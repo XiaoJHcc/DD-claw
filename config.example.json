@@ -1,0 +1,32 @@
+{
+  "pollIntervalSec": 45,
+  "pollJitterSec": 8,
+
+  // 首次运行时，已在直播的主播是否推送。默认关，避免启动即刷屏
+  "notifyOnFirstRun": false,
+  // 之后新增订阅时，该主播若正在直播是否推送。默认开 ——
+  // 关掉意味着新加的主播当时那场直播永远收不到通知
+  "notifyOnNewSubscription": true,
+
+  "healthAlertAfterFailures": 5,
+
+  "subscriptions": [
+    { "uid": "7706705", "alias": "阿梓从小就很可爱", "enabled": true }
+  ],
+
+  "notify": {
+    // NapCat 起来、QQ 号填好后把这里和下面某个 target 的 enabled 一起改成 true
+    "onebot": {
+      "enabled": false,
+      // 填好 id 后再把对应的 enabled 改成 true。
+      // schema 只校验 enabled 的目标，所以占位符可以先留着
+      "targets": [
+        { "type": "private", "id": "REPLACE_ME_你的主号QQ号", "enabled": false },
+        { "type": "group", "id": "REPLACE_ME_群号", "enabled": false }
+      ]
+    },
+    "toast": {
+      "enabled": true
+    }
+  }
+}

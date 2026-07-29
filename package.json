@@ -1,0 +1,30 @@
+{
+  "name": "dd-claw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "B站开播监听 → 内容判定 → 推送",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/core/state.test.ts src/core/scheduler.test.ts src/core/concurrency.test.ts src/rules/once-per-session.test.ts src/config/config.test.ts",
+    "probe": "tsx src/index.ts --probe",
+    "test-notify": "tsx src/index.ts --test-notify"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.2",
+    "powertoast": "^3.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

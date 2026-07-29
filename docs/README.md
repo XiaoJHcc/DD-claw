@@ -1,0 +1,40 @@
+# DD-claw 文档索引
+
+B站关注主播开播监听 → 内容智能判定 → 按偏好推送。
+
+## 文档结构
+
+| 文档 | 内容 |
+|---|---|
+| [design.md](design.md) | 项目设计：目标分层、架构、数据流、模块职责、里程碑 |
+| [boundaries.md](boundaries.md) | **能力边界**：什么能做、什么做不到、代价是什么 |
+| [plan-m1.md](plan-m1.md) | **M1 落地计划**：开播检测 → QQ 推送，任务分解与验收 |
+
+### 模块调研
+
+| 文档 | 结论一句话 |
+|---|---|
+| [research/live-status.md](research/live-status.md) | 开播状态匿名可查，批量接口一次覆盖所有关注对象 |
+| [research/danmaku.md](research/danmaku.md) | 弹幕 WS 匿名可连，只需 WBI 签名 + UA |
+| [research/media-capture.md](research/media-capture.md) | keyframe 白嫖；需音频时走 FLV + ffmpeg 合并命令 |
+| [research/feeds.md](research/feeds.md) | 动态/微博匿名全灭，必须 cookie 或浏览器 |
+| [research/auth-cookie.md](research/auth-cookie.md) | 自动读 Chrome cookie 已死，手动导出是唯一正路 |
+| [research/llm.md](research/llm.md) | 文本为主路径；免费视觉首选 Gemini，备选 GLM-4V-Flash |
+| [research/notify.md](research/notify.md) | QQ 只剩 NapCat 一条活路；本机 Toast 走 powertoast |
+| [research/ts-stack.md](research/ts-stack.md) | TS 全项可行，唯一短板中文 OCR，隔离成独立服务 |
+
+## 溯源标记
+
+调研结论按可信度分三级，全文统一使用：
+
+- **[实测]** — 本次调研期间真实发出过请求 / 跑过代码，附返回码或输出。绝大多数由 subagent 在 2026-07-29 执行。
+- **[文档]** — 来自公开文档或源码阅读，未亲自跑通。
+- **[待验证]** — 传闻、社区经验、或 agent 自己标注不确定的内容。**不要当事实用**。
+
+时效性：所有结论基于 **2026-07-29**。B站/微博风控与各家免费额度政策变动频繁，标注 [待验证] 的部分实现前需重新确认。
+
+## 一句话现状
+
+匿名可拿：开播状态、标题、分区、开播时间、keyframe 预览图、弹幕流、直播流截图与音频。
+需要凭据：B站空间动态、微博时间线。
+故 MVP 与内容分析层可完全匿名运行，cookie 只是「预告时间表」的前置条件。
