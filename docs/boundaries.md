@@ -103,3 +103,11 @@
 11. 未开播时 `playurl_info` 为 `null`，调 ffmpeg 前必须先查 `live_status`。[实测]
 12. 别装 cookie 编辑类浏览器扩展——ModHeader 2026-07 因藏休眠外泄代码被下架。[文档]
 
+以下来自 M1 实施（2026-07-30），原 M1 计划文档已归档删除，经验折叠于此：
+
+13. `powertoast` v3 是类 API（`new Toast(opts).show()`），不是默认导出函数；字段名 `aumid`（非 appID）、`activation`（非 onClick）；预览大图用 `heroImg` 而非 `icon`。[实测]
+14. 配置文件支持 JSONC 注释时，剥注释必须跳过字符串内部（`"https://..."` 里的 `//` 会被误删）；Windows 记事本 / PowerShell 写的文件常有 BOM，`JSON.parse` 不接受，需先剥离。[实测]
+15. `live_status=2` 是轮播不是直播（泠鸢实测命中），必须当未开播处理，否则把B站自动放的录像推成开播。[实测]
+16. OneBot 对同一目标并发发送会被限流（群约 20 条/分钟）：每目标一条串行链 + ≥1.2s 间隔。图片失败降级纯文本重发只在请求真正到达 NapCat 后才有意义——NapCat 没启动时降级重试必然同样失败。[实测]
+17. 批量接口单 POST 不宜过长：`uids` 按 50 分片。多主播同时开播时推送要并发受限（`mapLimit` 4），否则串行 await 会把第 10 条通知拖到分钟级。[实测]
+
