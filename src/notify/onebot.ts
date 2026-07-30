@@ -1,6 +1,6 @@
 import { makeLogger } from '../logger.js';
-import type { LiveEvent } from '../core/types.js';
-import { formatEventText, type Notifier, type NotifyResult } from './types.js';
+import type { PushMessage, PushTarget } from '../core/types.js';
+import { type Notifier, type NotifyResult } from './types.js';
 import type { NotifyTarget } from '../config/schema.js';
 
 const log = makeLogger('notify/onebot');
@@ -35,9 +35,13 @@ export class OneBotNotifier implements Notifier {
     private readonly targets: NotifyTarget[],
   ) {}
 
-  async send(event: LiveEvent): Promise<NotifyResult[]> {
-    const active = this.targets.filter((t) => t.enabled);
-    const withImage = this.buildSegments(event, true);
+  async send(msg: PushMessage): Promise<NotifyResult[]> {
+    // msg.targets 缺省时用配置的默认目标；统一成 { type, id } 处理
+    const raw: Array<PushTarget | NotifyTarget> = msg.targets ?? this.targets;
+    const active = raw
+      .filter((t) => !('enabled' in t) || t.enabled)
+      .map((t) => ({ type: t.type, id: t.id }));
+    const withImage = this.buildSegments(msg, true);
 
     return this.mapTargets(active, async (t) => {
       const label = `${t.type}:${t.id}`;
@@ -47,9 +51,9 @@ export class OneBotNotifier implements Notifier {
       // 图片失败降级为纯文本重发一次 —— 预览图是锦上添花，通知本身不能丢。
       // 但只在请求真的到达了 NapCat 时才降级：连接层失败（reached=false）
       // 说明 NapCat 压根不通，去掉图片重试必然同样失败，白费一次请求。
-      if (event.keyframe && first.reached) {
+      if (msg.image && first.reached) {
         log.warn(`${label} 带图失败，降级纯文本重试`, first.error);
-        const retry = await this.post(t, this.buildSegments(event, false));
+        const retry = await this.post(t, this.buildSegments(msg, false));
         return { ...retry, target: label };
       }
       return { ...first, target: label };
@@ -62,8 +66,8 @@ export class OneBotNotifier implements Notifier {
    * 并发轰同一个群很容易撞上。不同目标之间仍并行。
    */
   private async mapTargets(
-    targets: NotifyTarget[],
-    fn: (t: NotifyTarget) => Promise<NotifyResult>,
+    targets: PushTarget[],
+    fn: (t: PushTarget) => Promise<NotifyResult>,
   ): Promise<NotifyResult[]> {
     const results = await Promise.all(targets.map(async (t) => {
       const key = `${t.type}:${t.id}`;
@@ -90,17 +94,17 @@ export class OneBotNotifier implements Notifier {
     );
   }
 
-  private buildSegments(e: LiveEvent, withImage: boolean): Segment[] {
-    const segs: Segment[] = [{ type: 'text', data: { text: formatEventText(e) + '\n' } }];
-    if (withImage && e.keyframe) {
+  private buildSegments(msg: PushMessage, withImage: boolean): Segment[] {
+    const segs: Segment[] = [{ type: 'text', data: { text: `${msg.title}\n${msg.body}` } }];
+    if (withImage && msg.image) {
       // 直接用B站 CDN 的公网 URL，NapCat 自己去拉，我们不落盘不 base64
-      segs.push({ type: 'image', data: { file: e.keyframe } });
+      segs.push({ type: 'image', data: { file: msg.image } });
     }
-    segs.push({ type: 'text', data: { text: `\n${e.roomUrl}` } });
+    if (msg.url) segs.push({ type: 'text', data: { text: `\n${msg.url}` } });
     return segs;
   }
 
-  private async post(target: NotifyTarget, message: Segment[]): Promise<PostResult> {
+  private async post(target: PushTarget, message: Segment[]): Promise<PostResult> {
     const action = target.type === 'private' ? 'send_private_msg' : 'send_group_msg';
     const body = target.type === 'private'
       ? { user_id: Number(target.id), message }

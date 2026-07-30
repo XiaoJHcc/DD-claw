@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { diffRoom, type PrevState } from './state.js';
 import type { RoomStatus } from '../sources/bili/types.js';
 
-const OPTS = { notifyOnColdStart: false, now: 1_800_000_000 };
+const OPTS = { now: 1_800_000_000 };
 const UID = '7706705';
 
 function status(over: Partial<RoomStatus> = {}): RoomStatus {
@@ -62,16 +62,12 @@ test('curr 为 null 时合成的 status 仍带正确 uid（多主播下不能串
   assert.equal(s[0]!.status.uid, '999', 'signal 必须能自证属于哪个主播');
 });
 
-test('无 prev 且 notifyOnColdStart=false 时不推', () => {
-  assert.deepEqual(diffRoom(UID, undefined, status(), OPTS), []);
-});
-
-test('无 prev 且 notifyOnColdStart=true 时推送', () => {
-  const s = diffRoom(UID, undefined, status(), { ...OPTS, notifyOnColdStart: true });
+test('无 prev 且在播，如实产出 live_start（无政策参数，抑制在 pipeline）', () => {
+  const s = diffRoom(UID, undefined, status(), OPTS);
   assert.deepEqual(s.map((x) => x.kind), ['live_start']);
 });
 
-test('无 prev 且未开播，任何配置下都无 Signal', () => {
+test('无 prev 且未开播，无 Signal', () => {
   const off = status({ isLive: false, liveTime: 0 });
-  assert.deepEqual(diffRoom(UID, undefined, off, { ...OPTS, notifyOnColdStart: true }), []);
+  assert.deepEqual(diffRoom(UID, undefined, off, OPTS), []);
 });

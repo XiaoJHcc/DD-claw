@@ -1,6 +1,6 @@
 import { makeLogger } from '../logger.js';
-import type { LiveEvent } from '../core/types.js';
-import { formatEventText, type Notifier, type NotifyResult } from './types.js';
+import type { PushMessage } from '../core/types.js';
+import { type Notifier, type NotifyResult } from './types.js';
 
 const log = makeLogger('notify/toast');
 
@@ -15,19 +15,18 @@ export class ToastNotifier implements Notifier {
   readonly name = 'toast';
   readonly capabilities = { image: true, clickThrough: true };
 
-  async send(event: LiveEvent): Promise<NotifyResult[]> {
-    return [await this.show(formatEventText(event), event.keyframe, event.roomUrl)];
+  async send(msg: PushMessage): Promise<NotifyResult[]> {
+    return [await this.show(msg.title, msg.body, msg.image ?? '', msg.url ?? '')];
   }
 
   async alert(title: string, body: string): Promise<void> {
-    await this.show(`⚠️ ${title}\n${body}`, '', '');
+    await this.show(`⚠️ ${title}`, body, '', '');
   }
 
-  private async show(text: string, image: string, url: string): Promise<NotifyResult> {
-    const [title, ...rest] = text.split('\n');
+  private async show(title: string, message: string, image: string, url: string): Promise<NotifyResult> {
     const opts: Record<string, unknown> = {
-      title: title ?? 'DD-claw',
-      message: rest.join('\n'),
+      title: title || 'DD-claw',
+      message,
       silent: false,
     };
     // heroImg 是顶部大图横幅，比 icon 的小缩略图更适合直播预览

@@ -1,5 +1,5 @@
 import { makeLogger } from '../logger.js';
-import type { LiveEvent } from '../core/types.js';
+import type { PushMessage } from '../core/types.js';
 import type { Db } from '../core/db.js';
 import type { Notifier } from './types.js';
 
@@ -22,14 +22,17 @@ export class NotifyDispatcher {
     return this.notifiers.map((n) => n.name);
   }
 
-  async broadcast(event: LiveEvent): Promise<BroadcastOutcome> {
+  async broadcast(msg: PushMessage): Promise<BroadcastOutcome> {
     if (this.dryRun) {
-      log.info(`[dry-run] 本应推送: ${event.alias || event.uname} / ${event.title} / ${event.roomUrl}`);
+      log.info(`[dry-run] 本应推送: ${msg.title} / ${msg.body.split('\n')[0]} / ${msg.url ?? ''}`);
       return { anySuccess: true, total: 0, succeeded: 0 };
     }
 
+    // notify_log 溯源用的直播场次；非直播类消息（如告警）没有，写空
+    const ref = msg.ref ?? { roomId: '', liveTime: 0 };
+
     // 并行 fan-out：一个通道失败不能拖累其他通道
-    const settled = await Promise.allSettled(this.notifiers.map((n) => n.send(event)));
+    const settled = await Promise.allSettled(this.notifiers.map((n) => n.send(msg)));
 
     let total = 0;
     let succeeded = 0;
@@ -40,7 +43,7 @@ export class NotifyDispatcher {
         total++;
         log.error(`${channel} 抛出异常`, outcome.reason);
         this.db.logNotify({
-          roomId: event.roomId, liveTime: event.liveTime, channel,
+          roomId: ref.roomId, liveTime: ref.liveTime, channel,
           ok: false, error: String(outcome.reason),
         });
         return;
@@ -50,7 +53,7 @@ export class NotifyDispatcher {
         if (r.ok) succeeded++;
         else log.warn(`${channel}${r.target ? ` (${r.target})` : ''} 失败: ${r.error}`);
         this.db.logNotify({
-          roomId: event.roomId, liveTime: event.liveTime, channel,
+          roomId: ref.roomId, liveTime: ref.liveTime, channel,
           target: r.target, ok: r.ok, error: r.error,
         });
       }

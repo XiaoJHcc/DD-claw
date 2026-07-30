@@ -24,21 +24,12 @@ export interface BiliApiEnvelope<T> {
   data: T;
 }
 
-/** 归一化后的房间状态 */
-export interface RoomStatus {
-  uid: string;
-  roomId: string;
-  uname: string;
-  title: string;
-  /** 已把轮播(2)折叠为未开播语义，原始值见 rawLiveStatus */
-  isLive: boolean;
+import type { LiveStatus } from '../../core/types.js';
+
+/** 归一化后的房间状态：core 的 LiveStatus + bili 特有的原始状态码 */
+export interface RoomStatus extends LiveStatus {
+  /** 已把轮播(2)折叠为未开播语义（isLive），原始值在此 */
   rawLiveStatus: number;
-  /** 本场开播时间戳（秒）。未开播时为 0 */
-  liveTime: number;
-  areaName: string;
-  parentAreaName: string;
-  cover: string;
-  keyframe: string;
 }
 
 export function normalizeRoomStatus(raw: RawRoomStatus): RoomStatus {

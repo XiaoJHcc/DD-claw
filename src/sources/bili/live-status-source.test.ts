@@ -1,0 +1,204 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { LiveStatusSource, type StatusFetcher } from './live-status-source.js';
+import { Bus } from '../../core/bus.js';
+import { Db } from '../../core/db.js';
+import type { Signal } from '../../core/types.js';
+import type { RoomStatus } from './types.js';
+import type { AppConfig } from '../../config/schema.js';
+
+function room(uid: string, over: Partial<RoomStatus> = {}): RoomStatus {
+  return {
+    uid, roomId: `room-${uid}`, uname: `主播${uid}`, title: '标题',
+    isLive: true, rawLiveStatus: 1, liveTime: 1_785_310_737,
+    areaName: '虚拟主播', parentAreaName: '虚拟主播', cover: '', keyframe: 'k.jpg',
+    ...over,
+  };
+}
+
+function config(uids: string[], over: Partial<AppConfig> = {}): AppConfig {
+  return {
+    pollIntervalSec: 45, pollJitterSec: 0,
+    notifyOnFirstRun: false, notifyOnNewSubscription: true,
+    healthAlertAfterFailures: 2,
+    subscriptions: uids.map((u) => ({ uid: u, alias: `别名${u}`, enabled: true })),
+    notify: { onebot: { enabled: false, targets: [] }, toast: { enabled: true } },
+    ...over,
+  } as AppConfig;
+}
+
+interface Harness {
+  src: LiveStatusSource;
+  db: Db;
+  signals: Signal[];
+  cfg: AppConfig;
+  cleanup(): void;
+}
+
+/** 真 Bus + 收集信号，临时目录真实 Db，假 fetcher */
+function harness(uids: string[], fetcher: StatusFetcher, over: Partial<AppConfig> = {}): Harness {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));
+  const db = new Db(join(dir, 'test.db'));
+  const bus = new Bus();
+  const signals: Signal[] = [];
+  bus.on('*', (s) => { signals.push(s); });
+  const cfg = config(uids, over);
+  const src = new LiveStatusSource({ fetcher });
+  src.bind({ bus, db, config: cfg });
+  return {
+    src, db, signals, cfg,
+    cleanup() { db.close(); rmSync(dir, { recursive: true, force: true }); },
+  };
+}
+
+// ---- 拉取失败绝不能当成下播（最关键的正确性属性）----
+
+test('拉取失败不产生 signal，且保留已知状态', async (t) => {
+  const live = new Map([['1', room('1')]]);
+  let fail = false;
+  const h = harness(['1'], async () => {
+    if (fail) throw new Error('模拟网络超时');
+    return live;
+  });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.deepEqual(h.signals.map((s) => s.kind), ['live_start']);
+
+  fail = true;
+  await h.src.pollOnce();
+  await h.src.pollOnce();
+
+  assert.equal(
+    h.signals.filter((s) => s.kind !== 'health_alert').length,
+    1,
+    '拉取失败期间不应产生任何新的 live 系信号（health_alert 除外）',
+  );
+  assert.equal(h.db.loadRoomStates().get('1')?.isLive, true, '失败不得把状态改成已下播');
+});
+
+test('拉取失败达到阈值 emit 一次 health_alert，恢复后计数复位', async (t) => {
+  let fail = true;
+  const h = harness(['1'], async () => {
+    if (fail) throw new Error('boom');
+    return new Map([['1', room('1')]]);
+  });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(h.signals.length, 0, '第 1 次失败还没到阈值');
+  await h.src.pollOnce();
+  const alerts = h.signals.filter((s) => s.kind === 'health_alert');
+  assert.equal(alerts.length, 1, '第 2 次达到阈值应告警');
+  const p = alerts[0]!.payload as { failures: number; subscriptions: number; lastError: string };
+  assert.equal(p.failures, 2);
+  assert.equal(p.subscriptions, 1, 'payload 要带上受影响的订阅数');
+  assert.match(p.lastError, /boom/);
+
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '不应重复告警刷屏');
+
+  fail = false;
+  await h.src.pollOnce();
+  assert.equal(h.src.failureCount, 0, '成功后计数应重置');
+});
+
+// ---- 缺 key = 未开播 ----
+
+test('返回缺 key = 未开播，不影响其他主播的状态', async (t) => {
+  const h = harness(['1', '2', '3'], async () => new Map([
+    ['1', room('1')],
+    ['2', room('2', { isLive: false, rawLiveStatus: 0, liveTime: 0 })],
+    // '3' 整个 key 缺失
+  ]));
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.deepEqual(h.signals.map((s) => s.uid), ['1'], '只有在播的那个产 live_start');
+  const states = h.db.loadRoomStates();
+  assert.equal(states.get('2')?.isLive, false);
+  assert.equal(states.has('3'), false, '缺失且无历史的 uid 不落状态');
+});
+
+test('状态写入是批量的（一轮一次事务）', async (t) => {
+  const uids = ['1', '2', '3'];
+  const all = new Map(uids.map((u) => [u, room(u)]));
+  const h = harness(uids, async () => all);
+  t.after(h.cleanup);
+
+  const batches: number[] = [];
+  const orig = h.db.saveRoomStates.bind(h.db);
+  h.db.saveRoomStates = (e) => { batches.push(e.length); orig(e); };
+
+  await h.src.pollOnce();
+  assert.deepEqual(batches, [3], '3 个主播应合并为 1 次批量写');
+});
+
+// ---- 冷启动标记：first_run vs new_subscription ----
+
+test('首轮观测（known 为空）整轮都标 first_run', async (t) => {
+  const h = harness(['1', '2'], async () => new Map([['1', room('1')], ['2', room('2')]]));
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(h.signals.length, 2);
+  for (const s of h.signals) assert.equal(s.coldStart, 'first_run');
+});
+
+test('已运行后新出现的 uid 标 new_subscription，老 uid 不标', async (t) => {
+  const statuses = new Map([
+    ['1', room('1', { isLive: false, liveTime: 0 })],
+    ['2', room('2')],
+  ]);
+  const h = harness(['1', '2'], async () => statuses);
+  t.after(h.cleanup);
+  // 模拟非首次运行：DB 里已有主播 1 的记录
+  h.db.saveRoomState('1', { roomId: 'room-1', isLive: false, liveTime: 0, title: '标题' });
+  h.src.restore();
+
+  await h.src.pollOnce();
+  assert.deepEqual(
+    h.signals.map((s) => [s.uid, s.coldStart]),
+    [['2', 'new_subscription']],
+  );
+
+  // 下一轮老订阅开播：不带 coldStart 标记
+  statuses.set('1', room('1'));
+  h.signals.length = 0;
+  await h.src.pollOnce();
+  assert.deepEqual(h.signals.map((s) => [s.uid, s.coldStart]), [['1', undefined]]);
+});
+
+// ---- restore 恢复基线 ----
+
+test('restore 恢复基线：重启后同一场不重复产 live_start', async (t) => {
+  const all = new Map([['1', room('1')]]);
+  const h = harness(['1'], async () => all);
+  t.after(h.cleanup);
+  await h.src.pollOnce();
+  assert.equal(h.signals.length, 1);
+
+  // 模拟重启：同一个 DB，新 source 实例
+  const bus2 = new Bus();
+  const signals2: Signal[] = [];
+  bus2.on('*', (s) => { signals2.push(s); });
+  const src2 = new LiveStatusSource({ fetcher: async () => all });
+  src2.bind({ bus: bus2, db: h.db, config: h.cfg });
+
+  await src2.pollOnce();
+  assert.equal(signals2.length, 0, '基线恢复后同一场不重复产信号');
+});
+
+test('同一场跨多轮轮询只产一次 live_start', async (t) => {
+  const all = new Map([['1', room('1')]]);
+  const h = harness(['1'], async () => all);
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  await h.src.pollOnce();
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter((s) => s.kind === 'live_start').length, 1, '3 轮只产 1 次');
+});

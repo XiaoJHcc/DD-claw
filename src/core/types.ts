@@ -1,19 +1,45 @@
-import type { RoomStatus } from '../sources/bili/types.js';
 // 仅类型导入，编译期擦除，不构成运行时循环依赖
 import type { SceneVerdict } from '../analysis/types.js';
 
-export type SignalKind = 'live_start' | 'live_end' | 'title_change';
+/**
+ * 平台无关的直播间状态。core 层只认识它；各平台 source 把自己的原始类型
+ * 归一化成它（如 bili 的 RoomStatus 是它的扩展，多带一个 rawLiveStatus）。
+ */
+export interface LiveStatus {
+  uid: string;
+  roomId: string;
+  uname: string;
+  title: string;
+  /** 已折叠平台特异语义（如 bili 轮播(2) 视为未开播） */
+  isLive: boolean;
+  /** 本场开播时间戳（秒），未开播为 0。是一场直播的身份 */
+  liveTime: number;
+  areaName: string;
+  parentAreaName: string;
+  cover: string;
+  keyframe: string;
+}
+
+export type SignalKind =
+  | 'live_start' | 'live_end' | 'title_change' // live-status source 真实产生
+  | 'feed_post' | 'danmaku_batch' | 'snapshot' // 预留：动态/弹幕/画面
+  | 'health_alert';                            // 监听自身健康
 
 export interface Signal {
-  source: 'live-status';
+  /** 产出方标识，如 'bili/live-status' */
+  source: string;
   kind: SignalKind;
   uid: string;
   roomId: string;
   ts: number;
-  /** live_start / title_change 时为当前状态；live_end 时为下播前的最后已知状态 */
-  status: RoomStatus;
+  /** live 系信号携带：live_start / title_change 为当前状态，live_end 为最后已知状态 */
+  status?: LiveStatus;
   /** title_change 专用 */
   previousTitle?: string;
+  /** source 只标记，抑制策略在 pipeline */
+  coldStart?: 'first_run' | 'new_subscription';
+  /** 各 source 自定义载荷（如 health_alert 的失败详情） */
+  payload?: unknown;
 }
 
 /** 推送用的事件载荷。analysis 层接上后 verdict 会被填充。 */
@@ -34,7 +60,7 @@ export interface LiveEvent {
   verdict: SceneVerdict | null;
 }
 
-export function toLiveEvent(status: RoomStatus, alias: string): LiveEvent {
+export function toLiveEvent(status: LiveStatus, alias: string): LiveEvent {
   return {
     platform: 'bilibili',
     uid: status.uid,
@@ -50,4 +76,23 @@ export function toLiveEvent(status: RoomStatus, alias: string): LiveEvent {
     liveTime: status.liveTime,
     verdict: null,
   };
+}
+
+export interface PushTarget {
+  type: 'group' | 'private';
+  id: string;
+}
+
+/** 推送层的通用载荷。notify 不认识 LiveEvent，只认识 PushMessage。 */
+export interface PushMessage {
+  title: string;
+  body: string;
+  image?: string;
+  /** 点击跳转 */
+  url?: string;
+  priority: 'high' | 'normal' | 'low';
+  /** 缺省 = 各通道用配置的默认目标 */
+  targets?: PushTarget[];
+  /** notify_log 溯源：对应的直播场次。非直播类消息缺省。 */
+  ref?: { roomId: string; liveTime: number };
 }

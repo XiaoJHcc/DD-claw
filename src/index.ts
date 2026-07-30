@@ -1,15 +1,20 @@
 import { loadConfig, ConfigError } from './config/index.js';
 import { makeLogger } from './logger.js';
 import { Db } from './core/db.js';
-import { Scheduler } from './core/scheduler.js';
+import { Bus } from './core/bus.js';
+import { Pipeline } from './core/pipeline.js';
 import { toLiveEvent } from './core/types.js';
 import { NoopAnalyzer } from './analysis/noop.js';
+import { AnalysisQueue } from './analysis/queue.js';
 import { OncePerSessionRule } from './rules/once-per-session.js';
 import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
 import { ToastNotifier } from './notify/toast.js';
+import { liveEventToMessage } from './notify/message.js';
+import { LiveStatusSource } from './sources/bili/live-status-source.js';
 import { fetchLiveStatus } from './sources/bili/live-status.js';
 import type { Notifier } from './notify/types.js';
+import type { Source } from './sources/types.js';
 
 const log = makeLogger('main');
 
@@ -76,39 +81,45 @@ async function main(): Promise<void> {
   const dispatcher = new NotifyDispatcher(notifiers, db, args.dryRun);
   log.info(`推送通道: ${dispatcher.channels.join(', ')}${args.dryRun ? '  [dry-run]' : ''}`);
 
-  // --test-notify 用一条假事件走完整推送链路，验证 NapCat 配置与消息格式
+  // --test-notify 用一条假消息走完整推送链路，验证 NapCat 配置与消息格式
   if (args.testNotify) {
-    const fake = toLiveEvent({
+    const fake = liveEventToMessage(toLiveEvent({
       uid: '7706705', roomId: '80397', uname: '阿梓从小就很可爱',
-      title: '[DD-claw 测试] 这是一条测试通知', isLive: true, rawLiveStatus: 1,
+      title: '[DD-claw 测试] 这是一条测试通知', isLive: true,
       liveTime: Math.floor(Date.now() / 1000), areaName: '虚拟主播',
       parentAreaName: '虚拟主播', cover: '',
       keyframe: 'https://i0.hdslb.com/bfs/live-key-frame/keyframe072918300018143727685jhbin.jpg',
-    }, '测试');
+    }, '测试'));
     await dispatcher.broadcast(fake);
     db.close();
     return;
   }
 
-  const scheduler = new Scheduler({
-    config: app,
+  // 装配：bus → pipeline（编排唯一入口）→ sources（只产信号）
+  const bus = new Bus();
+  const pipeline = new Pipeline({
+    bus,
     db,
-    analyzer: new NoopAnalyzer(),
+    config: app,
+    queue: new AnalysisQueue(new NoopAnalyzer()),
     rule: new OncePerSessionRule(db),
     dispatcher,
-    forceUids: args.forceUids,
   });
+  pipeline.attach();
+
+  const sources: Source[] = [
+    new LiveStatusSource({ forceUids: args.forceUids }),
+  ];
+  for (const s of sources) s.start({ bus, db, config: app });
 
   const shutdown = (sig: string) => {
     log.info(`收到 ${sig}，停止中`);
-    scheduler.stop();
+    for (const s of sources) s.stop();
     db.close();
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
-
-  await scheduler.start();
 }
 
 main().catch((e) => {

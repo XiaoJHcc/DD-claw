@@ -1,6 +1,6 @@
 import type { LiveEvent, Signal } from '../core/types.js';
 
-export type Scene = 'chatting' | 'singing' | 'gaming' | 'other';
+export type Scene = 'chatting' | 'singing' | 'gaming' | 'show' | 'other';
 
 export interface SceneVerdict {
   scene: Scene;
@@ -28,4 +28,14 @@ export interface Analyzer {
    * 这样 M2 接上真 Analyzer 后规则层不用改。
    */
   analyze(ctx: AnalysisContext): Promise<SceneVerdict | null>;
+}
+
+/**
+ * LLM 任务统一形态（M2 占位）：zod schema 进，JSON 出，provider 可替换。
+ * buildPrompt 返回文本或多模态消息；parse 里做 zod 校验。
+ */
+export interface LlmTask<I, O> {
+  readonly name: string;
+  buildPrompt(input: I): unknown;
+  parse(raw: unknown): O;
 }

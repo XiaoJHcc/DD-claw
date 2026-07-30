@@ -1,4 +1,4 @@
-import type { LiveEvent } from '../core/types.js';
+import type { PushMessage } from '../core/types.js';
 
 export interface NotifyResult {
   ok: boolean;
@@ -16,22 +16,7 @@ export interface Notifier {
     image: boolean;
     clickThrough: boolean;
   };
-  send(event: LiveEvent): Promise<NotifyResult[]>;
+  send(msg: PushMessage): Promise<NotifyResult[]>;
   /** 监听自身失效时的告警通道。Toast 靠它在 NapCat 挂掉时通知用户 */
   alert?(title: string, body: string): Promise<void>;
-}
-
-export function formatEventText(e: LiveEvent): string {
-  const who = e.alias || e.uname;
-  const area = e.parentAreaName && e.areaName
-    ? `${e.parentAreaName} / ${e.areaName}`
-    : e.areaName || e.parentAreaName || '未知分区';
-  const when = e.liveTime > 0
-    ? new Date(e.liveTime * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-    : '';
-  return [
-    `🔴 ${who} 开播了`,
-    e.title,
-    area + (when ? `  ·  ${when} 开播` : ''),
-  ].join('\n');
 }
