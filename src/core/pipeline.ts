@@ -1,6 +1,8 @@
 import { makeLogger } from '../logger.js';
-import { toLiveEvent, type Signal } from './types.js';
+import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage } from '../notify/message.js';
+import { classifyL0 } from '../analysis/l0.js';
+import { composeMessage, matchClauses } from '../analysis/matcher.js';
 import type { Bus } from './bus.js';
 import type { Db } from './db.js';
 import type { AppConfig } from '../config/schema.js';
@@ -23,9 +25,11 @@ export interface PipelineDeps {
 }
 
 interface HealthAlertPayload {
-  failures: number;
-  subscriptions: number;
-  lastError: string;
+  failures?: number;
+  subscriptions?: number;
+  lastError?: string;
+  /** source 自定义的完整告警文案；缺省用 live-status 拉取失败的默认文案 */
+  message?: string;
 }
 
 /**
@@ -71,7 +75,7 @@ export class Pipeline {
   }
 
   private aliasOf(uid: string): string {
-    return this.deps.config.subscriptions.find((s) => s.uid === uid)?.alias ?? '';
+    return this.deps.db.getStreamer(uid)?.alias ?? '';
   }
 
   private async handle(signal: Signal): Promise<void> {
@@ -102,7 +106,16 @@ export class Pipeline {
       return;
     }
 
-    const verdict = await queue.submit({ event, signal });
+    // mode='silent'：追踪照常住（recordSession 已在上面做），但不产生推送。
+    // 位置在冷启动抑制之后：两种抑制都跳过推送，语义一致。
+    if (db.getStreamer(signal.uid)?.mode === 'silent') {
+      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: mode=silent（仅抑制推送，追踪照常）`);
+      return;
+    }
+
+    // verdict 来源：分析队列优先（将来接 LLM Analyzer）；返回 null 时 L0 关键词
+    // 分类器兜底 —— L0 补的是 LLM 缺席的位，不替代 LLM 的结果。两者同形，下游不感知。
+    const verdict = (await queue.submit({ event, signal })) ?? classifyL0(event);
     const decision = await rule.decide({ ...event, verdict }, signal, verdict);
 
     if (!decision.shouldNotify) {
@@ -111,7 +124,7 @@ export class Pipeline {
     }
 
     log.info(`推送 [${signal.kind}] ${event.alias || event.uname} — ${decision.reason}`);
-    const outcome = await dispatcher.broadcast(liveEventToMessage({ ...event, verdict }));
+    const outcome = await dispatcher.broadcast(this.buildMessage({ ...event, verdict }));
 
     // 只要有任一通道成功就标记，否则 Toast 成功而 QQ 失败会导致下轮重推
     if (outcome.anySuccess && signal.kind === 'live_start') {
@@ -119,13 +132,24 @@ export class Pipeline {
     }
   }
 
+  /** matcher 命中偏好子句 → 子句的文案/优先级/目标；未命中 → M1 默认文案。 */
+  private buildMessage(event: LiveEvent): PushMessage {
+    const clause = matchClauses(this.deps.db.listEnabledClauses(event.uid), event, event.verdict);
+    if (clause) {
+      log.info(`命中偏好子句 #${clause.id}（${event.alias || event.uname}，优先级 ${clause.priority}）`);
+      return composeMessage(clause, event, event.alias);
+    }
+    return liveEventToMessage(event);
+  }
+
   private async handleHealthAlert(signal: Signal): Promise<void> {
     const p = signal.payload as HealthAlertPayload | undefined;
     await this.deps.dispatcher.alertAll(
       'DD-claw 监听异常',
-      `连续 ${p?.failures ?? 0} 次拉取B站接口失败。\n` +
-      `这是批量接口，**全部 ${p?.subscriptions ?? 0} 个订阅都收不到开播通知**。\n` +
-      `最后错误: ${p?.lastError ?? '(未知)'}`,
+      p?.message ??
+        `连续 ${p?.failures ?? 0} 次拉取B站接口失败。\n` +
+        `这是批量接口，**全部 ${p?.subscriptions ?? 0} 个订阅都收不到开播通知**。\n` +
+        `最后错误: ${p?.lastError ?? '(未知)'}`,
     );
   }
 }

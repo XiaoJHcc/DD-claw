@@ -10,6 +10,22 @@
 
   "healthAlertAfterFailures": 5,
 
+  // 关注列表同步（需项目根 cookies.json，见 docs/research/auth-cookie.md）。
+  // 无 cookies.json 时自动停用，不影响匿名开播监听
+  "follows": {
+    "enabled": true,
+    "syncIntervalSec": 1800
+  },
+
+  // 控制面板（localhost WebUI，只绑 127.0.0.1）：管理监听名单与偏好子句。
+  // 改库即生效，无需重启；启动失败（如端口被占）只记日志，不影响主流程
+  "panel": {
+    "enabled": true,
+    "port": 8787
+  },
+
+  // 可选，仅作为首次启动种子（streamers 表为空时导入一次）；
+  // 之后监听名单以数据库为准，由面板管理。整段可省略
   "subscriptions": [
     { "uid": "7706705", "alias": "阿梓从小就很可爱", "enabled": true }
   ],

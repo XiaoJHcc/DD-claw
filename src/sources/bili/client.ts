@@ -33,16 +33,25 @@ export class BiliApiError extends Error {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-interface RequestOptions {
+export interface RequestOptions {
   method?: 'GET' | 'POST';
   body?: unknown;
   timeoutMs?: number;
   referer?: string;
+  /**
+   * 登录凭据（完整 Cookie 头）。匿名调用不传，零影响。
+   * 注意：cookie 值绝不进日志，本层的错误日志也不含 headers。
+   */
+  cookie?: string;
 }
+
+/** biliRequest 的函数形态，供上层注入假实现做单测 */
+export type BiliRequestFn = <T>(url: string, opts?: RequestOptions) => Promise<T>;
 
 async function once<T>(url: string, opts: RequestOptions): Promise<BiliApiEnvelope<T>> {
   const headers: Record<string, string> = { 'User-Agent': UA, Accept: 'application/json' };
   if (opts.referer) headers['Referer'] = opts.referer;
+  if (opts.cookie) headers['Cookie'] = opts.cookie;
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
 
   let res: Response;

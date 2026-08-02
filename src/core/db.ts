@@ -3,6 +3,11 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { PrevState } from './state.js';
+import {
+  clauseToRow, rowToClause, rowToFollow, rowToStreamer,
+  type ClausePatch, type ClauseRow, type Follow, type FollowRow, type NewClause,
+  type PreferenceClause, type Streamer, type StreamerInput, type StreamerMode, type StreamerRow,
+} from './streamers.js';
 
 const log = makeLogger('core/db');
 
@@ -37,7 +42,42 @@ CREATE TABLE IF NOT EXISTS room_state (
   title       TEXT,
   updated_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS streamers (
+  uid          TEXT    PRIMARY KEY,
+  uname        TEXT    NOT NULL DEFAULT '',
+  alias        TEXT,
+  room_id      TEXT,
+  weibo_uid    TEXT,
+  mode         TEXT    NOT NULL DEFAULT 'on' CHECK(mode IN ('off','silent','on')),
+  analyze      INTEGER NOT NULL DEFAULT 0,
+  profile_note TEXT,
+  source       TEXT    NOT NULL DEFAULT 'manual' CHECK(source IN ('follows','manual')),
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS follows (
+  uid         TEXT    PRIMARY KEY,
+  uname       TEXT    NOT NULL DEFAULT '',
+  first_seen  INTEGER NOT NULL,
+  last_seen   INTEGER NOT NULL,
+  is_followed INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS preference_clauses (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid             TEXT    NOT NULL,
+  scenes          TEXT,
+  min_confidence  REAL,
+  title_keywords  TEXT,
+  priority        TEXT    NOT NULL DEFAULT 'normal' CHECK(priority IN ('high','normal','low')),
+  message_template TEXT   NOT NULL DEFAULT '',
+  targets         TEXT,
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
 `;
+
+const now = () => Math.floor(Date.now() / 1000);
 
 export class Db {
   private readonly db: Database.Database;
@@ -127,6 +167,180 @@ export class Db {
       )
       .run(p.roomId, p.liveTime, p.channel, p.target ?? null, p.ok ? 1 : 0,
         p.error ?? null, Math.floor(Date.now() / 1000));
+  }
+
+  // ---- streamers：监听名单（事实来源）----
+
+  /** 监听中的 uid（mode != off）。live-status source 的名单来源。 */
+  listWatchedUids(): string[] {
+    const rows = this.db
+      .prepare("SELECT uid FROM streamers WHERE mode != 'off'")
+      .all() as Array<{ uid: string }>;
+    return rows.map((r) => r.uid);
+  }
+
+  /**
+   * 仅当 streamers 为空时，把 config.json 的 subscriptions 种子导入。
+   * 返回导入条数（非空时返回 0，幂等）。
+   */
+  seedStreamersIfEmpty(subs: Array<{ uid: string; alias: string; enabled: boolean }>): number {
+    const { c } = this.db.prepare('SELECT COUNT(*) AS c FROM streamers').get() as { c: number };
+    if (c > 0 || subs.length === 0) return 0;
+    const tx = this.db.transaction(() => {
+      for (const s of subs) {
+        this.upsertStreamer({ uid: s.uid, alias: s.alias, mode: s.enabled ? 'on' : 'off', source: 'manual' });
+      }
+    });
+    tx();
+    return subs.length;
+  }
+
+  listStreamers(): Streamer[] {
+    const rows = this.db.prepare('SELECT * FROM streamers ORDER BY created_at, uid').all() as StreamerRow[];
+    return rows.map(rowToStreamer);
+  }
+
+  getStreamer(uid: string): Streamer | undefined {
+    const row = this.db.prepare('SELECT * FROM streamers WHERE uid = ?').get(uid) as StreamerRow | undefined;
+    return row ? rowToStreamer(row) : undefined;
+  }
+
+  /** 新建或更新；未提供的字段在建行时取默认值、改行时保留原值。 */
+  upsertStreamer(input: StreamerInput): void {
+    const prev = this.getStreamer(input.uid);
+    const s: Streamer = {
+      uid: input.uid,
+      uname: input.uname ?? prev?.uname ?? '',
+      alias: input.alias !== undefined ? input.alias : prev?.alias ?? null,
+      roomId: input.roomId !== undefined ? input.roomId : prev?.roomId ?? null,
+      weiboUid: input.weiboUid !== undefined ? input.weiboUid : prev?.weiboUid ?? null,
+      mode: input.mode ?? prev?.mode ?? 'on',
+      analyze: input.analyze ?? prev?.analyze ?? false,
+      profileNote: input.profileNote !== undefined ? input.profileNote : prev?.profileNote ?? null,
+      source: input.source ?? prev?.source ?? 'manual',
+      createdAt: prev?.createdAt ?? now(),
+      updatedAt: now(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO streamers
+           (uid, uname, alias, room_id, weibo_uid, mode, analyze, profile_note, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(uid) DO UPDATE SET
+           uname=excluded.uname, alias=excluded.alias, room_id=excluded.room_id,
+           weibo_uid=excluded.weibo_uid, mode=excluded.mode, analyze=excluded.analyze,
+           profile_note=excluded.profile_note, source=excluded.source, updated_at=excluded.updated_at`,
+      )
+      .run(s.uid, s.uname, s.alias, s.roomId, s.weiboUid, s.mode,
+        s.analyze ? 1 : 0, s.profileNote, s.source, s.createdAt, s.updatedAt);
+  }
+
+  setStreamerMode(uid: string, mode: StreamerMode): boolean {
+    return this.db
+      .prepare('UPDATE streamers SET mode = ?, updated_at = ? WHERE uid = ?')
+      .run(mode, now(), uid).changes > 0;
+  }
+
+  // ---- follows：关注列表候选池 ----
+
+  /** 关注列表出现的 uid 入库；已存在的刷新 uname / last_seen / is_followed。 */
+  upsertFollows(follows: Array<{ uid: string; uname: string }>): void {
+    if (follows.length === 0) return;
+    const stmt = this.db.prepare(
+      `INSERT INTO follows (uid, uname, first_seen, last_seen, is_followed)
+       VALUES (?, ?, ?, ?, 1)
+       ON CONFLICT(uid) DO UPDATE SET
+         uname=excluded.uname, last_seen=excluded.last_seen, is_followed=1`,
+    );
+    const tx = this.db.transaction((rows: Array<{ uid: string; uname: string }>) => {
+      for (const f of rows) stmt.run(f.uid, f.uname, now(), now());
+    });
+    tx(follows);
+  }
+
+  /** 一次同步完成：seen 里的标 is_followed=1 + last_seen=ts，其余标取关。返回取关条数。 */
+  markFollowsSynced(seenUids: string[], ts: number): number {
+    const tx = this.db.transaction(() => {
+      const seen = this.db.prepare('UPDATE follows SET is_followed = 1, last_seen = ? WHERE uid = ?');
+      for (const uid of seenUids) seen.run(ts, uid);
+      if (seenUids.length === 0) {
+        return this.db.prepare('UPDATE follows SET is_followed = 0').run().changes;
+      }
+      const ph = seenUids.map(() => '?').join(',');
+      return this.db
+        .prepare(`UPDATE follows SET is_followed = 0 WHERE uid NOT IN (${ph})`)
+        .run(...seenUids).changes;
+    });
+    return tx();
+  }
+
+  listFollows(onlyFollowed = false): Follow[] {
+    const sql = 'SELECT * FROM follows' + (onlyFollowed ? ' WHERE is_followed = 1' : '') + ' ORDER BY uid';
+    return (this.db.prepare(sql).all() as FollowRow[]).map(rowToFollow);
+  }
+
+  // ---- preference_clauses：结构化偏好子句 ----
+
+  /** 面板用：全量子句（含 disabled）。matcher 消费请用 listEnabledClauses。 */
+  listClauses(): PreferenceClause[] {
+    const rows = this.db.prepare('SELECT * FROM preference_clauses ORDER BY id').all() as ClauseRow[];
+    return rows.map(rowToClause);
+  }
+
+  listEnabledClauses(uid?: string): PreferenceClause[] {
+    const sql = 'SELECT * FROM preference_clauses WHERE enabled = 1' +
+      (uid !== undefined ? ' AND uid = ?' : '') + ' ORDER BY id';
+    const rows = (uid !== undefined
+      ? this.db.prepare(sql).all(uid)
+      : this.db.prepare(sql).all()) as ClauseRow[];
+    return rows.map(rowToClause);
+  }
+
+  insertClause(c: NewClause): number {
+    const r = clauseToRow(c);
+    const t = now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO preference_clauses
+           (uid, scenes, min_confidence, title_keywords, priority, message_template, targets, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(r.uid, r.scenes, r.min_confidence, r.title_keywords, r.priority,
+        r.message_template, r.targets, r.enabled, t, t);
+    return Number(info.lastInsertRowid);
+  }
+
+  /** 部分更新；只动提供的字段。返回是否有行被更新。 */
+  updateClause(id: number, patch: ClausePatch): boolean {
+    const merged = { ...this.getClauseRow(id), ...patch };
+    if (!merged.uid) return false;
+    const r = clauseToRow(merged as NewClause);
+    return this.db
+      .prepare(
+        `UPDATE preference_clauses SET
+           uid=?, scenes=?, min_confidence=?, title_keywords=?, priority=?,
+           message_template=?, targets=?, enabled=?, updated_at=?
+         WHERE id = ?`,
+      )
+      .run(r.uid, r.scenes, r.min_confidence, r.title_keywords, r.priority,
+        r.message_template, r.targets, r.enabled, now(), id).changes > 0;
+  }
+
+  deleteClause(id: number): boolean {
+    return this.db.prepare('DELETE FROM preference_clauses WHERE id = ?').run(id).changes > 0;
+  }
+
+  setClauseEnabled(id: number, enabled: boolean): boolean {
+    return this.db
+      .prepare('UPDATE preference_clauses SET enabled = ?, updated_at = ? WHERE id = ?')
+      .run(enabled ? 1 : 0, now(), id).changes > 0;
+  }
+
+  private getClauseRow(id: number): NewClause | undefined {
+    const row = this.db.prepare('SELECT * FROM preference_clauses WHERE id = ?').get(id) as ClauseRow | undefined;
+    if (!row) return undefined;
+    const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = rowToClause(row);
+    return rest;
   }
 
   close(): void {

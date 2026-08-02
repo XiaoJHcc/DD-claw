@@ -19,12 +19,12 @@ function room(uid: string, over: Partial<RoomStatus> = {}): RoomStatus {
   };
 }
 
-function config(uids: string[], over: Partial<AppConfig> = {}): AppConfig {
+function config(_uids: string[], over: Partial<AppConfig> = {}): AppConfig {
   return {
     pollIntervalSec: 45, pollJitterSec: 0,
     notifyOnFirstRun: false, notifyOnNewSubscription: true,
     healthAlertAfterFailures: 2,
-    subscriptions: uids.map((u) => ({ uid: u, alias: `别名${u}`, enabled: true })),
+    subscriptions: [],
     notify: { onebot: { enabled: false, targets: [] }, toast: { enabled: true } },
     ...over,
   } as AppConfig;
@@ -38,10 +38,11 @@ interface Harness {
   cleanup(): void;
 }
 
-/** 真 Bus + 收集信号，临时目录真实 Db，假 fetcher */
+/** 真 Bus + 收集信号，临时目录真实 Db（streamers 表预插名单），假 fetcher */
 function harness(uids: string[], fetcher: StatusFetcher, over: Partial<AppConfig> = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));
   const db = new Db(join(dir, 'test.db'));
+  for (const u of uids) db.upsertStreamer({ uid: u, alias: `别名${u}` });
   const bus = new Bus();
   const signals: Signal[] = [];
   bus.on('*', (s) => { signals.push(s); });

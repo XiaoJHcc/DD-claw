@@ -38,8 +38,23 @@ export const configSchema = z.object({
   notifyOnNewSubscription: z.boolean().default(true),
   healthAlertAfterFailures: z.number().int().min(1).max(100).default(5),
 
-  subscriptions: z.array(subscriptionSchema)
-    .min(1, 'subscriptions 至少要有一项'),
+  /** 关注列表同步（需 cookies.json）。间隔下限 300s，低频即可，降低风控压力 */
+  follows: z.object({
+    enabled: z.boolean().default(true),
+    syncIntervalSec: z.number().int().min(300, '关注列表同步间隔不低于 300 秒').max(86400).default(1800),
+  }).default({ enabled: true, syncIntervalSec: 1800 }),
+
+  /** 控制面板（localhost WebUI，只绑 127.0.0.1）：监听名单 / 候选池 / 偏好子句管理 */
+  panel: z.object({
+    enabled: z.boolean().default(true),
+    port: z.number().int().min(1).max(65535).default(8787),
+  }).default({ enabled: true, port: 8787 }),
+
+  /**
+   * 历史种子来源：仅首次启动（streamers 表为空）时导入数据库，
+   * 之后监听名单以 streamers 表为准，由面板管理。可整段省略。
+   */
+  subscriptions: z.array(subscriptionSchema).default([]),
 
   notify: z.object({
     onebot: z.object({

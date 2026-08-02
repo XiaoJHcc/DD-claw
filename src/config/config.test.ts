@@ -1,6 +1,38 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { __stripJsonCommentsForTest as strip } from './index.js';
+import { configSchema } from './schema.js';
+
+const minimal = {
+  notify: { onebot: { enabled: false }, toast: { enabled: true } },
+};
+
+test('subscriptions 可省略（已迁库，仅作种子）', () => {
+  const r = configSchema.safeParse(minimal);
+  assert.ok(r.success, JSON.stringify(r.success ? {} : r.error.issues));
+  assert.deepEqual(r.data!.subscriptions, []);
+});
+
+test('follows 可省略，默认 enabled + 1800s；间隔下限 300s', () => {
+  const r = configSchema.safeParse(minimal);
+  assert.ok(r.success);
+  assert.deepEqual(r.data!.follows, { enabled: true, syncIntervalSec: 1800 });
+
+  const tooLow = configSchema.safeParse({ ...minimal, follows: { syncIntervalSec: 60 } });
+  assert.equal(tooLow.success, false);
+});
+
+test('subscriptions 存在时仍校验 uid 去重', () => {
+  const r = configSchema.safeParse({
+    ...minimal,
+    subscriptions: [
+      { uid: '123', alias: 'A' },
+      { uid: '123', alias: 'B' },
+    ],
+  });
+  assert.equal(r.success, false);
+  assert.match(r.error!.issues[0]!.message, /uid 重复/);
+});
 
 test('剥掉行注释', () => {
   assert.equal(JSON.parse(strip('{"a":1} // trailing')).a, 1);

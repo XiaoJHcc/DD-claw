@@ -13,7 +13,7 @@ const log = makeLogger('bili/live-status-source');
 export type StatusFetcher = (uids: string[]) => Promise<Map<string, RoomStatus>>;
 
 export interface LiveStatusSourceOpts {
-  /** 只监听这些 uid（--force-uid 用），为空则用配置里的订阅 */
+  /** 只监听这些 uid（--force-uid 用），为空则读数据库 streamers 表 */
   forceUids?: string[];
   fetcher?: StatusFetcher;
 }
@@ -48,7 +48,7 @@ export class LiveStatusSource implements Source {
   private get uids(): string[] {
     const forced = this.opts.forceUids;
     if (forced && forced.length > 0) return forced;
-    return this.ctx!.config.subscriptions.filter((s) => s.enabled).map((s) => s.uid);
+    return this.ctx!.db.listWatchedUids();
   }
 
   start(ctx: SourceContext): void {

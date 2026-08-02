@@ -40,7 +40,13 @@ export class OneBotNotifier implements Notifier {
     const raw: Array<PushTarget | NotifyTarget> = msg.targets ?? this.targets;
     const active = raw
       .filter((t) => !('enabled' in t) || t.enabled)
-      .map((t) => ({ type: t.type, id: t.id }));
+      .map((t) => ({ type: t.type, id: t.id }))
+      .filter((t) => {
+        if (/^\d+$/.test(t.id)) return true;
+        // 偏好子句的目标是人手填的，填错记日志跳过，不能炸掉整条推送
+        log.warn(`跳过无效推送目标 ${t.type}:"${t.id}"（id 必须是纯数字QQ号/群号）`);
+        return false;
+      });
     const withImage = this.buildSegments(msg, true);
 
     return this.mapTargets(active, async (t) => {

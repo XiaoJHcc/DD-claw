@@ -9,7 +9,7 @@
 ```
 ┌─ 1. 抓取  src/sources/   持续生产：原始数据入库归档 + 变更信号上总线
 │           bili/live-status  批量轮询（50/片 POST，非逐个轮询）  [已实现]
-│           bili/follows      关注列表同步（SESSDATA）           [未实现]
+│           bili/follows      关注列表同步（SESSDATA）           [已实现]
 │           bili/danmaku      弹幕 WS 按需拉起                   [未实现]
 │           bili/dynamic      空间动态（cookie）                 [未实现]
 │           weibo/feed        微博时间线（cookie）               [未实现]
@@ -21,7 +21,7 @@
 ├─ 2. 分析  src/analysis/  LLM 即任务：zod schema 进，JSON 出，中间可替换
 │           triggers   触发策略（开播/新动态/预留：直播中抽查）  [未实现]
 │           queue      分析队列：限流 + 优先级 + 结果缓存        [未实现]
-│           tasks/     scene-classify / schedule-extract / push-compose
+│           tasks/     scene-classify / schedule-extract；matcher 确定性偏好匹配
 │           context    按房间聚合多源数据                       [未实现]
 │           providers  熔断 + 多 key 池 + 降级链                [未实现]
 │           （当前仅 NoopAnalyzer 占位）
@@ -41,7 +41,7 @@
 2. **任务化 LLM 接口**（分析内部）：schema 进 JSON 出，换模型只动 providers
 3. **PushDirective**（分析→推送）：推送层不解释语义
 
-**偏好归属（已决策）**：自然语言偏好由 LLM（push-compose）解释 → 文案/优先级/方向；rules 只做确定性护栏；notify 只做路由执行。LLM 出错时护栏兜底，通道规则不依赖 LLM 可用性。
+**偏好归属（已决策）**：人类需求是唯一锚点信源——用户在控制面板直填结构化偏好子句（preference_clauses 表），matcher 确定性执行 → 文案/优先级/方向；不做 NL→结构化衍生编译，运行管线无人工环节。rules 只做确定性护栏；notify 只做路由执行。LLM 不参与偏好解释，其可用性不影响偏好链路。
 
 **高峰并发原则**：轮询循环只做「拉批量状态 + diff 产信号」两件便宜事；所有 LLM 调用进 analysis/queue，通知不等分析结果。
 
@@ -66,8 +66,9 @@
 | `src/core/bus.ts` | 类型化信号总线：emit 不 await，单 handler 异常记日志不影响其他 |
 | `src/core/state.ts` | 纯函数状态机 `diffRoom(prev, curr)` → Signal；`(room_id, live_time)` 是一场直播的身份；轮播（`live_status=2`）视为未开播；拉取失败不产 Signal；无 prev 也如实产 live_start（抑制政策在 pipeline） |
 | `src/core/scheduler.ts` | `PeriodicTask`：通用周期任务器（间隔+抖动+自调度不重叠），不含业务逻辑 |
-| `src/core/pipeline.ts` | 信号编排唯一装配点：bus → 冷启动抑制 → 分析队列 → 护栏 → 推送；信号处理并发 4；health_alert → alertAll |
-| `src/core/db.ts` | better-sqlite3。已有三表：`live_sessions` / `notify_log` / `room_state`。**待扩展**：`follows` / `signals` / `posts` / `snapshots` / `verdicts` / `schedules` |
+| `src/core/pipeline.ts` | 信号编排唯一装配点：bus → 冷启动抑制 → silent 抑制（追踪照常） → 分析队列（null 则 L0 兜底） → 护栏 → matcher/默认文案 → 推送；信号处理并发 4；health_alert → alertAll（payload 带 `message` 时用自定义文案） |
+| `src/core/db.ts` | better-sqlite3。已有六表：`live_sessions` / `notify_log` / `room_state` / `streamers`（监听名单，事实来源）/ `follows`（关注候选池）/ `preference_clauses`（偏好子句）。**待扩展**：`signals` / `posts` / `snapshots` / `verdicts` / `schedules` |
+| `src/core/streamers.ts` | streamers / follows / preference_clauses 三表的行类型与「行 ↔ 对象」映射（JSON 字段序列化集中在此）；监听名单 CRUD 是 `Db` 的方法 |
 | `src/core/concurrency.ts` | `mapLimit` 有界并发工具 |
 
 ### sources — 抓取
@@ -80,7 +81,9 @@
 | `src/sources/bili/live-status-source.ts` | 轮询 + diff + 批量落状态 + `coldStart` 标记 + 健康计数发 `health_alert` 信号 | ✅ |
 | `src/sources/bili/types.ts` | 接口返回类型 | ✅ |
 | `src/sources/bili/wbi.ts` | WBI 签名（弹幕/动态接口前置） | ⬜ |
-| `src/sources/bili/follows.ts` | 关注列表同步 → 订阅表（SESSDATA + isLogin 心跳） | ⬜ |
+| `src/sources/bili/auth.ts` | cookie 管理：`loadCookies`（cookies.json 整套字段，坏 JSON 启动即失败）/ `cookieHeader`（绝不进日志）/ `fetchSelf`（nav isLogin 心跳，-101 归一化为未登录） | ✅ |
+| `src/sources/bili/followings.ts` | 分页拉 `x/relation/followings`（50/页，按 total 翻页，短页到底）；分页上限/签名要求未经实测，见代码【实测点】注释 | ✅ |
+| `src/sources/bili/follows.ts` | `FollowsSource`：isLogin 心跳合并进同步周期（失效发一次 health_alert 并跳过，恢复复位）→ 整轮成功才落库（单页失败整轮放弃，绝不清空）→ 新关注自动入 streamers（mode='on', source='follows'，已有条目不碰） | ✅ |
 | `src/sources/bili/danmaku.ts` | 弹幕 WS，开播拉起、下播关闭；采样进分析队列 | ⬜ |
 | `src/sources/bili/dynamic.ts` | 空间动态 → posts 表 + feed_post 信号 | ⬜ |
 | `src/sources/weibo/feed.ts` | 微博时间线（config 配 `weiboUid` 映射） | ⬜ |
@@ -97,8 +100,9 @@
 | `src/analysis/context.ts` | 按房间聚合时间窗内多源数据 → 一份 context | ⬜ |
 | `src/analysis/providers.ts` | LLM provider 熔断 + 降级链（Gemini → GLM） | ⬜ |
 | `src/analysis/tasks/scene-classify.ts` | 内容分类（游戏/唱歌/杂谈/演出/other + evidence）→ verdicts 表 | ⬜ |
-| `src/analysis/tasks/schedule-extract.ts` | 从动态/微博解析预告时间 → schedules 表（低置信度进人工确认） | ⬜ |
-| `src/analysis/tasks/push-compose.ts` | verdict + 自然语言偏好规则 → PushDirective（文案/优先级/方向） | ⬜ |
+| `src/analysis/tasks/schedule-extract.ts` | 从动态/微博解析预告时间 → schedules 表（置信度入库，阈值过滤） | ⬜ |
+| `src/analysis/matcher.ts` | 确定性偏好匹配：preference_clauses × verdict → PushMessage（模板渲染/优先级/目标） | ✅ |
+| `src/analysis/l0.ts` | L0 确定性分类器：标题/分区关键词 → SceneVerdict（与 LLM 同形），分析队列返回 null 时兜底 | ✅ |
 
 ### rules — 确定性护栏
 
@@ -114,18 +118,28 @@
 |---|---|---|
 | `src/notify/types.ts` | `Notifier` 接口：`send(PushMessage)` + `capabilities` + `alert()` | ✅ |
 | `src/notify/message.ts` | `liveEventToMessage()`：LiveEvent → PushMessage（🔴 文案沿用 M1） | ✅ |
-| `src/notify/dispatcher.ts` | 并行 fan-out、notify_log 用 `msg.ref` 溯源、任一通道成功即标记。**待扩展**：按 msg.targets 路由 + 通道级规则 | ✅ M1 版 |
+| `src/notify/dispatcher.ts` | 并行 fan-out、notify_log 用 `msg.ref` 溯源、任一通道成功即标记。**待扩展**：通道级规则 | ✅ M1 版 |
 | `src/notify/onebot.ts` | NapCat OneBot 11 HTTP；消息段数组；图片失败降级纯文本；每目标串行 + 1.2s 间隔 | ✅ **NapCat 未部署，未实测** |
 | `src/notify/toast.ts` | powertoast 本机通知；兼作 NapCat 挂掉时的告警通道 | ✅ |
 | `src/notify/ntfy.ts` | ntfy 兜底通道 | ⬜ |
+
+### panel — 控制面板（localhost WebUI，v0）
+
+| 文件 | 职责 | 状态 |
+|---|---|---|
+| `src/panel/server.ts` | `createPanelServer({ db, status })`：同进程 node:http，零框架零依赖，只绑 127.0.0.1；REST API 读写 streamers/follows/preference_clauses 三表 + `/api/status`；改库即生效，启动失败只记 error 不影响主流程 | ✅ v0 |
+| `src/panel/http-util.ts` | 请求体解析（64KB 上限）、参数校验（400 + 中文错误）、JSON 响应 | ✅ |
+| `src/panel/page.ts` | 内嵌单页 HTML 字符串（名单/候选池/子句/状态四区块，原生 fetch，无 CDN 离线可用；dist 不拷静态文件故内嵌） | ✅ |
+
+v0 范围：名单三态/分析开关/画像编辑、候选池一键加入、子句 CRUD、状态展示（cookie/follows/通道/监听数/uptime）。v1 预留：扫码登录与 cookie 健康、verdicts 总览、时间表日历。
 
 ### 装配与基础设施（已实现）
 
 | 文件 | 职责 |
 |---|---|
-| `src/index.ts` | 装配入口 + CLI：`--dry-run` / `--test-notify` / `--probe` / `--force-uid` |
+| `src/index.ts` | 装配入口 + CLI：`--dry-run` / `--test-notify` / `--probe` / `--force-uid`；`panel.enabled` 时起控制面板 |
 | `src/config/index.ts` | 读 `.env` + `config.json`（JSONC 注释、BOM 剥离），zod 启动即校验 |
-| `src/config/schema.ts` | 配置 schema；秘密只在 `.env` / `cookies.json`。待扩展：偏好规则、weiboUid 映射 |
+| `src/config/schema.ts` | 配置 schema；秘密只在 `.env` / `cookies.json`。`subscriptions` 已迁库（streamers 表），仅作首次启动种子，可省略。`follows`：关注列表同步开关 + 间隔（默认 1800s，下限 300s）。`panel`：控制面板开关 + 端口（默认 8787，只绑 127.0.0.1）。待扩展：weiboUid 映射 |
 | `src/logger.ts` | 极简结构化日志 |
 
 ## 开发约定
@@ -143,7 +157,7 @@
 ```bash
 npm run dev          # tsx watch 开发
 npm run build        # tsc → dist/，常驻用 node dist/index.js
-npm test             # node --test（state/bus/pipeline/concurrency/live-status-source/rules/config）
+npm test             # node --test（state/bus/pipeline/concurrency/streamers/live-status-source/auth/follows/rules/config/l0/matcher/onebot/panel）
 npm run probe        # 只查一次开播状态，验证接口通不通
 npm run test-notify  # 假事件走完整推送链路，验证 NapCat/Toast 配置
 ```
@@ -160,5 +174,5 @@ npm run test-notify  # 假事件走完整推送链路，验证 NapCat/Toast 配�
 
 - **M1（开播通知）**：代码完成，测试通过。**NapCat 未部署**，QQ 通道未实测
 - **M2 第 0 步（架构纠偏）**：完成。bus / pipeline / PeriodicTask / Source 接口 / 分析队列 / PushMessage 落地，行为与 M1 对齐，测试全绿
-- **M2（规模化 + 内容判定）**：未开始。前置：cookie 导入（SESSDATA）
+- **M2（规模化 + 内容判定）**：进行中。监听名单已迁库：`streamers` / `follows` / `preference_clauses` 三表 + CRUD + config 种子导入完成，source 名单改读 `listWatchedUids()`，测试全绿。**cookie 管理 + 关注列表同步已落地**：`auth.ts`（cookies.json 整套字段 + nav isLogin 心跳）+ `FollowsSource`（心跳合并进同步周期、失效告警一次、单页失败整轮放弃、新关注自动入 streamers），接口分页上限为未实测点，测试全绿。**无 LLM 偏好执行链路已落地**：L0 关键词分类器（与 LLM 同形 verdict，队列返回 null 时兜底）→ matcher（子句 × verdict → 文案/优先级/目标）→ OneBot 按 `msg.targets` 定向 + `mode='silent'` 抑制推送（追踪照常），测试全绿。**控制面板 v0 已落地**：`src/panel/`（node:http 只绑 127.0.0.1，内嵌单页无依赖），名单三态/画像编辑、候选池一键加入、偏好子句 CRUD、系统状态展示，改库即生效无需重启，测试全绿。后续：动态/微博源，见 design.md §6；面板 v1 = 扫码登录/cookie 健康、verdicts 总览、时间表日历
 - **M3（预告时间表）/ M4（偏好与路由）/ M5（产品化）**：未开始

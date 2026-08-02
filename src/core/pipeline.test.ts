@@ -6,6 +6,7 @@ import { AnalysisQueue } from '../analysis/queue.js';
 import { NoopAnalyzer } from '../analysis/noop.js';
 import { OncePerSessionRule } from '../rules/once-per-session.js';
 import type { PushMessage, Signal } from './types.js';
+import type { PreferenceClause } from './streamers.js';
 import type { RoomStatus } from '../sources/bili/types.js';
 import type { AppConfig } from '../config/schema.js';
 
@@ -28,11 +29,28 @@ function sig(over: Partial<Signal> = {}): Signal {
 class FakeDb {
   sessions: string[] = [];
   notified = new Set<string>();
+  streamers = new Map<string, { alias: string | null; mode: string }>([
+    ['1', { alias: '阿梓', mode: 'on' }],
+  ]);
+  clauses: PreferenceClause[] = [];
   recordSession(p: { roomId: string; liveTime: number }) {
     this.sessions.push(`${p.roomId}:${p.liveTime}`);
   }
   hasNotified(r: string, t: number) { return this.notified.has(`${r}:${t}`); }
   markNotified(r: string, t: number) { this.notified.add(`${r}:${t}`); }
+  getStreamer(uid: string) { return this.streamers.get(uid); }
+  listEnabledClauses(uid?: string) {
+    return this.clauses.filter((c) => c.enabled && (uid === undefined || c.uid === uid));
+  }
+}
+
+function clause(over: Partial<PreferenceClause> = {}): PreferenceClause {
+  return {
+    id: 1, uid: '1', scenes: [], minConfidence: null, titleKeywords: [],
+    priority: 'normal', messageTemplate: '', targets: null,
+    enabled: true, createdAt: 0, updatedAt: 0,
+    ...over,
+  };
 }
 
 class FakeDispatcher {
@@ -55,7 +73,7 @@ class FakeDispatcher {
 function config(over: Partial<AppConfig> = {}): AppConfig {
   return {
     notifyOnFirstRun: false, notifyOnNewSubscription: true,
-    subscriptions: [{ uid: '1', alias: '阿梓', enabled: true }],
+    subscriptions: [],
     ...over,
   } as AppConfig;
 }
@@ -129,6 +147,56 @@ test('live_end / title_change 不推送（M1 规则）', async () => {
   h.bus.emit(sig({ kind: 'title_change', previousTitle: '旧标题' }));
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 0);
+});
+
+// ---- mode='silent'：追踪照常，推送抑制 ----
+
+test("mode='silent'：抑制推送但 recordSession 照做", async () => {
+  const h = harness();
+  h.db.streamers.set('1', { alias: '阿梓', mode: 'silent' });
+  h.bus.emit(sig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0);
+  assert.deepEqual(h.db.sessions, ['r1:1785310737'], 'silent 只跳推送，场次仍入库');
+  assert.equal(h.db.notified.size, 0);
+});
+
+// ---- 偏好子句（matcher × L0 verdict）----
+
+test('命中偏好子句：文案/优先级/目标按子句（L0 提供 verdict）', async () => {
+  const h = harness();
+  h.db.clauses.push(clause({
+    id: 7, scenes: ['singing'], minConfidence: 0.5,
+    priority: 'high', messageTemplate: '{alias}唱歌速来',
+    targets: [{ type: 'group', id: '12345' }],
+  }));
+  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  const m = h.disp.sent[0]!;
+  assert.equal(m.title, '阿梓唱歌速来');
+  assert.equal(m.priority, 'high');
+  assert.deepEqual(m.targets, [{ type: 'group', id: '12345' }]);
+  assert.equal(m.url, 'https://live.bilibili.com/r1', '跳转字段沿用默认形状');
+});
+
+test('子句未命中（scene 不符）：走 M1 默认文案', async () => {
+  const h = harness();
+  h.db.clauses.push(clause({ scenes: ['gaming'], messageTemplate: '{alias}打游戏了' }));
+  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  assert.equal(h.disp.sent[0]!.title, '🔴 阿梓 开播了');
+  assert.equal(h.disp.sent[0]!.priority, 'normal');
+});
+
+test('标题无关键词（L0 也判不出）时 scenes 子句不命中，仍走默认', async () => {
+  const h = harness();
+  h.db.clauses.push(clause({ scenes: ['singing'], messageTemplate: '{alias}唱歌速来' }));
+  h.bus.emit(sig({ status: status({ title: '孩子们下午好' }) }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  assert.equal(h.disp.sent[0]!.title, '🔴 阿梓 开播了');
 });
 
 // ---- 健康告警 ----

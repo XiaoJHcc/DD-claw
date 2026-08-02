@@ -1,4 +1,5 @@
-import { loadConfig, ConfigError } from './config/index.js';
+import { loadConfig, ConfigError, projectRoot } from './config/index.js';
+import { resolve } from 'node:path';
 import { makeLogger } from './logger.js';
 import { Db } from './core/db.js';
 import { Bus } from './core/bus.js';
@@ -13,6 +14,10 @@ import { ToastNotifier } from './notify/toast.js';
 import { liveEventToMessage } from './notify/message.js';
 import { LiveStatusSource } from './sources/bili/live-status-source.js';
 import { fetchLiveStatus } from './sources/bili/live-status.js';
+import { loadCookies, cookieHeader } from './sources/bili/auth.js';
+import { FollowsSource } from './sources/bili/follows.js';
+import { createPanelServer } from './panel/server.js';
+import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 import type { Source } from './sources/types.js';
 
@@ -44,13 +49,18 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const { app, secrets } = loadConfig();
 
-  // --probe 只查一次开播状态，不碰 DB、不推送。用来确认接口通不通。
+  // --probe 只查一次开播状态，不推送。用来确认接口通不通。
+  // 无 --force-uid 时开 DB 只读监听名单（streamers 表），用完即关。
   if (args.probe) {
-    const uids = args.forceUids.length > 0
-      ? args.forceUids
-      : app.subscriptions.filter((s) => s.enabled).map((s) => s.uid);
+    let uids = args.forceUids;
+    let probeDb: Db | undefined;
+    if (uids.length === 0) {
+      probeDb = new Db(secrets.dbPath);
+      uids = probeDb.listWatchedUids();
+    }
     log.info(`探测 ${uids.length} 个 uid: ${uids.join(', ')}`);
     const res = await fetchLiveStatus(uids);
+    probeDb?.close();
     for (const uid of uids) {
       const s = res.get(uid);
       if (!s) { log.info(`  ${uid}: 返回中无此 uid（未开播）`); continue; }
@@ -64,6 +74,10 @@ async function main(): Promise<void> {
   }
 
   const db = new Db(secrets.dbPath);
+
+  // 监听名单事实来源是 streamers 表；config.json 的 subscriptions 仅作首次种子
+  const seeded = db.seedStreamersIfEmpty(app.subscriptions);
+  if (seeded > 0) log.info(`已从 config.json 种子导入 ${seeded} 个主播到 streamers 表，之后由面板管理`);
 
   const notifiers: Notifier[] = [];
   if (app.notify.onebot.enabled) {
@@ -110,11 +124,49 @@ async function main(): Promise<void> {
   const sources: Source[] = [
     new LiveStatusSource({ forceUids: args.forceUids }),
   ];
+
+  // 凭据功能：cookies.json 不存在 → 停用并说明；坏 JSON → loadCookies 抛
+  // ConfigError，启动即失败。cookie 值绝不进日志，只传拼好的 Cookie 头。
+  const cookies = loadCookies(resolve(projectRoot, 'cookies.json'));
+  if (!cookies) {
+    log.info('未导入 cookies.json，关注列表同步等凭据功能停用（匿名开播监听不受影响）');
+  } else if (!app.follows.enabled) {
+    log.info('cookies.json 存在，但 config 里 follows.enabled=false，跳过关注列表同步');
+  } else {
+    sources.push(new FollowsSource({ cookie: cookieHeader(cookies) }));
+  }
+
   for (const s of sources) s.start({ bus, db, config: app });
+
+  // 控制面板：辅助设施。EADDRINUSE 等错误走 'error' 事件，只记日志不影响主流程
+  const startedAt = Math.floor(Date.now() / 1000);
+  let panel: Server | undefined;
+  if (app.panel.enabled) {
+    panel = createPanelServer({
+      db,
+      status: () => ({
+        cookieImported: cookies != null,
+        followsEnabled: app.follows.enabled,
+        notifiers: dispatcher.channels,
+        watchedCount: db.listWatchedUids().length,
+        startedAt,
+      }),
+    });
+    panel.on('error', (e) => log.error('控制面板启动失败（不影响主流程）', e));
+    panel.listen(app.panel.port, '127.0.0.1', () => {
+      log.info(`控制面板: http://127.0.0.1:${app.panel.port}`);
+    });
+  }
+
+  const watched = args.forceUids.length > 0 ? args.forceUids.length : db.listWatchedUids().length;
+  if (watched === 0) {
+    log.warn('监听名单为空（streamers 表中没有 mode!=off 的主播），不会产生任何开播信号');
+  }
 
   const shutdown = (sig: string) => {
     log.info(`收到 ${sig}，停止中`);
     for (const s of sources) s.stop();
+    panel?.close();
     db.close();
     process.exit(0);
   };
