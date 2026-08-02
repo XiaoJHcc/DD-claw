@@ -14,9 +14,9 @@ import { ToastNotifier } from './notify/toast.js';
 import { liveEventToMessage } from './notify/message.js';
 import { LiveStatusSource } from './sources/bili/live-status-source.js';
 import { fetchLiveStatus } from './sources/bili/live-status.js';
-import { loadCookies, cookieHeader } from './sources/bili/auth.js';
+import { loadCookies, cookieHeader, type SelfInfo } from './sources/bili/auth.js';
 import { FollowsSource } from './sources/bili/follows.js';
-import { createPanelServer } from './panel/server.js';
+import { createPanelServer, type PlatformStatus } from './panel/server.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 import type { Source } from './sources/types.js';
@@ -125,15 +125,31 @@ async function main(): Promise<void> {
     new LiveStatusSource({ forceUids: args.forceUids }),
   ];
 
+  // follows source 单独持有（不放 sources 数组）：扫码登录后要热重启，
+  // shutdown 时 stop 的必须是最新实例
+  let followsSrc: FollowsSource | null = null;
+  // 最近一次登录态心跳结果（onLoginState 上报），面板状态展示用
+  let biliLogin: SelfInfo | null = null;
+  let cookieImported = false;
+  const startFollows = (cookieHdr: string): void => {
+    followsSrc?.stop();
+    followsSrc = new FollowsSource({
+      cookie: cookieHdr,
+      onLoginState: (s) => { biliLogin = s; },
+    });
+    followsSrc.start({ bus, db, config: app });
+  };
+
   // 凭据功能：cookies.json 不存在 → 停用并说明；坏 JSON → loadCookies 抛
   // ConfigError，启动即失败。cookie 值绝不进日志，只传拼好的 Cookie 头。
   const cookies = loadCookies(resolve(projectRoot, 'cookies.json'));
+  cookieImported = cookies != null;
   if (!cookies) {
     log.info('未导入 cookies.json，关注列表同步等凭据功能停用（匿名开播监听不受影响）');
   } else if (!app.follows.enabled) {
     log.info('cookies.json 存在，但 config 里 follows.enabled=false，跳过关注列表同步');
   } else {
-    sources.push(new FollowsSource({ cookie: cookieHeader(cookies) }));
+    startFollows(cookieHeader(cookies));
   }
 
   for (const s of sources) s.start({ bus, db, config: app });
@@ -144,13 +160,34 @@ async function main(): Promise<void> {
   if (app.panel.enabled) {
     panel = createPanelServer({
       db,
-      status: () => ({
-        cookieImported: cookies != null,
-        followsEnabled: app.follows.enabled,
-        notifiers: dispatcher.channels,
-        watchedCount: db.listWatchedUids().length,
-        startedAt,
-      }),
+      status: () => {
+        // state 推导：无 cookie=none；有 cookie 还没心跳=imported；
+        // isLogin true=ok / false=expired（mid 随心跳带出）
+        const biliState: PlatformStatus['state'] = !cookieImported
+          ? 'none'
+          : biliLogin === null ? 'imported' : biliLogin.isLogin ? 'ok' : 'expired';
+        return {
+          startedAt,
+          notifiers: dispatcher.channels,
+          watchedCount: db.listWatchedUids().length,
+          liveCount: db.countLiveRooms(),
+          platforms: [
+            { key: 'bili', name: 'B站', state: biliState, mid: biliLogin?.mid ?? null },
+            { key: 'weibo', name: '微博', state: 'reserved' },
+          ],
+        };
+      },
+      auth: {
+        cookiePath: resolve(projectRoot, 'cookies.json'),
+        onCookiesSaved: (cookieHdr) => {
+          cookieImported = true;
+          biliLogin = null; // 新 cookie 还没心跳，先按 imported 展示
+          if (app.follows.enabled) {
+            log.info('扫码登录成功，热重启关注列表同步');
+            startFollows(cookieHdr);
+          }
+        },
+      },
     });
     panel.on('error', (e) => log.error('控制面板启动失败（不影响主流程）', e));
     panel.listen(app.panel.port, '127.0.0.1', () => {
@@ -166,6 +203,7 @@ async function main(): Promise<void> {
   const shutdown = (sig: string) => {
     log.info(`收到 ${sig}，停止中`);
     for (const s of sources) s.stop();
+    followsSrc?.stop();
     panel?.close();
     db.close();
     process.exit(0);

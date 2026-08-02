@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { diffRoom, type PrevState } from './state.js';
+import { diffRoom, toPrevState, type PrevState } from './state.js';
 import type { RoomStatus } from '../sources/bili/types.js';
 
 const OPTS = { now: 1_800_000_000 };
@@ -10,13 +10,19 @@ function status(over: Partial<RoomStatus> = {}): RoomStatus {
   return {
     uid: UID, roomId: '80397', uname: '阿梓从小就很可爱',
     title: '孩子们下午好', isLive: true, rawLiveStatus: 1, liveTime: 1_785_310_737,
-    areaName: '无畏契约', parentAreaName: '网游', cover: '', keyframe: 'k.jpg',
+    areaName: '无畏契约', parentAreaName: '网游', cover: 'c.jpg', keyframe: 'k.jpg',
+    face: 'f.jpg', online: 1234,
     ...over,
   };
 }
 
 function prev(over: Partial<PrevState> = {}): PrevState {
-  return { roomId: '80397', isLive: true, liveTime: 1_785_310_737, title: '孩子们下午好', ...over };
+  return {
+    roomId: '80397', isLive: true, liveTime: 1_785_310_737, title: '孩子们下午好',
+    areaName: '无畏契约', parentAreaName: '网游', keyframe: 'k.jpg', cover: 'c.jpg',
+    online: 1234, face: 'f.jpg',
+    ...over,
+  };
 }
 
 test('0 → 1 产出 live_start', () => {
@@ -70,4 +76,17 @@ test('无 prev 且在播，如实产出 live_start（无政策参数，抑制在
 test('无 prev 且未开播，无 Signal', () => {
   const off = status({ isLive: false, liveTime: 0 });
   assert.deepEqual(diffRoom(UID, undefined, off, OPTS), []);
+});
+
+test('toPrevState 全量带出展示字段，缺失时缺省 \'\' / 0', () => {
+  const p = toPrevState(status());
+  assert.deepEqual(p, {
+    roomId: '80397', isLive: true, liveTime: 1_785_310_737, title: '孩子们下午好',
+    areaName: '无畏契约', parentAreaName: '网游', keyframe: 'k.jpg', cover: 'c.jpg',
+    online: 1234, face: 'f.jpg',
+  });
+
+  const bare = toPrevState(status({ face: undefined, online: undefined }));
+  assert.equal(bare.face, '');
+  assert.equal(bare.online, 0);
 });

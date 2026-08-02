@@ -24,6 +24,7 @@ export interface StreamerRow {
   mode: StreamerMode;
   analyze: number;
   profile_note: string | null;
+  face: string | null;
   source: StreamerSource;
   created_at: number;
   updated_at: number;
@@ -38,6 +39,7 @@ export interface Streamer {
   mode: StreamerMode;
   analyze: boolean;
   profileNote: string | null;
+  face: string | null;
   source: StreamerSource;
   createdAt: number;
   updatedAt: number;
@@ -51,7 +53,7 @@ export function rowToStreamer(r: StreamerRow): Streamer {
     uid: r.uid, uname: r.uname, alias: r.alias,
     roomId: r.room_id, weiboUid: r.weibo_uid,
     mode: r.mode, analyze: r.analyze === 1,
-    profileNote: r.profile_note, source: r.source,
+    profileNote: r.profile_note, face: r.face ?? null, source: r.source,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -61,6 +63,7 @@ export function rowToStreamer(r: StreamerRow): Streamer {
 export interface FollowRow {
   uid: string;
   uname: string;
+  face: string | null;
   first_seen: number;
   last_seen: number;
   is_followed: number;
@@ -69,6 +72,7 @@ export interface FollowRow {
 export interface Follow {
   uid: string;
   uname: string;
+  face: string | null;
   firstSeen: number;
   lastSeen: number;
   isFollowed: boolean;
@@ -76,7 +80,7 @@ export interface Follow {
 
 export function rowToFollow(r: FollowRow): Follow {
   return {
-    uid: r.uid, uname: r.uname,
+    uid: r.uid, uname: r.uname, face: r.face ?? null,
     firstSeen: r.first_seen, lastSeen: r.last_seen,
     isFollowed: r.is_followed === 1,
   };

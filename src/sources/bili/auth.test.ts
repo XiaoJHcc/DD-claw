@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadCookies, cookieHeader, fetchSelf } from './auth.js';
+import { loadCookies, cookieHeader, fetchSelf, saveCookies } from './auth.js';
 import { BiliApiError, BiliHttpError } from './client.js';
 import { ConfigError } from '../../config/index.js';
 
@@ -82,4 +82,42 @@ test('fetchSelf 其他错误（HTTP 层/其他业务码）继续抛出', async (
     fetchSelf('c', async () => { throw new BiliApiError(-352, '风控'); }),
     BiliApiError,
   );
+});
+
+// ---- saveCookies ----
+
+test('saveCookies 文件不存在直接写', (t) => {
+  const { dir, cleanup } = tmpdir_();
+  t.after(cleanup);
+  const p = join(dir, 'cookies.json');
+  saveCookies(p, { SESSDATA: 's', bili_jct: 'j' });
+  assert.deepEqual(loadCookies(p), { SESSDATA: 's', bili_jct: 'j' });
+});
+
+test('saveCookies merge：新值覆盖、旧值兜底（扫码不发 buvid3 等风控字段）', (t) => {
+  const { dir, cleanup } = tmpdir_();
+  t.after(cleanup);
+  const p = join(dir, 'cookies.json');
+  writeFileSync(p, JSON.stringify({ SESSDATA: 'old', buvid3: 'keep-me', n: 1 }));
+  saveCookies(p, { SESSDATA: 'new', bili_jct: 'j' });
+  assert.deepEqual(loadCookies(p), { SESSDATA: 'new', bili_jct: 'j', buvid3: 'keep-me' },
+    '旧的风控字段保留，SESSDATA 被新值覆盖，非字符串旧值被丢弃');
+});
+
+test('saveCookies 旧文件是坏 JSON 直接覆盖', (t) => {
+  const { dir, cleanup } = tmpdir_();
+  t.after(cleanup);
+  const p = join(dir, 'cookies.json');
+  writeFileSync(p, '{not json');
+  saveCookies(p, { SESSDATA: 's' });
+  assert.deepEqual(loadCookies(p), { SESSDATA: 's' });
+});
+
+test('saveCookies 旧文件不是对象（数组）直接覆盖', (t) => {
+  const { dir, cleanup } = tmpdir_();
+  t.after(cleanup);
+  const p = join(dir, 'cookies.json');
+  writeFileSync(p, '[1,2]');
+  saveCookies(p, { SESSDATA: 's' });
+  assert.deepEqual(loadCookies(p), { SESSDATA: 's' });
 });

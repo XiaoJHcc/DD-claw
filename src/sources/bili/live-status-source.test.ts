@@ -14,7 +14,8 @@ function room(uid: string, over: Partial<RoomStatus> = {}): RoomStatus {
   return {
     uid, roomId: `room-${uid}`, uname: `主播${uid}`, title: '标题',
     isLive: true, rawLiveStatus: 1, liveTime: 1_785_310_737,
-    areaName: '虚拟主播', parentAreaName: '虚拟主播', cover: '', keyframe: 'k.jpg',
+    areaName: '虚拟主播', parentAreaName: '虚拟主播', cover: 'c.jpg', keyframe: 'k.jpg',
+    face: `https://i0.hdslb.com/face-${uid}.jpg`, online: 100,
     ...over,
   };
 }
@@ -157,7 +158,10 @@ test('已运行后新出现的 uid 标 new_subscription，老 uid 不标', async
   const h = harness(['1', '2'], async () => statuses);
   t.after(h.cleanup);
   // 模拟非首次运行：DB 里已有主播 1 的记录
-  h.db.saveRoomState('1', { roomId: 'room-1', isLive: false, liveTime: 0, title: '标题' });
+  h.db.saveRoomState('1', {
+    roomId: 'room-1', isLive: false, liveTime: 0, title: '标题',
+    areaName: '', parentAreaName: '', keyframe: '', cover: '', online: 0, face: '',
+  });
   h.src.restore();
 
   await h.src.pollOnce();
@@ -202,4 +206,52 @@ test('同一场跨多轮轮询只产一次 live_start', async (t) => {
   await h.src.pollOnce();
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'live_start').length, 1, '3 轮只产 1 次');
+});
+
+// ---- 实况字段持久化 + 头像回填 ----
+
+test('room_state 落库展示字段：keyframe/分区/在线人数，下播后保留上一场实况', async (t) => {
+  const statuses = new Map([['1', room('1')]]);
+  const h = harness(['1'], async () => statuses);
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  let s = h.db.loadRoomStates().get('1')!;
+  assert.equal(s.keyframe, 'k.jpg');
+  assert.equal(s.cover, 'c.jpg');
+  assert.equal(s.areaName, '虚拟主播');
+  assert.equal(s.parentAreaName, '虚拟主播');
+  assert.equal(s.online, 100);
+
+  // 下播：curr 缺 key，offline 写路径 { ...prev, isLive: false } 保留上一场实况
+  statuses.clear();
+  await h.src.pollOnce();
+  s = h.db.loadRoomStates().get('1')!;
+  assert.equal(s.isLive, false);
+  assert.equal(s.keyframe, 'k.jpg', '下播后仍保留上一场关键帧');
+  assert.equal(s.online, 100, '下播后仍保留上一场在线人数');
+});
+
+test('头像回填：streamers.face 为空时用本轮 face 补上，已有值不覆盖', async (t) => {
+  const all = new Map([['1', room('1')], ['2', room('2')]]);
+  const h = harness(['1', '2'], async () => all);
+  t.after(h.cleanup);
+  // 1 face 为空（harness 预插时未给）；2 已有 face
+  h.db.upsertStreamer({ uid: '2', uname: '主播2', face: 'https://i0.hdslb.com/old.jpg' });
+
+  await h.src.pollOnce();
+
+  const s1 = h.db.getStreamer('1')!;
+  assert.equal(s1.face, 'https://i0.hdslb.com/face-1.jpg', '空 face 被回填');
+  assert.equal(s1.alias, '别名1', '回填不碰其他字段');
+  assert.equal(h.db.getStreamer('2')?.face, 'https://i0.hdslb.com/old.jpg', '已有 face 不覆盖');
+});
+
+test('curr.face 为空串时不做回填', async (t) => {
+  const all = new Map([['1', room('1', { face: '' })]]);
+  const h = harness(['1'], async () => all);
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(h.db.getStreamer('1')?.face, null, '空串 face 不写入');
 });

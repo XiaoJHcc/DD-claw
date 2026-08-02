@@ -15,14 +15,16 @@ export interface FollowsSourceOpts {
   cookie: string;
   selfFetcher?: SelfFetcher;
   listFetcher?: FollowingsFetcher;
+  /** 每轮心跳拿到 self 后上报一次（无论 isLogin 真假），供面板展示登录态 */
+  onLoginState?: (s: SelfInfo) => void;
 }
 
 /**
  * 关注列表同步：isLogin 心跳合并进同步周期 —— 每轮先查登录态，
  * 失效则发一次 health_alert 并跳过本轮（恢复后复位）；有效才分页拉取。
- * 整轮成功才落库：upsertFollows + markFollowsSynced；
- * 新出现的 uid 自动加入 streamers（mode='on', source='follows'），
- * 已在表里的不碰（用户手调的 mode/alias 优先）。
+ * 整轮成功才落库：upsertFollows + markFollowsSynced。
+ * 关注不再自动入监听 —— follows 表只是面板上「方便添加」的候选池，
+ * 监听名单完全由用户在面板管理；同步只对已有 streamer 条目做空 face 回填。
  */
 export class FollowsSource implements Source {
   readonly name = 'bili/follows';
@@ -35,11 +37,13 @@ export class FollowsSource implements Source {
   private readonly cookie: string;
   private readonly selfFetcher: SelfFetcher;
   private readonly listFetcher: FollowingsFetcher;
+  private readonly onLoginState?: (s: SelfInfo) => void;
 
   constructor(opts: FollowsSourceOpts) {
     this.cookie = opts.cookie;
     this.selfFetcher = opts.selfFetcher ?? fetchSelf;
     this.listFetcher = opts.listFetcher ?? fetchFollowings;
+    this.onLoginState = opts.onLoginState;
   }
 
   start(ctx: SourceContext): void {
@@ -75,6 +79,7 @@ export class FollowsSource implements Source {
       log.error('登录态查询失败，跳过本轮同步', e);
       return false;
     }
+    this.onLoginState?.(self);
 
     if (!self.isLogin) {
       if (!this.alerted) {
@@ -115,14 +120,16 @@ export class FollowsSource implements Source {
     ctx.db.upsertFollows(list);
     const removed = ctx.db.markFollowsSynced(list.map((f) => f.uid), Math.floor(Date.now() / 1000));
 
-    let added = 0;
+    // 关注不自动入监听（关注列表只是候选池）；仅给已在名单、face 为空的条目补头像
+    let faceBackfilled = 0;
     for (const f of list) {
-      if (ctx.db.getStreamer(f.uid)) continue;
-      ctx.db.upsertStreamer({ uid: f.uid, uname: f.uname, mode: 'on', source: 'follows' });
-      added++;
-      log.info(`新关注自动加入监听: ${f.uname}(${f.uid})`);
+      const existing = ctx.db.getStreamer(f.uid);
+      if (existing && !existing.face && f.face) {
+        ctx.db.upsertStreamer({ uid: f.uid, face: f.face });
+        faceBackfilled++;
+      }
     }
-    log.info(`同步完成：关注 ${list.length}，取关标记 ${removed}，新加入监听 ${added}`);
+    log.info(`同步完成：关注 ${list.length}，取关标记 ${removed}，头像回填 ${faceBackfilled}`);
     return true;
   }
 }

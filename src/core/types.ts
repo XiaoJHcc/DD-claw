@@ -18,6 +18,10 @@ export interface LiveStatus {
   parentAreaName: string;
   cover: string;
   keyframe: string;
+  /** 主播头像 URL（平台无关、匿名可得；拿不到时缺省） */
+  face?: string;
+  /** 直播间在线人数（平台无关、匿名可得；拿不到时缺省） */
+  online?: number;
 }
 
 export type SignalKind =

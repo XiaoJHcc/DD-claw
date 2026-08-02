@@ -66,6 +66,18 @@ test('upsertStreamer 部分更新保留原值，setStreamerMode 生效', (t) => 
   assert.equal(db.setStreamerMode('不存在', 'off'), false);
 });
 
+test('upsertStreamer face：建行默认 null，改行未提供保留原值', (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', uname: 'A' });
+  assert.equal(db.getStreamer('1')?.face, null, '未提供时建行默认 null');
+
+  db.upsertStreamer({ uid: '1', face: 'https://i0.hdslb.com/f.jpg' });
+  assert.equal(db.getStreamer('1')?.face, 'https://i0.hdslb.com/f.jpg');
+
+  db.upsertStreamer({ uid: '1', uname: 'A2' });
+  assert.equal(db.getStreamer('1')?.face, 'https://i0.hdslb.com/f.jpg', '未提供 face 时保留原值');
+});
+
 // ---- follows ----
 
 test('upsertFollows + markFollowsSynced：不在 seen 里的标记取关', (t) => {
@@ -91,6 +103,23 @@ test('markFollowsSynced 空 seen = 全部取关', (t) => {
   db.upsertFollows([{ uid: '1', uname: 'A' }, { uid: '2', uname: 'B' }]);
   assert.equal(db.markFollowsSynced([], 1_800_000_000), 2);
   assert.equal(db.listFollows(true).length, 0);
+});
+
+test('upsertFollows face：写入并可读，空值不覆盖已有头像（只进不退）', (t) => {
+  const db = memDb(t);
+  db.upsertFollows([{ uid: '1', uname: 'A' }]);
+  assert.equal(db.listFollows().find((f) => f.uid === '1')?.face, null, '未提供时默认 null');
+
+  db.upsertFollows([{ uid: '1', uname: 'A', face: 'https://i0.hdslb.com/f.jpg' }]);
+  assert.equal(db.listFollows().find((f) => f.uid === '1')?.face, 'https://i0.hdslb.com/f.jpg');
+
+  db.upsertFollows([{ uid: '1', uname: 'A' }]);
+  assert.equal(db.listFollows().find((f) => f.uid === '1')?.face, 'https://i0.hdslb.com/f.jpg',
+    '缺省 face 不覆盖已有值');
+
+  db.upsertFollows([{ uid: '1', uname: 'A', face: '' }]);
+  assert.equal(db.listFollows().find((f) => f.uid === '1')?.face, 'https://i0.hdslb.com/f.jpg',
+    '空串 face 不覆盖已有值');
 });
 
 // ---- preference_clauses ----

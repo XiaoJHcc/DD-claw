@@ -6,6 +6,14 @@ export interface PrevState {
   isLive: boolean;
   liveTime: number;
   title: string;
+  // 以下为展示用字段：随状态持久化供面板展示实况，diffRoom 不读，
+  // diff 仍只看 roomId / isLive / liveTime / title
+  areaName: string;
+  parentAreaName: string;
+  keyframe: string;
+  cover: string;
+  online: number;
+  face: string;
 }
 
 export interface DiffOptions {
@@ -101,5 +109,10 @@ function synthesizeOffline(uid: string, prev: PrevState): LiveStatus {
 }
 
 export function toPrevState(s: LiveStatus): PrevState {
-  return { roomId: s.roomId, isLive: s.isLive, liveTime: s.liveTime, title: s.title };
+  return {
+    roomId: s.roomId, isLive: s.isLive, liveTime: s.liveTime, title: s.title,
+    areaName: s.areaName ?? '', parentAreaName: s.parentAreaName ?? '',
+    keyframe: s.keyframe ?? '', cover: s.cover ?? '',
+    online: s.online ?? 0, face: s.face ?? '',
+  };
 }

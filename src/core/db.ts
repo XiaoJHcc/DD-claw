@@ -79,6 +79,23 @@ CREATE TABLE IF NOT EXISTS preference_clauses (
 
 const now = () => Math.floor(Date.now() / 1000);
 
+/** 面板实况展示用的完整 room_state 行（PrevState 展示字段 + 下播锚点/轮询时间） */
+export interface RoomStateFull {
+  roomId: string;
+  isLive: boolean;
+  liveTime: number;
+  title: string;
+  areaName: string;
+  parentAreaName: string;
+  keyframe: string;
+  cover: string;
+  online: number;
+  /** 最后一次观测到在播的时间（下播时长锚点）；从未见过开播为 null */
+  lastLiveAt: number | null;
+  /** 本轮状态落库时间 */
+  polledAt: number;
+}
+
 export class Db {
   private readonly db: Database.Database;
 
@@ -87,13 +104,33 @@ export class Db {
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
     this.db.exec(SCHEMA);
+    // 存量库迁移：room_state 展示字段（last_live_at = 最后一次观测到在播的时间，下播时长锚点）
+    for (const ddl of ['area_name TEXT', 'parent_area_name TEXT', 'keyframe TEXT',
+      'cover TEXT', 'online INTEGER', 'last_live_at INTEGER']) {
+      this.ensureColumn('room_state', ddl.split(' ')[0]!, ddl);
+    }
+    this.ensureColumn('streamers', 'face', 'face TEXT');
+    this.ensureColumn('follows', 'face', 'face TEXT');
     log.info(`数据库就绪: ${path}`);
+  }
+
+  /** 缺列则 ALTER TABLE 补上（旧库在线迁移；新列一律可空，不动旧数据） */
+  private ensureColumn(table: string, column: string, ddl: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
   }
 
   loadRoomStates(): Map<string, PrevState> {
     const rows = this.db
-      .prepare('SELECT uid, room_id, is_live, live_time, title FROM room_state')
-      .all() as Array<{ uid: string; room_id: string; is_live: number; live_time: number; title: string | null }>;
+      .prepare(`SELECT uid, room_id, is_live, live_time, title,
+                area_name, parent_area_name, keyframe, cover, online FROM room_state`)
+      .all() as Array<{
+        uid: string; room_id: string; is_live: number; live_time: number; title: string | null;
+        area_name: string | null; parent_area_name: string | null;
+        keyframe: string | null; cover: string | null; online: number | null;
+      }>;
     const m = new Map<string, PrevState>();
     for (const r of rows) {
       m.set(r.uid, {
@@ -101,6 +138,12 @@ export class Db {
         isLive: r.is_live === 1,
         liveTime: r.live_time,
         title: r.title ?? '',
+        areaName: r.area_name ?? '',
+        parentAreaName: r.parent_area_name ?? '',
+        keyframe: r.keyframe ?? '',
+        cover: r.cover ?? '',
+        online: r.online ?? 0,
+        face: '', // 头像以 streamers.face 为准，room_state 不存
       });
     }
     return m;
@@ -116,16 +159,65 @@ export class Db {
   }
 
   saveRoomState(uid: string, s: PrevState): void {
+    // last_live_at = 最后一次观测到在播的时间戳：在播时写入，下播后保留旧值
+    // （是「下播时长」的锚点），故冲突更新时用 CASE 而不是无条件覆盖
     this.db
       .prepare(
-        `INSERT INTO room_state (uid, room_id, is_live, live_time, title, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO room_state
+           (uid, room_id, is_live, live_time, title,
+            area_name, parent_area_name, keyframe, cover, online, last_live_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 1 THEN ? ELSE NULL END, ?)
          ON CONFLICT(uid) DO UPDATE SET
            room_id=excluded.room_id, is_live=excluded.is_live,
            live_time=excluded.live_time, title=excluded.title,
+           area_name=excluded.area_name, parent_area_name=excluded.parent_area_name,
+           keyframe=excluded.keyframe, cover=excluded.cover, online=excluded.online,
+           last_live_at = CASE WHEN excluded.is_live=1
+             THEN excluded.last_live_at ELSE room_state.last_live_at END,
            updated_at=excluded.updated_at`,
       )
-      .run(uid, s.roomId, s.isLive ? 1 : 0, s.liveTime, s.title, Math.floor(Date.now() / 1000));
+      .run(uid, s.roomId, s.isLive ? 1 : 0, s.liveTime, s.title,
+        s.areaName, s.parentAreaName, s.keyframe, s.cover, s.online,
+        s.isLive ? 1 : 0, Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000));
+  }
+
+  /** 当前在播房间数（面板状态展示用） */
+  countLiveRooms(): number {
+    const { c } = this.db
+      .prepare('SELECT COUNT(*) AS c FROM room_state WHERE is_live=1')
+      .get() as { c: number };
+    return c;
+  }
+
+  /** 面板实况展示用：loadRoomStates 之外的 last_live_at / updated_at 也读出 */
+  listRoomStatesFull(): Map<string, RoomStateFull> {
+    const rows = this.db
+      .prepare(`SELECT uid, room_id, is_live, live_time, title,
+                area_name, parent_area_name, keyframe, cover, online,
+                last_live_at, updated_at FROM room_state`)
+      .all() as Array<{
+        uid: string; room_id: string; is_live: number; live_time: number; title: string | null;
+        area_name: string | null; parent_area_name: string | null;
+        keyframe: string | null; cover: string | null; online: number | null;
+        last_live_at: number | null; updated_at: number;
+      }>;
+    const m = new Map<string, RoomStateFull>();
+    for (const r of rows) {
+      m.set(r.uid, {
+        roomId: r.room_id,
+        isLive: r.is_live === 1,
+        liveTime: r.live_time,
+        title: r.title ?? '',
+        areaName: r.area_name ?? '',
+        parentAreaName: r.parent_area_name ?? '',
+        keyframe: r.keyframe ?? '',
+        cover: r.cover ?? '',
+        online: r.online ?? 0,
+        lastLiveAt: r.last_live_at,
+        polledAt: r.updated_at,
+      });
+    }
+    return m;
   }
 
   /** 记录一场直播。已存在则不动（保留原 notified_at）。 */
@@ -217,6 +309,7 @@ export class Db {
       mode: input.mode ?? prev?.mode ?? 'on',
       analyze: input.analyze ?? prev?.analyze ?? false,
       profileNote: input.profileNote !== undefined ? input.profileNote : prev?.profileNote ?? null,
+      face: input.face !== undefined ? input.face : prev?.face ?? null,
       source: input.source ?? prev?.source ?? 'manual',
       createdAt: prev?.createdAt ?? now(),
       updatedAt: now(),
@@ -224,15 +317,16 @@ export class Db {
     this.db
       .prepare(
         `INSERT INTO streamers
-           (uid, uname, alias, room_id, weibo_uid, mode, analyze, profile_note, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (uid, uname, alias, room_id, weibo_uid, mode, analyze, profile_note, face, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(uid) DO UPDATE SET
            uname=excluded.uname, alias=excluded.alias, room_id=excluded.room_id,
            weibo_uid=excluded.weibo_uid, mode=excluded.mode, analyze=excluded.analyze,
-           profile_note=excluded.profile_note, source=excluded.source, updated_at=excluded.updated_at`,
+           profile_note=excluded.profile_note, face=excluded.face,
+           source=excluded.source, updated_at=excluded.updated_at`,
       )
       .run(s.uid, s.uname, s.alias, s.roomId, s.weiboUid, s.mode,
-        s.analyze ? 1 : 0, s.profileNote, s.source, s.createdAt, s.updatedAt);
+        s.analyze ? 1 : 0, s.profileNote, s.face, s.source, s.createdAt, s.updatedAt);
   }
 
   setStreamerMode(uid: string, mode: StreamerMode): boolean {
@@ -243,17 +337,18 @@ export class Db {
 
   // ---- follows：关注列表候选池 ----
 
-  /** 关注列表出现的 uid 入库；已存在的刷新 uname / last_seen / is_followed。 */
-  upsertFollows(follows: Array<{ uid: string; uname: string }>): void {
+  /** 关注列表出现的 uid 入库；已存在的刷新 uname / last_seen / is_followed。face 只进不退（空不覆盖）。 */
+  upsertFollows(follows: Array<{ uid: string; uname: string; face?: string }>): void {
     if (follows.length === 0) return;
     const stmt = this.db.prepare(
-      `INSERT INTO follows (uid, uname, first_seen, last_seen, is_followed)
-       VALUES (?, ?, ?, ?, 1)
+      `INSERT INTO follows (uid, uname, face, first_seen, last_seen, is_followed)
+       VALUES (?, ?, ?, ?, ?, 1)
        ON CONFLICT(uid) DO UPDATE SET
-         uname=excluded.uname, last_seen=excluded.last_seen, is_followed=1`,
+         uname=excluded.uname, face=COALESCE(excluded.face, follows.face),
+         last_seen=excluded.last_seen, is_followed=1`,
     );
-    const tx = this.db.transaction((rows: Array<{ uid: string; uname: string }>) => {
-      for (const f of rows) stmt.run(f.uid, f.uname, now(), now());
+    const tx = this.db.transaction((rows: Array<{ uid: string; uname: string; face?: string }>) => {
+      for (const f of rows) stmt.run(f.uid, f.uname, f.face || null, now(), now());
     });
     tx(follows);
   }

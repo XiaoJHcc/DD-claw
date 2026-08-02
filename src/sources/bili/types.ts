@@ -45,5 +45,7 @@ export function normalizeRoomStatus(raw: RawRoomStatus): RoomStatus {
     parentAreaName: raw.area_v2_parent_name ?? '',
     cover: raw.cover_from_user ?? '',
     keyframe: raw.keyframe ?? '',
+    face: raw.face ?? '',
+    online: raw.online ?? 0,
   };
 }

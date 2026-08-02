@@ -396,7 +396,7 @@ matcher（preference_clauses × verdict → PushDirective）→ rules 护栏完�
 
 ### M5 — 产品化
 
-控制面板（localhost WebUI，轻量起步不引框架）：扫码登录与 cookie 健康、监听名单管理、主播画像与偏好子句编辑、verdicts 总览、时间表日历。v0（登录 + 名单管理）可提前至 M2 之后；多平台数据源。
+控制面板（localhost WebUI，轻量起步不引框架）：扫码登录与 cookie 健康、监听名单管理、主播画像与偏好子句编辑、verdicts 总览、时间表日历。v0（名单管理）与 v1（三卡片展示 + 扫码登录 + 主播实况）已提前至 M2 落地；多平台数据源。
 
 ## 9. 风险登记
 
@@ -417,7 +417,7 @@ matcher（preference_clauses × verdict → PushDirective）→ rules 护栏完�
 | 问题 | 当前倾向 | 影响面 |
 |---|---|---|
 | 直播中抽查的触发策略 | 定时 + 弹幕突变双触发 | analysis/triggers |
-| B站扫码登录取 cookie（面板内） | 待实测 passport 扫码接口；兜底手动粘贴 | 凭据管理、控制面板 |
+| B站扫码登录取 cookie（面板内） | 已落地（面板 v1，passport generate/poll + 落盘热重启）；字段名为社区共识**未经实测**，见 `qrcode.ts`【实测点】；兜底手动放 cookies.json | 凭据管理、控制面板 |
 | 主播 → 微博账号的映射 | 面板手动填 `streamers.weibo_uid`，自动发现不可靠 | follows 同步、weibo source |
 | 微博关注列表是否也要同步 | 暂不同步，以B站关注为准 | follows |
 | 多主播同时开播合并推送 | 逐条推（M1 遗留，量大了再议） | dispatcher |

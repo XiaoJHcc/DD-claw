@@ -118,6 +118,14 @@ export class LiveStatusSource implements Source {
         const st = toPrevState(curr);
         this.prev.set(uid, st);
         stateWrites.push({ uid, state: st });
+        // 头像回填（匿名可得通道）：streamers 里 face 为空且本轮拿到就补上，
+        // 不碰其他字段（upsertStreamer 未提供的字段保留原值）
+        if (curr.face) {
+          const s = ctx.db.getStreamer(uid);
+          if (s && !s.face) {
+            ctx.db.upsertStreamer({ uid, face: curr.face, uname: curr.uname || undefined });
+          }
+        }
       } else if (prev?.isLive) {
         const off = { ...prev, isLive: false, liveTime: 0 };
         this.prev.set(uid, off);
