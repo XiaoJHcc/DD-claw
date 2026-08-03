@@ -8,6 +8,7 @@ dist/
 !.env.example
 config.json
 cookies.json
+weibo-cookies.json
 
 # 运行时数据
 data/

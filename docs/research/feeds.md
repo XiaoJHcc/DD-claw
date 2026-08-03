@@ -75,6 +75,17 @@ GET https://m.weibo.cn/api/container/getIndex?type=uid&value=<uid>
 - 转发：`mblog.retweeted_status` 是完整嵌套 mblog，递归同一套解析
 - 频率建议：单账号 ≥1-2 分钟/用户 [待验证]
 
+### 2026-08-03 修订：扫码 v2 + weibo.com/ajax 路径跑通（项目已实现）
+
+上面的 432/游客 cookie 结论**维持不变**（匿名与访客通道全灭）；但「扫码登录 → 自己带 cookie 直连 weibo.com/ajax」已走通，项目按这条路实现了 `src/sources/weibo/{qrcode,auth,feed}.ts`：
+
+- **扫码（sso v2）**[已实测]：`GET passport.weibo.com/sso/v2/qrcode/image?entry=miniblog&size=180` → `retcode:20000000` + `data.qrid` + `data.image`（png 直链，前端直接 `<img src>`）。**必须带 `Referer: https://weibo.com/`，否则 403**（冒烟实测踩到）。轮询 `GET .../sso/v2/qrcode/check?entry=miniblog&source=miniblog&url=<固定回调>&disp=popup&qrid=<qrid>`：未扫描 `retcode:50114001`「未使用」[已实测]；确认 `retcode:20000000` 且 `data.url` 是跨域登录跳转地址[已实测]。`50114002`=已扫未确认及其他 50114xxx 是按文档的防御式映射 [实测点，待真扫校准]。
+- **换票**[2024 文档参考，待真扫校准]：confirmed 后从 `data.url` 起跟随 302 链（redirect: manual，每跳收集 Set-Cookie 并带上已收集的 cookie），合并得 SUB/SUBP 等全套登录 cookie。
+- **时间线（新版 ajax 接口）**[文档]：`GET weibo.com/ajax/statuses/mymblog?uid=<uid>&page=1&feature=0`（桌面 UA + `Referer: https://weibo.com/u/<uid>` + 全量 cookie）→ `data.list[]`：`idstr` / **`text_raw`（纯文本，免剥 HTML）** / `created_at`（`"Mon Aug 03 21:15:00 +0800 2026"`，`Date.parse` 可直解）/ `pics[].large.url` / `mblogid` / `isLongText` / `retweeted_status`。长文补全 `GET weibo.com/ajax/statuses/longtext?id=<mblogid>` → `data.longTextContent`（替代上面 m.weibo.cn 的 show 路径）。
+- **登录态校验**[文档]：`GET weibo.com/ajax/log/action` 看响应头 `X-Log-Uid`（值即登录 uid）。
+- Node fetch 读 Set-Cookie 用 `res.headers.getSetCookie()`；换票 3xx 时 `res.ok=false`，勿按错误处理。
+- m.weibo.cn 路径整体留作 ajax 失败后的备选，未实现。
+
 ## RSSHub 评估
 
 **维护状态最健康的选项**：[实测] `pushed_at: 2026-07-29`（当天有提交），45454 star，未归档。

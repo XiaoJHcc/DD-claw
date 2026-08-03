@@ -16,7 +16,7 @@ interface Fixture {
 /** 真实 http.Server 绑临时端口 + 内存库；connection:close 避免 keep-alive 挂住测试进程 */
 async function setup(
   t: import('node:test').TestContext,
-  opts: { auth?: PanelDeps['auth']; weiboResolver?: PanelDeps['weiboResolver'] } = {},
+  opts: { auth?: PanelDeps['auth']; weiboAuth?: PanelDeps['weiboAuth']; weiboResolver?: PanelDeps['weiboResolver'] } = {},
 ): Promise<Fixture> {
   const db = new Db(':memory:');
   const status: PanelStatus = {
@@ -38,6 +38,7 @@ async function setup(
       liveCount: db.countLiveRooms(),
     }),
     auth: opts.auth,
+    weiboAuth: opts.weiboAuth,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {
@@ -582,4 +583,111 @@ test('无 auth dep 时扫码路由 404', async (t) => {
   const { base } = await setup(t);
   assert.equal((await api(base, '/api/auth/bili/qrcode', 'POST')).status, 404);
   assert.equal((await api(base, '/api/auth/bili/qrcode/poll?key=k')).status, 404);
+});
+
+// ---- 微博扫码登录 ----
+
+function weiboAuthFixture(t: import('node:test').TestContext, over: {
+  pollStatus?: string; exchangeCookies?: Record<string, string>;
+  onCookiesSaved?: (h: string) => void; selfUid?: string | null;
+} = {}): { weiboAuth: PanelDeps['weiboAuth']; dir: string; savedHeaders: string[] } {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-panel-wb-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const savedHeaders: string[] = [];
+  const weiboAuth: PanelDeps['weiboAuth'] = {
+    cookiePath: join(dir, 'weibo-cookies.json'),
+    onCookiesSaved: over.onCookiesSaved ?? ((h) => { savedHeaders.push(h); }),
+    qrcode: {
+      generateQrcode: async () => ({ qrid: 'q123', image: 'https://passport.weibo.com/sso/v2/qrcode/q123.png' }),
+      pollQrcode: async () => {
+        const status = over.pollStatus ?? 'waiting';
+        if (status === 'confirmed') {
+          return { status: 'confirmed', loginUrl: 'https://login.sina.com.cn/crossdomain/abc' };
+        }
+        return { status: status as 'waiting' };
+      },
+      exchangeCookies: async () => over.exchangeCookies ?? { SUB: 's2', SUBP: 'p2' },
+    },
+    selfFetcher: async () => ({
+      loggedIn: true, uid: over.selfUid === undefined ? '2203177060' : over.selfUid,
+    }),
+  };
+  return { weiboAuth, dir, savedHeaders };
+}
+
+test('POST /api/auth/weibo/qrcode 返回 {image}（png 直链）并建立会话', async (t) => {
+  const { weiboAuth } = weiboAuthFixture(t);
+  const { base } = await setup(t, { weiboAuth });
+  const r = await api(base, '/api/auth/weibo/qrcode', 'POST');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { image: 'https://passport.weibo.com/sso/v2/qrcode/q123.png' });
+
+  // 会话已建立：poll 不再 400
+  const poll = await api(base, '/api/auth/weibo/qrcode/poll');
+  assert.equal(poll.status, 200);
+  assert.deepEqual(poll.json, { status: 'waiting' });
+});
+
+test('GET weibo poll 未生成二维码 → 400', async (t) => {
+  const { weiboAuth } = weiboAuthFixture(t);
+  const { base } = await setup(t, { weiboAuth });
+  const r = await api(base, '/api/auth/weibo/qrcode/poll');
+  assert.equal(r.status, 400);
+  assert.match(r.json.error ?? '', /请先生成二维码/);
+});
+
+test('GET weibo poll：waiting / scanned 透传，不落盘不回调', async (t) => {
+  for (const st of ['waiting', 'scanned']) {
+    const { weiboAuth, dir, savedHeaders } = weiboAuthFixture(t, { pollStatus: st });
+    const { base } = await setup(t, { weiboAuth });
+    await api(base, '/api/auth/weibo/qrcode', 'POST');
+    const r = await api(base, '/api/auth/weibo/qrcode/poll');
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { status: st });
+    assert.equal(existsSync(join(dir, 'weibo-cookies.json')), false, `${st} 不得写 weibo-cookies.json`);
+    assert.equal(savedHeaders.length, 0, `${st} 不得触发 onCookiesSaved`);
+  }
+});
+
+test('GET weibo poll：expired 透传并清会话（再 poll → 400）', async (t) => {
+  const { weiboAuth } = weiboAuthFixture(t, { pollStatus: 'expired' });
+  const { base } = await setup(t, { weiboAuth });
+  await api(base, '/api/auth/weibo/qrcode', 'POST');
+  const r = await api(base, '/api/auth/weibo/qrcode/poll');
+  assert.deepEqual(r.json, { status: 'expired' });
+  assert.equal((await api(base, '/api/auth/weibo/qrcode/poll')).status, 400, '会话已清');
+});
+
+test('GET weibo poll confirmed：换票 → saveWeiboCookies 落盘（旧字段兜底）+ onCookiesSaved 回调 + 返回 uid', async (t) => {
+  const saved: string[] = [];
+  const { weiboAuth, dir } = weiboAuthFixture(t, {
+    pollStatus: 'confirmed',
+    exchangeCookies: { SUB: 'new-sub', SUBP: 'new-subp' },
+    onCookiesSaved: (h) => { saved.push(h); },
+  });
+  // 旧文件：未提及字段应被 merge 保留
+  writeFileSync(join(dir, 'weibo-cookies.json'), JSON.stringify({ SUB: 'old', SSO_LOGIN: 'keep' }));
+  const { base } = await setup(t, { weiboAuth });
+
+  await api(base, '/api/auth/weibo/qrcode', 'POST');
+  const r = await api(base, '/api/auth/weibo/qrcode/poll');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { status: 'confirmed', uid: '2203177060' });
+
+  const onDisk = JSON.parse(readFileSync(join(dir, 'weibo-cookies.json'), 'utf8')) as Record<string, string>;
+  assert.deepEqual(onDisk, { SUB: 'new-sub', SUBP: 'new-subp', SSO_LOGIN: 'keep' },
+    '新值覆盖、旧字段兜底');
+
+  assert.equal(saved.length, 1, 'onCookiesSaved 被调一次');
+  assert.match(saved[0]!, /SUB=new-sub/);
+  assert.match(saved[0]!, /SSO_LOGIN=keep/, '回调拿到的是 merge 后的全量 cookie 头');
+
+  const body = JSON.stringify(r.json) + JSON.stringify(onDisk);
+  assert.ok(!body.includes('old'), '旧 SUB 值不出现在任何输出里');
+});
+
+test('无 weiboAuth dep 时微博扫码路由 404', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/auth/weibo/qrcode', 'POST')).status, 404);
+  assert.equal((await api(base, '/api/auth/weibo/qrcode/poll')).status, 404);
 });

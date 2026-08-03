@@ -52,6 +52,12 @@ export const configSchema = z.object({
     intervalSec: z.number().int().min(120, '动态轮询间隔不低于 120 秒').max(86400).default(300),
   }).default({ enabled: true, intervalSec: 300 }),
 
+  /** 微博时间线轮询（需 weibo-cookies.json；无 cookie 时自动跳过）。下限 120s，单账号低频即可 */
+  weibo: z.object({
+    enabled: z.boolean().default(true),
+    intervalSec: z.number().int().min(120, '微博轮询间隔不低于 120 秒').max(86400).default(300),
+  }).default({ enabled: true, intervalSec: 300 }),
+
   /** 控制面板（localhost WebUI，只绑 127.0.0.1）：监听名单 / 候选池 / 推送规则与渠道管理 */
   panel: z.object({
     enabled: z.boolean().default(true),

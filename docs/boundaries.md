@@ -22,7 +22,7 @@
 | 能力 | 匿名结果 | 最低代价 |
 |---|---|---|
 | B站空间动态 | [实测] ~~HTTP 412，即使 WBI 签名正确~~（2026-08-03 推翻：全量 cookie + dm 三参（高斯算法生成，非静态占位）+ space Referer 即通，**无需 WBI**） | 完整 cookie 集 |
-| 微博用户时间线 | [实测] **HTTP 432**，游客 cookie 流程已失效 | 登录 cookie |
+| 微博用户时间线 | [实测] **HTTP 432**，游客 cookie 流程已失效（2026-08-03 补充：扫码登录 + `weibo.com/ajax/statuses/mymblog` 路径已跑通，见 feeds.md 修订块） | 登录 cookie（面板扫码落 weibo-cookies.json） |
 | 我关注的直播列表 | [实测] `-101 账号未登录` | SESSDATA |
 | 直播原画画质 | [实测] `qn=10000` 静默降级到 250 | SESSDATA（本项目不需要） |
 | 动态评论区 | [文档] 需 `type=17` + 动态 id | 未跑通，见 feeds.md |

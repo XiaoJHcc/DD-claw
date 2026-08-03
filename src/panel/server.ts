@@ -16,6 +16,13 @@ import { PANEL_PAGE } from './page.js';
 import { cookieHeader, fetchSelf, loadCookies, saveCookies, type SelfInfo } from '../sources/bili/auth.js';
 import { generateQrcode, pollQrcode } from '../sources/bili/qrcode.js';
 import type { WeiboResolver } from '../sources/weibo/resolve.js';
+import {
+  exchangeCookies as exchangeWeiboCookies, generateQrcode as generateWeiboQrcode,
+  pollQrcode as pollWeiboQrcode,
+} from '../sources/weibo/qrcode.js';
+import {
+  fetchWeiboSelf, loadWeiboCookies, saveWeiboCookies, weiboCookieHeader, type WeiboSelfInfo,
+} from '../sources/weibo/auth.js';
 
 const log = makeLogger('panel');
 
@@ -41,7 +48,7 @@ export interface PanelDeps {
   status: () => PanelStatus;
   /** 微博昵称→UID 解析器；不注入时 PUT 带 weiboNick 一律 400 */
   weiboResolver?: WeiboResolver;
-  /** 扫码登录支持；不注入则 /api/auth/* 一律 404 */
+  /** 扫码登录支持；不注入则 /api/auth/bili/* 一律 404 */
   auth?: {
     cookiePath: string;
     /** 新 cookie 落盘后的热重启回调（参数是拼好的 Cookie 头，绝不进日志） */
@@ -51,11 +58,27 @@ export interface PanelDeps {
     /** 注入点供测试；confirmed 后用新 cookie 查一次 nav 拿 mid */
     selfFetcher?: (cookie: string) => Promise<SelfInfo>;
   };
+  /** 微博扫码登录支持；不注入则 /api/auth/weibo/* 一律 404 */
+  weiboAuth?: {
+    cookiePath: string;
+    /** 新 cookie 落盘后的热重启回调（参数是拼好的 Cookie 头，绝不进日志） */
+    onCookiesSaved: (cookieHeader: string) => void;
+    /** 注入点供测试；缺省用真实 passport v2 客户端 */
+    qrcode?: {
+      generateQrcode: typeof generateWeiboQrcode;
+      pollQrcode: typeof pollWeiboQrcode;
+      exchangeCookies: typeof exchangeWeiboCookies;
+    };
+    /** 注入点供测试；confirmed 后用新 cookie 查一次登录态拿 uid */
+    selfFetcher?: (cookie: string) => Promise<WeiboSelfInfo>;
+  };
 }
 
 export function createPanelServer(deps: PanelDeps): http.Server {
+  // 微博扫码会话：generate 存 qrid，poll 凭它查状态（单人面板，无需多会话）
+  const weiboSession = { qrid: null as string | null };
   return http.createServer((req, res) => {
-    handle(deps, req, res).catch((e: unknown) => {
+    handle(deps, weiboSession, req, res).catch((e: unknown) => {
       if (e instanceof HttpError) {
         sendJson(res, e.status, { error: e.message });
       } else {
@@ -68,6 +91,7 @@ export function createPanelServer(deps: PanelDeps): http.Server {
 
 async function handle(
   deps: PanelDeps,
+  weiboSession: { qrid: string | null },
   req: http.IncomingMessage,
   res: http.ServerResponse,
 ): Promise<void> {
@@ -140,6 +164,21 @@ async function handle(
   }
   if (deps.auth && method === 'GET' && path === '/api/auth/bili/qrcode/poll') {
     sendJson(res, 200, await pollQrcodeRoute(deps, url.searchParams.get('key')));
+    return;
+  }
+
+  // ---- 微博扫码登录（weiboAuth dep 存在才挂）----
+  if (deps.weiboAuth && method === 'POST' && path === '/api/auth/weibo/qrcode') {
+    const qr = deps.weiboAuth.qrcode
+      ?? { generateQrcode: generateWeiboQrcode, pollQrcode: pollWeiboQrcode, exchangeCookies: exchangeWeiboCookies };
+    const info = await qr.generateQrcode();
+    weiboSession.qrid = info.qrid;
+    // image 是 png 直链，前端 <img src> 直接显示（不走内嵌二维码库）
+    sendJson(res, 200, { image: info.image });
+    return;
+  }
+  if (deps.weiboAuth && method === 'GET' && path === '/api/auth/weibo/qrcode/poll') {
+    sendJson(res, 200, await pollWeiboQrcodeRoute(deps, weiboSession));
     return;
   }
 
@@ -301,4 +340,39 @@ async function pollQrcodeRoute(deps: PanelDeps, key: string | null): Promise<unk
     log.error('扫码登录成功但 nav 查询失败（mid 暂缺，下轮心跳会补上）', e);
   }
   return { status: 'confirmed', mid };
+}
+
+/**
+ * 轮询微博扫码状态；confirmed 时换票 → saveWeiboCookies 落盘 → 热重启回调 →
+ * 用新 cookie 查一次登录态拿 uid。cookie 值不出现在响应/日志里。
+ */
+async function pollWeiboQrcodeRoute(
+  deps: PanelDeps,
+  session: { qrid: string | null },
+): Promise<unknown> {
+  const auth = deps.weiboAuth!;
+  if (!session.qrid) throw new HttpError(400, '请先生成二维码');
+  const qr = auth.qrcode
+    ?? { generateQrcode: generateWeiboQrcode, pollQrcode: pollWeiboQrcode, exchangeCookies: exchangeWeiboCookies };
+  const result = await qr.pollQrcode(session.qrid);
+  if (result.status !== 'confirmed') {
+    if (result.status === 'expired') session.qrid = null;
+    return { status: result.status };
+  }
+  session.qrid = null;
+  if (!result.loginUrl) throw new HttpError(500, '扫码确认响应缺少登录跳转地址');
+
+  const cookies = await qr.exchangeCookies(result.loginUrl);
+  saveWeiboCookies(auth.cookiePath, cookies);
+  const merged = loadWeiboCookies(auth.cookiePath) ?? cookies;
+  auth.onCookiesSaved(weiboCookieHeader(merged));
+
+  let uid: string | null = null;
+  try {
+    const self = await (auth.selfFetcher ?? fetchWeiboSelf)(weiboCookieHeader(merged));
+    uid = self.uid;
+  } catch (e) {
+    log.error('微博扫码登录成功但登录态查询失败（uid 暂缺，下轮心跳会补上）', e);
+  }
+  return { status: 'confirmed', uid };
 }

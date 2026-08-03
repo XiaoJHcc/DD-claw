@@ -24,6 +24,13 @@
     "intervalSec": 300
   },
 
+  // 微博时间线轮询（需项目根 weibo-cookies.json，可在面板扫码登录生成）。
+  // 无 cookie 时自动跳过；下限 120 秒，单账号 3-10 分钟足够
+  "weibo": {
+    "enabled": true,
+    "intervalSec": 300
+  },
+
   // 控制面板（localhost WebUI，只绑 127.0.0.1）：管理监听名单与偏好子句。
   // 改库即生效，无需重启；启动失败（如端口被占）只记日志，不影响主流程
   "panel": {
