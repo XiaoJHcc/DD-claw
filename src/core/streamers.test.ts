@@ -1,21 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Db } from './db.js';
-import type { NewClause } from './streamers.js';
 
 /** 内存库：每个测试独立，不需要清理临时文件 */
 function memDb(t: import('node:test').TestContext): Db {
   const db = new Db(':memory:');
   t.after(() => db.close());
   return db;
-}
-
-function clause(over: Partial<NewClause> = {}): NewClause {
-  return {
-    uid: '1', scenes: ['singing'], minConfidence: 0.7, titleKeywords: ['歌回'],
-    priority: 'high', messageTemplate: '{alias} 开歌回了', targets: null, enabled: true,
-    ...over,
-  };
 }
 
 // ---- streamers ----
@@ -132,34 +123,4 @@ test('upsertFollows face：写入并可读，空值不覆盖已有头像（只�
   db.upsertFollows([{ uid: '1', uname: 'A', face: '' }]);
   assert.equal(db.listFollows().find((f) => f.uid === '1')?.face, 'https://i0.hdslb.com/f.jpg',
     '空串 face 不覆盖已有值');
-});
-
-// ---- preference_clauses ----
-
-test('clause CRUD：insert / list / update / disable / delete', (t) => {
-  const db = memDb(t);
-  const id = db.insertClause(clause());
-  assert.ok(id > 0);
-
-  db.insertClause(clause({ uid: '2', enabled: false }));
-
-  let enabled = db.listEnabledClauses();
-  assert.equal(enabled.length, 1, 'disabled 的不出现在 listEnabledClauses');
-  assert.deepEqual(enabled[0]!.scenes, ['singing'], 'JSON 数组字段正确解析');
-  assert.deepEqual(enabled[0]!.titleKeywords, ['歌回']);
-  assert.equal(enabled[0]!.minConfidence, 0.7);
-  assert.equal(enabled[0]!.targets, null);
-
-  assert.equal(db.updateClause(id, { priority: 'low', targets: [{ type: 'group', id: '100' }] }), true);
-  enabled = db.listEnabledClauses('1');
-  assert.equal(enabled[0]!.priority, 'low');
-  assert.deepEqual(enabled[0]!.targets, [{ type: 'group', id: '100' }]);
-  assert.equal(enabled[0]!.messageTemplate, '{alias} 开歌回了', '未提供的字段保留原值');
-  assert.equal(db.listEnabledClauses('其他uid').length, 0, 'uid 过滤生效');
-
-  assert.equal(db.setClauseEnabled(id, false), true);
-  assert.equal(db.listEnabledClauses().length, 0);
-
-  assert.equal(db.deleteClause(id), true);
-  assert.equal(db.deleteClause(id), false, '重复删除返回 false');
 });

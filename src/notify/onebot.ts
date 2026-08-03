@@ -36,14 +36,12 @@ export class OneBotNotifier implements Notifier {
   ) {}
 
   async send(msg: PushMessage): Promise<NotifyResult[]> {
-    // msg.targets 缺省时用配置的默认目标；统一成 { type, id } 处理
-    const raw: Array<PushTarget | NotifyTarget> = msg.targets ?? this.targets;
-    const active = raw
-      .filter((t) => !('enabled' in t) || t.enabled)
-      .map((t) => ({ type: t.type, id: t.id }))
+    // 常规发送只看 msg.targets（dispatcher 已按选中渠道解析好）；
+    // 构造参数 targets 只用于 alert() 告警。空数组 = 不发，返回空结果。
+    const active = (msg.targets ?? [])
       .filter((t) => {
         if (/^\d+$/.test(t.id)) return true;
-        // 偏好子句的目标是人手填的，填错记日志跳过，不能炸掉整条推送
+        // 目标号是人手填的，填错记日志跳过，不能炸掉整条推送
         log.warn(`跳过无效推送目标 ${t.type}:"${t.id}"（id 必须是纯数字QQ号/群号）`);
         return false;
       });

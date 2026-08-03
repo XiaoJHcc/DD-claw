@@ -9,6 +9,7 @@ import { QR_LIB_B64 } from './page/qr-lib.js';
 import { APP_CORE } from './page/app-core.js';
 import { APP_STATUS } from './page/app-status.js';
 import { APP_STREAMERS } from './page/app-streamers.js';
+import { APP_PUSH } from './page/app-push.js';
 
 const QR_LIB = Buffer.from(QR_LIB_B64, 'base64').toString('utf8');
 
@@ -43,6 +44,15 @@ export const PANEL_PAGE = `<!doctype html>
 <div id="follow-list" class="follow-row"></div>
 </section>
 
+<section class="card" id="card-push">
+<h2>推送</h2>
+<h3 class="push-sub">默认推送词</h3>
+<div id="push-template">加载中…</div>
+<h3 class="push-sub">推送渠道</h3>
+<div id="channel-list">加载中…</div>
+<div id="channel-add"></div>
+</section>
+
 <div id="modal-mask" class="hidden"><div id="modal"></div></div>
 
 <script>${QR_LIB}</script>
@@ -50,6 +60,7 @@ export const PANEL_PAGE = `<!doctype html>
 ${APP_CORE}
 ${APP_STATUS}
 ${APP_STREAMERS}
+${APP_PUSH}
 </script>
 </body>
 </html>

@@ -46,16 +46,31 @@ test('msg.targets 覆盖配置的默认目标，无效 id 记日志跳过', asyn
   }
 });
 
-test('msg.targets 缺省时用配置的默认目标', async () => {
+test('msg.targets 缺省/空数组 = 不发（配置目标只用于 alert）', async () => {
   const posted: Posted[] = [];
   const restore = stubFetch(posted);
   try {
     const n = new OneBotNotifier('http://napcat:3000', '', [
       { type: 'group', id: '11111', enabled: true },
-      { type: 'group', id: '33333', enabled: false },
     ]);
-    await n.send(msg());
-    assert.equal(posted.length, 1, 'disabled 的默认目标不发');
+    const results = await n.send(msg());
+    assert.equal(posted.length, 0, '常规 send 不看配置的默认目标');
+    assert.deepEqual(results, []);
+  } finally {
+    restore();
+  }
+});
+
+test('alert 仍用构造参数的目标（跳过 disabled）', async () => {
+  const posted: Posted[] = [];
+  const restore = stubFetch(posted);
+  try {
+    const n = new OneBotNotifier('http://napcat:3000', '', [
+      { type: 'group', id: '11111', enabled: true },
+      { type: 'private', id: '22222', enabled: false },
+    ]);
+    await n.alert('标题', '正文');
+    assert.equal(posted.length, 1, 'disabled 的告警目标不发');
     assert.ok(posted[0]!.url.endsWith('/send_group_msg'));
     assert.equal(posted[0]!.body['group_id'], 11111);
   } finally {

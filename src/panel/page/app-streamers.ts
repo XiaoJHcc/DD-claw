@@ -1,13 +1,12 @@
 /**
- * 面板前端 · 卡片3 主播列表 + 详情弹窗（全字段编辑 + 该主播子句 CRUD）+ 关注未监听区。
+ * 面板前端 · 卡片3 主播列表 + 详情弹窗（全字段编辑 + 该主播推送规则 CRUD）+ 关注未监听区。
  * 卡片2 时间表占位是静态 HTML，在 page.ts 壳里。
  * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 app-core 段。
  */
 export const APP_STREAMERS = `
 var streamers = [];
 var modalUid = null;
-var SCENES = ['chatting', 'singing', 'gaming', 'show', 'other'];
-var SCENE_NAMES = { chatting: '杂谈', singing: '唱歌', gaming: '游戏', show: '演出', other: '其他' };
+var modalChannels = [];
 
 function avatarHtml(face, name, cls) {
   cls = cls || 'avatar';
@@ -18,8 +17,7 @@ function avatarHtml(face, name, cls) {
 // ---- 主播卡片列表 ----
 function streamerCard(s) {
   var name = s.alias || s.uname || String(s.uid);
-  var csum = (s.clauses && s.clauses.count > 0)
-    ? s.clauses.count + ' 条子句 · 最高 ' + s.clauses.maxPriority : '无子句';
+  var rsum = (s.rules && s.rules.count > 0) ? s.rules.count + ' 条规则' : '无规则';
   var state = '监听中' + (s.notify ? '' : ' · 推送关') + (s.analyze ? ' · LLM分析' : '');
   var left = '<div class="sc-left">' + avatarHtml(s.face, name) +
     '<div class="sc-name">' + esc(name) + '</div>' +
@@ -27,7 +25,7 @@ function streamerCard(s) {
     '<div class="meta">直播间 ' + (s.roomId ? esc(s.roomId) : '—') + '</div>' +
     '<div class="meta">微博 ' + (s.weiboNick ? esc(s.weiboNick) : (s.weiboUid ? esc(s.weiboUid) : '—')) + '</div>' +
     '<div class="meta sc-note' + (s.profileNote ? '' : ' none') + '">' + esc(s.profileNote || '未填写') + '</div>' +
-    '<div class="meta"><span class="dot green"></span>' + esc(state) + ' · ' + esc(csum) + '</div></div>';
+    '<div class="meta"><span class="dot green"></span>' + esc(state) + ' · ' + esc(rsum) + '</div></div>';
   var right;
   if (s.live && s.live.isLive) {
     var img = s.live.keyframe || s.live.cover;
@@ -57,7 +55,7 @@ function loadStreamers() {
   }).catch(function (e) { toast(e.message, true); });
 }
 
-// ---- 详情弹窗：上半区（别名/三开关/直播间号/微博/画像），下半区偏好子句 ----
+// ---- 详情弹窗：上半区（别名/三开关/直播间号/微博/画像），下半区推送规则 ----
 function switchRow(id, checked, label, hint) {
   return '<div class="wfull"><label><input type="checkbox" id="' + id + '"' +
     (checked ? ' checked' : '') + '> ' + label + '</label>' +
@@ -76,7 +74,7 @@ function openStreamer(uid) {
     '<div class="mrow">' +
       switchRow('f-watch', s.watch, '监听', '抓取开播状态和动态（关闭后此主播移出主列表，回到关注区）') +
       switchRow('f-analyze', s.analyze, 'LLM 分析', '开播后对直播内容做归类（功能未接入，先存设置）') +
-      switchRow('f-notify', s.notify, '推送', '命中偏好时发通知（关闭 = 只记录不打扰）') +
+      switchRow('f-notify', s.notify, '推送', '命中规则时发通知（关闭 = 只记录不打扰）') +
     '</div>' +
     '<div class="mrow"><label class="wfull">直播间号 <span>' +
       (s.roomId ? esc(s.roomId) : '<span class="hint">获取中…（轮询回填后自动出现）</span>') +
@@ -90,18 +88,17 @@ function openStreamer(uid) {
       esc(s.profileNote || '') + '" placeholder="常见内容 / 语言风格 / 优先级经验"></label></div>' +
     '<div class="mrow"><button onclick="saveStreamer()">保存</button> ' +
     '<button onclick="closeModal()">关闭</button></div>' +
-    '<h4>偏好子句</h4>' +
-    '<p class="hint">条件之间是 AND；场景与关键词都留空 = 兜底子句。推送词变量 {alias} {uname} {title}；' +
-    '目标格式 group:群号, private:QQ号，留空 = 各通道默认目标。</p>' +
-    '<div id="modal-clauses">加载中…</div>');
-  modalCleanup = function () { modalUid = null; };
-  loadModalClauses();
+    '<h4>推送规则</h4>' +
+    '<p class="hint">关键词和分区都填 = 都要满足；都不填 = 默认推送；从上往下第一条命中的规则生效</p>' +
+    '<div id="modal-rules">加载中…</div>');
+  modalCleanup = function () { modalUid = null; modalChannels = []; };
+  loadModalRules();
 }
 function runModal(p, okMsg) {
   p.then(function () {
     if (okMsg) toast(okMsg);
     loadStreamers();
-    if (modalUid != null) loadModalClauses(); // 只重建子句区，不动上方编辑表单
+    if (modalUid != null) loadModalRules(); // 只重建规则区，不动上方编辑表单
   }).catch(function (e) { toast(e.message, true); });
 }
 function saveStreamer() {
@@ -114,93 +111,99 @@ function saveStreamer() {
   }), '已保存');
 }
 
-// ---- 子句 CRUD（uid 固定为 modalUid；表单逻辑沿用旧版） ----
-function priOpts(p) {
-  var names = { high: 'high 高', normal: 'normal 普通', low: 'low 低' };
-  return ['high', 'normal', 'low'].map(function (v) {
-    return '<option value="' + v + '"' + (v === p ? ' selected' : '') + '>' + names[v] + '</option>';
+// ---- 推送规则 CRUD（uid 固定为 modalUid；渠道勾选来自「推送」卡片） ----
+function splitCsv(v) {
+  return v.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+}
+function ruleChannelBoxes(selected) {
+  if (modalChannels.length === 0) return '<span class="hint">还没有渠道，先到「推送」卡片新增</span>';
+  return modalChannels.map(function (c) {
+    return '<label><input type="checkbox" class="e-ch" value="' + c.id + '"' +
+      (selected.indexOf(c.id) >= 0 ? ' checked' : '') + '> ' + esc(c.name) +
+      ' <span class="tag">' + chanTypeName(c) + '</span></label>';
   }).join('');
 }
-function sceneBoxes(scenes) {
-  return SCENES.map(function (sc) {
-    return '<label><input type="checkbox" class="e-scene" value="' + sc + '"' +
-      (scenes.indexOf(sc) >= 0 ? ' checked' : '') + '> ' + SCENE_NAMES[sc] + '</label>';
-  }).join('');
+function checkedChannelIds(div) {
+  return Array.prototype.slice.call(div.querySelectorAll('.e-ch'))
+    .filter(function (x) { return x.checked; }).map(function (x) { return Number(x.value); });
 }
-function targetsText(ts) {
-  return (ts || []).map(function (t) { return t.type + ':' + t.id; }).join(', ');
+// 第一行固定「默认推送」（空条件规则；还没有时此行就是它的新建表单）
+function defaultRuleRow(r) {
+  return '<div class="clause" data-id="' + (r ? r.id : '') + '" data-default="1">' +
+    '<div class="row"><b>默认推送</b> <span class="hint">条件规则都不命中时走这里</span></div>' +
+    '<div class="row">渠道 ' + ruleChannelBoxes(r ? r.channels : []) + '</div>' +
+    '<div class="row">推送词 <input class="e-tpl" size="34" value="' +
+      esc(r && r.messageTemplate ? r.messageTemplate : '') + '" placeholder="留空 = 用全局默认模板">' +
+    ' <label><input type="checkbox" class="e-enabled"' + (!r || r.enabled ? ' checked' : '') + '> 启用</label>' +
+    ' <button onclick="saveDefaultRule()">保存</button></div></div>';
 }
-function parseTargetsText(v) {
-  v = v.trim();
-  if (!v) return null;
-  return v.split(',').map(function (part) {
-    var kv = part.trim().split(':');
-    if (kv.length !== 2 || (kv[0] !== 'group' && kv[0] !== 'private') || !/^\\d+$/.test(kv[1])) {
-      throw new Error('目标格式应为 group:群号, private:QQ号');
-    }
-    return { type: kv[0], id: kv[1] };
-  });
+function ruleFormRows(r) {
+  return '<div class="row">关键词 <input class="e-kw" size="14" value="' + esc(r.keywords.join(', ')) +
+      '" placeholder="标题含任一，逗号分隔">' +
+    ' 分区 <input class="e-area" size="12" value="' + esc(r.areas.join(', ')) +
+      '" placeholder="分区含任一，逗号分隔"></div>' +
+    '<div class="row">渠道 ' + ruleChannelBoxes(r.channels) + '</div>' +
+    '<div class="row">推送词 <input class="e-tpl" size="34" value="' + esc(r.messageTemplate || '') +
+      '" placeholder="留空 = 用全局默认模板">' +
+    ' <label><input type="checkbox" class="e-enabled"' + (r.enabled ? ' checked' : '') + '> 启用</label>';
 }
-function clauseFormRows(c) {
-  return '<div class="row">场景 ' + sceneBoxes(c.scenes) +
-    ' 置信度≥ <input class="e-conf" size="4" value="' + (c.minConfidence == null ? '' : c.minConfidence) + '" placeholder="0-1">' +
-    ' 关键词 <input class="e-kw" size="12" value="' + esc(c.titleKeywords.join(', ')) + '" placeholder="逗号分隔">' +
-    ' 优先级 <select class="e-pri">' + priOpts(c.priority) + '</select>' +
-    ' <label><input type="checkbox" class="e-enabled"' + (c.enabled ? ' checked' : '') + '> 启用</label></div>' +
-    '<div class="row">推送词 <input class="e-tpl" size="34" value="' + esc(c.messageTemplate) + '" placeholder="例：{alias} 开歌回了，速来">' +
-    ' 目标 <input class="e-targets" size="24" value="' + esc(targetsText(c.targets)) + '" placeholder="group:123, private:789">';
+function ruleRow(r) {
+  return '<div class="clause" data-id="' + r.id + '">' + ruleFormRows(r) +
+    ' <button onclick="saveRule(' + r.id + ')">保存</button>' +
+    ' <button onclick="delRule(' + r.id + ')">删除</button></div></div>';
 }
-function clauseRow(c) {
-  return '<div class="clause" data-id="' + c.id + '">' + clauseFormRows(c) +
-    ' <button onclick="saveClause(' + c.id + ')">保存</button>' +
-    ' <button onclick="delClause(' + c.id + ')">删除</button></div></div>';
+function addRuleRow() {
+  return '<div class="clause add" id="rule-add">' +
+    ruleFormRows({ keywords: [], areas: [], channels: [], messageTemplate: null, enabled: true }) +
+    ' <button onclick="addRule()">新增规则</button></div></div>';
 }
-function addClauseRow() {
-  return '<div class="clause add" id="clause-add">' +
-    clauseFormRows({ scenes: [], minConfidence: null, titleKeywords: [], priority: 'normal',
-      messageTemplate: '', targets: null, enabled: true }) +
-    ' <button onclick="addClause()">新增子句</button></div></div>';
-}
-function loadModalClauses() {
-  var box = document.getElementById('modal-clauses');
+function loadModalRules() {
+  var box = document.getElementById('modal-rules');
   if (!box || modalUid == null) return;
-  api('/api/clauses').then(function (j) {
-    var mine = (j.clauses || []).filter(function (c) { return String(c.uid) === String(modalUid); });
-    box.innerHTML = mine.map(clauseRow).join('') + addClauseRow();
+  Promise.all([api('/api/channels'), api('/api/rules?uid=' + modalUid)]).then(function (rs) {
+    modalChannels = rs[0].channels || [];
+    var rules = rs[1].rules || [];
+    var def = null, cond = [];
+    for (var i = 0; i < rules.length; i++) {
+      // 空条件规则 = 默认推送，固定在渲染第一行（其余按 id 从上到下）
+      if (!def && rules[i].keywords.length === 0 && rules[i].areas.length === 0) def = rules[i];
+      else cond.push(rules[i]);
+    }
+    box.innerHTML = defaultRuleRow(def) + cond.map(ruleRow).join('') + addRuleRow();
   }).catch(function (e) { toast(e.message, true); });
 }
-function readClauseForm(div) {
-  var scenes = Array.prototype.slice.call(div.querySelectorAll('.e-scene'))
-    .filter(function (x) { return x.checked; }).map(function (x) { return x.value; });
-  var conf = div.querySelector('.e-conf').value.trim();
-  var minConfidence = conf === '' ? null : Number(conf);
-  if (minConfidence !== null && (isNaN(minConfidence) || minConfidence < 0 || minConfidence > 1)) {
-    throw new Error('置信度必须是 0-1 的数字');
-  }
+function readRuleForm(div) {
   return {
-    scenes: scenes, minConfidence: minConfidence,
-    titleKeywords: div.querySelector('.e-kw').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
-    priority: div.querySelector('.e-pri').value,
-    messageTemplate: div.querySelector('.e-tpl').value,
-    targets: parseTargetsText(div.querySelector('.e-targets').value),
+    keywords: splitCsv(div.querySelector('.e-kw').value),
+    areas: splitCsv(div.querySelector('.e-area').value),
+    channels: checkedChannelIds(div),
+    messageTemplate: div.querySelector('.e-tpl').value.trim() || null,
     enabled: div.querySelector('.e-enabled').checked,
   };
 }
-function addClause() {
-  try {
-    var body = readClauseForm(document.getElementById('clause-add'));
-    body.uid = modalUid;
-    runModal(api('/api/clauses', 'POST', body), '已新增');
-  } catch (e) { toast(e.message, true); }
+function saveDefaultRule() {
+  var div = document.querySelector('.clause[data-default="1"]');
+  var body = {
+    keywords: [], areas: [],
+    channels: checkedChannelIds(div),
+    messageTemplate: div.querySelector('.e-tpl').value.trim() || null,
+    enabled: div.querySelector('.e-enabled').checked,
+  };
+  var id = div.getAttribute('data-id');
+  if (id) runModal(api('/api/rules/' + id, 'PUT', body), '已保存');
+  else { body.uid = modalUid; runModal(api('/api/rules', 'POST', body), '已保存'); }
 }
-function saveClause(id) {
-  try {
-    runModal(api('/api/clauses/' + id, 'PUT',
-      readClauseForm(document.querySelector('.clause[data-id="' + id + '"]'))), '已保存');
-  } catch (e) { toast(e.message, true); }
+function addRule() {
+  var body = readRuleForm(document.getElementById('rule-add'));
+  body.uid = modalUid;
+  runModal(api('/api/rules', 'POST', body), '已新增');
 }
-function delClause(id) {
-  if (confirm('删除这条子句？')) runModal(api('/api/clauses/' + id, 'DELETE'), '已删除');
+function saveRule(id) {
+  runModal(api('/api/rules/' + id, 'PUT',
+    readRuleForm(document.querySelector('.clause[data-id="' + id + '"]'))), '已保存');
+}
+function delRule(id) {
+  if (confirm('删除这条规则？')) runModal(api('/api/rules/' + id, 'DELETE'), '已删除');
 }
 
 // ---- 关注未监听 ----

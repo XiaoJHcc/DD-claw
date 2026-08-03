@@ -1,5 +1,5 @@
 import { loadConfig, ConfigError, projectRoot } from './config/index.js';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { makeLogger } from './logger.js';
 import { Db } from './core/db.js';
 import { Bus } from './core/bus.js';
@@ -11,6 +11,7 @@ import { OncePerSessionRule } from './rules/once-per-session.js';
 import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
 import { ToastNotifier } from './notify/toast.js';
+import { ensureToastAumid } from './notify/aumid.js';
 import { liveEventToMessage } from './notify/message.js';
 import { LiveStatusSource } from './sources/bili/live-status-source.js';
 import { fetchLiveStatus } from './sources/bili/live-status.js';
@@ -18,6 +19,7 @@ import { loadCookies, cookieHeader, type SelfInfo } from './sources/bili/auth.js
 import { FollowsSource } from './sources/bili/follows.js';
 import { createPanelServer, type PlatformStatus } from './panel/server.js';
 import { createWeiboResolver } from './sources/weibo/resolve.js';
+import type { NewPushChannel } from './core/push.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 import type { Source } from './sources/types.js';
@@ -80,13 +82,35 @@ async function main(): Promise<void> {
   const seeded = db.seedStreamersIfEmpty(app.subscriptions);
   if (seeded > 0) log.info(`已从 config.json 种子导入 ${seeded} 个主播到 streamers 表，之后由面板管理`);
 
+  // 推送渠道事实来源是 push_channels 表；config 的 notify 目标仅作首次种子
+  // （config 的 onebot.targets 之后仍作 alert 告警目标，zod 校验不变）
+  const channelSeeds: NewPushChannel[] = [];
+  if (app.notify.onebot.enabled) {
+    for (const t of app.notify.onebot.targets) {
+      if (!t.enabled) continue;
+      channelSeeds.push({
+        name: `${t.type === 'group' ? 'QQ群' : 'QQ私聊'} ${t.id}`,
+        notifier: 'onebot', targetType: t.type, targetId: t.id, enabled: true,
+      });
+    }
+  }
+  if (app.notify.toast.enabled) {
+    channelSeeds.push({ name: '系统通知', notifier: 'toast', targetType: null, targetId: null, enabled: true });
+  }
+  const seededChannels = db.seedPushChannelsIfEmpty(channelSeeds);
+  if (seededChannels > 0) log.info(`已从 config 种子导入 ${seededChannels} 个推送渠道到 push_channels 表，之后由面板管理`);
+
   const notifiers: Notifier[] = [];
   if (app.notify.onebot.enabled) {
     notifiers.push(new OneBotNotifier(
       secrets.napcatBaseUrl, secrets.napcatToken, app.notify.onebot.targets,
     ));
   }
-  if (app.notify.toast.enabled) notifiers.push(new ToastNotifier());
+  if (app.notify.toast.enabled) {
+    // Win32 AUMID 注册是幂等的，仅首次会调 PowerShell；失败回落系统默认身份
+    const toastAumid = await ensureToastAumid();
+    notifiers.push(new ToastNotifier(toastAumid, join(dirname(secrets.dbPath), 'cache', 'toast')));
+  }
 
   if (notifiers.length === 0) {
     log.error('没有启用任何推送通道，退出');

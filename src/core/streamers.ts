@@ -1,16 +1,10 @@
 /**
- * streamers / follows / preference_clauses 三表的行类型与「行 ↔ 对象」映射。
+ * streamers / follows 两表的行类型与「行 ↔ 对象」映射。
  * 类型与 JSON 字段的序列化集中在这里，避免 db.ts 膨胀；
- * 表结构见 design.md §6（Streamer / PreferenceClause）。
+ * 表结构见 design.md §6。推送相关的表见 push.ts。
  */
 
 export type StreamerSource = 'follows' | 'manual';
-export type Priority = 'high' | 'normal' | 'low';
-
-export interface PushTargetRef {
-  type: 'group' | 'private';
-  id: string;
-}
 
 // ---- streamers：监听名单（事实来源；config.json 的 subscriptions 仅为种子）----
 
@@ -90,67 +84,5 @@ export function rowToFollow(r: FollowRow): Follow {
     uid: r.uid, uname: r.uname, face: r.face ?? null,
     firstSeen: r.first_seen, lastSeen: r.last_seen,
     isFollowed: r.is_followed === 1,
-  };
-}
-
-// ---- preference_clauses：结构化偏好子句（面板直填，matcher 消费）----
-
-export interface ClauseRow {
-  id: number;
-  uid: string;
-  scenes: string | null;
-  min_confidence: number | null;
-  title_keywords: string | null;
-  priority: Priority;
-  message_template: string;
-  targets: string | null;
-  enabled: number;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface PreferenceClause {
-  id: number;
-  uid: string;
-  scenes: string[];
-  minConfidence: number | null;
-  titleKeywords: string[];
-  priority: Priority;
-  messageTemplate: string;
-  /** null = 默认目标 */
-  targets: PushTargetRef[] | null;
-  enabled: boolean;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export type NewClause = Omit<PreferenceClause, 'id' | 'createdAt' | 'updatedAt'>;
-export type ClausePatch = Partial<NewClause>;
-
-export function rowToClause(r: ClauseRow): PreferenceClause {
-  return {
-    id: r.id, uid: r.uid,
-    scenes: r.scenes ? (JSON.parse(r.scenes) as string[]) : [],
-    minConfidence: r.min_confidence,
-    titleKeywords: r.title_keywords ? (JSON.parse(r.title_keywords) as string[]) : [],
-    priority: r.priority,
-    messageTemplate: r.message_template,
-    targets: r.targets ? (JSON.parse(r.targets) as PushTargetRef[]) : null,
-    enabled: r.enabled === 1,
-    createdAt: r.created_at, updatedAt: r.updated_at,
-  };
-}
-
-/** 对象字段 → 行字段（写库用；JSON 数组序列化为字符串） */
-export function clauseToRow(c: NewClause): Omit<ClauseRow, 'id' | 'created_at' | 'updated_at'> {
-  return {
-    uid: c.uid,
-    scenes: JSON.stringify(c.scenes),
-    min_confidence: c.minConfidence,
-    title_keywords: JSON.stringify(c.titleKeywords),
-    priority: c.priority,
-    message_template: c.messageTemplate,
-    targets: c.targets ? JSON.stringify(c.targets) : null,
-    enabled: c.enabled ? 1 : 0,
   };
 }

@@ -4,10 +4,14 @@ import { dirname } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { PrevState } from './state.js';
 import {
-  clauseToRow, rowToClause, rowToFollow, rowToStreamer,
-  type ClausePatch, type ClauseRow, type Follow, type FollowRow, type NewClause,
-  type PreferenceClause, type Streamer, type StreamerInput, type StreamerRow,
+  rowToFollow, rowToStreamer,
+  type Follow, type FollowRow, type Streamer, type StreamerInput, type StreamerRow,
 } from './streamers.js';
+import {
+  rowToChannel, rowToRule,
+  type NewPushChannel, type NewPushRule, type PushChannel, type PushChannelInput,
+  type PushChannelRow, type PushRule, type PushRuleInput, type PushRuleRow,
+} from './push.js';
 
 const log = makeLogger('core/db');
 
@@ -64,18 +68,31 @@ CREATE TABLE IF NOT EXISTS follows (
   last_seen   INTEGER NOT NULL,
   is_followed INTEGER NOT NULL DEFAULT 1
 );
-CREATE TABLE IF NOT EXISTS preference_clauses (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  uid             TEXT    NOT NULL,
-  scenes          TEXT,
-  min_confidence  REAL,
-  title_keywords  TEXT,
-  priority        TEXT    NOT NULL DEFAULT 'normal' CHECK(priority IN ('high','normal','low')),
-  message_template TEXT   NOT NULL DEFAULT '',
-  targets         TEXT,
-  enabled         INTEGER NOT NULL DEFAULT 1,
-  created_at      INTEGER NOT NULL,
-  updated_at      INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS push_channels (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT    NOT NULL,
+  notifier    TEXT    NOT NULL CHECK(notifier IN ('toast','onebot')),
+  target_type TEXT    CHECK(target_type IN ('group','private')),
+  target_id   TEXT,
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS push_rules (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid              TEXT    NOT NULL,
+  keywords         TEXT    NOT NULL DEFAULT '[]',
+  areas            TEXT    NOT NULL DEFAULT '[]',
+  channels         TEXT    NOT NULL DEFAULT '[]',
+  message_template TEXT,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_rules_uid ON push_rules (uid);
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 `;
 
@@ -118,6 +135,7 @@ export class Db {
     this.ensureColumn('streamers', 'notify', 'notify INTEGER NOT NULL DEFAULT 1');
     this.ensureColumn('streamers', 'weibo_nick', 'weibo_nick TEXT');
     this.migrateStreamerMode();
+    this.migratePreferenceClauses();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -143,6 +161,19 @@ export class Db {
       ALTER TABLE streamers DROP COLUMN mode;
     `);
     log.info('streamers 表 mode 列已迁移为 watch/notify 开关并删除');
+  }
+
+  /**
+   * preference_clauses（旧场景子句）已废弃：推送规则改用 push_rules 透明条件模型，
+   * 旧数据无法映射，直接 DROP。对新库幂等。
+   */
+  private migratePreferenceClauses(): void {
+    const row = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='preference_clauses'")
+      .get();
+    if (!row) return;
+    this.db.exec('DROP TABLE preference_clauses');
+    log.info('preference_clauses 表已废弃并删除（推送规则改用 push_rules 表）');
   }
 
   loadRoomStates(): Map<string, PrevState> {
@@ -404,68 +435,136 @@ export class Db {
     return (this.db.prepare(sql).all() as FollowRow[]).map(rowToFollow);
   }
 
-  // ---- preference_clauses：结构化偏好子句 ----
+  // ---- push_channels：推送渠道（事实来源；config 的 notify 目标仅为首次种子）----
 
-  /** 面板用：全量子句（含 disabled）。matcher 消费请用 listEnabledClauses。 */
-  listClauses(): PreferenceClause[] {
-    const rows = this.db.prepare('SELECT * FROM preference_clauses ORDER BY id').all() as ClauseRow[];
-    return rows.map(rowToClause);
+  listPushChannels(): PushChannel[] {
+    const rows = this.db.prepare('SELECT * FROM push_channels ORDER BY id').all() as PushChannelRow[];
+    return rows.map(rowToChannel);
   }
 
-  listEnabledClauses(uid?: string): PreferenceClause[] {
-    const sql = 'SELECT * FROM preference_clauses WHERE enabled = 1' +
-      (uid !== undefined ? ' AND uid = ?' : '') + ' ORDER BY id';
-    const rows = (uid !== undefined
-      ? this.db.prepare(sql).all(uid)
-      : this.db.prepare(sql).all()) as ClauseRow[];
-    return rows.map(rowToClause);
+  private getPushChannel(id: number): PushChannel | undefined {
+    const row = this.db.prepare('SELECT * FROM push_channels WHERE id = ?').get(id) as PushChannelRow | undefined;
+    return row ? rowToChannel(row) : undefined;
   }
 
-  insertClause(c: NewClause): number {
-    const r = clauseToRow(c);
+  /** 带 id 且存在 = 改行（未提供字段保留原值）；否则建行。返回渠道 id。 */
+  upsertPushChannel(input: PushChannelInput): number {
+    const prev = input.id !== undefined ? this.getPushChannel(input.id) : undefined;
+    const c: NewPushChannel = {
+      name: input.name ?? prev?.name ?? '',
+      notifier: input.notifier ?? prev?.notifier ?? 'toast',
+      targetType: input.targetType !== undefined ? input.targetType : prev?.targetType ?? null,
+      targetId: input.targetId !== undefined ? input.targetId : prev?.targetId ?? null,
+      enabled: input.enabled ?? prev?.enabled ?? true,
+    };
+    if (prev) {
+      this.db
+        .prepare(
+          `UPDATE push_channels SET name=?, notifier=?, target_type=?, target_id=?, enabled=?, updated_at=?
+           WHERE id=?`,
+        )
+        .run(c.name, c.notifier, c.targetType, c.targetId, c.enabled ? 1 : 0, now(), prev.id);
+      return prev.id;
+    }
     const t = now();
     const info = this.db
       .prepare(
-        `INSERT INTO preference_clauses
-           (uid, scenes, min_confidence, title_keywords, priority, message_template, targets, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO push_channels (name, notifier, target_type, target_id, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(r.uid, r.scenes, r.min_confidence, r.title_keywords, r.priority,
-        r.message_template, r.targets, r.enabled, t, t);
+      .run(c.name, c.notifier, c.targetType, c.targetId, c.enabled ? 1 : 0, t, t);
     return Number(info.lastInsertRowid);
   }
 
-  /** 部分更新；只动提供的字段。返回是否有行被更新。 */
-  updateClause(id: number, patch: ClausePatch): boolean {
-    const merged = { ...this.getClauseRow(id), ...patch };
-    if (!merged.uid) return false;
-    const r = clauseToRow(merged as NewClause);
-    return this.db
+  deletePushChannel(id: number): boolean {
+    return this.db.prepare('DELETE FROM push_channels WHERE id = ?').run(id).changes > 0;
+  }
+
+  /**
+   * 仅当 push_channels 为空时，把 config 的 notify 目标种子导入（onebot targets + toast）。
+   * 返回导入条数（非空时返回 0，幂等）。之后渠道以表为准，由面板管理。
+   */
+  seedPushChannelsIfEmpty(seeds: NewPushChannel[]): number {
+    const { c } = this.db.prepare('SELECT COUNT(*) AS c FROM push_channels').get() as { c: number };
+    if (c > 0 || seeds.length === 0) return 0;
+    const tx = this.db.transaction(() => {
+      for (const s of seeds) this.upsertPushChannel(s);
+    });
+    tx();
+    return seeds.length;
+  }
+
+  // ---- push_rules：透明条件规则 ----
+
+  /** 面板用：全量规则（含 disabled），id 升序。matcher 消费请用 listEnabledPushRules。 */
+  listPushRules(): PushRule[] {
+    const rows = this.db.prepare('SELECT * FROM push_rules ORDER BY id').all() as PushRuleRow[];
+    return rows.map(rowToRule);
+  }
+
+  /** 某主播的启用规则，id 升序（= 匹配优先级：第一条命中生效）。 */
+  listEnabledPushRules(uid: string): PushRule[] {
+    const rows = this.db
+      .prepare('SELECT * FROM push_rules WHERE enabled = 1 AND uid = ? ORDER BY id')
+      .all(uid) as PushRuleRow[];
+    return rows.map(rowToRule);
+  }
+
+  private getPushRule(id: number): PushRule | undefined {
+    const row = this.db.prepare('SELECT * FROM push_rules WHERE id = ?').get(id) as PushRuleRow | undefined;
+    return row ? rowToRule(row) : undefined;
+  }
+
+  /** 带 id 且存在 = 改行（未提供字段保留原值）；否则建行（uid 必填）。返回规则 id。 */
+  upsertPushRule(input: PushRuleInput): number {
+    const prev = input.id !== undefined ? this.getPushRule(input.id) : undefined;
+    const uid = input.uid ?? prev?.uid;
+    if (!uid) throw new Error('新建 push_rule 必须提供 uid');
+    const r: NewPushRule = {
+      uid,
+      keywords: input.keywords ?? prev?.keywords ?? [],
+      areas: input.areas ?? prev?.areas ?? [],
+      channels: input.channels ?? prev?.channels ?? [],
+      messageTemplate: input.messageTemplate !== undefined
+        ? input.messageTemplate : prev?.messageTemplate ?? null,
+      enabled: input.enabled ?? prev?.enabled ?? true,
+    };
+    if (prev) {
+      this.db
+        .prepare(
+          `UPDATE push_rules SET uid=?, keywords=?, areas=?, channels=?, message_template=?, enabled=?, updated_at=?
+           WHERE id=?`,
+        )
+        .run(r.uid, JSON.stringify(r.keywords), JSON.stringify(r.areas), JSON.stringify(r.channels),
+          r.messageTemplate, r.enabled ? 1 : 0, now(), prev.id);
+      return prev.id;
+    }
+    const t = now();
+    const info = this.db
       .prepare(
-        `UPDATE preference_clauses SET
-           uid=?, scenes=?, min_confidence=?, title_keywords=?, priority=?,
-           message_template=?, targets=?, enabled=?, updated_at=?
-         WHERE id = ?`,
+        `INSERT INTO push_rules (uid, keywords, areas, channels, message_template, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(r.uid, r.scenes, r.min_confidence, r.title_keywords, r.priority,
-        r.message_template, r.targets, r.enabled, now(), id).changes > 0;
+      .run(r.uid, JSON.stringify(r.keywords), JSON.stringify(r.areas), JSON.stringify(r.channels),
+        r.messageTemplate, r.enabled ? 1 : 0, t, t);
+    return Number(info.lastInsertRowid);
   }
 
-  deleteClause(id: number): boolean {
-    return this.db.prepare('DELETE FROM preference_clauses WHERE id = ?').run(id).changes > 0;
+  deletePushRule(id: number): boolean {
+    return this.db.prepare('DELETE FROM push_rules WHERE id = ?').run(id).changes > 0;
   }
 
-  setClauseEnabled(id: number, enabled: boolean): boolean {
-    return this.db
-      .prepare('UPDATE preference_clauses SET enabled = ?, updated_at = ? WHERE id = ?')
-      .run(enabled ? 1 : 0, now(), id).changes > 0;
+  // ---- settings：kv（目前只有 default_template）----
+
+  getSetting(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value ?? null;
   }
 
-  private getClauseRow(id: number): NewClause | undefined {
-    const row = this.db.prepare('SELECT * FROM preference_clauses WHERE id = ?').get(id) as ClauseRow | undefined;
-    if (!row) return undefined;
-    const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = rowToClause(row);
-    return rest;
+  setSetting(key: string, value: string): void {
+    this.db
+      .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .run(key, value);
   }
 
   close(): void {

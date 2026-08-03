@@ -1,8 +1,7 @@
 import { makeLogger } from '../logger.js';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage } from '../notify/message.js';
-import { classifyL0 } from '../analysis/l0.js';
-import { composeMessage, matchClauses } from '../analysis/matcher.js';
+import { matchPushRule, renderTemplate } from '../analysis/matcher.js';
 import type { Bus } from './bus.js';
 import type { Db } from './db.js';
 import type { AppConfig } from '../config/schema.js';
@@ -113,9 +112,9 @@ export class Pipeline {
       return;
     }
 
-    // verdict 来源：分析队列优先（将来接 LLM Analyzer）；返回 null 时 L0 关键词
-    // 分类器兜底 —— L0 补的是 LLM 缺席的位，不替代 LLM 的结果。两者同形，下游不感知。
-    const verdict = (await queue.submit({ event, signal })) ?? classifyL0(event);
+    // verdict 只来自分析队列（将来接 LLM Analyzer；NoopAnalyzer 恒 null）。
+    // 无 LLM 时不做分类，推送走用户自定的透明条件规则（buildMessage）。
+    const verdict = await queue.submit({ event, signal });
     const decision = await rule.decide({ ...event, verdict }, signal, verdict);
 
     if (!decision.shouldNotify) {
@@ -123,8 +122,11 @@ export class Pipeline {
       return;
     }
 
+    const msg = this.buildMessage({ ...event, verdict });
+    if (!msg) return; // buildMessage 已记日志（规则不命中 / 规则未选渠道）
+
     log.info(`推送 [${signal.kind}] ${event.alias || event.uname} — ${decision.reason}`);
-    const outcome = await dispatcher.broadcast(this.buildMessage({ ...event, verdict }));
+    const outcome = await dispatcher.broadcast(msg);
 
     // 只要有任一通道成功就标记，否则 Toast 成功而 QQ 失败会导致下轮重推
     if (outcome.anySuccess && signal.kind === 'live_start') {
@@ -132,14 +134,43 @@ export class Pipeline {
     }
   }
 
-  /** matcher 命中偏好子句 → 子句的文案/优先级/目标；未命中 → M1 默认文案。 */
-  private buildMessage(event: LiveEvent): PushMessage {
-    const clause = matchClauses(this.deps.db.listEnabledClauses(event.uid), event, event.verdict);
-    if (clause) {
-      log.info(`命中偏好子句 #${clause.id}（${event.alias || event.uname}，优先级 ${clause.priority}）`);
-      return composeMessage(clause, event, event.alias);
+  /**
+   * 透明条件规则 → PushMessage；返回 null = 不推（规则不命中 / 命中规则未选渠道）。
+   * - 主播一条规则都没有 → 兜底：全部启用渠道 + 全局默认模板（避免加了监听却静默无通知）
+   * - 有规则 → id 升序第一条命中；命中规则的 channels 为空 = 用户明确不推
+   * - 模板：规则覆盖 > settings.default_template > 内置默认；正文/图片/跳转沿用默认形状
+   */
+  private buildMessage(event: LiveEvent): PushMessage | null {
+    const { db } = this.deps;
+    const base = liveEventToMessage(event);
+    const rules = db.listEnabledPushRules(event.uid);
+
+    let channelIds: number[];
+    let templateOverride: string | null = null;
+    if (rules.length === 0) {
+      channelIds = db.listPushChannels().filter((c) => c.enabled).map((c) => c.id);
+      if (channelIds.length === 0) {
+        log.warn(`不推送 ${event.alias || event.uname}: 无任何规则且没有启用的推送渠道`);
+        return null;
+      }
+    } else {
+      const rule = matchPushRule(rules, event);
+      if (!rule) {
+        log.info(`不推送 ${event.alias || event.uname}: 有条件规则但均不命中`);
+        return null;
+      }
+      if (rule.channels.length === 0) {
+        log.info(`不推送 ${event.alias || event.uname}: 命中规则 #${rule.id} 但未勾选渠道`);
+        return null;
+      }
+      channelIds = rule.channels;
+      templateOverride = rule.messageTemplate;
+      log.info(`命中推送规则 #${rule.id}（${event.alias || event.uname}）`);
     }
-    return liveEventToMessage(event);
+
+    const tpl = templateOverride ?? db.getSetting('default_template') ?? '🔴 {alias} 开播了';
+    const text = renderTemplate(tpl, event).trim();
+    return { ...base, title: text || base.title, channels: channelIds.map(String) };
   }
 
   private async handleHealthAlert(signal: Signal): Promise<void> {

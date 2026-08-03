@@ -8,6 +8,11 @@ function esc(s) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 function q(s) { return "'" + String(s) + "'"; } // 生成内联 onclick 里的字符串实参
+// 渠道类型 → 人话标签（推送卡片与主播弹窗共用）
+function chanTypeName(c) {
+  if (c.notifier === 'toast') return '系统通知';
+  return c.targetType === 'group' ? 'QQ群' : 'QQ私聊';
+}
 function api(path, method, body) {
   return fetch(path, {
     method: method || 'GET',

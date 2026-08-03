@@ -18,6 +18,7 @@ input,select{font-size:.85rem;padding:.2rem .35rem;border:1px solid #c9ccd2;bord
 #toast.ok{color:#177245}#toast.err{color:#c0392b}
 .card{background:#fff;border-radius:10px;padding:.9rem 1.1rem;margin-bottom:.9rem;box-shadow:0 1px 3px rgba(0,0,0,.07)}
 .hint{color:#888;font-size:.82rem}
+.hidden{display:none}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:.35rem;vertical-align:baseline}
 .dot.green{background:#2ba245}.dot.yellow{background:#e0a800}.dot.red{background:#d43f3a}.dot.gray{background:#b7bcc4}
 /* 卡片1 运行状态 */
@@ -60,7 +61,13 @@ input,select{font-size:.85rem;padding:.2rem .35rem;border:1px solid #c9ccd2;bord
 .mfoot{margin-top:.8rem;color:#999;font-size:.76rem;border-top:1px solid #eee;padding-top:.5rem}
 .qr-box{margin:.6rem 0;min-height:2rem}
 .qr-box svg{width:220px;height:220px}
-/* 子句表单（详情弹窗内） */
+/* 卡片4 推送：渠道行 */
+.push-sub{font-size:.88rem;color:#666;margin:.7rem 0 .35rem}
+.chan{display:flex;gap:.8rem;align-items:center;border:1px solid #e5e7eb;border-radius:6px;padding:.4rem .6rem;margin:.4rem 0;font-size:.85rem}
+.chan.add{border-style:dashed;background:#f7f9fc}
+.chan .grow{flex:1}
+.tag{display:inline-block;font-size:.72rem;padding:.05rem .4rem;border-radius:4px;background:#eef1f5;color:#556}
+/* 规则表单（详情弹窗内） */
 .clause{border:1px solid #ddd;border-radius:6px;padding:.45rem .6rem;margin:.45rem 0;font-size:.84rem}
 .clause.add{background:#f7f9fc;border-style:dashed}
 .clause label{white-space:nowrap;margin-right:.45rem}

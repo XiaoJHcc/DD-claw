@@ -6,7 +6,7 @@ import { AnalysisQueue } from '../analysis/queue.js';
 import { NoopAnalyzer } from '../analysis/noop.js';
 import { OncePerSessionRule } from '../rules/once-per-session.js';
 import type { PushMessage, Signal } from './types.js';
-import type { PreferenceClause } from './streamers.js';
+import type { PushChannel, PushRule } from './push.js';
 import type { RoomStatus } from '../sources/bili/types.js';
 import type { AppConfig } from '../config/schema.js';
 
@@ -32,23 +32,29 @@ class FakeDb {
   streamers = new Map<string, { alias: string | null; notify: boolean }>([
     ['1', { alias: '阿梓', notify: true }],
   ]);
-  clauses: PreferenceClause[] = [];
+  rules: PushRule[] = [];
+  channels: PushChannel[] = [
+    { id: 1, name: '系统通知', notifier: 'toast', targetType: null, targetId: null,
+      enabled: true, createdAt: 0, updatedAt: 0 },
+  ];
+  settings = new Map<string, string>();
   recordSession(p: { roomId: string; liveTime: number }) {
     this.sessions.push(`${p.roomId}:${p.liveTime}`);
   }
   hasNotified(r: string, t: number) { return this.notified.has(`${r}:${t}`); }
   markNotified(r: string, t: number) { this.notified.add(`${r}:${t}`); }
   getStreamer(uid: string) { return this.streamers.get(uid); }
-  listEnabledClauses(uid?: string) {
-    return this.clauses.filter((c) => c.enabled && (uid === undefined || c.uid === uid));
+  listEnabledPushRules(uid: string) {
+    return this.rules.filter((r) => r.enabled && r.uid === uid).sort((a, b) => a.id - b.id);
   }
+  listPushChannels() { return this.channels; }
+  getSetting(key: string) { return this.settings.get(key) ?? null; }
 }
 
-function clause(over: Partial<PreferenceClause> = {}): PreferenceClause {
+function rule(over: Partial<PushRule> = {}): PushRule {
   return {
-    id: 1, uid: '1', scenes: [], minConfidence: null, titleKeywords: [],
-    priority: 'normal', messageTemplate: '', targets: null,
-    enabled: true, createdAt: 0, updatedAt: 0,
+    id: 1, uid: '1', keywords: [], areas: [], channels: [1],
+    messageTemplate: null, enabled: true, createdAt: 0, updatedAt: 0,
     ...over,
   };
 }
@@ -161,42 +167,81 @@ test('notify=false：抑制推送但 recordSession 照做', async () => {
   assert.equal(h.db.notified.size, 0);
 });
 
-// ---- 偏好子句（matcher × L0 verdict）----
+// ---- 推送规则（matcher × push_rules / push_channels）----
 
-test('命中偏好子句：文案/优先级/目标按子句（L0 提供 verdict）', async () => {
+test('主播无规则：兜底全部启用渠道 + 内置默认模板', async () => {
   const h = harness();
-  h.db.clauses.push(clause({
-    id: 7, scenes: ['singing'], minConfidence: 0.5,
-    priority: 'high', messageTemplate: '{alias}唱歌速来',
-    targets: [{ type: 'group', id: '12345' }],
+  h.db.channels.push(
+    { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '111',
+      enabled: true, createdAt: 0, updatedAt: 0 },
+    { id: 3, name: '停用的', notifier: 'onebot', targetType: 'group', targetId: '222',
+      enabled: false, createdAt: 0, updatedAt: 0 },
+  );
+  h.bus.emit(sig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  const m = h.disp.sent[0]!;
+  assert.equal(m.title, '🔴 阿梓 开播了', '内置默认模板渲染');
+  assert.deepEqual(m.channels, ['1', '2'], '兜底 = 全部启用渠道（停用不算）');
+});
+
+test('无规则且没有任何启用渠道：不推', async () => {
+  const h = harness();
+  h.db.channels = [];
+  h.bus.emit(sig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0);
+});
+
+test('命中条件规则：渠道与推送词按规则', async () => {
+  const h = harness();
+  h.db.rules.push(rule({
+    id: 7, keywords: ['歌'], channels: [2], messageTemplate: '{alias}唱歌速来',
   }));
   h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
   assert.equal(m.title, '阿梓唱歌速来');
-  assert.equal(m.priority, 'high');
-  assert.deepEqual(m.targets, [{ type: 'group', id: '12345' }]);
+  assert.deepEqual(m.channels, ['2'], '渠道 = 命中规则的 channels');
   assert.equal(m.url, 'https://live.bilibili.com/r1', '跳转字段沿用默认形状');
 });
 
-test('子句未命中（scene 不符）：走 M1 默认文案', async () => {
+test('规则未覆盖推送词时用全局默认模板（settings.default_template）', async () => {
   const h = harness();
-  h.db.clauses.push(clause({ scenes: ['gaming'], messageTemplate: '{alias}打游戏了' }));
+  h.db.settings.set('default_template', '{alias} 开播：{title}');
+  h.db.rules.push(rule({ keywords: ['歌'] }));
   h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1);
-  assert.equal(h.disp.sent[0]!.title, '🔴 阿梓 开播了');
-  assert.equal(h.disp.sent[0]!.priority, 'normal');
+  assert.equal(h.disp.sent[0]!.title, '阿梓 开播：今晚歌回！');
 });
 
-test('标题无关键词（L0 也判不出）时 scenes 子句不命中，仍走默认', async () => {
+test('默认规则（空条件）兜底：条件规则不命中时生效', async () => {
   const h = harness();
-  h.db.clauses.push(clause({ scenes: ['singing'], messageTemplate: '{alias}唱歌速来' }));
-  h.bus.emit(sig({ status: status({ title: '孩子们下午好' }) }));
+  h.db.rules.push(
+    rule({ id: 1, channels: [3] }),               // 默认推送，id 更小也不挡条件规则
+    rule({ id: 2, keywords: ['歌'], channels: [2] }),
+  );
+  h.bus.emit(sig({ status: status({ title: '打游戏' }) }));
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1);
-  assert.equal(h.disp.sent[0]!.title, '🔴 阿梓 开播了');
+  assert.deepEqual(h.disp.sent[0]!.channels, ['3'], '条件规则不命中落默认推送');
+});
+
+test('有规则但均不命中（默认规则被删）：不推', async () => {
+  const h = harness();
+  h.db.rules.push(rule({ keywords: ['歌'] }));
+  h.bus.emit(sig({ status: status({ title: '打游戏' }) }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0);
+});
+
+test('命中规则但 channels 为空 = 用户明确不推', async () => {
+  const h = harness();
+  h.db.rules.push(rule({ keywords: ['歌'], channels: [] }));
+  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0);
+  assert.equal(h.db.notified.size, 0, '未推成功不得 markNotified');
 });
 
 // ---- 健康告警 ----

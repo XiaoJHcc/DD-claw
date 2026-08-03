@@ -97,6 +97,8 @@ export interface PushMessage {
   priority: 'high' | 'normal' | 'low';
   /** 缺省 = 各通道用配置的默认目标 */
   targets?: PushTarget[];
+  /** 引用 push_channels 表的渠道 id（字符串）。存在时 dispatcher 按渠道路由；缺省 = 兼容旧行为全通道发 */
+  channels?: string[];
   /** notify_log 溯源：对应的直播场次。非直播类消息缺省。 */
   ref?: { roomId: string; liveTime: number };
 }

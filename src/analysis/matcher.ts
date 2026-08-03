@@ -1,85 +1,36 @@
-import type { LiveEvent, PushMessage } from '../core/types.js';
-import type { PreferenceClause } from '../core/streamers.js';
-import type { SceneVerdict } from './types.js';
-import { liveEventToMessage } from '../notify/message.js';
-
-const PRIORITY_RANK = { high: 3, normal: 2, low: 1 } as const;
+import type { LiveEvent } from '../core/types.js';
+import type { PushRule } from '../core/push.js';
 
 /**
- * 单条子句的命中判定。条件为 AND：
- * - scenes 非空 → verdict 非空、scene 命中、且 confidence ≥ (minConfidence ?? 0)
- * - titleKeywords 非空 → event.title 大小写不敏感子串命中任一
- * 两者都空 = 该主播的兜底子句，恒命中。
+ * 透明条件规则的命中判定（确定性，无 LLM）：
+ * - keywords 非空 → event.title 大小写不敏感子串命中任一
+ * - areas 非空 → areaName / parentAreaName 任一字段子串命中任一
+ * - 两组都非空 = AND（都要中）；两组都空 = 默认规则（恒命中）
+ * 调用方按 id 升序传入：条件规则从上往下第一条命中生效；
+ * 默认规则无论 id 顺序都最后兜底（否则它恒命中会挡住所有条件规则）。
  */
-function clauseMatches(
-  c: PreferenceClause,
-  event: LiveEvent,
-  verdict: SceneVerdict | null,
-): boolean {
-  if (c.uid !== event.uid) return false;
-  const needScene = c.scenes.length > 0;
-  const needTitle = c.titleKeywords.length > 0;
-  if (!needScene && !needTitle) return true;
-  if (needScene) {
-    if (!verdict) return false;
-    if (!c.scenes.includes(verdict.scene)) return false;
-    if (verdict.confidence < (c.minConfidence ?? 0)) return false;
-  }
-  if (needTitle) {
-    const title = event.title.toLowerCase();
-    if (!c.titleKeywords.some((k) => title.includes(k.toLowerCase()))) return false;
-  }
-  return true;
-}
-
-/**
- * 确定性偏好执行：verdict × preference_clauses → 命中的子句（无命中返回 null，
- * 调用方走 M1 默认行为）。偏好链路零 LLM 依赖，verdict 可来自 LLM 也可来自 L0。
- * 多条命中取优先级高者（high > normal > low），同级取 id 小者（先填先生效）。
- */
-export function matchClauses(
-  clauses: PreferenceClause[],
-  event: LiveEvent,
-  verdict: SceneVerdict | null,
-): PreferenceClause | null {
-  let best: PreferenceClause | null = null;
-  for (const c of clauses) {
-    if (!clauseMatches(c, event, verdict)) continue;
-    if (
-      !best ||
-      PRIORITY_RANK[c.priority] > PRIORITY_RANK[best.priority] ||
-      (c.priority === best.priority && c.id < best.id)
-    ) {
-      best = c;
+export function matchPushRule(rules: PushRule[], event: LiveEvent): PushRule | null {
+  const title = event.title.toLowerCase();
+  const area = `${event.areaName}\n${event.parentAreaName}`.toLowerCase();
+  let fallback: PushRule | null = null;
+  for (const r of rules) {
+    const needKeywords = r.keywords.length > 0;
+    const needAreas = r.areas.length > 0;
+    if (!needKeywords && !needAreas) {
+      fallback ??= r; // 默认规则：只留第一条，等其他规则都不命中时兜底
+      continue;
     }
+    if (needKeywords && !r.keywords.some((k) => title.includes(k.toLowerCase()))) continue;
+    if (needAreas && !r.areas.some((a) => area.includes(a.toLowerCase()))) continue;
+    return r;
   }
-  return best;
+  return fallback;
 }
 
 /** 渲染 {alias} {uname} {title} 变量（alias 缺省回退 uname） */
-function renderTemplate(tpl: string, event: LiveEvent, alias: string): string {
+export function renderTemplate(tpl: string, event: LiveEvent): string {
   return tpl
-    .replaceAll('{alias}', alias || event.uname)
+    .replaceAll('{alias}', event.alias || event.uname)
     .replaceAll('{uname}', event.uname)
     .replaceAll('{title}', event.title);
-}
-
-/**
- * 子句 → PushMessage：模板渲染结果为标题；正文/图片/跳转/ref 沿用 M1 默认
- * 消息的形状（liveEventToMessage），优先级与 targets 来自子句。
- * targets 为 null 时缺省，各通道用自己配置的默认目标。
- */
-export function composeMessage(
-  clause: PreferenceClause,
-  event: LiveEvent,
-  alias: string,
-): PushMessage {
-  const base = liveEventToMessage(event);
-  const text = renderTemplate(clause.messageTemplate, event, alias).trim();
-  return {
-    ...base,
-    title: text || base.title,
-    priority: clause.priority,
-    targets: clause.targets ?? undefined,
-  };
 }

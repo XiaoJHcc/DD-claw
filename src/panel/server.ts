@@ -6,9 +6,10 @@
 import http from 'node:http';
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
-import type { Priority, Streamer, StreamerInput } from '../core/streamers.js';
+import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
-  HttpError, parseClausePatch, parseNewClause, parseStreamerPatch, parseUid,
+  HttpError, checkChannelShape, parseChannelPatch, parseNewChannel, parseNewRule,
+  parseRulePatch, parseStreamerPatch, parseTemplateBody, parseUid,
   readJsonBody, sendJson,
 } from './http-util.js';
 import { PANEL_PAGE } from './page.js';
@@ -99,12 +100,34 @@ async function handle(
     sendJson(res, 200, { follows });
     return;
   }
-  if (method === 'GET' && path === '/api/clauses') {
-    sendJson(res, 200, { clauses: db.listClauses() });
+  if (method === 'GET' && path === '/api/channels') {
+    sendJson(res, 200, { channels: db.listPushChannels() });
     return;
   }
-  if (method === 'POST' && path === '/api/clauses') {
-    const id = db.insertClause(parseNewClause(await readJsonBody(req)));
+  if (method === 'POST' && path === '/api/channels') {
+    const id = db.upsertPushChannel(parseNewChannel(await readJsonBody(req)));
+    sendJson(res, 201, { id });
+    return;
+  }
+  if (method === 'GET' && path === '/api/push/template') {
+    sendJson(res, 200, { template: db.getSetting('default_template') });
+    return;
+  }
+  if (method === 'PUT' && path === '/api/push/template') {
+    const template = parseTemplateBody(await readJsonBody(req));
+    db.setSetting('default_template', template);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (method === 'GET' && path === '/api/rules') {
+    const uidParam = url.searchParams.get('uid');
+    const uid = uidParam === null ? null : parseUid(uidParam);
+    const rules = db.listPushRules();
+    sendJson(res, 200, { rules: uid === null ? rules : rules.filter((r) => r.uid === uid) });
+    return;
+  }
+  if (method === 'POST' && path === '/api/rules') {
+    const id = db.upsertPushRule(parseNewRule(await readJsonBody(req)));
     sendJson(res, 201, { id });
     return;
   }
@@ -138,18 +161,43 @@ async function handle(
     }
   }
 
-  const cm = path.match(/^\/api\/clauses\/([^/]+)$/);
-  if (cm) {
-    const id = Number(parseUid(cm[1], 'id'));
+  const chm = path.match(/^\/api\/channels\/([^/]+)$/);
+  if (chm) {
+    const id = Number(parseUid(chm[1], 'id'));
+    const prev = db.listPushChannels().find((c) => c.id === id);
+    if (!prev) throw new HttpError(404, '渠道不存在');
     if (method === 'PUT') {
-      if (!db.updateClause(id, parseClausePatch(await readJsonBody(req)))) {
-        throw new HttpError(404, '子句不存在');
-      }
+      const patch = parseChannelPatch(await readJsonBody(req));
+      // 联动校验要对合并后的形状做（如 toast 改成 onebot 必须补目标号）
+      checkChannelShape({
+        notifier: patch.notifier ?? prev.notifier,
+        targetType: patch.targetType !== undefined ? patch.targetType : prev.targetType,
+        targetId: patch.targetId !== undefined ? patch.targetId : prev.targetId,
+      });
+      db.upsertPushChannel({ id, ...patch });
       sendJson(res, 200, { ok: true });
       return;
     }
     if (method === 'DELETE') {
-      if (!db.deleteClause(id)) throw new HttpError(404, '子句不存在');
+      db.deletePushChannel(id);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+  }
+
+  const rm = path.match(/^\/api\/rules\/([^/]+)$/);
+  if (rm) {
+    const id = Number(parseUid(rm[1], 'id'));
+    if (method === 'PUT') {
+      const patch = parseRulePatch(await readJsonBody(req));
+      const before = db.listPushRules().some((r) => r.id === id);
+      if (!before) throw new HttpError(404, '规则不存在');
+      db.upsertPushRule({ id, ...patch });
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (method === 'DELETE') {
+      if (!db.deletePushRule(id)) throw new HttpError(404, '规则不存在');
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -158,20 +206,13 @@ async function handle(
   throw new HttpError(404, '未知路由');
 }
 
-const PRIORITY_RANK: Record<Priority, number> = { high: 3, normal: 2, low: 1 };
-
-/** 名单 + face + 实况（room_state）+ 子句摘要。一次请求内三表各只查一次。 */
+/** 名单 + face + 实况（room_state）+ 规则摘要。一次请求内三表各只查一次。 */
 function enrichedStreamers(db: Db): unknown[] {
   const streamers = db.listStreamers();
   const roomStates = db.listRoomStatesFull();
-  const clauseMap = new Map<string, { count: number; maxPriority: Priority | null }>();
-  for (const c of db.listClauses()) {
-    const agg = clauseMap.get(c.uid) ?? { count: 0, maxPriority: null };
-    agg.count++;
-    if (agg.maxPriority === null || PRIORITY_RANK[c.priority] > PRIORITY_RANK[agg.maxPriority]) {
-      agg.maxPriority = c.priority;
-    }
-    clauseMap.set(c.uid, agg);
+  const ruleCount = new Map<string, number>();
+  for (const r of db.listPushRules()) {
+    ruleCount.set(r.uid, (ruleCount.get(r.uid) ?? 0) + 1);
   }
   return streamers.map((s) => {
     const rs = roomStates.get(s.uid);
@@ -187,7 +228,7 @@ function enrichedStreamers(db: Db): unknown[] {
             lastLiveAt: rs.lastLiveAt, polledAt: rs.polledAt,
           }
         : null,
-      clauses: clauseMap.get(s.uid) ?? { count: 0, maxPriority: null },
+      rules: { count: ruleCount.get(s.uid) ?? 0 },
     };
   });
 }

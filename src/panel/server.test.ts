@@ -7,7 +7,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from '../core/db.js';
 import { createPanelServer, type PanelDeps, type PanelStatus } from './server.js';
-import type { NewClause } from '../core/streamers.js';
 
 interface Fixture {
   db: Db;
@@ -66,40 +65,29 @@ async function api(
   return { status: res.status, json: json ?? {} };
 }
 
-function clause(over: Partial<NewClause> = {}): Record<string, unknown> {
-  return {
-    uid: '1001', scenes: ['singing'], minConfidence: 0.7, titleKeywords: ['歌回'],
-    priority: 'high', messageTemplate: '{alias} 开歌回了',
-    targets: [{ type: 'group', id: '123456' }], enabled: true,
-    ...over,
-  };
-}
-
 // ---- 页面 ----
 
-test('GET / 返回内嵌页面，包含三个卡片与关注未监听区', async (t) => {
+test('GET / 返回内嵌页面，包含四个卡片与关注未监听区', async (t) => {
   const { base } = await setup(t);
   const res = await fetch(base + '/', { headers: { connection: 'close' } });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type') ?? '', /text\/html/);
   const html = await res.text();
-  for (const marker of ['运行状态', '直播计划时间表', '主播列表', '关注未监听']) {
+  for (const marker of ['运行状态', '直播计划时间表', '主播列表', '关注未监听', '推送']) {
     assert.ok(html.includes(marker), `页面应包含「${marker}」`);
   }
 });
 
-// ---- streamers（含 face / live / clauses 摘要）----
+// ---- streamers（含 face / live / rules 摘要）----
 
-test('GET /api/streamers：enrich face / live=null / clauses 摘要与 maxPriority 排序', async (t) => {
+test('GET /api/streamers：enrich face / live=null / rules 摘要（含 disabled 计数）', async (t) => {
   const { db, base } = await setup(t);
   db.upsertStreamer({ uid: '1001', uname: '阿梓', face: 'https://i0.hdslb.com/f1.jpg' });
   db.upsertStreamer({ uid: '1002', uname: '小可' });
-  db.insertClause({ uid: '1001', scenes: [], minConfidence: null, titleKeywords: [],
-    priority: 'low', messageTemplate: '', targets: null, enabled: true });
-  db.insertClause({ uid: '1001', scenes: [], minConfidence: null, titleKeywords: [],
-    priority: 'high', messageTemplate: '', targets: null, enabled: false });
-  db.insertClause({ uid: '1001', scenes: [], minConfidence: null, titleKeywords: [],
-    priority: 'normal', messageTemplate: '', targets: null, enabled: true });
+  db.upsertPushRule({ uid: '1001', keywords: [], areas: [], channels: [],
+    messageTemplate: null, enabled: true });
+  db.upsertPushRule({ uid: '1001', keywords: ['歌'], areas: [], channels: [],
+    messageTemplate: null, enabled: false });
 
   const r = await api(base, '/api/streamers');
   assert.equal(r.status, 200);
@@ -107,7 +95,7 @@ test('GET /api/streamers：enrich face / live=null / clauses 摘要与 maxPriori
     uid: string; face: string | null; roomId: string | null;
     watch: boolean; notify: boolean; analyze: boolean;
     weiboNick: string | null; weiboUid: string | null;
-    live: unknown; clauses: { count: number; maxPriority: string | null };
+    live: unknown; rules: { count: number };
   }>;
   const s1 = list.find((s) => s.uid === '1001')!;
   const s2 = list.find((s) => s.uid === '1002')!;
@@ -118,9 +106,8 @@ test('GET /api/streamers：enrich face / live=null / clauses 摘要与 maxPriori
   assert.equal(s1.weiboUid, null);
   assert.equal(s1.roomId, null);
   assert.equal(s1.live, null, '无 room_state 记录时 live=null');
-  assert.deepEqual(s1.clauses, { count: 3, maxPriority: 'high' },
-    'maxPriority 取最高档（high>normal>low），disabled 子句也计入');
-  assert.deepEqual(s2.clauses, { count: 0, maxPriority: null });
+  assert.deepEqual(s1.rules, { count: 2 }, 'disabled 规则也计入');
+  assert.deepEqual(s2.rules, { count: 0 });
 });
 
 test('GET /api/streamers：有 room_state 时 live 带实况字段与下播锚点', async (t) => {
@@ -315,53 +302,135 @@ test('GET /api/follows：只回 is_followed=1，带 face 并标注 watched', asy
   ]);
 });
 
-// ---- preference_clauses ----
+// ---- push_channels ----
 
-test('clause CRUD：POST → GET（含 disabled）→ PUT → DELETE', async (t) => {
+function channelBody(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '123456', ...over };
+}
+
+test('channel CRUD：POST → GET → PUT → DELETE', async (t) => {
   const { db, base } = await setup(t);
-  db.upsertStreamer({ uid: '1001' });
 
-  const created = await api(base, '/api/clauses', 'POST', clause());
+  const created = await api(base, '/api/channels', 'POST', channelBody());
   assert.equal(created.status, 201);
   const id = (created.json as { id: number }).id;
   assert.ok(id > 0);
-  await api(base, '/api/clauses', 'POST', clause({ enabled: false }));
+  await api(base, '/api/channels', 'POST', { name: '系统通知', notifier: 'toast' });
 
-  const list = await api(base, '/api/clauses');
-  const clauses = list.json['clauses'] as Array<{ id: number; enabled: boolean }>;
-  assert.equal(clauses.length, 2, 'listClauses 含 disabled 子句');
+  const list = await api(base, '/api/channels');
+  const channels = list.json['channels'] as Array<{ id: number; name: string; enabled: boolean }>;
+  assert.equal(channels.length, 2);
 
-  const patched = await api(base, `/api/clauses/${id}`, 'PUT', { priority: 'low', targets: null });
+  const patched = await api(base, `/api/channels/${id}`, 'PUT', { name: '亲友群', enabled: false });
   assert.equal(patched.status, 200);
-  const c = db.listClauses().find((x) => x.id === id)!;
-  assert.equal(c.priority, 'low');
-  assert.equal(c.targets, null);
-  assert.equal(c.messageTemplate, '{alias} 开歌回了', '未提供字段保留');
+  const c = db.listPushChannels().find((x) => x.id === id)!;
+  assert.equal(c.name, '亲友群');
+  assert.equal(c.enabled, false);
+  assert.equal(c.targetId, '123456', '未提供字段保留');
 
-  assert.equal((await api(base, `/api/clauses/${id}`, 'DELETE')).status, 200);
-  assert.equal((await api(base, `/api/clauses/${id}`, 'DELETE')).status, 404, '重复删除 404');
+  assert.equal((await api(base, `/api/channels/${id}`, 'DELETE')).status, 200);
+  assert.equal((await api(base, `/api/channels/${id}`, 'DELETE')).status, 404, '重复删除 404');
 });
 
-test('clause 校验：坏 uid / 坏 scenes / 坏 targets / 坏置信度 / 坏 id / 缺失行 404 / 超大请求体', async (t) => {
+test('channel 校验：notifier 枚举 / onebot 必填纯数字 targetId / name 非空 / toast 无目标', async (t) => {
   const { base } = await setup(t);
 
-  assert.equal((await api(base, '/api/clauses', 'POST', clause({ uid: 'abc' }))).status, 400);
+  assert.equal((await api(base, '/api/channels', 'POST', channelBody({ notifier: 'ntfy' }))).status, 400);
+  assert.equal((await api(base, '/api/channels', 'POST', channelBody({ name: '  ' }))).status, 400);
+  assert.equal((await api(base, '/api/channels', 'POST', channelBody({ targetId: 'abc' }))).status, 400);
 
-  const badScene = await api(base, '/api/clauses', 'POST', clause({ scenes: ['dancing'] }));
-  assert.equal(badScene.status, 400);
-  assert.match(badScene.json.error ?? '', /scenes/);
+  const noTarget = await api(base, '/api/channels', 'POST', channelBody({ targetId: null }));
+  assert.equal(noTarget.status, 400);
+  assert.match(noTarget.json.error ?? '', /targetId/);
 
-  assert.equal(
-    (await api(base, '/api/clauses', 'POST', clause({ targets: [{ type: 'group', id: 'abc' }] }))).status,
-    400,
-  );
-  assert.equal((await api(base, '/api/clauses', 'POST', clause({ minConfidence: 1.5 }))).status, 400);
+  const toastWithTarget = await api(base, '/api/channels', 'POST',
+    { name: '系统通知', notifier: 'toast', targetId: '123' });
+  assert.equal(toastWithTarget.status, 400, '系统通知渠道没有目标号');
 
-  assert.equal((await api(base, '/api/clauses/xyz', 'PUT', { enabled: false })).status, 400);
-  assert.equal((await api(base, '/api/clauses/999', 'PUT', { enabled: false })).status, 404);
-  assert.equal((await api(base, '/api/clauses/999', 'DELETE')).status, 404);
+  // PUT：toast 改 onebot 不补目标号 → 合并后形状不合法
+  const created = await api(base, '/api/channels', 'POST', { name: '系统通知', notifier: 'toast' });
+  const id = (created.json as { id: number }).id;
+  const badSwitch = await api(base, `/api/channels/${id}`, 'PUT', { notifier: 'onebot' });
+  assert.equal(badSwitch.status, 400);
 
-  const huge = await api(base, '/api/clauses', 'POST', clause({ messageTemplate: 'x'.repeat(70 * 1024) }));
+  assert.equal((await api(base, '/api/channels/xyz', 'PUT', { enabled: false })).status, 400);
+  assert.equal((await api(base, '/api/channels/999', 'PUT', { enabled: false })).status, 404);
+  assert.equal((await api(base, '/api/channels/999', 'DELETE')).status, 404);
+});
+
+// ---- 默认推送词模板 ----
+
+test('template：GET 未设置为 null，PUT 后可读，校验类型', async (t) => {
+  const { base } = await setup(t);
+
+  const empty = await api(base, '/api/push/template');
+  assert.equal(empty.status, 200);
+  assert.equal(empty.json['template'], null);
+
+  assert.equal((await api(base, '/api/push/template', 'PUT', { template: '{alias} 开播了！' })).status, 200);
+  const got = await api(base, '/api/push/template');
+  assert.equal(got.json['template'], '{alias} 开播了！');
+
+  assert.equal((await api(base, '/api/push/template', 'PUT', { template: 1 })).status, 400);
+  assert.equal((await api(base, '/api/push/template', 'PUT', {})).status, 400);
+});
+
+// ---- push_rules ----
+
+function ruleBody(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    uid: '1001', keywords: ['歌回'], areas: ['虚拟Singer'], channels: [1],
+    messageTemplate: '{alias} 开歌回了', enabled: true,
+    ...over,
+  };
+}
+
+test('rule CRUD：POST → GET（uid 过滤）→ PUT → DELETE', async (t) => {
+  const { db, base } = await setup(t);
+  db.upsertStreamer({ uid: '1001' });
+
+  const created = await api(base, '/api/rules', 'POST', ruleBody());
+  assert.equal(created.status, 201);
+  const id = (created.json as { id: number }).id;
+  assert.ok(id > 0);
+  await api(base, '/api/rules', 'POST', ruleBody({ uid: '1002' }));
+
+  const mine = await api(base, '/api/rules?uid=1001');
+  const rules = mine.json['rules'] as Array<{ id: number; uid: string }>;
+  assert.deepEqual(rules.map((r) => r.id), [id], 'uid 过滤生效');
+  const all = await api(base, '/api/rules');
+  assert.equal((all.json['rules'] as unknown[]).length, 2, '不带 uid 返回全量');
+
+  const patched = await api(base, `/api/rules/${id}`, 'PUT', { channels: [], messageTemplate: null });
+  assert.equal(patched.status, 200);
+  const r = db.listPushRules().find((x) => x.id === id)!;
+  assert.deepEqual(r.channels, []);
+  assert.equal(r.messageTemplate, null);
+  assert.deepEqual(r.keywords, ['歌回'], '未提供字段保留');
+
+  assert.equal((await api(base, `/api/rules/${id}`, 'DELETE')).status, 200);
+  assert.equal((await api(base, `/api/rules/${id}`, 'DELETE')).status, 404, '重复删除 404');
+});
+
+test('rule 校验：坏 uid / 坏 channels / 未知字段 / 坏 id / 缺失行 404 / 超大请求体', async (t) => {
+  const { base } = await setup(t);
+
+  assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ uid: 'abc' }))).status, 400);
+
+  const badChannels = await api(base, '/api/rules', 'POST', ruleBody({ channels: ['x'] }));
+  assert.equal(badChannels.status, 400);
+  assert.match(badChannels.json.error ?? '', /channels/);
+
+  assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ priority: 'high' }))).status, 400,
+    'priority 已移除，属未知字段');
+  assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ keywords: '歌' }))).status, 400);
+  assert.equal((await api(base, '/api/rules?uid=abc')).status, 400);
+
+  assert.equal((await api(base, '/api/rules/xyz', 'PUT', { enabled: false })).status, 400);
+  assert.equal((await api(base, '/api/rules/999', 'PUT', { enabled: false })).status, 404);
+  assert.equal((await api(base, '/api/rules/999', 'DELETE')).status, 404);
+
+  const huge = await api(base, '/api/rules', 'POST', ruleBody({ messageTemplate: 'x'.repeat(70 * 1024) }));
   assert.equal(huge.status, 400);
   assert.match(huge.json.error ?? '', /64KB/);
 });
