@@ -4,7 +4,7 @@
  */
 export const PANEL_CSS = `
 *{box-sizing:border-box}
-body{font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;max-width:1080px;margin:1.2rem auto;padding:0 1rem;color:#222;background:#f4f5f7}
+body{font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;max-width:1280px;margin:1.2rem auto;padding:0 1rem;color:#222;background:#f4f5f7}
 h1{font-size:1.2rem;margin:0}
 h2{font-size:1rem;margin:0 0 .6rem}
 h3{font-size:.95rem;margin:.2rem 0 .5rem}
@@ -45,6 +45,17 @@ input,select{font-size:.85rem;padding:.2rem .35rem;border:1px solid #c9ccd2;bord
 .live-info{min-width:0}
 .live-title{font-size:.9rem;font-weight:600;margin-bottom:.25rem;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .off-dur{font-size:.9rem;color:#555}
+/* 主播卡片第三栏：动态时间线 */
+.sc-posts{width:250px;flex:none;min-width:0;border-left:1px solid #eef0f3;padding-left:.8rem}
+.sc-posts-title{font-size:.82rem;color:#666;margin-bottom:.2rem}
+.post{display:flex;gap:.5rem;padding:.3rem .2rem;color:inherit;text-decoration:none;border-radius:6px}
+.post+.post{border-top:1px dashed #eef0f3}
+a.post:hover{background:#f7f9fc}
+.post-thumb{width:52px;height:52px;border-radius:6px;object-fit:cover;flex:none;background:#eceef1}
+.post-body{min-width:0}
+.post-head{display:flex;gap:.4rem;align-items:center;margin-bottom:.1rem}
+.post-time{font-size:.72rem;color:#999;white-space:nowrap}
+.post-text{font-size:.78rem;color:#444;white-space:pre-line;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 /* 关注未监听 */
 .follows-title{font-size:.88rem;color:#666;margin:.9rem 0 .4rem}
 .follow-row{display:flex;flex-wrap:wrap;gap:.6rem}

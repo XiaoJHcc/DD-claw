@@ -156,6 +156,37 @@ test('GET /api/streamers：有 room_state 时 live 带实况字段与下播锚�
   assert.equal(live2.title, '上一场标题', '下播后保留上一场标题供展示');
 });
 
+test('GET /api/streamers：enrich 带 posts（pub_ts 倒序取 5，raw 不下发）', async (t) => {
+  const { db, base } = await setup(t);
+  db.upsertStreamer({ uid: '1001', uname: '阿梓' });
+  db.upsertStreamer({ uid: '1002', uname: '小可' });
+  const mk = (uid: string, itemId: string, pubTs: number) => ({
+    platform: 'bili_dynamic', uid, itemId, type: 'DYNAMIC_TYPE_WORD',
+    text: `正文 ${itemId}`, pics: ['https://i0.hdslb.com/p.jpg'], pubTs,
+    url: `https://t.bilibili.com/${itemId}`, raw: '{"secret":"不下发"}',
+  });
+  // 6 条：enrich 只带最近 5
+  db.insertPosts([1, 2, 3, 4, 5, 6].map((i) => mk('1001', `a${i}`, 1000 + i)));
+
+  const r = await api(base, '/api/streamers');
+  assert.equal(r.status, 200);
+  const list = r.json['streamers'] as Array<{
+    uid: string;
+    posts: Array<{ platform: string; type: string; text: string; pics: string[];
+      pubTs: number; url: string; raw?: string }>;
+  }>;
+  const s1 = list.find((s) => s.uid === '1001')!;
+  assert.equal(s1.posts.length, 5, '每主播最多 5 条');
+  assert.deepEqual(s1.posts.map((p) => p.text), [
+    '正文 a6', '正文 a5', '正文 a4', '正文 a3', '正文 a2',
+  ], 'pub_ts 倒序，最旧的一条被截掉');
+  assert.equal(s1.posts[0]!.platform, 'bili_dynamic');
+  assert.deepEqual(s1.posts[0]!.pics, ['https://i0.hdslb.com/p.jpg']);
+  assert.equal(s1.posts[0]!.url, 'https://t.bilibili.com/a6');
+  assert.equal(s1.posts[0]!.raw, undefined, 'raw 不下发给前端');
+  assert.deepEqual(list.find((s) => s.uid === '1002')!.posts, [], '无动态 = 空数组');
+});
+
 test('PUT /api/streamers 部分更新（未提供字段保留原值）', async (t) => {
   const { db, base } = await setup(t);
   db.upsertStreamer({ uid: '1001', uname: '阿梓', alias: '梓宝' });

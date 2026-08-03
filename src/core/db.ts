@@ -12,6 +12,10 @@ import {
   type NewPushChannel, type NewPushRule, type PushChannel, type PushChannelInput,
   type PushChannelRow, type PushRule, type PushRuleInput, type PushRuleRow,
 } from './push.js';
+import {
+  rowToPost,
+  type NewPost, type Post, type PostRow,
+} from './posts.js';
 
 const log = makeLogger('core/db');
 
@@ -94,6 +98,21 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS posts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  platform   TEXT    NOT NULL,
+  uid        TEXT    NOT NULL,
+  item_id    TEXT    NOT NULL,
+  type       TEXT    NOT NULL,
+  text       TEXT,
+  pics       TEXT    NOT NULL DEFAULT '[]',
+  pub_ts     INTEGER NOT NULL,
+  url        TEXT,
+  raw        TEXT,
+  created_at INTEGER NOT NULL,
+  UNIQUE(platform, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_posts_uid_ts ON posts (uid, pub_ts);
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -552,6 +571,54 @@ export class Db {
 
   deletePushRule(id: number): boolean {
     return this.db.prepare('DELETE FROM push_rules WHERE id = ?').run(id).changes > 0;
+  }
+
+  // ---- posts：动态/微博时间线归档 ----
+
+  /**
+   * INSERT OR IGNORE 批量归档（单事务）。返回新插入行在入参中的下标 ——
+   * 已存在的 (platform, item_id) 静默跳过，下标即「哪些是本轮新帖」的判断依据。
+   */
+  insertPosts(posts: NewPost[]): number[] {
+    if (posts.length === 0) return [];
+    const stmt = this.db.prepare(
+      `INSERT OR IGNORE INTO posts
+         (platform, uid, item_id, type, text, pics, pub_ts, url, raw, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const inserted: number[] = [];
+    const t = now();
+    const tx = this.db.transaction((rows: NewPost[]) => {
+      rows.forEach((p, i) => {
+        const info = stmt.run(p.platform, p.uid, p.itemId, p.type, p.text,
+          JSON.stringify(p.pics), p.pubTs, p.url, p.raw, t);
+        if (info.changes > 0) inserted.push(i);
+      });
+    });
+    tx(posts);
+    return inserted;
+  }
+
+  /**
+   * 面板 enrich 用：一批 uid 各取最近 perUid 条，一次 IN 查询后 JS 分组截取，
+   * 返回 uid → 该 uid 的最近动态（pub_ts 倒序）。无动态的 uid 不在返回里。
+   */
+  listRecentPosts(uids: string[], perUid: number): Map<string, Post[]> {
+    const out = new Map<string, Post[]>();
+    if (uids.length === 0 || perUid <= 0) return out;
+    const ph = uids.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(`SELECT * FROM posts WHERE uid IN (${ph}) ORDER BY pub_ts DESC, id DESC`)
+      .all(...uids) as PostRow[];
+    for (const r of rows) {
+      const list = out.get(r.uid);
+      if (list) {
+        if (list.length < perUid) list.push(rowToPost(r));
+      } else {
+        out.set(r.uid, [rowToPost(r)]);
+      }
+    }
+    return out;
   }
 
   // ---- settings：kv（目前只有 default_template）----

@@ -17,6 +17,13 @@
     "syncIntervalSec": 1800
   },
 
+  // 空间动态轮询（同样需 cookies.json，无 cookie 时自动跳过）。
+  // 下限 120 秒；预告一天就几条，3-10 分钟足够，更频繁只增风控压力
+  "dynamic": {
+    "enabled": true,
+    "intervalSec": 300
+  },
+
   // 控制面板（localhost WebUI，只绑 127.0.0.1）：管理监听名单与偏好子句。
   // 改库即生效，无需重启；启动失败（如端口被占）只记日志，不影响主流程
   "panel": {

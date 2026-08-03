@@ -17,6 +17,7 @@ import { LiveStatusSource } from './sources/bili/live-status-source.js';
 import { fetchLiveStatus } from './sources/bili/live-status.js';
 import { loadCookies, cookieHeader, type SelfInfo } from './sources/bili/auth.js';
 import { FollowsSource } from './sources/bili/follows.js';
+import { DynamicSource } from './sources/bili/dynamic.js';
 import { createPanelServer, type PlatformStatus } from './panel/server.js';
 import { createWeiboResolver } from './sources/weibo/resolve.js';
 import type { NewPushChannel } from './core/push.js';
@@ -150,9 +151,10 @@ async function main(): Promise<void> {
     new LiveStatusSource({ forceUids: args.forceUids }),
   ];
 
-  // follows source 单独持有（不放 sources 数组）：扫码登录后要热重启，
+  // follows / dynamic source 单独持有（不放 sources 数组）：扫码登录后要热重启，
   // shutdown 时 stop 的必须是最新实例
   let followsSrc: FollowsSource | null = null;
+  let dynamicSrc: DynamicSource | null = null;
   // 最近一次登录态心跳结果（onLoginState 上报），面板状态展示用
   let biliLogin: SelfInfo | null = null;
   let cookieImported = false;
@@ -164,17 +166,31 @@ async function main(): Promise<void> {
     });
     followsSrc.start({ bus, db, config: app });
   };
+  const startDynamic = (cookieHdr: string): void => {
+    dynamicSrc?.stop();
+    dynamicSrc = new DynamicSource({ cookie: cookieHdr });
+    dynamicSrc.start({ bus, db, config: app });
+  };
 
   // 凭据功能：cookies.json 不存在 → 停用并说明；坏 JSON → loadCookies 抛
   // ConfigError，启动即失败。cookie 值绝不进日志，只传拼好的 Cookie 头。
   const cookies = loadCookies(resolve(projectRoot, 'cookies.json'));
   cookieImported = cookies != null;
   if (!cookies) {
-    log.info('未导入 cookies.json，关注列表同步等凭据功能停用（匿名开播监听不受影响）');
-  } else if (!app.follows.enabled) {
-    log.info('cookies.json 存在，但 config 里 follows.enabled=false，跳过关注列表同步');
+    log.info('未导入 cookies.json，关注列表同步 / 动态轮询等凭据功能停用（匿名开播监听不受影响）');
   } else {
-    startFollows(cookieHeader(cookies));
+    const cookieHdr = cookieHeader(cookies);
+    if (!app.follows.enabled) {
+      log.info('cookies.json 存在，但 config 里 follows.enabled=false，跳过关注列表同步');
+    } else {
+      startFollows(cookieHdr);
+    }
+    if (!app.dynamic.enabled) {
+      log.info('cookies.json 存在，但 config 里 dynamic.enabled=false，跳过动态轮询');
+    } else {
+      log.info(`动态轮询：${db.listWatchedUids().length} 个监听对象，间隔 ${app.dynamic.intervalSec}s`);
+      startDynamic(cookieHdr);
+    }
   }
 
   for (const s of sources) s.start({ bus, db, config: app });
@@ -212,6 +228,10 @@ async function main(): Promise<void> {
             log.info('扫码登录成功，热重启关注列表同步');
             startFollows(cookieHdr);
           }
+          if (app.dynamic.enabled) {
+            log.info('扫码登录成功，热重启动态轮询');
+            startDynamic(cookieHdr);
+          }
         },
       },
     });
@@ -230,6 +250,7 @@ async function main(): Promise<void> {
     log.info(`收到 ${sig}，停止中`);
     for (const s of sources) s.stop();
     followsSrc?.stop();
+    dynamicSrc?.stop();
     panel?.close();
     db.close();
     process.exit(0);

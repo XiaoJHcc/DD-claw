@@ -6,16 +6,22 @@
 
 **匿名全灭，必须凭据。** B站动态 412、微博 432，且都不是靠补签名能解决的。
 
+（2026-08-03 修订：**「自己带 cookie 直连」已在动态接口跑通**——全量 cookie + dm 三参即可，详见下节修订块，项目已选这条路实现 `src/sources/bili/dynamic.ts`；RSSHub 不再是动态源的必选项。微博 432 结论不变。）
+
 选型：**自建 RSSHub** 或**自己带 cookie 直连**，二者都要凭据。开播状态**不走**这条路。
 
 ## B站空间动态 [实测]
 
+> **2026-08-03 修订（已推翻下方 412 旧结论）**：`feed/space` 带**扫码登录全量 cookie**（cookies.json 5 个字段即够）+ **dm 三参**（`dm_img_list` 按 RSSHub `getDmImgList` 高斯算法现场生成；`dm_img_str`/`dm_cover_img_str` = `bm8gd2ViZ2w`，即 base64('no webgl') 去 padding）+ `Referer: https://space.bilibili.com/<uid>/` + 桌面 UA → **HTTP 200 / code 0**，**不需要 WBI 签名**。参数：`offset=&host_mid=<uid>&platform=web&features=itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote`。已实现为 `src/sources/bili/dynamic.ts`（解析 `parseDynamicItem`）+ `src/sources/bili/dm.ts`（dm 参数生成），实测 22 个 uid 全量归档零 412，返回含 `DYNAMIC_TYPE_LIVE_RCMD` / `AV` / `DRAW` / `WORD` / `FORWARD` / `ARTICLE`。
+>
+> 当年 412 的真正原因不是 WBI，而是缺全量 cookie 或 dm 参数用静态占位（占位值无效，必须现场生成）。间歇性 412 / `-352` 仍可能出现：按「跳过本轮、保留旧数据、连续失败计数告警」处理（见 `docs/boundaries.md` §5.19）。
+
 ```
 GET https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=<uid>
-→ HTTP 412（风控页面，非 JSON）
+→ HTTP 412（风控页面，非 JSON）  ← 匿名/缺 dm 参数时的表现；带齐上述组合可通（见上修订）
 ```
 
-关键：agent 完整实现了一遍 WBI 签名（`nav` 取 `img_key`/`sub_key` → mixin key 重排 → 参数升序拼 `wts` → MD5 算 `w_rid`），**签名正确后仍然 412**。
+关键：agent 完整实现了一遍 WBI 签名（`nav` 取 `img_key`/`sub_key` → mixin key 重排 → 参数升序拼 `wts` → MD5 算 `w_rid`），**签名正确后仍然 412**。（2026-08-03：方向错了，该接口根本不看 WBI，看 cookie + dm 指纹。）
 
 ### 412 与 -352 是两条不同的失败路径
 

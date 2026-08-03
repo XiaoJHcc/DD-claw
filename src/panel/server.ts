@@ -206,7 +206,7 @@ async function handle(
   throw new HttpError(404, '未知路由');
 }
 
-/** 名单 + face + 实况（room_state）+ 规则摘要。一次请求内三表各只查一次。 */
+/** 名单 + face + 实况（room_state）+ 规则摘要 + 最近动态（posts）。一次请求内每表只查一次。 */
 function enrichedStreamers(db: Db): unknown[] {
   const streamers = db.listStreamers();
   const roomStates = db.listRoomStatesFull();
@@ -214,6 +214,8 @@ function enrichedStreamers(db: Db): unknown[] {
   for (const r of db.listPushRules()) {
     ruleCount.set(r.uid, (ruleCount.get(r.uid) ?? 0) + 1);
   }
+  // 一次分组查询：每个 uid 最近 5 条动态（跨平台按 pub_ts 混排），raw 不下发
+  const recentPosts = db.listRecentPosts(streamers.map((s) => s.uid), 5);
   return streamers.map((s) => {
     const rs = roomStates.get(s.uid);
     return {
@@ -229,6 +231,10 @@ function enrichedStreamers(db: Db): unknown[] {
           }
         : null,
       rules: { count: ruleCount.get(s.uid) ?? 0 },
+      posts: (recentPosts.get(s.uid) ?? []).map((p) => ({
+        platform: p.platform, type: p.type, text: p.text,
+        pics: p.pics, pubTs: p.pubTs, url: p.url,
+      })),
     };
   });
 }

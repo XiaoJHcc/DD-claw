@@ -21,7 +21,7 @@
 
 | 能力 | 匿名结果 | 最低代价 |
 |---|---|---|
-| B站空间动态 | [实测] **HTTP 412**，即使 WBI 签名正确 | 完整 cookie 集 |
+| B站空间动态 | [实测] ~~HTTP 412，即使 WBI 签名正确~~（2026-08-03 推翻：全量 cookie + dm 三参（高斯算法生成，非静态占位）+ space Referer 即通，**无需 WBI**） | 完整 cookie 集 |
 | 微博用户时间线 | [实测] **HTTP 432**，游客 cookie 流程已失效 | 登录 cookie |
 | 我关注的直播列表 | [实测] `-101 账号未登录` | SESSDATA |
 | 直播原画画质 | [实测] `qn=10000` 静默降级到 250 | SESSDATA（本项目不需要） |
@@ -31,8 +31,8 @@
 
 - **自动读取 Chrome/Edge 已登录 cookie** — Chrome 127+ App-Bound Encryption 封死。可绕过，但手段是进程注入 / process hollowing / COM 伪装，等同恶意软件技术，本项目不采用。
 - **CDP 直挂用户日常 Chrome** — [文档] Chrome ≥136 不再支持对默认 profile 用 remote debugging。
-- **免签调用 B站动态接口** — 旧接口 `dynamic_svr/space_history` [实测] 同样 412，无替代。
-- **绕过 412 靠伪造设备指纹** — `dm_img_list` 等参数有生成算法，[实测] 填静态占位值无效。
+- **免签调用 B站动态接口** — 旧接口 `dynamic_svr/space_history` [实测] 同样 412，无替代。（2026-08-03 修订：带登录 cookie + dm 参数的新接口 `web-dynamic/feed/space` 已跑通，见 §5.18；免签仍不可能。）
+- **绕过 412 靠静态占位设备指纹** — `dm_img_list` 等参数有生成算法，[实测] 填静态占位值无效；必须按 RSSHub 高斯算法现场生成（本项目 `src/sources/bili/dm.ts`）。
 
 ## 2. 功能边界
 
@@ -110,4 +110,9 @@
 15. `live_status=2` 是轮播不是直播（泠鸢实测命中），必须当未开播处理，否则把B站自动放的录像推成开播。[实测]
 16. OneBot 对同一目标并发发送会被限流（群约 20 条/分钟）：每目标一条串行链 + ≥1.2s 间隔。图片失败降级纯文本重发只在请求真正到达 NapCat 后才有意义——NapCat 没启动时降级重试必然同样失败。[实测]
 17. 批量接口单 POST 不宜过长：`uids` 按 50 分片。多主播同时开播时推送要并发受限（`mapLimit` 4），否则串行 await 会把第 10 条通知拖到分钟级。[实测]
+
+以下来自动态源实施（2026-08-03）：
+
+18. B站空间动态接口 `x/polymer/web-dynamic/v1/feed/space` **不需要 WBI 签名**——之前「签名正确仍 412」缺的是全量 cookie + dm 三参的正确组合：`dm_img_list`（高斯随机轨迹 JSON，算法抄 RSSHub `getDmImgList`，静态占位无效）+ `dm_img_str`/`dm_cover_img_str=bm8gd2ViZ2w`（base64('no webgl') 去 padding）+ `Referer: https://space.bilibili.com/<uid>/` + cookies.json 全字段。实测 22 个 uid 全量归档零 412。`DYNAMIC_TYPE_LIVE_RCMD` 的 `major.live_rcmd.content` 是需要二次 JSON.parse 的字符串，内含 `live_play_info.{title,room_id,area_name,cover}`。[实测]
+19. 动态去重只靠 `(platform, item_id)` UNIQUE，不要用时间戳判新旧（编辑/置顶会让时间戳不稳定）；拉取失败（412 HTML / -352 / 网络错）必须跳过本轮保留旧数据，绝不能当成「没动态」。[实测]
 

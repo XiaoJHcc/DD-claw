@@ -46,6 +46,12 @@ export const configSchema = z.object({
     syncIntervalSec: z.number().int().min(300, '关注列表同步间隔不低于 300 秒').max(86400).default(1800),
   }).default({ enabled: true, syncIntervalSec: 1800 }),
 
+  /** 空间动态轮询（需 cookies.json；无 cookie 时自动跳过）。下限 120s，预告一天就几条，低频即可 */
+  dynamic: z.object({
+    enabled: z.boolean().default(true),
+    intervalSec: z.number().int().min(120, '动态轮询间隔不低于 120 秒').max(86400).default(300),
+  }).default({ enabled: true, intervalSec: 300 }),
+
   /** 控制面板（localhost WebUI，只绑 127.0.0.1）：监听名单 / 候选池 / 推送规则与渠道管理 */
   panel: z.object({
     enabled: z.boolean().default(true),

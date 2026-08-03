@@ -15,6 +15,45 @@ function avatarHtml(face, name, cls) {
 }
 
 // ---- 主播卡片列表 ----
+// 动态类型 → 人话小标签（微博预留）
+function postTypeTag(p) {
+  if (p.platform === 'weibo') return '微博';
+  if (p.type === 'DYNAMIC_TYPE_LIVE_RCMD') return '动态·开播';
+  if (p.type === 'DYNAMIC_TYPE_AV') return '动态·视频';
+  if (p.type === 'DYNAMIC_TYPE_DRAW') return '动态·图文';
+  if (p.type === 'DYNAMIC_TYPE_FORWARD') return '动态·转发';
+  if (p.type === 'DYNAMIC_TYPE_WORD') return '动态·文字';
+  return '动态';
+}
+function relTime(ts) {
+  if (!ts) return '';
+  var diff = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+  return Math.floor(diff / 86400) + ' 天前';
+}
+function postRow(p) {
+  var inner =
+    (p.pics && p.pics[0]
+      ? '<img class="post-thumb" referrerpolicy="no-referrer" src="' + esc(p.pics[0]) + '" alt="">'
+      : '') +
+    '<div class="post-body"><div class="post-head"><span class="tag">' + postTypeTag(p) + '</span>' +
+    '<span class="post-time">' + relTime(p.pubTs) + '</span></div>' +
+    '<div class="post-text">' + esc(p.text || '(无文字)') + '</div></div>';
+  // 卡片整体点击是开详情弹窗；动态链接要新窗口打开，不能把点击冒泡上去
+  if (p.url) {
+    return '<a class="post" href="' + esc(p.url) + '" target="_blank" rel="noreferrer"' +
+      ' onclick="event.stopPropagation()">' + inner + '</a>';
+  }
+  return '<div class="post">' + inner + '</div>';
+}
+function postsColumn(s) {
+  var rows = (s.posts && s.posts.length)
+    ? s.posts.map(postRow).join('')
+    : '<p class="hint">暂无抓取</p>';
+  return '<div class="sc-posts"><div class="sc-posts-title">动态</div>' + rows + '</div>';
+}
 function streamerCard(s) {
   var name = s.alias || s.uname || String(s.uid);
   var rsum = (s.rules && s.rules.count > 0) ? s.rules.count + ' 条规则' : '无规则';
@@ -43,7 +82,8 @@ function streamerCard(s) {
     right = '<div class="sc-right"><div class="kf kf-empty"></div>' +
       '<div class="live-info"><div class="off-dur">' + off + '</div>' + prev + '</div></div>';
   }
-  return '<div class="streamer-card" onclick="openStreamer(' + q(s.uid) + ')">' + left + right + '</div>';
+  return '<div class="streamer-card" onclick="openStreamer(' + q(s.uid) + ')">' +
+    left + right + postsColumn(s) + '</div>';
 }
 function loadStreamers() {
   return api('/api/streamers').then(function (j) {
