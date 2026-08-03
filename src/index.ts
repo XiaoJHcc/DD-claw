@@ -17,6 +17,7 @@ import { fetchLiveStatus } from './sources/bili/live-status.js';
 import { loadCookies, cookieHeader, type SelfInfo } from './sources/bili/auth.js';
 import { FollowsSource } from './sources/bili/follows.js';
 import { createPanelServer, type PlatformStatus } from './panel/server.js';
+import { createWeiboResolver } from './sources/weibo/resolve.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 import type { Source } from './sources/types.js';
@@ -160,6 +161,7 @@ async function main(): Promise<void> {
   if (app.panel.enabled) {
     panel = createPanelServer({
       db,
+      weiboResolver: createWeiboResolver(),
       status: () => {
         // state 推导：无 cookie=none；有 cookie 还没心跳=imported；
         // isLogin true=ok / false=expired（mid 随心跳带出）
@@ -197,7 +199,7 @@ async function main(): Promise<void> {
 
   const watched = args.forceUids.length > 0 ? args.forceUids.length : db.listWatchedUids().length;
   if (watched === 0) {
-    log.warn('监听名单为空（streamers 表中没有 mode!=off 的主播），不会产生任何开播信号');
+    log.warn('监听名单为空（streamers 表中没有 watch=1 的主播），不会产生任何开播信号');
   }
 
   const shutdown = (sig: string) => {

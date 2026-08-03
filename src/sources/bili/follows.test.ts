@@ -106,8 +106,8 @@ test('fetchFollowings 中间页 code != 0 直接抛（上层整轮放弃）', as
 test('同步成功：关注不再自动入 streamers，已有手动条目不被覆盖', async (t) => {
   const h = harness(async () => LOGGED_IN, async () => [f('1'), f('2'), f('3')]);
   t.after(h.cleanup);
-  // 用户手动管理过的条目：alias / mode / source 都必须保留
-  h.db.upsertStreamer({ uid: '2', alias: '手动别名', mode: 'silent', source: 'manual' });
+  // 用户手动管理过的条目：alias / notify / source 都必须保留
+  h.db.upsertStreamer({ uid: '2', alias: '手动别名', notify: false, source: 'manual' });
 
   assert.equal(await h.src.syncOnce(), true);
 
@@ -116,7 +116,7 @@ test('同步成功：关注不再自动入 streamers，已有手动条目不被�
 
   const s2 = h.db.getStreamer('2');
   assert.equal(s2?.alias, '手动别名', '已有条目的 alias 不被覆盖');
-  assert.equal(s2?.mode, 'silent', '已有条目的 mode 不被覆盖');
+  assert.equal(s2?.notify, false, '已有条目的 notify 不被覆盖');
   assert.equal(s2?.source, 'manual');
 
   assert.deepEqual(h.db.listFollows(true).map((x) => x.uid), ['1', '2', '3']);
@@ -133,7 +133,7 @@ test('face 透传与回填：follows 表带头像，已有空 face 的 streamer 
   ]);
   t.after(h.cleanup);
   // 2 已在监听名单且 face 为空；3 已有 face
-  h.db.upsertStreamer({ uid: '2', uname: '旧名', mode: 'silent', alias: '手动别名' });
+  h.db.upsertStreamer({ uid: '2', uname: '旧名', notify: false, alias: '手动别名' });
   h.db.upsertStreamer({ uid: '3', uname: '主播3', face: 'https://i0.hdslb.com/f3.jpg' });
 
   assert.equal(await h.src.syncOnce(), true);
@@ -143,7 +143,7 @@ test('face 透传与回填：follows 表带头像，已有空 face 的 streamer 
 
   const s2 = h.db.getStreamer('2')!;
   assert.equal(s2.face, FACE2_NEW, '已有条目 face 为空时回填');
-  assert.equal(s2.mode, 'silent', '回填不碰 mode');
+  assert.equal(s2.notify, false, '回填不碰 notify');
   assert.equal(s2.alias, '手动别名', '回填不碰 alias');
   assert.equal(s2.uname, '旧名', '回填不碰 uname');
 
@@ -155,7 +155,7 @@ test('face 回填只进不退：后续轮拿到新头像也不覆盖已有值', 
   const h = harness(async () => LOGGED_IN, async () => list);
   t.after(h.cleanup);
   // 已在监听名单、face 为空 → 第一轮补；第二轮拿到新头像也不覆盖
-  h.db.upsertStreamer({ uid: '1', uname: '主播1', mode: 'on', source: 'manual' });
+  h.db.upsertStreamer({ uid: '1', uname: '主播1', watch: true, source: 'manual' });
 
   await h.src.syncOnce();
   assert.equal(h.db.getStreamer('1')?.face, 'https://i0.hdslb.com/f1.jpg', '空 face 第一轮回填');
@@ -173,7 +173,7 @@ test('取关标记：本轮消失的 uid 标 is_followed=0，新增的加入', a
   const h = harness(async () => LOGGED_IN, async () => list);
   t.after(h.cleanup);
   // 用户手动加入监听的条目：取关也不被删除（监听名单由用户管理）
-  h.db.upsertStreamer({ uid: '1', uname: '主播1', mode: 'on', source: 'manual' });
+  h.db.upsertStreamer({ uid: '1', uname: '主播1', watch: true, source: 'manual' });
 
   await h.src.syncOnce();
   list = [f('2'), f('3')];
@@ -183,7 +183,7 @@ test('取关标记：本轮消失的 uid 标 is_followed=0，新增的加入', a
   assert.equal(follows.find((x) => x.uid === '1')?.isFollowed, false, '消失的标取关');
   assert.equal(follows.find((x) => x.uid === '2')?.isFollowed, true);
   assert.equal(follows.find((x) => x.uid === '3')?.isFollowed, true, '新增的在库');
-  assert.equal(h.db.getStreamer('1')?.mode, 'on', '取关不删用户监听条目');
+  assert.equal(h.db.getStreamer('1')?.watch, true, '取关不删用户监听条目');
   assert.equal(h.db.getStreamer('3'), undefined, '新关注不自动入监听');
 });
 

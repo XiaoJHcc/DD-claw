@@ -6,7 +6,7 @@ import type { PrevState } from './state.js';
 import {
   clauseToRow, rowToClause, rowToFollow, rowToStreamer,
   type ClausePatch, type ClauseRow, type Follow, type FollowRow, type NewClause,
-  type PreferenceClause, type Streamer, type StreamerInput, type StreamerMode, type StreamerRow,
+  type PreferenceClause, type Streamer, type StreamerInput, type StreamerRow,
 } from './streamers.js';
 
 const log = makeLogger('core/db');
@@ -48,8 +48,10 @@ CREATE TABLE IF NOT EXISTS streamers (
   alias        TEXT,
   room_id      TEXT,
   weibo_uid    TEXT,
-  mode         TEXT    NOT NULL DEFAULT 'on' CHECK(mode IN ('off','silent','on')),
+  weibo_nick   TEXT,
+  watch        INTEGER NOT NULL DEFAULT 1,
   analyze      INTEGER NOT NULL DEFAULT 0,
+  notify       INTEGER NOT NULL DEFAULT 1,
   profile_note TEXT,
   source       TEXT    NOT NULL DEFAULT 'manual' CHECK(source IN ('follows','manual')),
   created_at   INTEGER NOT NULL,
@@ -111,15 +113,36 @@ export class Db {
     }
     this.ensureColumn('streamers', 'face', 'face TEXT');
     this.ensureColumn('follows', 'face', 'face TEXT');
+    // streamers 三开关（watch/analyze/notify）替代旧 mode 列
+    this.ensureColumn('streamers', 'watch', 'watch INTEGER NOT NULL DEFAULT 1');
+    this.ensureColumn('streamers', 'notify', 'notify INTEGER NOT NULL DEFAULT 1');
+    this.ensureColumn('streamers', 'weibo_nick', 'weibo_nick TEXT');
+    this.migrateStreamerMode();
     log.info(`数据库就绪: ${path}`);
   }
 
-  /** 缺列则 ALTER TABLE 补上（旧库在线迁移；新列一律可空，不动旧数据） */
+  /** 缺列则 ALTER TABLE 补上（旧库在线迁移；新列一律可空或带默认值，不动旧数据） */
   private ensureColumn(table: string, column: string, ddl: string): void {
     const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
     }
+  }
+
+  /**
+   * 旧 mode 列（off/silent/on）迁移为 watch/notify 开关后删除：
+   * off → watch=0；silent → notify=0。对新库（无 mode 列）幂等。
+   * 前置：watch/notify 列已由 ensureColumn 补好（默认 1）。
+   */
+  private migrateStreamerMode(): void {
+    const cols = this.db.prepare('PRAGMA table_info(streamers)').all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'mode')) return;
+    this.db.exec(`
+      UPDATE streamers SET watch = 0 WHERE mode = 'off';
+      UPDATE streamers SET notify = 0 WHERE mode = 'silent';
+      ALTER TABLE streamers DROP COLUMN mode;
+    `);
+    log.info('streamers 表 mode 列已迁移为 watch/notify 开关并删除');
   }
 
   loadRoomStates(): Map<string, PrevState> {
@@ -263,10 +286,10 @@ export class Db {
 
   // ---- streamers：监听名单（事实来源）----
 
-  /** 监听中的 uid（mode != off）。live-status source 的名单来源。 */
+  /** 监听中的 uid（watch=1）。live-status source 的名单来源。 */
   listWatchedUids(): string[] {
     const rows = this.db
-      .prepare("SELECT uid FROM streamers WHERE mode != 'off'")
+      .prepare('SELECT uid FROM streamers WHERE watch = 1')
       .all() as Array<{ uid: string }>;
     return rows.map((r) => r.uid);
   }
@@ -274,13 +297,21 @@ export class Db {
   /**
    * 仅当 streamers 为空时，把 config.json 的 subscriptions 种子导入。
    * 返回导入条数（非空时返回 0，幂等）。
+   * 旧 mode 字段兼容映射：'off'→watch:false，'silent'→notify:false；
+   * 无 mode 时按 enabled 推导（false→watch:false）。
    */
-  seedStreamersIfEmpty(subs: Array<{ uid: string; alias: string; enabled: boolean }>): number {
+  seedStreamersIfEmpty(
+    subs: Array<{ uid: string; alias: string; enabled: boolean; mode?: 'off' | 'silent' | 'on' }>,
+  ): number {
     const { c } = this.db.prepare('SELECT COUNT(*) AS c FROM streamers').get() as { c: number };
     if (c > 0 || subs.length === 0) return 0;
     const tx = this.db.transaction(() => {
       for (const s of subs) {
-        this.upsertStreamer({ uid: s.uid, alias: s.alias, mode: s.enabled ? 'on' : 'off', source: 'manual' });
+        const mode = s.mode ?? (s.enabled ? 'on' : 'off');
+        this.upsertStreamer({
+          uid: s.uid, alias: s.alias, source: 'manual',
+          watch: mode !== 'off', notify: mode !== 'silent',
+        });
       }
     });
     tx();
@@ -306,8 +337,10 @@ export class Db {
       alias: input.alias !== undefined ? input.alias : prev?.alias ?? null,
       roomId: input.roomId !== undefined ? input.roomId : prev?.roomId ?? null,
       weiboUid: input.weiboUid !== undefined ? input.weiboUid : prev?.weiboUid ?? null,
-      mode: input.mode ?? prev?.mode ?? 'on',
+      weiboNick: input.weiboNick !== undefined ? input.weiboNick : prev?.weiboNick ?? null,
+      watch: input.watch ?? prev?.watch ?? true,
       analyze: input.analyze ?? prev?.analyze ?? false,
+      notify: input.notify ?? prev?.notify ?? true,
       profileNote: input.profileNote !== undefined ? input.profileNote : prev?.profileNote ?? null,
       face: input.face !== undefined ? input.face : prev?.face ?? null,
       source: input.source ?? prev?.source ?? 'manual',
@@ -317,22 +350,19 @@ export class Db {
     this.db
       .prepare(
         `INSERT INTO streamers
-           (uid, uname, alias, room_id, weibo_uid, mode, analyze, profile_note, face, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (uid, uname, alias, room_id, weibo_uid, weibo_nick, watch, analyze, notify,
+            profile_note, face, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(uid) DO UPDATE SET
            uname=excluded.uname, alias=excluded.alias, room_id=excluded.room_id,
-           weibo_uid=excluded.weibo_uid, mode=excluded.mode, analyze=excluded.analyze,
+           weibo_uid=excluded.weibo_uid, weibo_nick=excluded.weibo_nick,
+           watch=excluded.watch, analyze=excluded.analyze, notify=excluded.notify,
            profile_note=excluded.profile_note, face=excluded.face,
            source=excluded.source, updated_at=excluded.updated_at`,
       )
-      .run(s.uid, s.uname, s.alias, s.roomId, s.weiboUid, s.mode,
-        s.analyze ? 1 : 0, s.profileNote, s.face, s.source, s.createdAt, s.updatedAt);
-  }
-
-  setStreamerMode(uid: string, mode: StreamerMode): boolean {
-    return this.db
-      .prepare('UPDATE streamers SET mode = ?, updated_at = ? WHERE uid = ?')
-      .run(mode, now(), uid).changes > 0;
+      .run(s.uid, s.uname, s.alias, s.roomId, s.weiboUid, s.weiboNick,
+        s.watch ? 1 : 0, s.analyze ? 1 : 0, s.notify ? 1 : 0,
+        s.profileNote, s.face, s.source, s.createdAt, s.updatedAt);
   }
 
   // ---- follows：关注列表候选池 ----

@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test src/core/state.test.ts src/core/bus.test.ts src/core/pipeline.test.ts src/core/concurrency.test.ts src/core/streamers.test.ts src/core/db.test.ts src/sources/bili/live-status-source.test.ts src/sources/bili/auth.test.ts src/sources/bili/follows.test.ts src/sources/bili/qrcode.test.ts src/rules/once-per-session.test.ts src/config/config.test.ts src/analysis/l0.test.ts src/analysis/matcher.test.ts src/notify/onebot.test.ts src/panel/server.test.ts",
+    "test": "node --import tsx --test src/core/state.test.ts src/core/bus.test.ts src/core/pipeline.test.ts src/core/concurrency.test.ts src/core/streamers.test.ts src/core/db.test.ts src/sources/bili/live-status-source.test.ts src/sources/bili/auth.test.ts src/sources/bili/follows.test.ts src/sources/bili/qrcode.test.ts src/sources/weibo/resolve.test.ts src/rules/once-per-session.test.ts src/config/config.test.ts src/analysis/l0.test.ts src/analysis/matcher.test.ts src/notify/onebot.test.ts src/panel/server.test.ts",
     "probe": "tsx src/index.ts --probe",
     "test-notify": "tsx src/index.ts --test-notify"
   },

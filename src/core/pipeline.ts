@@ -106,10 +106,10 @@ export class Pipeline {
       return;
     }
 
-    // mode='silent'：追踪照常住（recordSession 已在上面做），但不产生推送。
-    // 位置在冷启动抑制之后：两种抑制都跳过推送，语义一致。
-    if (db.getStreamer(signal.uid)?.mode === 'silent') {
-      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: mode=silent（仅抑制推送，追踪照常）`);
+    // notify=false：追踪照常（recordSession 已在上面做），但不产生推送。
+    // watch=1 && notify=0 = 旧 mode='silent' 语义；位置在冷启动抑制之后。
+    if (db.getStreamer(signal.uid)?.notify === false) {
+      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: notify=off（仅抑制推送，追踪照常）`);
       return;
     }
 

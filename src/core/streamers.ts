@@ -4,7 +4,6 @@
  * 表结构见 design.md §6（Streamer / PreferenceClause）。
  */
 
-export type StreamerMode = 'off' | 'silent' | 'on';
 export type StreamerSource = 'follows' | 'manual';
 export type Priority = 'high' | 'normal' | 'low';
 
@@ -21,8 +20,10 @@ export interface StreamerRow {
   alias: string | null;
   room_id: string | null;
   weibo_uid: string | null;
-  mode: StreamerMode;
+  weibo_nick: string | null;
+  watch: number;
   analyze: number;
+  notify: number;
   profile_note: string | null;
   face: string | null;
   source: StreamerSource;
@@ -36,8 +37,14 @@ export interface Streamer {
   alias: string | null;
   roomId: string | null;
   weiboUid: string | null;
-  mode: StreamerMode;
+  /** 微博昵称（面板直填，保存时解析为 weiboUid） */
+  weiboNick: string | null;
+  /** 监听：抓取开播状态/动态（watch=1 && notify=0 = 旧 silent 语义） */
+  watch: boolean;
+  /** LLM 分析开关（功能未接入，先存设置） */
   analyze: boolean;
+  /** 推送开关：false = 只记录不打扰 */
+  notify: boolean;
   profileNote: string | null;
   face: string | null;
   source: StreamerSource;
@@ -51,8 +58,8 @@ export type StreamerInput = Partial<Omit<Streamer, 'uid' | 'createdAt' | 'update
 export function rowToStreamer(r: StreamerRow): Streamer {
   return {
     uid: r.uid, uname: r.uname, alias: r.alias,
-    roomId: r.room_id, weiboUid: r.weibo_uid,
-    mode: r.mode, analyze: r.analyze === 1,
+    roomId: r.room_id, weiboUid: r.weibo_uid, weiboNick: r.weibo_nick ?? null,
+    watch: r.watch === 1, analyze: r.analyze === 1, notify: r.notify === 1,
     profileNote: r.profile_note, face: r.face ?? null, source: r.source,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };

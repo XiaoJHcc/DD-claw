@@ -92,19 +92,23 @@ export function parseUid(v: unknown, field = 'uid'): string {
 
 // ---- streamers ----
 
-const STREAMER_MODES = ['off', 'silent', 'on'] as const;
-
-/** PUT /api/streamers/:uid 的部分更新体（uid 由路由提供）；至少一个可更新字段。 */
+/**
+ * PUT /api/streamers/:uid 的部分更新体（uid 由路由提供）；至少一个可更新字段。
+ * weiboNick 空字符串 = 清除；昵称→UID 的解析在路由层做（需要注入 resolver）。
+ */
 export function parseStreamerPatch(body: unknown): Partial<StreamerInput> {
   const o = asObject(body);
-  rejectUnknownKeys(o, ['alias', 'mode', 'analyze', 'weiboUid', 'profileNote', 'roomId']);
+  rejectUnknownKeys(o, ['alias', 'watch', 'analyze', 'notify', 'weiboNick', 'profileNote']);
   const patch: Partial<StreamerInput> = {};
   if ('alias' in o) patch.alias = asNullableString(o.alias, 'alias');
-  if ('mode' in o) patch.mode = asEnum(o.mode, 'mode', STREAMER_MODES);
+  if ('watch' in o) patch.watch = asBoolean(o.watch, 'watch');
   if ('analyze' in o) patch.analyze = asBoolean(o.analyze, 'analyze');
-  if ('weiboUid' in o) patch.weiboUid = asNullableString(o.weiboUid, 'weiboUid');
+  if ('notify' in o) patch.notify = asBoolean(o.notify, 'notify');
+  if ('weiboNick' in o) {
+    const v = asNullableString(o.weiboNick, 'weiboNick');
+    patch.weiboNick = v === '' ? null : v; // 空串 = 清除
+  }
   if ('profileNote' in o) patch.profileNote = asNullableString(o.profileNote, 'profileNote');
-  if ('roomId' in o) patch.roomId = asNullableString(o.roomId, 'roomId');
   if (Object.keys(patch).length === 0) throw new HttpError(400, '没有可更新的字段');
   return patch;
 }

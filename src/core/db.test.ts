@@ -63,7 +63,10 @@ test('旧库迁移：新列补齐，旧数据原样保留', (t) => {
   for (const col of ['area_name', 'parent_area_name', 'keyframe', 'cover', 'online', 'last_live_at']) {
     assert.ok(columns(path, 'room_state').includes(col), `room_state 应补列 ${col}`);
   }
-  assert.ok(columns(path, 'streamers').includes('face'), 'streamers 应补列 face');
+  for (const col of ['face', 'watch', 'notify', 'weibo_nick']) {
+    assert.ok(columns(path, 'streamers').includes(col), `streamers 应补列 ${col}`);
+  }
+  assert.ok(!columns(path, 'streamers').includes('mode'), 'streamers 旧 mode 列应被删除');
   assert.ok(columns(path, 'follows').includes('face'), 'follows 应补列 face');
 
   // 旧数据还在，新列读出为缺省值
@@ -72,9 +75,53 @@ test('旧库迁移：新列补齐，旧数据原样保留', (t) => {
   assert.equal(state?.isLive, true);
   assert.equal(state?.areaName, '');
   assert.equal(state?.online, 0);
-  assert.equal(db.getStreamer('1')?.uname, '旧主播');
-  assert.equal(db.getStreamer('1')?.face, null);
+  const st = db.getStreamer('1')!;
+  assert.equal(st.uname, '旧主播');
+  assert.equal(st.face, null);
+  assert.equal(st.watch, true, '旧 mode=on → watch=1');
+  assert.equal(st.notify, true);
+  assert.equal(st.weiboNick, null);
   assert.equal(db.listFollows().find((f) => f.uid === '1')?.uname, '旧关注');
+});
+
+test('旧 mode 列迁移：off→watch=0，silent→notify=0，mode 列删除且幂等', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'mig.db');
+  const raw = new Database(path);
+  raw.exec(`
+    CREATE TABLE streamers (
+      uid TEXT PRIMARY KEY, uname TEXT NOT NULL DEFAULT '', alias TEXT,
+      room_id TEXT, weibo_uid TEXT,
+      mode TEXT NOT NULL DEFAULT 'on' CHECK(mode IN ('off','silent','on')),
+      analyze INTEGER NOT NULL DEFAULT 0, profile_note TEXT,
+      source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('follows','manual')),
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    INSERT INTO streamers (uid, uname, mode, analyze, created_at, updated_at) VALUES
+      ('1', 'A', 'on', 1, 1800000000, 1800000000),
+      ('2', 'B', 'off', 0, 1800000000, 1800000000),
+      ('3', 'C', 'silent', 0, 1800000000, 1800000000);
+  `);
+  raw.close();
+
+  db = new Db(path);
+
+  assert.ok(!columns(path, 'streamers').includes('mode'), 'mode 列应被删除');
+  const s1 = db.getStreamer('1')!;
+  assert.deepEqual([s1.watch, s1.notify, s1.analyze], [true, true, true], 'on → 全开，analyze 保留');
+  const s2 = db.getStreamer('2')!;
+  assert.deepEqual([s2.watch, s2.notify], [false, true], 'off → watch=0');
+  const s3 = db.getStreamer('3')!;
+  assert.deepEqual([s3.watch, s3.notify], [true, false], 'silent → notify=0');
+
+  // 幂等：再开一次（无 mode 列）不报错、数据不变
+  db.close();
+  db = new Db(path);
+  assert.deepEqual(
+    [db.getStreamer('2')!.watch, db.getStreamer('3')!.notify],
+    [false, false],
+    '二次打开不重复迁移',
+  );
 });
 
 test('saveRoomState / loadRoomStates 新字段往返一致', (t) => {

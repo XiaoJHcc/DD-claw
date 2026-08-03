@@ -255,3 +255,18 @@ test('curr.face 为空串时不做回填', async (t) => {
   await h.src.pollOnce();
   assert.equal(h.db.getStreamer('1')?.face, null, '空串 face 不写入');
 });
+
+test('直播间号回填：streamers.roomId 为空时用本轮 room_id 补上，已有值不覆盖', async (t) => {
+  const all = new Map([['1', room('1')], ['2', room('2')]]);
+  const h = harness(['1', '2'], async () => all);
+  t.after(h.cleanup);
+  // 1 roomId 为空（harness 预插时未给）；2 已有 roomId
+  h.db.upsertStreamer({ uid: '2', roomId: '已有房间号' });
+
+  await h.src.pollOnce();
+
+  const s1 = h.db.getStreamer('1')!;
+  assert.equal(s1.roomId, 'room-1', '空 roomId 被回填');
+  assert.equal(s1.alias, '别名1', '回填不碰其他字段');
+  assert.equal(h.db.getStreamer('2')?.roomId, '已有房间号', '已有 roomId 不覆盖');
+});

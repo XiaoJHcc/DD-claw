@@ -29,8 +29,8 @@ function sig(over: Partial<Signal> = {}): Signal {
 class FakeDb {
   sessions: string[] = [];
   notified = new Set<string>();
-  streamers = new Map<string, { alias: string | null; mode: string }>([
-    ['1', { alias: '阿梓', mode: 'on' }],
+  streamers = new Map<string, { alias: string | null; notify: boolean }>([
+    ['1', { alias: '阿梓', notify: true }],
   ]);
   clauses: PreferenceClause[] = [];
   recordSession(p: { roomId: string; liveTime: number }) {
@@ -149,15 +149,15 @@ test('live_end / title_change 不推送（M1 规则）', async () => {
   assert.equal(h.disp.sent.length, 0);
 });
 
-// ---- mode='silent'：追踪照常，推送抑制 ----
+// ---- notify=false（旧 silent 语义）：追踪照常，推送抑制 ----
 
-test("mode='silent'：抑制推送但 recordSession 照做", async () => {
+test('notify=false：抑制推送但 recordSession 照做', async () => {
   const h = harness();
-  h.db.streamers.set('1', { alias: '阿梓', mode: 'silent' });
+  h.db.streamers.set('1', { alias: '阿梓', notify: false });
   h.bus.emit(sig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 0);
-  assert.deepEqual(h.db.sessions, ['r1:1785310737'], 'silent 只跳推送，场次仍入库');
+  assert.deepEqual(h.db.sessions, ['r1:1785310737'], 'notify=false 只跳推送，场次仍入库');
   assert.equal(h.db.notified.size, 0);
 });
 

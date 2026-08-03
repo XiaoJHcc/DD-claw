@@ -8,7 +8,6 @@ var streamers = [];
 var modalUid = null;
 var SCENES = ['chatting', 'singing', 'gaming', 'show', 'other'];
 var SCENE_NAMES = { chatting: '杂谈', singing: '唱歌', gaming: '游戏', show: '演出', other: '其他' };
-var MODE_STATE = { on: ['green', '监听中'], silent: ['yellow', '静默'], off: ['gray', '停用'] };
 
 function avatarHtml(face, name, cls) {
   cls = cls || 'avatar';
@@ -19,16 +18,16 @@ function avatarHtml(face, name, cls) {
 // ---- 主播卡片列表 ----
 function streamerCard(s) {
   var name = s.alias || s.uname || String(s.uid);
-  var ms = MODE_STATE[s.mode] || ['gray', s.mode];
   var csum = (s.clauses && s.clauses.count > 0)
     ? s.clauses.count + ' 条子句 · 最高 ' + s.clauses.maxPriority : '无子句';
+  var state = '监听中' + (s.notify ? '' : ' · 推送关') + (s.analyze ? ' · LLM分析' : '');
   var left = '<div class="sc-left">' + avatarHtml(s.face, name) +
     '<div class="sc-name">' + esc(name) + '</div>' +
     '<div class="meta">UID ' + esc(s.uid) + '</div>' +
     '<div class="meta">直播间 ' + (s.roomId ? esc(s.roomId) : '—') + '</div>' +
-    '<div class="meta">微博 ' + (s.weiboUid ? esc(s.weiboUid) : '—') + '</div>' +
+    '<div class="meta">微博 ' + (s.weiboNick ? esc(s.weiboNick) : (s.weiboUid ? esc(s.weiboUid) : '—')) + '</div>' +
     '<div class="meta sc-note' + (s.profileNote ? '' : ' none') + '">' + esc(s.profileNote || '未填写') + '</div>' +
-    '<div class="meta"><span class="dot ' + ms[0] + '"></span>' + ms[1] + ' · ' + esc(csum) + '</div></div>';
+    '<div class="meta"><span class="dot green"></span>' + esc(state) + ' · ' + esc(csum) + '</div></div>';
   var right;
   if (s.live && s.live.isLive) {
     var img = s.live.keyframe || s.live.cover;
@@ -51,19 +50,18 @@ function streamerCard(s) {
 function loadStreamers() {
   return api('/api/streamers').then(function (j) {
     streamers = j.streamers || [];
-    // 主列表只展示监听中的（mode != off）；off 的回到关注区等待重新加入
-    var active = streamers.filter(function (s) { return s.mode !== 'off'; });
+    // 主列表只展示监听中的（watch=true）；关掉的回到关注区等待重新加入
+    var active = streamers.filter(function (s) { return s.watch; });
     document.getElementById('streamer-list').innerHTML =
       active.map(streamerCard).join('') || '<p class="hint">名单为空（从下方关注列表加入）。</p>';
   }).catch(function (e) { toast(e.message, true); });
 }
 
-// ---- 详情弹窗：全字段编辑 ----
-function modeOpts(m) {
-  var names = { off: 'off 不监听', silent: 'silent 追踪不推送', on: 'on 正常' };
-  return ['off', 'silent', 'on'].map(function (v) {
-    return '<option value="' + v + '"' + (v === m ? ' selected' : '') + '>' + names[v] + '</option>';
-  }).join('');
+// ---- 详情弹窗：上半区（别名/三开关/直播间号/微博/画像），下半区偏好子句 ----
+function switchRow(id, checked, label, hint) {
+  return '<div class="wfull"><label><input type="checkbox" id="' + id + '"' +
+    (checked ? ' checked' : '') + '> ' + label + '</label>' +
+    '<div class="hint">' + hint + '</div></div>';
 }
 function fieldVal(id) { var v = document.getElementById(id).value.trim(); return v || null; }
 function openStreamer(uid) {
@@ -73,11 +71,21 @@ function openStreamer(uid) {
   modalUid = s.uid;
   openModal(
     '<h3>' + esc(s.alias || s.uname || s.uid) + ' <small>UID ' + esc(s.uid) + '</small></h3>' +
-    '<div class="mrow"><label>别名 <input id="f-alias" value="' + esc(s.alias || '') + '"></label>' +
-    '<label>模式 <select id="f-mode">' + modeOpts(s.mode) + '</select></label>' +
-    '<label><input type="checkbox" id="f-analyze"' + (s.analyze ? ' checked' : '') + '> 分析</label></div>' +
-    '<div class="mrow"><label>直播间号 <input id="f-room" value="' + esc(s.roomId || '') + '"></label>' +
-    '<label>微博 uid <input id="f-weibo" value="' + esc(s.weiboUid || '') + '"></label></div>' +
+    '<div class="mrow"><label class="wfull">别名 <input id="f-alias" class="wfull" value="' +
+      esc(s.alias || '') + '"></label></div>' +
+    '<div class="mrow">' +
+      switchRow('f-watch', s.watch, '监听', '抓取开播状态和动态（关闭后此主播移出主列表，回到关注区）') +
+      switchRow('f-analyze', s.analyze, 'LLM 分析', '开播后对直播内容做归类（功能未接入，先存设置）') +
+      switchRow('f-notify', s.notify, '推送', '命中偏好时发通知（关闭 = 只记录不打扰）') +
+    '</div>' +
+    '<div class="mrow"><label class="wfull">直播间号 <span>' +
+      (s.roomId ? esc(s.roomId) : '<span class="hint">获取中…（轮询回填后自动出现）</span>') +
+      '</span></label></div>' +
+    '<div class="mrow"><label class="wfull">微博 <input id="f-weibo" class="wfull" value="' +
+      esc(s.weiboNick || '') + '" placeholder="微博昵称">' +
+      (s.weiboUid ? '<span class="hint">已解析 UID：' + esc(s.weiboUid) + '</span>' : '') +
+      '</label></div>' +
+    '<p class="hint">填微博昵称，保存时自动解析为 UID；改名后重新填一次即可</p>' +
     '<div class="mrow"><label class="wfull">画像 <input id="f-note" class="wfull" value="' +
       esc(s.profileNote || '') + '" placeholder="常见内容 / 语言风格 / 优先级经验"></label></div>' +
     '<div class="mrow"><button onclick="saveStreamer()">保存</button> ' +
@@ -98,9 +106,11 @@ function runModal(p, okMsg) {
 }
 function saveStreamer() {
   runModal(api('/api/streamers/' + modalUid, 'PUT', {
-    alias: fieldVal('f-alias'), mode: document.getElementById('f-mode').value,
+    alias: fieldVal('f-alias'),
+    watch: document.getElementById('f-watch').checked,
     analyze: document.getElementById('f-analyze').checked,
-    roomId: fieldVal('f-room'), weiboUid: fieldVal('f-weibo'), profileNote: fieldVal('f-note'),
+    notify: document.getElementById('f-notify').checked,
+    weiboNick: fieldVal('f-weibo'), profileNote: fieldVal('f-note'),
   }), '已保存');
 }
 

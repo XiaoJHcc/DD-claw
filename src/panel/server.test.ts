@@ -17,7 +17,7 @@ interface Fixture {
 /** 真实 http.Server 绑临时端口 + 内存库；connection:close 避免 keep-alive 挂住测试进程 */
 async function setup(
   t: import('node:test').TestContext,
-  opts: { auth?: PanelDeps['auth'] } = {},
+  opts: { auth?: PanelDeps['auth']; weiboResolver?: PanelDeps['weiboResolver'] } = {},
 ): Promise<Fixture> {
   const db = new Db(':memory:');
   const status: PanelStatus = {
@@ -32,6 +32,7 @@ async function setup(
   };
   const server: Server = createPanelServer({
     db,
+    weiboResolver: opts.weiboResolver,
     status: () => ({
       ...status,
       watchedCount: db.listWatchedUids().length,
@@ -103,13 +104,19 @@ test('GET /api/streamers：enrich face / live=null / clauses 摘要与 maxPriori
   const r = await api(base, '/api/streamers');
   assert.equal(r.status, 200);
   const list = r.json['streamers'] as Array<{
-    uid: string; face: string | null;
+    uid: string; face: string | null; roomId: string | null;
+    watch: boolean; notify: boolean; analyze: boolean;
+    weiboNick: string | null; weiboUid: string | null;
     live: unknown; clauses: { count: number; maxPriority: string | null };
   }>;
   const s1 = list.find((s) => s.uid === '1001')!;
   const s2 = list.find((s) => s.uid === '1002')!;
   assert.equal(s1.face, 'https://i0.hdslb.com/f1.jpg');
   assert.equal(s2.face, null);
+  assert.deepEqual([s1.watch, s1.notify, s1.analyze], [true, true, false], '三开关注出布尔');
+  assert.equal(s1.weiboNick, null);
+  assert.equal(s1.weiboUid, null);
+  assert.equal(s1.roomId, null);
   assert.equal(s1.live, null, '无 room_state 记录时 live=null');
   assert.deepEqual(s1.clauses, { count: 3, maxPriority: 'high' },
     'maxPriority 取最高档（high>normal>low），disabled 子句也计入');
@@ -164,56 +171,130 @@ test('GET /api/streamers：有 room_state 时 live 带实况字段与下播锚�
 
 test('PUT /api/streamers 部分更新（未提供字段保留原值）', async (t) => {
   const { db, base } = await setup(t);
-  db.upsertStreamer({ uid: '1001', uname: '阿梓', alias: '梓宝', mode: 'on' });
+  db.upsertStreamer({ uid: '1001', uname: '阿梓', alias: '梓宝' });
 
-  const r = await api(base, '/api/streamers/1001', 'PUT', { mode: 'silent', analyze: true });
+  const r = await api(base, '/api/streamers/1001', 'PUT', { notify: false, analyze: true });
   assert.equal(r.status, 200);
   const s = db.getStreamer('1001')!;
-  assert.equal(s.mode, 'silent');
+  assert.equal(s.notify, false);
   assert.equal(s.analyze, true);
+  assert.equal(s.watch, true, '未提供的开关保留原值');
   assert.equal(s.alias, '梓宝', '未提供的字段保留原值');
 });
 
-test('PUT /api/streamers 校验：坏 uid / 未知 uid / 坏 mode / 未知字段 / 坏 JSON / 空补丁', async (t) => {
+test('PUT /api/streamers 校验：坏 uid / 未知 uid / 旧 mode 字段 / 未知字段 / 坏 JSON / 空补丁', async (t) => {
   const { db, base } = await setup(t);
   db.upsertStreamer({ uid: '1001' });
 
-  assert.equal((await api(base, '/api/streamers/abc', 'PUT', { mode: 'on' })).status, 400);
-  assert.equal((await api(base, '/api/streamers/9999', 'PUT', { mode: 'on' })).status, 404);
+  assert.equal((await api(base, '/api/streamers/abc', 'PUT', { watch: true })).status, 400);
+  assert.equal((await api(base, '/api/streamers/9999', 'PUT', { watch: true })).status, 404);
 
-  const badMode = await api(base, '/api/streamers/1001', 'PUT', { mode: 'banana' });
-  assert.equal(badMode.status, 400);
-  assert.match(badMode.json.error ?? '', /mode/);
+  const oldMode = await api(base, '/api/streamers/1001', 'PUT', { mode: 'on' });
+  assert.equal(oldMode.status, 400, '旧 mode 字段不再可写');
+  assert.match(oldMode.json.error ?? '', /未知字段/);
+
+  const badBool = await api(base, '/api/streamers/1001', 'PUT', { watch: 'yes' });
+  assert.equal(badBool.status, 400);
+  assert.match(badBool.json.error ?? '', /watch/);
 
   assert.equal((await api(base, '/api/streamers/1001', 'PUT', { nickname: 'x' })).status, 400);
   assert.equal((await api(base, '/api/streamers/1001', 'PUT', {})).status, 400);
+  assert.equal((await api(base, '/api/streamers/1001', 'PUT', { roomId: '123' })).status, 400,
+    'roomId 不再可写（轮询自动回填）');
 
   const badJson = await api(base, '/api/streamers/1001', 'PUT', undefined, '{oops');
   assert.equal(badJson.status, 400);
   assert.match(badJson.json.error ?? '', /JSON/);
 });
 
+// ---- weiboNick：昵称→UID 解析（mock resolver）----
+
+test('PUT weiboNick：解析成功 → weibo_nick + weibo_uid 一起入库', async (t) => {
+  const calls: string[] = [];
+  const { db, base } = await setup(t, {
+    weiboResolver: { resolveUid: async (nick) => { calls.push(nick); return '2203177060'; } },
+  });
+  db.upsertStreamer({ uid: '1001', uname: '阿梓' });
+
+  const r = await api(base, '/api/streamers/1001', 'PUT', { weiboNick: '阿梓从小就很可爱' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(calls, ['阿梓从小就很可爱']);
+  const s = db.getStreamer('1001')!;
+  assert.equal(s.weiboNick, '阿梓从小就很可爱');
+  assert.equal(s.weiboUid, '2203177060');
+  const body = r.json['streamer'] as { weiboNick: string; weiboUid: string };
+  assert.equal(body.weiboUid, '2203177060', '响应里也带解析结果');
+
+  // 与现值相同 → 不重复解析
+  const again = await api(base, '/api/streamers/1001', 'PUT', { weiboNick: '阿梓从小就很可爱' });
+  assert.equal(again.status, 200);
+  assert.equal(calls.length, 1, '昵称未变化时不重复解析');
+});
+
+test('PUT weiboNick：昵称不存在 400 / 解析器异常 400 / 未注入 resolver 400', async (t) => {
+  const { db, base } = await setup(t, {
+    weiboResolver: {
+      resolveUid: async (nick) => {
+        if (nick === '不存在的人') return null;
+        throw new Error('微博访客令牌申请失败（HTTP 500）');
+      },
+    },
+  });
+  db.upsertStreamer({ uid: '1001' });
+
+  const notFound = await api(base, '/api/streamers/1001', 'PUT', { weiboNick: '不存在的人' });
+  assert.equal(notFound.status, 400);
+  assert.match(notFound.json.error ?? '', /找不到这个昵称/);
+  assert.equal(db.getStreamer('1001')?.weiboNick, null, '失败不入库');
+
+  const netErr = await api(base, '/api/streamers/1001', 'PUT', { weiboNick: '别人' });
+  assert.equal(netErr.status, 400);
+  assert.match(netErr.json.error ?? '', /解析失败/);
+  assert.match(netErr.json.error ?? '', /HTTP 500/, '带上解析器给的原因');
+
+  const noResolver = await setup(t);
+  noResolver.db.upsertStreamer({ uid: '1001' });
+  const r = await api(noResolver.base, '/api/streamers/1001', 'PUT', { weiboNick: '阿梓' });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error ?? '', /微博解析不可用/);
+});
+
+test('PUT weiboNick：传空 → weibo_nick 与 weibo_uid 一起清空', async (t) => {
+  const { db, base } = await setup(t, {
+    weiboResolver: { resolveUid: async () => { throw new Error('不该被调用'); } },
+  });
+  db.upsertStreamer({ uid: '1001', weiboNick: '阿梓从小就很可爱', weiboUid: '2203177060' });
+
+  const r = await api(base, '/api/streamers/1001', 'PUT', { weiboNick: '' });
+  assert.equal(r.status, 200);
+  const s = db.getStreamer('1001')!;
+  assert.equal(s.weiboNick, null);
+  assert.equal(s.weiboUid, null, '清空时 uid 一起清');
+});
+
 // ---- 候选池一键加入 ----
 
-test('POST /api/streamers/:uid/watch：候选池加入（拷 uname+face）/ 重复 409 / mode=off 重新打开', async (t) => {
+test('POST /api/streamers/:uid/watch：候选池加入（拷 uname+face）/ 重复 409 / watch=0 重新打开', async (t) => {
   const { db, base } = await setup(t);
   db.upsertFollows([{ uid: '2001', uname: '阿梓', face: 'https://i0.hdslb.com/f1.jpg' }]);
-  db.upsertStreamer({ uid: '2002', uname: '旧人', mode: 'off', alias: '保留我' });
+  db.upsertStreamer({ uid: '2002', uname: '旧人', watch: false, alias: '保留我' });
 
   const r = await api(base, '/api/streamers/2001/watch', 'POST');
   assert.equal(r.status, 200);
   const s = db.getStreamer('2001')!;
-  assert.equal(s.mode, 'on');
+  assert.equal(s.watch, true);
+  assert.equal(s.notify, true, '新行默认 notify=1');
+  assert.equal(s.analyze, false, '新行默认 analyze=0');
   assert.equal(s.source, 'follows');
   assert.equal(s.uname, '阿梓', 'uname 从 follows 预填');
   assert.equal(s.face, 'https://i0.hdslb.com/f1.jpg', 'face 也从 follows 拷贝');
 
   const dup = await api(base, '/api/streamers/2001/watch', 'POST');
-  assert.equal(dup.status, 409, '已在名单（mode!=off）不得重复加入');
+  assert.equal(dup.status, 409, '已在名单（watch=1）不得重复加入');
 
   const re = await api(base, '/api/streamers/2002/watch', 'POST');
   assert.equal(re.status, 200);
-  assert.equal(db.getStreamer('2002')!.mode, 'on', 'mode=off 的已有条目重新打开');
+  assert.equal(db.getStreamer('2002')!.watch, true, 'watch=0 的已有条目重新打开');
   assert.equal(db.getStreamer('2002')!.alias, '保留我', '已有字段不被覆盖');
 });
 
@@ -224,7 +305,7 @@ test('GET /api/follows：只回 is_followed=1，带 face 并标注 watched', asy
     { uid: '2002', uname: 'B' },
   ]);
   db.markFollowsSynced(['2001'], 1_800_000_000); // 2002 取关
-  db.upsertStreamer({ uid: '2001', mode: 'on' });
+  db.upsertStreamer({ uid: '2001', watch: true });
 
   const r = await api(base, '/api/follows');
   assert.equal(r.status, 200);
@@ -289,8 +370,8 @@ test('clause 校验：坏 uid / 坏 scenes / 坏 targets / 坏置信度 / 坏 id
 
 test('GET /api/status 返回装配处注入的新形状状态', async (t) => {
   const { db, base } = await setup(t);
-  db.upsertStreamer({ uid: '1001', mode: 'on' });
-  db.upsertStreamer({ uid: '1002', mode: 'off' });
+  db.upsertStreamer({ uid: '1001', watch: true });
+  db.upsertStreamer({ uid: '1002', watch: false });
   db.saveRoomState('1001', {
     roomId: '80397', isLive: true, liveTime: 1_800_000_000, title: 't',
     areaName: '', parentAreaName: '', keyframe: '', cover: '', online: 0, face: '',
@@ -300,7 +381,7 @@ test('GET /api/status 返回装配处注入的新形状状态', async (t) => {
   assert.equal(r.status, 200);
   assert.ok(typeof r.json['startedAt'] === 'number');
   assert.deepEqual(r.json['notifiers'], ['onebot', 'toast']);
-  assert.equal(r.json['watchedCount'], 1, '只数 mode!=off');
+  assert.equal(r.json['watchedCount'], 1, '只数 watch=1');
   assert.equal(r.json['liveCount'], 1, '只数 is_live=1');
   assert.deepEqual(r.json['platforms'], [
     { key: 'bili', name: 'B站', state: 'ok', mid: '999' },

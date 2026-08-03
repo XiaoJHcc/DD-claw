@@ -23,6 +23,8 @@ export const subscriptionSchema = z.object({
   uid: z.string().regex(/^\d+$/, 'uid 必须是纯数字'),
   alias: z.string().min(1),
   enabled: z.boolean().default(true),
+  /** 历史遗留字段（off/silent/on），种子导入时兼容映射为 watch/notify 开关 */
+  mode: z.enum(['off', 'silent', 'on']).optional(),
 });
 
 export const configSchema = z.object({

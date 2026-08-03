@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
-import type { Priority } from '../core/streamers.js';
+import type { Priority, Streamer, StreamerInput } from '../core/streamers.js';
 import {
   HttpError, parseClausePatch, parseNewClause, parseStreamerPatch, parseUid,
   readJsonBody, sendJson,
@@ -14,6 +14,7 @@ import {
 import { PANEL_PAGE } from './page.js';
 import { cookieHeader, fetchSelf, loadCookies, saveCookies, type SelfInfo } from '../sources/bili/auth.js';
 import { generateQrcode, pollQrcode } from '../sources/bili/qrcode.js';
+import type { WeiboResolver } from '../sources/weibo/resolve.js';
 
 const log = makeLogger('panel');
 
@@ -37,6 +38,8 @@ export interface PanelStatus {
 export interface PanelDeps {
   db: Db;
   status: () => PanelStatus;
+  /** 微博昵称→UID 解析器；不注入时 PUT 带 weiboNick 一律 400 */
+  weiboResolver?: WeiboResolver;
   /** 扫码登录支持；不注入则 /api/auth/* 一律 404 */
   auth?: {
     cookiePath: string;
@@ -86,12 +89,12 @@ async function handle(
     return;
   }
   if (method === 'GET' && path === '/api/follows') {
-    const modes = new Map(db.listStreamers().map((s) => [s.uid, s.mode]));
+    const watching = new Map(db.listStreamers().map((s) => [s.uid, s.watch]));
     const follows = db.listFollows(true).map((f) => ({
       uid: f.uid,
       uname: f.uname,
       face: f.face,
-      watched: (modes.get(f.uid) ?? 'off') !== 'off',
+      watched: watching.get(f.uid) === true,
     }));
     sendJson(res, 200, { follows });
     return;
@@ -125,8 +128,11 @@ async function handle(
       return;
     }
     if (!sm[2] && method === 'PUT') {
-      if (!db.getStreamer(uid)) throw new HttpError(404, '该 uid 不在监听名单');
-      db.upsertStreamer({ uid, ...parseStreamerPatch(await readJsonBody(req)) });
+      const prev = db.getStreamer(uid);
+      if (!prev) throw new HttpError(404, '该 uid 不在监听名单');
+      const patch = parseStreamerPatch(await readJsonBody(req));
+      await resolveWeiboNick(deps, prev, patch);
+      db.upsertStreamer({ uid, ...patch });
       sendJson(res, 200, { streamer: db.getStreamer(uid) });
       return;
     }
@@ -186,17 +192,45 @@ function enrichedStreamers(db: Db): unknown[] {
   });
 }
 
-/** 候选池一键加入监听；已有条目不碰来源，仅 mode=off 时重新打开。uname/face 从 follows 预填。 */
+/** 候选池一键加入监听；已有条目不碰来源，仅 watch=0 时重新打开。新行默认 notify=1、analyze=0。uname/face 从 follows 预填。 */
 function watchStreamer(db: Db, uid: string): unknown {
   const existing = db.getStreamer(uid);
-  if (existing && existing.mode !== 'off') throw new HttpError(409, '该主播已在监听名单');
+  if (existing?.watch) throw new HttpError(409, '该主播已在监听名单');
   if (existing) {
-    db.upsertStreamer({ uid, mode: 'on' });
+    db.upsertStreamer({ uid, watch: true });
   } else {
     const follow = db.listFollows(true).find((f) => f.uid === uid);
-    db.upsertStreamer({ uid, uname: follow?.uname, face: follow?.face ?? null, mode: 'on', source: 'follows' });
+    db.upsertStreamer({ uid, uname: follow?.uname, face: follow?.face ?? null, watch: true, source: 'follows' });
   }
   return { streamer: db.getStreamer(uid) };
+}
+
+/**
+ * PUT 里的 weiboNick 处理：与库中现值不同才解析（改名后重新填一次即可）。
+ * 解析到 UID → weibo_nick + weibo_uid 一起存；昵称不存在 / 网络错误 → 400；
+ * 传空（null）→ 两个字段一起清空。与现值相同 → 不解析（weibo_uid 保持原值）。
+ */
+async function resolveWeiboNick(
+  deps: PanelDeps,
+  prev: Streamer,
+  patch: Partial<StreamerInput>,
+): Promise<void> {
+  if (patch.weiboNick === undefined) return;
+  if (patch.weiboNick === null || patch.weiboNick === '') {
+    patch.weiboNick = null;
+    patch.weiboUid = null;
+    return;
+  }
+  if (patch.weiboNick === prev.weiboNick) return;
+  if (!deps.weiboResolver) throw new HttpError(400, '微博解析不可用');
+  let uid: string | null;
+  try {
+    uid = await deps.weiboResolver.resolveUid(patch.weiboNick);
+  } catch (e) {
+    throw new HttpError(400, `微博昵称解析失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (uid === null) throw new HttpError(400, '微博上找不到这个昵称');
+  patch.weiboUid = uid;
 }
 
 /** 轮询扫码状态；confirmed 时落盘 + 热重启回调 + 用新 cookie 查 mid。cookie 值不出现在响应里。 */

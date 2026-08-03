@@ -67,7 +67,7 @@
 | `src/core/state.ts` | 纯函数状态机 `diffRoom(prev, curr)` → Signal；`(room_id, live_time)` 是一场直播的身份；轮播（`live_status=2`）视为未开播；拉取失败不产 Signal；无 prev 也如实产 live_start（抑制政策在 pipeline） |
 | `src/core/scheduler.ts` | `PeriodicTask`：通用周期任务器（间隔+抖动+自调度不重叠），不含业务逻辑 |
 | `src/core/pipeline.ts` | 信号编排唯一装配点：bus → 冷启动抑制 → silent 抑制（追踪照常） → 分析队列（null 则 L0 兜底） → 护栏 → matcher/默认文案 → 推送；信号处理并发 4；health_alert → alertAll（payload 带 `message` 时用自定义文案） |
-| `src/core/db.ts` | better-sqlite3。已有六表：`live_sessions` / `notify_log` / `room_state`（已扩展展示列 area_name/parent_area_name/keyframe/cover/online/last_live_at，存库迁移自动补列；`countLiveRooms()` / `listRoomStatesFull()` 供面板）/ `streamers`（监听名单，事实来源，含 face）/ `follows`（关注候选池，含 face）/ `preference_clauses`（偏好子句）。**待扩展**：`signals` / `posts` / `snapshots` / `verdicts` / `schedules` |
+| `src/core/db.ts` | better-sqlite3。已有六表：`live_sessions` / `notify_log` / `room_state`（已扩展展示列 area_name/parent_area_name/keyframe/cover/online/last_live_at，存库迁移自动补列；`countLiveRooms()` / `listRoomStatesFull()` 供面板）/ `streamers`（监听名单，事实来源，含 face；三开关 `watch`/`analyze`/`notify` 替代旧 `mode` 列——启动迁移：off→watch=0、silent→notify=0 后 DROP mode；另有 `weibo_nick` 列）/ `follows`（关注候选池，含 face）/ `preference_clauses`（偏好子句）。**待扩展**：`signals` / `posts` / `snapshots` / `verdicts` / `schedules` |
 | `src/core/streamers.ts` | streamers / follows / preference_clauses 三表的行类型与「行 ↔ 对象」映射（JSON 字段序列化集中在此）；监听名单 CRUD 是 `Db` 的方法 |
 | `src/core/concurrency.ts` | `mapLimit` 有界并发工具 |
 
@@ -78,7 +78,7 @@
 | `src/sources/types.ts` | `Source` / `SourceContext` 接口：只产 Signal + 归档，不含通知逻辑 | ✅ |
 | `src/sources/bili/client.ts` | HTTP 层：强制注入 UA、超时重试、HTTP 错误与业务错误（`code != 0`）分层 | ✅ |
 | `src/sources/bili/live-status.ts` | 批量 `get_status_info_by_uids`（POST，50/片）；缺 key = 未开播，不是失败 | ✅ |
-| `src/sources/bili/live-status-source.ts` | 轮询 + diff + 批量落状态 + `coldStart` 标记 + 健康计数发 `health_alert` 信号 | ✅ |
+| `src/sources/bili/live-status-source.ts` | 轮询 + diff + 批量落状态 + `coldStart` 标记 + 健康计数发 `health_alert` 信号；face / roomId 空值回填（已有值不覆盖） | ✅ |
 | `src/sources/bili/types.ts` | 接口返回类型 | ✅ |
 | `src/sources/bili/wbi.ts` | WBI 签名（弹幕/动态接口前置） | ⬜ |
 | `src/sources/bili/auth.ts` | cookie 管理：`loadCookies`（cookies.json 整套字段，坏 JSON 启动即失败）/ `saveCookies`（扫码落盘，merge：新值覆盖、旧值兜底）/ `cookieHeader`（绝不进日志）/ `fetchSelf`（nav isLogin 心跳，-101 归一化为未登录） | ✅ |
@@ -88,6 +88,7 @@
 | `src/sources/bili/danmaku.ts` | 弹幕 WS，开播拉起、下播关闭；采样进分析队列 | ⬜ |
 | `src/sources/bili/dynamic.ts` | 空间动态 → posts 表 + feed_post 信号 | ⬜ |
 | `src/sources/weibo/feed.ts` | 微博时间线（config 配 `weiboUid` 映射） | ⬜ |
+| `src/sources/weibo/resolve.ts` | 昵称→UID 解析（匿名访客通道：genvisitor 拿 tid → incarnate 拿 SUB/SUBP → m.weibo.cn/n/<昵称> 302 /u/<uid>；cookie 模块级缓存、失效自动重建重试一次、绝不进日志；fetch 可注入） | ✅ 已实测昵称解析 |
 | `src/sources/media/keyframe.ts` | 画面采样 → snapshots 表 | ⬜ |
 
 ### analysis — 分析（LLM 即任务）
@@ -128,10 +129,10 @@
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
-| `src/panel/server.ts` | `createPanelServer({ db, status, auth? })`：同进程 node:http，零框架零依赖，只绑 127.0.0.1；REST API 读写 streamers/follows/preference_clauses 三表 + `/api/status`（platforms/liveCount 新形状）；`/api/streamers` enrich（face + live 实况 + clauses 摘要，一次请求三表各查一次）；`/api/auth/bili/qrcode` + `/poll` 扫码登录（auth dep 存在才挂载，confirmed → saveCookies 落盘 → onCookiesSaved 热重启 follows）；cookie 值不进任何响应/日志 | ✅ v1 |
+| `src/panel/server.ts` | `createPanelServer({ db, status, weiboResolver?, auth? })`：同进程 node:http，零框架零依赖，只绑 127.0.0.1；REST API 读写 streamers/follows/preference_clauses 三表 + `/api/status`（platforms/liveCount 新形状）；`/api/streamers` enrich（三开关 + face + live 实况 + clauses 摘要，一次请求三表各查一次）；`PUT /api/streamers/:uid` 可写键 alias/watch/analyze/notify/weiboNick/profileNote（weiboNick 与现值不同才走 resolver 解析，成功连同 weibo_uid 入库，找不到/网络错误 400，传空两字段一起清；resolver 未注入时 400「微博解析不可用」）；`/api/auth/bili/qrcode` + `/poll` 扫码登录（auth dep 存在才挂载，confirmed → saveCookies 落盘 → onCookiesSaved 热重启 follows）；cookie 值不进任何响应/日志 | ✅ v1 |
 | `src/panel/http-util.ts` | 请求体解析（64KB 上限）、参数校验（400 + 中文错误）、JSON 响应 | ✅ |
 | `src/panel/page.ts` | 内嵌单页 HTML 拼壳（原生 fetch，无 CDN 离线可用；dist 不拷静态文件故内嵌；脚本段内不得出现反引号与 `${`） | ✅ |
-| `src/panel/page/` | 单页拆分：`style.ts` 样式 / `qr-lib.ts` 二维码库（base64 内嵌）/ `app-core.ts` 公共段 / `app-status.ts` 运行状态卡 + 扫码登录弹窗 / `app-streamers.ts` 主播卡片（实况展示）+ 详情弹窗（全字段编辑 + 子句 CRUD）+ 关注未监听区 | ✅ |
+| `src/panel/page/` | 单页拆分：`style.ts` 样式 / `qr-lib.ts` 二维码库（base64 内嵌）/ `app-core.ts` 公共段 / `app-status.ts` 运行状态卡 + 扫码登录弹窗 / `app-streamers.ts` 主播卡片（实况展示 + 三开关状态点）+ 详情弹窗（别名/三开关/直播间号只读/微博昵称/画像 + 子句 CRUD）+ 关注未监听区 | ✅ |
 
 v1 范围：三卡片（运行状态 / 时间表占位 / 主播列表）；B站扫码登录（平台状态点：none/imported/ok/expired，弹窗出二维码轮询，确认后落盘热重启）；主播卡片实况（在播：关键帧/标题/分区/开播时长/在线；下播：下播时长锚点 last_live_at）；子句摘要（count + maxPriority）。v2 预留：verdicts 总览、时间表日历（M3）。
 
@@ -141,7 +142,7 @@ v1 范围：三卡片（运行状态 / 时间表占位 / 主播列表）；B站�
 |---|---|
 | `src/index.ts` | 装配入口 + CLI：`--dry-run` / `--test-notify` / `--probe` / `--force-uid`；`panel.enabled` 时起控制面板；follows source 单独持有（扫码登录后 `onCookiesSaved` 热重启，shutdown 停最新实例）；`onLoginState` → 面板平台状态 |
 | `src/config/index.ts` | 读 `.env` + `config.json`（JSONC 注释、BOM 剥离），zod 启动即校验 |
-| `src/config/schema.ts` | 配置 schema；秘密只在 `.env` / `cookies.json`。`subscriptions` 已迁库（streamers 表），仅作首次启动种子，可省略。`follows`：关注列表同步开关 + 间隔（默认 1800s，下限 300s）。`panel`：控制面板开关 + 端口（默认 8787，只绑 127.0.0.1）。待扩展：weiboUid 映射 |
+| `src/config/schema.ts` | 配置 schema；秘密只在 `.env` / `cookies.json`。`subscriptions` 已迁库（streamers 表），仅作首次启动种子，可省略（旧 `mode` 字段兼容映射为 watch/notify）。`follows`：关注列表同步开关 + 间隔（默认 1800s，下限 300s）。`panel`：控制面板开关 + 端口（默认 8787，只绑 127.0.0.1）。待扩展：weiboUid 映射 |
 | `src/logger.ts` | 极简结构化日志 |
 
 ## 开发约定
@@ -158,7 +159,7 @@ v1 范围：三卡片（运行状态 / 时间表占位 / 主播列表）；B站�
 ```bash
 npm run dev          # tsx watch 开发
 npm run build        # tsc → dist/，常驻用 node dist/index.js
-npm test             # node --test（state/bus/pipeline/concurrency/streamers/db/live-status-source/auth/follows/qrcode/rules/config/l0/matcher/onebot/panel）
+npm test             # node --test（state/bus/pipeline/concurrency/streamers/db/live-status-source/auth/follows/qrcode/weibo-resolve/rules/config/l0/matcher/onebot/panel）
 npm run probe        # 只查一次开播状态，验证接口通不通
 npm run test-notify  # 假事件走完整推送链路，验证 NapCat/Toast 配置
 ```
@@ -175,5 +176,5 @@ npm run test-notify  # 假事件走完整推送链路，验证 NapCat/Toast 配�
 
 - **M1（开播通知）**：代码完成，测试通过。**NapCat 未部署**，QQ 通道未实测
 - **M2 第 0 步（架构纠偏）**：完成。bus / pipeline / PeriodicTask / Source 接口 / 分析队列 / PushMessage 落地，行为与 M1 对齐，测试全绿
-- **M2（规模化 + 内容判定）**：进行中。监听名单已迁库：`streamers` / `follows` / `preference_clauses` 三表 + CRUD + config 种子导入完成，source 名单改读 `listWatchedUids()`，测试全绿。**cookie 管理 + 关注列表同步已落地**：`auth.ts`（cookies.json 整套字段 + nav isLogin 心跳，端点 `x/web-interface/nav`，旧 `x/member/web/nav` 已 404）+ `FollowsSource`（心跳合并进同步周期、失效告警一次、单页失败整轮放弃；关注不自动入监听，follows 表仅作面板候选池），分页已实测（604 关注 13 页），测试全绿。**无 LLM 偏好执行链路已落地**：L0 关键词分类器（与 LLM 同形 verdict，队列返回 null 时兜底）→ matcher（子句 × verdict → 文案/优先级/目标）→ OneBot 按 `msg.targets` 定向 + `mode='silent'` 抑制推送（追踪照常），测试全绿。**控制面板 v0 已落地**：`src/panel/`（node:http 只绑 127.0.0.1，内嵌单页无依赖），名单三态/画像编辑、候选池一键加入、偏好子句 CRUD、系统状态展示，改库即生效无需重启，测试全绿。**控制面板 v1 已落地**：三卡片产品化展示（运行状态 platforms/liveCount、时间表占位、主播卡片实况）+ B站扫码登录（passport generate/poll，confirmed → saveCookies merge 落盘 → onCookiesSaved 热重启 follows source；`onLoginState` 心跳驱动平台状态点 none/imported/ok/expired）+ 主播卡片实况（room_state 展示列 + last_live_at 下播锚点 + clauses 摘要）。扫码链路已真实实测通过（2026-08-03：扫码 → 落 cookie → 热重启 → 心跳 ok → 604 关注同步入库）。后续：动态/微博源，见 design.md §6；面板 v2 = verdicts 总览、时间表日历（M3）
+- **M2（规模化 + 内容判定）**：进行中。监听名单已迁库：`streamers` / `follows` / `preference_clauses` 三表 + CRUD + config 种子导入完成，source 名单改读 `listWatchedUids()`，测试全绿。**cookie 管理 + 关注列表同步已落地**：`auth.ts`（cookies.json 整套字段 + nav isLogin 心跳，端点 `x/web-interface/nav`，旧 `x/member/web/nav` 已 404）+ `FollowsSource`（心跳合并进同步周期、失效告警一次、单页失败整轮放弃；关注不自动入监听，follows 表仅作面板候选池），分页已实测（604 关注 13 页），测试全绿。**无 LLM 偏好执行链路已落地**：L0 关键词分类器（与 LLM 同形 verdict，队列返回 null 时兜底）→ matcher（子句 × verdict → 文案/优先级/目标）→ OneBot 按 `msg.targets` 定向 + `notify=false` 抑制推送（追踪照常），测试全绿。**控制面板 v0 已落地**：`src/panel/`（node:http 只绑 127.0.0.1，内嵌单页无依赖），名单管理/画像编辑、候选池一键加入、偏好子句 CRUD、系统状态展示，改库即生效无需重启，测试全绿。**控制面板 v1 已落地**：三卡片产品化展示（运行状态 platforms/liveCount、时间表占位、主播卡片实况）+ B站扫码登录（passport generate/poll，confirmed → saveCookies merge 落盘 → onCookiesSaved 热重启 follows source；`onLoginState` 心跳驱动平台状态点 none/imported/ok/expired）+ 主播卡片实况（room_state 展示列 + last_live_at 下播锚点 + clauses 摘要）。扫码链路已真实实测通过（2026-08-03：扫码 → 落 cookie → 热重启 → 心跳 ok → 604 关注同步入库）。后续：动态/微博源，见 design.md §6；面板 v2 = verdicts 总览、时间表日历（M3）
 - **M3（预告时间表）/ M4（偏好与路由）/ M5（产品化）**：未开始
