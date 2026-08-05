@@ -26,17 +26,23 @@ export class ToastNotifier implements Notifier {
   ) {}
 
   async send(msg: PushMessage): Promise<NotifyResult[]> {
-    return [await this.show(msg.title, msg.body, msg.image ?? '', msg.url ?? '')];
+    return [await this.show(msg.title, msg.body, msg.image ?? '', msg.url ?? '', msg.icon ?? '', msg.attribution ?? '')];
   }
 
   async alert(title: string, body: string): Promise<void> {
-    await this.show(`⚠️ ${title}`, body, '', '');
+    await this.show(`【告警】${title}`, body, '', '', '', '');
   }
 
-  private async show(title: string, message: string, image: string, url: string): Promise<NotifyResult> {
+  private async show(
+    title: string, message: string, image: string, url: string,
+    icon: string, attribution: string,
+  ): Promise<NotifyResult> {
     // Win32 身份要本地图；没配缓存目录就放弃图，不阻塞通知
     if (image && /^https?:/i.test(image)) {
       image = this.cacheDir ? (await localizeImage(image, this.cacheDir)) ?? '' : '';
+    }
+    if (icon && /^https?:/i.test(icon)) {
+      icon = this.cacheDir ? (await localizeImage(icon, this.cacheDir)) ?? '' : '';
     }
     const opts: Record<string, unknown> = {
       title: title || 'DD-claw',
@@ -44,8 +50,12 @@ export class ToastNotifier implements Notifier {
       silent: false,
     };
     if (this.aumid) opts['aumid'] = this.aumid;
-    // heroImg 是顶部大图横幅，比 icon 的小缩略图更适合直播预览
+    // 左侧方形头像（appLogoOverride，默认不裁圆）：刚开播没有关键帧时通知也有图
+    if (icon) opts['icon'] = icon;
+    // heroImg 是顶部大图横幅，有直播关键帧时作预览
     if (image) opts['heroImg'] = image;
+    // 底部小灰字行（分区 · 开播时间）
+    if (attribution) opts['attribution'] = attribution;
     // 点击整条通知时用默认浏览器打开直播间
     if (url) opts['activation'] = url;
 

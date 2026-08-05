@@ -164,7 +164,7 @@ export class Pipeline {
       }
     }
 
-    const tpl = templateOverride ?? db.getSetting('default_template') ?? '🔴 {alias} 开播了';
+    const tpl = templateOverride ?? db.getSetting('default_template') ?? '{alias} 开播了';
     const text = renderTemplate(tpl, event).trim();
     return { ...base, title: text || base.title, channels: channelIds.map(String) };
   }

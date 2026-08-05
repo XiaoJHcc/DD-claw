@@ -61,6 +61,24 @@ test('msg.targets 缺省/空数组 = 不发（配置目标只用于 alert）', a
   }
 });
 
+test('attribution 拼进正文第三行，缺省不拼', async () => {
+  const posted: Posted[] = [];
+  const restore = stubFetch(posted);
+  try {
+    const n = new OneBotNotifier('http://napcat:3000', '', []);
+    await n.send(msg({
+      targets: [{ type: 'private', id: '22222' }],
+      attribution: '网游 / CS2  ·  21:31 开播',
+    }));
+    await n.send(msg({ targets: [{ type: 'private', id: '22222' }] }));
+    const texts = posted.map((p) => (p.body['message'] as Array<{ data: { text: string } }>)[0]!.data.text);
+    assert.equal(texts[0], 't\nb\n网游 / CS2  ·  21:31 开播');
+    assert.equal(texts[1], 't\nb');
+  } finally {
+    restore();
+  }
+});
+
 test('alert 仍用构造参数的目标（跳过 disabled）', async () => {
   const posted: Posted[] = [];
   const restore = stubFetch(posted);

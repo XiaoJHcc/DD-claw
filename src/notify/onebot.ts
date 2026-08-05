@@ -91,7 +91,7 @@ export class OneBotNotifier implements Notifier {
   }
 
   async alert(title: string, body: string): Promise<void> {
-    const seg: Segment[] = [{ type: 'text', data: { text: `⚠️ ${title}\n${body}` } }];
+    const seg: Segment[] = [{ type: 'text', data: { text: `【告警】${title}\n${body}` } }];
     await this.mapTargets(
       this.targets.filter((x) => x.enabled),
       async (t) => this.post(t, seg),
@@ -99,7 +99,9 @@ export class OneBotNotifier implements Notifier {
   }
 
   private buildSegments(msg: PushMessage, withImage: boolean): Segment[] {
-    const segs: Segment[] = [{ type: 'text', data: { text: `${msg.title}\n${msg.body}` } }];
+    // attribution（分区 · 开播时间）拼成正文一行，QQ 没有小灰字概念
+    const text = `${msg.title}\n${msg.body}` + (msg.attribution ? `\n${msg.attribution}` : '');
+    const segs: Segment[] = [{ type: 'text', data: { text } }];
     if (withImage && msg.image) {
       // 直接用B站 CDN 的公网 URL，NapCat 自己去拉，我们不落盘不 base64
       segs.push({ type: 'image', data: { file: msg.image } });

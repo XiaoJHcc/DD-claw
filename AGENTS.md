@@ -62,7 +62,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `src/core/types.ts` | `LiveStatus`（平台无关，bili `RoomStatus` 是其扩展）/ `Signal` / `LiveEvent` / `PushMessage`，`toLiveEvent()`。core 不得 import 任何 sources/ 下的类型 |
+| `src/core/types.ts` | `LiveStatus`（平台无关，bili `RoomStatus` 是其扩展，含可选 face 头像）/ `Signal` / `LiveEvent`（含可选 face）/ `PushMessage`（含可选 icon 头像、attribution 小灰字行），`toLiveEvent()`。core 不得 import 任何 sources/ 下的类型 |
 | `src/core/bus.ts` | 类型化信号总线：emit 不 await，单 handler 异常记日志不影响其他 |
 | `src/core/state.ts` | 纯函数状态机 `diffRoom(prev, curr)` → Signal；`(room_id, live_time)` 是一场直播的身份；轮播（`live_status=2`）视为未开播；拉取失败不产 Signal；无 prev 也如实产 live_start（抑制政策在 pipeline） |
 | `src/core/scheduler.ts` | `PeriodicTask`：通用周期任务器（间隔+抖动+自调度不重叠），不含业务逻辑 |
@@ -123,10 +123,10 @@
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `src/notify/types.ts` | `Notifier` 接口：`send(PushMessage)` + `capabilities` + `alert()` | ✅ |
-| `src/notify/message.ts` | `liveEventToMessage()`：LiveEvent → PushMessage（🔴 文案沿用 M1） | ✅ |
+| `src/notify/message.ts` | `liveEventToMessage()`：LiveEvent → PushMessage（纯文案不用 emoji——QQ iOS 气泡渲染会把增补平面 emoji 拆成两个方框；body 只留直播标题，分区 · 开播时间进 attribution，头像进 icon，刚开播无关键帧时通知仍有图） | ✅ |
 | `src/notify/dispatcher.ts` | 并行 fan-out、notify_log 用 `msg.ref` 溯源、任一通道成功即标记。`msg.channels` 存在时渠道路由：查 push_channels 过滤「选中且启用」按 notifier 分组，onebot 组解析成 `msg.targets`，无选中渠道的 notifier 跳过；缺省走全通道旧行为。**待扩展**：通道级规则 | ✅ |
-| `src/notify/onebot.ts` | NapCat OneBot 11 HTTP；消息段数组；图片失败降级纯文本；每目标串行 + 1.2s 间隔。常规 `send` 只看 `msg.targets`（空 = 不发），构造参数 targets 只作 `alert()` 告警目标与 push_channels 种子来源；`--test-notify` 的假消息带 config targets 可真实验证链路 | ✅ 已实测（2026-08-05 test-notify 私聊 554056021 发送成功） |
-| `src/notify/toast.ts` | powertoast 本机通知；兼作 NapCat 挂掉时的告警通道。构造可传 `aumid` + `cacheDir`；http 图先经 image-cache 本地化（Win32 身份不支持远程图），失败按无图发 | ✅ 已实测 |
+| `src/notify/onebot.ts` | NapCat OneBot 11 HTTP；消息段数组；attribution 拼成正文第三行；图片失败降级纯文本；每目标串行 + 1.2s 间隔。常规 `send` 只看 `msg.targets`（空 = 不发），构造参数 targets 只作 `alert()` 告警目标与 push_channels 种子来源；`--test-notify` 的假消息带 config targets 可真实验证链路 | ✅ 已实测（2026-08-05 test-notify 私聊 554056021 发送成功） |
+| `src/notify/toast.ts` | powertoast 本机通知；兼作 NapCat 挂掉时的告警通道。构造可传 `aumid` + `cacheDir`；http 图先经 image-cache 本地化（Win32 身份不支持远程图），失败按无图发。icon = 左侧方形头像（appLogoOverride，不裁圆）、heroImg = 顶部关键帧大图、attribution = 底部分区 · 开播时间小灰字 | ✅ 已实测 |
 | `src/notify/aumid.ts` | Win32 AUMID「DD-claw」自动注册：.lnk 缺失时调 `scripts/register-aumid.ps1`（PowerShell COM interop 写 AppUserModel.ID + 通知中心注册表，**必须 UTF-8 BOM + STGM_READWRITE**）；失败回落 Microsoft Store 默认身份，通知照发 | ✅ 已实测 |
 | `src/notify/image-cache.ts` | toast 图片本地化：http 图下载到 `data/cache/toast/`（B站图床需 UA+Referer，3MB 上限，3 天清理），失败返回 null | ✅ |
 | `src/notify/ntfy.ts` | ntfy 兜底通道 | ⬜ |
@@ -165,7 +165,7 @@ v1 范围：四卡片（运行状态 / 时间表占位 / 主播列表 / 推送�
 ```bash
 npm run dev          # tsx watch 开发
 npm run build        # tsc → dist/，常驻用 node dist/index.js
-npm test             # node --test（state/bus/pipeline/concurrency/streamers/db/push/posts/live-status-source/auth/follows/qrcode/dynamic/weibo-resolve/weibo-qrcode/weibo-auth/weibo-feed/rules/config/matcher/onebot/dispatcher/image-cache/panel）
+npm test             # node --test（state/bus/pipeline/concurrency/streamers/db/push/posts/live-status-source/auth/follows/qrcode/dynamic/weibo-resolve/weibo-qrcode/weibo-auth/weibo-feed/rules/config/matcher/onebot/dispatcher/image-cache/message/panel）
 npm run probe        # 只查一次开播状态，验证接口通不通
 npm run test-notify  # 假事件走完整推送链路，验证 NapCat/Toast 配置
 ```

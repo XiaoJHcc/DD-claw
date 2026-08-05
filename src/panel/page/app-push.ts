@@ -18,7 +18,7 @@ function loadPushDefault() {
     document.getElementById('push-template').innerHTML =
       '<div class="mrow">渠道 ' + boxes + '</div>' +
       '<div class="mrow"><input id="tpl-input" class="wfull" value="' + esc(def.template || '') +
-      '" placeholder="留空 = 内置默认：🔴 {alias} 开播了">' +
+      '" placeholder="留空 = 内置默认：{alias} 开播了">' +
       '<button onclick="savePushDefault()">保存</button></div>' +
       '<p class="hint">主播的条件规则都不命中时走这里；变量：{alias} 别名（没填用主播名） ' +
       '{uname} 主播名 {title} 直播标题</p>';

@@ -130,7 +130,8 @@ async function main(): Promise<void> {
       title: '[DD-claw 测试] 这是一条测试通知', isLive: true,
       liveTime: Math.floor(Date.now() / 1000), areaName: '虚拟主播',
       parentAreaName: '虚拟主播', cover: '',
-      keyframe: 'https://i0.hdslb.com/bfs/live-key-frame/keyframe072918300018143727685jhbin.jpg',
+      keyframe: 'https://i0.hdslb.com/bfs/live-key-frame/keyframe08052341000000080397it5906.jpg',
+      face: 'https://i2.hdslb.com/bfs/face/bd4253b0eb80684a86efa0097935004527bcc773.jpg',
     }, '测试'));
     // onebot 常规发送只看 msg.targets（渠道路由之外的兼容路径）：拿 config 的启用目标当测试目标
     fake.targets = app.notify.onebot.targets

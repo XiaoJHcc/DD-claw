@@ -111,8 +111,8 @@ test('upsertPushRule 新建必须提供 uid', (t) => {
 test('settings：未写为 null，写入可读，覆盖写生效', (t) => {
   const db = memDb(t);
   assert.equal(db.getSetting('default_template'), null);
-  db.setSetting('default_template', '🔴 {alias} 开播了');
-  assert.equal(db.getSetting('default_template'), '🔴 {alias} 开播了');
+  db.setSetting('default_template', '{alias} 开播了');
+  assert.equal(db.getSetting('default_template'), '{alias} 开播了');
   db.setSetting('default_template', '{alias}来了');
   assert.equal(db.getSetting('default_template'), '{alias}来了');
 });

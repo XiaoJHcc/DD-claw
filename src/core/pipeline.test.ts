@@ -117,7 +117,7 @@ test('first_run 可配置为推送，消息为 PushMessage 且 markNotified', as
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '🔴 阿梓 开播了');
+  assert.equal(m.title, '阿梓 开播了');
   assert.equal(m.priority, 'normal');
   assert.equal(m.image, 'k.jpg');
   assert.equal(m.url, 'https://live.bilibili.com/r1');
@@ -181,7 +181,7 @@ test('主播无规则且未设全局默认：兜底全部启用渠道 + 内置�
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '🔴 阿梓 开播了', '内置默认模板渲染');
+  assert.equal(m.title, '阿梓 开播了', '内置默认模板渲染');
   assert.deepEqual(m.channels, ['1', '2'], '未设全局默认 = 全部启用渠道（停用不算）');
 });
 

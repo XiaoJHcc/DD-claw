@@ -60,6 +60,8 @@ export interface LiveEvent {
   cover: string;
   roomUrl: string;
   liveTime: number;
+  /** 主播头像 URL（来自 LiveStatus.face；刚开播没有关键帧时推送用它兜底） */
+  face?: string;
   /** M1 恒为 null；M2 接上 Analyzer 后填入判定结果。类型必须允许两者。 */
   verdict: SceneVerdict | null;
 }
@@ -78,6 +80,7 @@ export function toLiveEvent(status: LiveStatus, alias: string): LiveEvent {
     cover: status.cover,
     roomUrl: `https://live.bilibili.com/${status.roomId}`,
     liveTime: status.liveTime,
+    face: status.face,
     verdict: null,
   };
 }
@@ -92,6 +95,10 @@ export interface PushMessage {
   title: string;
   body: string;
   image?: string;
+  /** 小图标（主播头像）。toast 显示在左侧（appLogoOverride），刚开播无关键帧时仍有图 */
+  icon?: string;
+  /** 辅助说明小字（toast attribution 那行灰字；其他通道自行拼进正文） */
+  attribution?: string;
   /** 点击跳转 */
   url?: string;
   priority: 'high' | 'normal' | 'low';
