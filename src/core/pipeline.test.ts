@@ -169,7 +169,7 @@ test('notify=false：抑制推送但 recordSession 照做', async () => {
 
 // ---- 推送规则（matcher × push_rules / push_channels）----
 
-test('主播无规则：兜底全部启用渠道 + 内置默认模板', async () => {
+test('主播无规则且未设全局默认：兜底全部启用渠道 + 内置默认模板', async () => {
   const h = harness();
   h.db.channels.push(
     { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '111',
@@ -182,7 +182,7 @@ test('主播无规则：兜底全部启用渠道 + 内置默认模板', async ()
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
   assert.equal(m.title, '🔴 阿梓 开播了', '内置默认模板渲染');
-  assert.deepEqual(m.channels, ['1', '2'], '兜底 = 全部启用渠道（停用不算）');
+  assert.deepEqual(m.channels, ['1', '2'], '未设全局默认 = 全部启用渠道（停用不算）');
 });
 
 test('无规则且没有任何启用渠道：不推', async () => {
@@ -191,6 +191,28 @@ test('无规则且没有任何启用渠道：不推', async () => {
   h.bus.emit(sig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 0);
+});
+
+test('全局默认渠道（settings.default_channels）设置后按其推送', async () => {
+  const h = harness();
+  h.db.channels.push(
+    { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '111',
+      enabled: true, createdAt: 0, updatedAt: 0 },
+  );
+  h.db.settings.set('default_channels', '[2]');
+  h.bus.emit(sig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  assert.deepEqual(h.disp.sent[0]!.channels, ['2'], '全局默认只推勾选的渠道');
+});
+
+test('全局默认显式空数组 = 默认不推', async () => {
+  const h = harness();
+  h.db.settings.set('default_channels', '[]');
+  h.bus.emit(sig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0);
+  assert.equal(h.db.notified.size, 0, '未推成功不得 markNotified');
 });
 
 test('命中条件规则：渠道与推送词按规则', async () => {
@@ -216,19 +238,26 @@ test('规则未覆盖推送词时用全局默认模板（settings.default_templa
   assert.equal(h.disp.sent[0]!.title, '阿梓 开播：今晚歌回！');
 });
 
-test('默认规则（空条件）兜底：条件规则不命中时生效', async () => {
+test('条件规则不命中 → 全局默认（渠道与模板都按全局设置）', async () => {
   const h = harness();
-  h.db.rules.push(
-    rule({ id: 1, channels: [3] }),               // 默认推送，id 更小也不挡条件规则
-    rule({ id: 2, keywords: ['歌'], channels: [2] }),
+  h.db.channels.push(
+    { id: 2, name: 'QQ私聊', notifier: 'onebot', targetType: 'private', targetId: '111',
+      enabled: true, createdAt: 0, updatedAt: 0 },
   );
+  h.db.settings.set('default_channels', '[2]');
+  h.db.settings.set('default_template', '{alias} 来了');
+  h.db.rules.push(rule({ keywords: ['歌'], channels: [1] }));
   h.bus.emit(sig({ status: status({ title: '打游戏' }) }));
   await h.pipeline.whenIdle();
-  assert.deepEqual(h.disp.sent[0]!.channels, ['3'], '条件规则不命中落默认推送');
+  assert.equal(h.disp.sent.length, 1);
+  const m = h.disp.sent[0]!;
+  assert.deepEqual(m.channels, ['2'], '条件规则不命中落全局默认渠道');
+  assert.equal(m.title, '阿梓 来了', '模板也走全局默认');
 });
 
-test('有规则但均不命中（默认规则被删）：不推', async () => {
+test('条件规则不命中且全局默认显式空：不推', async () => {
   const h = harness();
+  h.db.settings.set('default_channels', '[]');
   h.db.rules.push(rule({ keywords: ['歌'] }));
   h.bus.emit(sig({ status: status({ title: '打游戏' }) }));
   await h.pipeline.whenIdle();

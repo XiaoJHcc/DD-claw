@@ -155,6 +155,7 @@ export class Db {
     this.ensureColumn('streamers', 'weibo_nick', 'weibo_nick TEXT');
     this.migrateStreamerMode();
     this.migratePreferenceClauses();
+    this.migratePerStreamerDefaultRules();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -193,6 +194,20 @@ export class Db {
     if (!row) return;
     this.db.exec('DROP TABLE preference_clauses');
     log.info('preference_clauses 表已废弃并删除（推送规则改用 push_rules 表）');
+  }
+
+  /**
+   * 每主播的「默认推送」（空条件规则）已改为全局默认推送（settings.default_channels /
+   * default_template，推送卡片统一配置）：删除存量空条件规则，主播只留条件规则。
+   * 对新库幂等。
+   */
+  private migratePerStreamerDefaultRules(): void {
+    const { changes } = this.db
+      .prepare("DELETE FROM push_rules WHERE keywords = '[]' AND areas = '[]'")
+      .run();
+    if (changes > 0) {
+      log.info(`已删除 ${changes} 条每主播「默认推送」空条件规则（默认推送改为全局设置）`);
+    }
   }
 
   loadRoomStates(): Map<string, PrevState> {

@@ -132,6 +132,10 @@ async function main(): Promise<void> {
       parentAreaName: '虚拟主播', cover: '',
       keyframe: 'https://i0.hdslb.com/bfs/live-key-frame/keyframe072918300018143727685jhbin.jpg',
     }, '测试'));
+    // onebot 常规发送只看 msg.targets（渠道路由之外的兼容路径）：拿 config 的启用目标当测试目标
+    fake.targets = app.notify.onebot.targets
+      .filter((t) => t.enabled)
+      .map((t) => ({ type: t.type, id: t.id }));
     await dispatcher.broadcast(fake);
     db.close();
     return;

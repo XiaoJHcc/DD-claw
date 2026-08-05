@@ -124,6 +124,24 @@ test('旧 mode 列迁移：off→watch=0，silent→notify=0，mode 列删除且
   );
 });
 
+test('每主播空条件「默认推送」规则迁移：开库即删，条件规则保留，幂等', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'mig.db');
+  db = new Db(path);
+  db.upsertPushRule({ uid: '1', keywords: [], areas: [], channels: [1], messageTemplate: null, enabled: true });
+  db.upsertPushRule({ uid: '1', keywords: ['歌'], areas: [], channels: [1], messageTemplate: null, enabled: true });
+  db.close();
+
+  db = new Db(path);
+  const rules = db.listPushRules();
+  assert.equal(rules.length, 1, '空条件规则开库即删（默认推送改全局设置）');
+  assert.deepEqual(rules[0]!.keywords, ['歌'], '条件规则保留');
+
+  db.close();
+  db = new Db(path);
+  assert.equal(db.listPushRules().length, 1, '二次打开幂等');
+});
+
 test('saveRoomState / loadRoomStates 新字段往返一致', (t) => {
   let db: Db | undefined;
   const path = join(tmpdir_(t, () => db?.close()), 'old.db');

@@ -390,21 +390,34 @@ test('channel 校验：notifier 枚举 / onebot 必填纯数字 targetId / name 
   assert.equal((await api(base, '/api/channels/999', 'DELETE')).status, 404);
 });
 
-// ---- 默认推送词模板 ----
+// ---- 全局默认推送（template + channels） ----
 
-test('template：GET 未设置为 null，PUT 后可读，校验类型', async (t) => {
-  const { base } = await setup(t);
+test('push/default：GET 缺省形状，PUT 后可读，校验类型', async (t) => {
+  const { db, base } = await setup(t);
+  const chId = db.upsertPushChannel({
+    name: '系统通知', notifier: 'toast', targetType: null, targetId: null, enabled: true,
+  });
+  db.upsertPushChannel({
+    name: '停用的', notifier: 'toast', targetType: null, targetId: null, enabled: false,
+  });
 
-  const empty = await api(base, '/api/push/template');
+  const empty = await api(base, '/api/push/default');
   assert.equal(empty.status, 200);
   assert.equal(empty.json['template'], null);
+  assert.deepEqual(empty.json['channels'], [chId], 'channels 未设置 = 全部启用渠道 id');
 
-  assert.equal((await api(base, '/api/push/template', 'PUT', { template: '{alias} 开播了！' })).status, 200);
-  const got = await api(base, '/api/push/template');
+  assert.equal(
+    (await api(base, '/api/push/default', 'PUT', { template: '{alias} 开播了！', channels: [] })).status,
+    200,
+  );
+  const got = await api(base, '/api/push/default');
   assert.equal(got.json['template'], '{alias} 开播了！');
+  assert.deepEqual(got.json['channels'], [], '显式空数组 = 默认不推');
 
-  assert.equal((await api(base, '/api/push/template', 'PUT', { template: 1 })).status, 400);
-  assert.equal((await api(base, '/api/push/template', 'PUT', {})).status, 400);
+  assert.equal((await api(base, '/api/push/default', 'PUT', { template: 1 })).status, 400);
+  assert.equal((await api(base, '/api/push/default', 'PUT', {})).status, 400);
+  assert.equal((await api(base, '/api/push/default', 'PUT', { channels: ['x'] })).status, 400);
+  assert.equal((await api(base, '/api/push/template')).status, 404, '旧 template 接口已移除');
 });
 
 // ---- push_rules ----
@@ -465,6 +478,21 @@ test('rule 校验：坏 uid / 坏 channels / 未知字段 / 坏 id / 缺失行 4
   const huge = await api(base, '/api/rules', 'POST', ruleBody({ messageTemplate: 'x'.repeat(70 * 1024) }));
   assert.equal(huge.status, 400);
   assert.match(huge.json.error ?? '', /64KB/);
+});
+
+test('rule 校验：空条件规则被拒（默认推送已改全局设置）', async (t) => {
+  const { base } = await setup(t);
+
+  const empty = await api(base, '/api/rules', 'POST', ruleBody({ keywords: [], areas: [] }));
+  assert.equal(empty.status, 400);
+  assert.match(empty.json.error ?? '', /全局默认/);
+
+  const created = await api(base, '/api/rules', 'POST', ruleBody());
+  const id = (created.json as { id: number }).id;
+  // PUT 把条件清空 = 合并后空条件，同样被拒；只清一组而另一组保留则放行
+  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { keywords: [], areas: [] })).status, 400);
+  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { keywords: [] })).status, 200,
+    'areas 保留原值，合并后仍有条件');
 });
 
 // ---- status / 404 ----

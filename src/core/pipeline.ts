@@ -135,30 +135,20 @@ export class Pipeline {
   }
 
   /**
-   * 透明条件规则 → PushMessage；返回 null = 不推（规则不命中 / 命中规则未选渠道）。
-   * - 主播一条规则都没有 → 兜底：全部启用渠道 + 全局默认模板（避免加了监听却静默无通知）
-   * - 有规则 → id 升序第一条命中；命中规则的 channels 为空 = 用户明确不推
+   * 透明条件规则 → PushMessage；返回 null = 不推（命中规则未选渠道 / 全局默认未选渠道）。
+   * - 主播只有条件规则：id 升序第一条命中；命中规则的 channels 为空 = 用户明确不推
+   * - 条件规则均不命中（含一条都没有）→ 全局默认：settings.default_channels
+   *   （未设置 = 全部启用渠道的旧兜底行为；显式空数组 = 默认不推）+ 全局默认模板
    * - 模板：规则覆盖 > settings.default_template > 内置默认；正文/图片/跳转沿用默认形状
    */
   private buildMessage(event: LiveEvent): PushMessage | null {
     const { db } = this.deps;
     const base = liveEventToMessage(event);
-    const rules = db.listEnabledPushRules(event.uid);
+    const rule = matchPushRule(db.listEnabledPushRules(event.uid), event);
 
     let channelIds: number[];
     let templateOverride: string | null = null;
-    if (rules.length === 0) {
-      channelIds = db.listPushChannels().filter((c) => c.enabled).map((c) => c.id);
-      if (channelIds.length === 0) {
-        log.warn(`不推送 ${event.alias || event.uname}: 无任何规则且没有启用的推送渠道`);
-        return null;
-      }
-    } else {
-      const rule = matchPushRule(rules, event);
-      if (!rule) {
-        log.info(`不推送 ${event.alias || event.uname}: 有条件规则但均不命中`);
-        return null;
-      }
+    if (rule) {
       if (rule.channels.length === 0) {
         log.info(`不推送 ${event.alias || event.uname}: 命中规则 #${rule.id} 但未勾选渠道`);
         return null;
@@ -166,11 +156,35 @@ export class Pipeline {
       channelIds = rule.channels;
       templateOverride = rule.messageTemplate;
       log.info(`命中推送规则 #${rule.id}（${event.alias || event.uname}）`);
+    } else {
+      channelIds = this.defaultChannelIds();
+      if (channelIds.length === 0) {
+        log.info(`不推送 ${event.alias || event.uname}: 条件规则均不命中，且全局默认未选渠道`);
+        return null;
+      }
     }
 
     const tpl = templateOverride ?? db.getSetting('default_template') ?? '🔴 {alias} 开播了';
     const text = renderTemplate(tpl, event).trim();
     return { ...base, title: text || base.title, channels: channelIds.map(String) };
+  }
+
+  /**
+   * 全局默认推送渠道：settings.default_channels（JSON id 数组）。
+   * 未设置 = 全部启用渠道（旧兜底行为，面板里显示为全勾）；显式空数组 = 默认不推。
+   */
+  private defaultChannelIds(): number[] {
+    const raw = this.deps.db.getSetting('default_channels');
+    if (raw === null) {
+      return this.deps.db.listPushChannels().filter((c) => c.enabled).map((c) => c.id);
+    }
+    try {
+      const ids = JSON.parse(raw) as unknown;
+      return Array.isArray(ids) ? ids.filter((x): x is number => typeof x === 'number') : [];
+    } catch {
+      log.warn(`settings.default_channels 不是合法 JSON，按默认不推处理: ${raw}`);
+      return [];
+    }
   }
 
   private async handleHealthAlert(signal: Signal): Promise<void> {

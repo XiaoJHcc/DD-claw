@@ -129,7 +129,8 @@ function openStreamer(uid) {
     '<div class="mrow"><button onclick="saveStreamer()">保存</button> ' +
     '<button onclick="closeModal()">关闭</button></div>' +
     '<h4>推送规则</h4>' +
-    '<p class="hint">关键词和分区都填 = 都要满足；都不填 = 默认推送；从上往下第一条命中的规则生效</p>' +
+    '<p class="hint">关键词和分区都填 = 都要满足；从上往下第一条命中的规则生效；' +
+    '都不命中时走「推送」卡片的全局默认</p>' +
     '<div id="modal-rules">加载中…</div>');
   modalCleanup = function () { modalUid = null; modalChannels = []; };
   loadModalRules();
@@ -151,7 +152,7 @@ function saveStreamer() {
   }), '已保存');
 }
 
-// ---- 推送规则 CRUD（uid 固定为 modalUid；渠道勾选来自「推送」卡片） ----
+// ---- 推送规则 CRUD（uid 固定为 modalUid；只有条件规则，默认推送在「推送」卡片全局配置） ----
 function splitCsv(v) {
   return v.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
 }
@@ -166,16 +167,6 @@ function ruleChannelBoxes(selected) {
 function checkedChannelIds(div) {
   return Array.prototype.slice.call(div.querySelectorAll('.e-ch'))
     .filter(function (x) { return x.checked; }).map(function (x) { return Number(x.value); });
-}
-// 第一行固定「默认推送」（空条件规则；还没有时此行就是它的新建表单）
-function defaultRuleRow(r) {
-  return '<div class="clause" data-id="' + (r ? r.id : '') + '" data-default="1">' +
-    '<div class="row"><b>默认推送</b> <span class="hint">条件规则都不命中时走这里</span></div>' +
-    '<div class="row">渠道 ' + ruleChannelBoxes(r ? r.channels : []) + '</div>' +
-    '<div class="row">推送词 <input class="e-tpl" size="34" value="' +
-      esc(r && r.messageTemplate ? r.messageTemplate : '') + '" placeholder="留空 = 用全局默认模板">' +
-    ' <label><input type="checkbox" class="e-enabled"' + (!r || r.enabled ? ' checked' : '') + '> 启用</label>' +
-    ' <button onclick="saveDefaultRule()">保存</button></div></div>';
 }
 function ruleFormRows(r) {
   return '<div class="row">关键词 <input class="e-kw" size="14" value="' + esc(r.keywords.join(', ')) +
@@ -203,13 +194,7 @@ function loadModalRules() {
   Promise.all([api('/api/channels'), api('/api/rules?uid=' + modalUid)]).then(function (rs) {
     modalChannels = rs[0].channels || [];
     var rules = rs[1].rules || [];
-    var def = null, cond = [];
-    for (var i = 0; i < rules.length; i++) {
-      // 空条件规则 = 默认推送，固定在渲染第一行（其余按 id 从上到下）
-      if (!def && rules[i].keywords.length === 0 && rules[i].areas.length === 0) def = rules[i];
-      else cond.push(rules[i]);
-    }
-    box.innerHTML = defaultRuleRow(def) + cond.map(ruleRow).join('') + addRuleRow();
+    box.innerHTML = rules.map(ruleRow).join('') + addRuleRow();
   }).catch(function (e) { toast(e.message, true); });
 }
 function readRuleForm(div) {
@@ -220,18 +205,6 @@ function readRuleForm(div) {
     messageTemplate: div.querySelector('.e-tpl').value.trim() || null,
     enabled: div.querySelector('.e-enabled').checked,
   };
-}
-function saveDefaultRule() {
-  var div = document.querySelector('.clause[data-default="1"]');
-  var body = {
-    keywords: [], areas: [],
-    channels: checkedChannelIds(div),
-    messageTemplate: div.querySelector('.e-tpl').value.trim() || null,
-    enabled: div.querySelector('.e-enabled').checked,
-  };
-  var id = div.getAttribute('data-id');
-  if (id) runModal(api('/api/rules/' + id, 'PUT', body), '已保存');
-  else { body.uid = modalUid; runModal(api('/api/rules', 'POST', body), '已保存'); }
 }
 function addRule() {
   var body = readRuleForm(document.getElementById('rule-add'));

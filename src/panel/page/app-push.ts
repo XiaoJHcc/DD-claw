@@ -1,21 +1,36 @@
 /**
- * 面板前端 · 卡片4 推送：全局默认推送词 + 渠道管理（系统通知 / QQ群 / QQ私聊）。
+ * 面板前端 · 卡片4 推送：全局默认推送（渠道勾选 + 推送词）+ 渠道管理（系统通知 / QQ群 / QQ私聊）。
  * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 app-core 段。
  */
 export const APP_PUSH = `
-// ---- 默认推送词模板（settings.default_template；留空 = 内置默认） ----
-function loadPushTemplate() {
-  return api('/api/push/template').then(function (j) {
+// ---- 全局默认推送（settings.default_channels + default_template） ----
+// 主播的条件规则都不命中时走这里；渠道一个都不勾 = 默认不推。
+function loadPushDefault() {
+  return Promise.all([api('/api/push/default'), api('/api/channels')]).then(function (rs) {
+    var def = rs[0], channels = rs[1].channels || [];
+    var boxes = channels.length === 0
+      ? '<span class="hint">还没有渠道，先在下方新增</span>'
+      : channels.map(function (c) {
+          return '<label><input type="checkbox" class="pd-ch" value="' + c.id + '"' +
+            ((def.channels || []).indexOf(c.id) >= 0 ? ' checked' : '') + '> ' + esc(c.name) +
+            ' <span class="tag">' + chanTypeName(c) + '</span></label>';
+        }).join('');
     document.getElementById('push-template').innerHTML =
-      '<div class="mrow"><input id="tpl-input" class="wfull" value="' + esc(j.template || '') +
+      '<div class="mrow">渠道 ' + boxes + '</div>' +
+      '<div class="mrow"><input id="tpl-input" class="wfull" value="' + esc(def.template || '') +
       '" placeholder="留空 = 内置默认：🔴 {alias} 开播了">' +
-      '<button onclick="saveTemplate()">保存</button></div>' +
-      '<p class="hint">变量：{alias} 别名（没填用主播名） {uname} 主播名 {title} 直播标题；每个主播的规则可单独覆盖</p>';
+      '<button onclick="savePushDefault()">保存</button></div>' +
+      '<p class="hint">主播的条件规则都不命中时走这里；变量：{alias} 别名（没填用主播名） ' +
+      '{uname} 主播名 {title} 直播标题</p>';
   }).catch(function (e) { toast(e.message, true); });
 }
-function saveTemplate() {
-  api('/api/push/template', 'PUT', { template: document.getElementById('tpl-input').value.trim() })
-    .then(function () { toast('已保存'); loadPushTemplate(); })
+function savePushDefault() {
+  var ids = Array.prototype.slice.call(document.querySelectorAll('.pd-ch'))
+    .filter(function (x) { return x.checked; }).map(function (x) { return Number(x.value); });
+  api('/api/push/default', 'PUT', {
+    template: document.getElementById('tpl-input').value.trim(),
+    channels: ids,
+  }).then(function () { toast('已保存'); loadPushDefault(); })
     .catch(function (e) { toast(e.message, true); });
 }
 
@@ -44,7 +59,7 @@ function toggleChannel(id, enabled) {
 function delChannel(id) {
   if (!confirm('删除这个渠道？勾选了它的规则会少一个推送去处。')) return;
   api('/api/channels/' + id, 'DELETE')
-    .then(function () { toast('已删除'); loadChannels(); })
+    .then(function () { toast('已删除'); loadChannels(); loadPushDefault(); })
     .catch(function (e) { toast(e.message, true); });
 }
 
@@ -74,11 +89,11 @@ function addChannel() {
     body.targetId = document.getElementById('ca-target').value.trim();
   }
   api('/api/channels', 'POST', body).then(function () {
-    toast('已新增'); loadChannels(); renderChannelAdd();
+    toast('已新增'); loadChannels(); loadPushDefault(); renderChannelAdd();
   }).catch(function (e) { toast(e.message, true); });
 }
 
-loadPushTemplate();
+loadPushDefault();
 loadChannels();
 renderChannelAdd();
 `;

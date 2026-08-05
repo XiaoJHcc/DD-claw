@@ -199,13 +199,13 @@ function parseRuleFields(o: Record<string, unknown>, p: PushRuleInput): void {
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
 }
 
-/** POST /api/rules 的新建体：uid 必填，其余缺省走默认值。 */
+/** POST /api/rules 的新建体：uid 必填，其余缺省走默认值。条件规则至少一个条件（默认推送是全局设置）。 */
 export function parseNewRule(body: unknown): NewPushRule {
   const o = asObject(body);
   rejectUnknownKeys(o, RULE_KEYS);
   const p: PushRuleInput = {};
   parseRuleFields(o, p);
-  return {
+  const rule = {
     uid: parseUid(o.uid),
     keywords: p.keywords ?? [],
     areas: p.areas ?? [],
@@ -213,6 +213,15 @@ export function parseNewRule(body: unknown): NewPushRule {
     messageTemplate: p.messageTemplate ?? null,
     enabled: p.enabled ?? true,
   };
+  checkRuleConditions(rule);
+  return rule;
+}
+
+/** 条件规则必须至少有一个条件；空条件 = 默认推送，已改为全局设置（推送卡片）。 */
+export function checkRuleConditions(r: { keywords: string[]; areas: string[] }): void {
+  if (r.keywords.length === 0 && r.areas.length === 0) {
+    throw new HttpError(400, '条件规则至少填一个关键词或分区；默认推送请在「推送」卡片配置全局默认');
+  }
 }
 
 /** PUT /api/rules/:id 的部分更新体；至少一个字段。 */
@@ -227,10 +236,20 @@ export function parseRulePatch(body: unknown): PushRuleInput {
 
 // ---- settings ----
 
-/** PUT /api/push/template：{ template: string }（空串 = 清除，回到内置默认） */
-export function parseTemplateBody(body: unknown): string {
+/**
+ * PUT /api/push/default：全局默认推送（条件规则都不命中时走这里）。
+ * { template?: string（空串 = 清除，回到内置默认）, channels?: number[]（空数组 = 默认不推） }
+ * 至少一个字段。
+ */
+export function parsePushDefaultBody(body: unknown): { template?: string; channels?: number[] } {
   const o = asObject(body);
-  rejectUnknownKeys(o, ['template']);
-  if (typeof o.template !== 'string') throw new HttpError(400, 'template 必须是字符串');
-  return o.template;
+  rejectUnknownKeys(o, ['template', 'channels']);
+  const out: { template?: string; channels?: number[] } = {};
+  if ('template' in o) {
+    if (typeof o.template !== 'string') throw new HttpError(400, 'template 必须是字符串');
+    out.template = o.template;
+  }
+  if ('channels' in o) out.channels = asIdArray(o.channels, 'channels');
+  if (Object.keys(out).length === 0) throw new HttpError(400, '没有可更新的字段');
+  return out;
 }

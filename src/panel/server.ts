@@ -8,8 +8,8 @@ import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
-  HttpError, checkChannelShape, parseChannelPatch, parseNewChannel, parseNewRule,
-  parseRulePatch, parseStreamerPatch, parseTemplateBody, parseUid,
+  HttpError, checkChannelShape, checkRuleConditions, parseChannelPatch, parseNewChannel,
+  parseNewRule, parsePushDefaultBody, parseRulePatch, parseStreamerPatch, parseUid,
   readJsonBody, sendJson,
 } from './http-util.js';
 import { PANEL_PAGE } from './page.js';
@@ -133,13 +133,20 @@ async function handle(
     sendJson(res, 201, { id });
     return;
   }
-  if (method === 'GET' && path === '/api/push/template') {
-    sendJson(res, 200, { template: db.getSetting('default_template') });
+  // 全局默认推送：条件规则都不命中时走这里。channels 未设置时返回全部启用渠道 id
+  // （= pipeline 的兜底行为，前端显示为全勾）；显式空数组 = 默认不推。
+  if (method === 'GET' && path === '/api/push/default') {
+    const raw = db.getSetting('default_channels');
+    const channels = raw === null
+      ? db.listPushChannels().filter((c) => c.enabled).map((c) => c.id)
+      : (JSON.parse(raw) as number[]);
+    sendJson(res, 200, { template: db.getSetting('default_template'), channels });
     return;
   }
-  if (method === 'PUT' && path === '/api/push/template') {
-    const template = parseTemplateBody(await readJsonBody(req));
-    db.setSetting('default_template', template);
+  if (method === 'PUT' && path === '/api/push/default') {
+    const patch = parsePushDefaultBody(await readJsonBody(req));
+    if (patch.template !== undefined) db.setSetting('default_template', patch.template);
+    if (patch.channels !== undefined) db.setSetting('default_channels', JSON.stringify(patch.channels));
     sendJson(res, 200, { ok: true });
     return;
   }
@@ -229,8 +236,13 @@ async function handle(
     const id = Number(parseUid(rm[1], 'id'));
     if (method === 'PUT') {
       const patch = parseRulePatch(await readJsonBody(req));
-      const before = db.listPushRules().some((r) => r.id === id);
-      if (!before) throw new HttpError(404, '规则不存在');
+      const prev = db.listPushRules().find((r) => r.id === id);
+      if (!prev) throw new HttpError(404, '规则不存在');
+      // 联动校验要对合并后的形状做：不允许把条件清空（空条件 = 默认推送，已改全局设置）
+      checkRuleConditions({
+        keywords: patch.keywords ?? prev.keywords,
+        areas: patch.areas ?? prev.areas,
+      });
       db.upsertPushRule({ id, ...patch });
       sendJson(res, 200, { ok: true });
       return;
