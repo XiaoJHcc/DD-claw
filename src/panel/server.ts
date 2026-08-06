@@ -23,6 +23,9 @@ import {
 import {
   fetchWeiboSelf, loadWeiboCookies, saveWeiboCookies, weiboCookieHeader, type WeiboSelfInfo,
 } from '../sources/weibo/auth.js';
+import type { AppConfig } from '../config/index.js';
+import { llmProviderSchema, type LlmProviderConfig } from '../config/schema.js';
+import { deriveRoutes, isLlmEnabled, setLlmEnabled, type LlmRouter } from '../analysis/providers.js';
 
 const log = makeLogger('panel');
 
@@ -71,6 +74,22 @@ export interface PanelDeps {
     };
     /** 注入点供测试；confirmed 后用新 cookie 查一次登录态拿 uid */
     selfFetcher?: (cookie: string) => Promise<WeiboSelfInfo>;
+  };
+  /**
+   * LLM provider 展示与 key 管理；不注入则 /api/llm* 一律 404。
+   * key 值只写不读：任何响应/日志都不含 key，只回「设置状态」。
+   */
+  llm?: {
+    config: AppConfig['llm'];
+    /** 注入后 GET /api/llm 带运行状态；PUT key 后 router.refreshKeys() 热更新 */
+    router?: LlmRouter;
+    /** provider 名单管理（settings 表是事实来源）；不注入则 providers CRUD 404 */
+    store?: {
+      list(): LlmProviderConfig[];
+      save(providers: LlmProviderConfig[]): void;
+    };
+    /** store.save 后调用：装配处重建 router，名单改动热生效 */
+    onProvidersChanged?: () => void;
   };
 }
 
@@ -149,6 +168,62 @@ async function handle(
     if (patch.channels !== undefined) db.setSetting('default_channels', JSON.stringify(patch.channels));
     sendJson(res, 200, { ok: true });
     return;
+  }
+  // ---- LLM provider 与 key 管理（llm dep 存在才挂；key 值只写不读）----
+  if (deps.llm && method === 'GET' && path === '/api/llm') {
+    sendJson(res, 200, llmInfo(deps));
+    return;
+  }
+  if (deps.llm && method === 'PUT' && path === '/api/llm/keys') {
+    sendJson(res, 200, putLlmKey(deps, await readJsonBody(req)));
+    return;
+  }
+  if (deps.llm && method === 'PUT' && path === '/api/llm/enabled') {
+    const b = (await readJsonBody(req)) as Record<string, unknown>;
+    if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
+    setLlmEnabled(deps.db, b.enabled);
+    sendJson(res, 200, { ok: true, enabled: b.enabled });
+    return;
+  }
+  if (deps.llm?.store && method === 'POST' && path === '/api/llm/providers') {
+    sendJson(res, 201, putLlmProvider(deps, null, await readJsonBody(req)));
+    return;
+  }
+  // 排序路由必须在 :name 通配之前匹配，否则 'order' 会被当成 provider 名
+  if (deps.llm?.store && method === 'PUT' && path === '/api/llm/providers/order') {
+    sendJson(res, 200, putLlmProviderOrder(deps, await readJsonBody(req)));
+    return;
+  }
+  const lpt = path.match(/^\/api\/llm\/providers\/([^/]+)\/test$/);
+  if (deps.llm?.router && lpt && method === 'POST') {
+    const name = decodeURIComponent(lpt[1]!);
+    const status = deps.llm.router.providerStatus(name);
+    if (status === null) throw new HttpError(404, 'provider 不存在');
+    if (status.startsWith('缺 key')) throw new HttpError(400, '缺 key，请先填写');
+    try {
+      const ms = await deps.llm.router.ping(name);
+      sendJson(res, 200, { ok: true, ms });
+    } catch (e) {
+      // 错误信息只含 HTTP 状态/对端响应摘要，不含 key（key 只在请求头里）
+      sendJson(res, 502, { ok: false, error: (e as Error).message });
+    }
+    return;
+  }
+  const lpm = path.match(/^\/api\/llm\/providers\/([^/]+)$/);
+  if (deps.llm?.store && lpm) {
+    const name = decodeURIComponent(lpm[1]!);
+    if (method === 'PUT') {
+      sendJson(res, 200, putLlmProvider(deps, name, await readJsonBody(req)));
+      return;
+    }
+    if (method === 'DELETE') {
+      const list = deps.llm.store.list();
+      if (!list.some((p) => p.name === name)) throw new HttpError(404, 'provider 不存在');
+      deps.llm.store.save(list.filter((p) => p.name !== name));
+      deps.llm.onProvidersChanged?.();
+      sendJson(res, 200, { ok: true });
+      return;
+    }
   }
   if (method === 'GET' && path === '/api/rules') {
     const uidParam = url.searchParams.get('uid');
@@ -387,4 +462,127 @@ async function pollWeiboQrcodeRoute(
     log.error('微博扫码登录成功但登录态查询失败（uid 暂缺，下轮心跳会补上）', e);
   }
   return { status: 'confirmed', uid };
+}
+
+// ---- LLM key 管理（settings 表 llm_key:<providerName>；本机面板，值可回显/编辑）----
+
+/** key 来源、池子大小与值本身：panel = 面板填写（优先）；env = .env keyEnvs；unset = 未设置 */
+function llmKeySource(
+  db: Db,
+  p: LlmProviderConfig,
+): { source: 'panel' | 'env' | 'unset'; count: number; value: string | null } {
+  const panel = db.getSetting(`llm_key:${p.name}`);
+  if (panel && panel.trim()) {
+    const v = panel.trim();
+    return { source: 'panel', count: v.split(',').map((s) => s.trim()).filter(Boolean).length, value: v };
+  }
+  const envKeys = p.keyEnvs
+    .map((n) => process.env[n])
+    .filter((k): k is string => !!k);
+  if (envKeys.length > 0) return { source: 'env', count: envKeys.length, value: envKeys.join(',') };
+  return { source: 'unset', count: 0, value: null };
+}
+
+function llmInfo(deps: PanelDeps): unknown {
+  const cfg = deps.llm!.config;
+  const list = deps.llm!.store?.list() ?? cfg.providers;
+  const routes = deriveRoutes(list);
+  const statusByName = new Map((deps.llm!.router?.describe() ?? []).map((s) => [s.name, s.status]));
+  return {
+    enabled: isLlmEnabled(deps.db, cfg),
+    providers: list.map((p) => ({
+      name: p.name,
+      baseURL: p.baseURL,
+      model: p.model,
+      vision: p.vision,
+      enabled: p.enabled,
+      structuredOutput: p.structuredOutput,
+      routes: (['text', 'vision'] as const).filter((r) => routes[r].includes(p.name)),
+      status: statusByName.get(p.name) ?? null,
+      key: llmKeySource(deps.db, p),
+    })),
+  };
+}
+
+/**
+ * 新增（name=null，POST）/ 更新（PUT）provider。body 经 llmProviderSchema 校验；
+ * 名单落 settings 表后回调装配处重建 router，热生效。
+ */
+function putLlmProvider(deps: PanelDeps, name: string | null, body: unknown): unknown {
+  const store = deps.llm!.store!;
+  const list = store.list();
+  const b = (body ?? {}) as Record<string, unknown>;
+
+  let merged: unknown;
+  if (name === null) {
+    merged = b;
+  } else {
+    const prev = list.find((p) => p.name === name);
+    if (!prev) throw new HttpError(404, 'provider 不存在');
+    // 只允许这几个字段进 patch；name 是路径标识，不可改
+    const patch: Record<string, unknown> = {};
+    for (const k of ['baseURL', 'model', 'vision', 'keyEnvs', 'enabled', 'structuredOutput'] as const) {
+      if (b[k] !== undefined) patch[k] = b[k];
+    }
+    merged = { ...prev, ...patch };
+  }
+
+  const parsed = llmProviderSchema.safeParse(merged);
+  if (!parsed.success) {
+    const msg = parsed.error.issues
+      .map((i) => `${i.path.length ? i.path.join('.') : '(根)'}: ${i.message}`).join('；');
+    throw new HttpError(400, `provider 校验失败：${msg}`);
+  }
+  const provider = parsed.data;
+
+  if (name === null) {
+    if (list.some((p) => p.name === provider.name)) {
+      throw new HttpError(400, `provider name 重复: ${provider.name}`);
+    }
+    store.save([...list, provider]);
+  } else {
+    store.save(list.map((p) => (p.name === name ? provider : p)));
+  }
+  // 表单可一并提交 key（弹窗编辑体验：一个表单存所有）；空串 = 清除面板填写
+  if (typeof b.key === 'string') {
+    deps.db.setSetting(`llm_key:${provider.name}`, b.key.trim());
+  }
+  deps.llm!.onProvidersChanged?.();
+  return { ok: true, name: provider.name };
+}
+
+/** 排序：names 必须是现有名单的一个排列（长度一致、无重复、无增删），整体重排后落库 */
+function putLlmProviderOrder(deps: PanelDeps, body: unknown): unknown {
+  const store = deps.llm!.store!;
+  const names = (body as Record<string, unknown> | null)?.names;
+  if (!Array.isArray(names) || names.some((n) => typeof n !== 'string')) {
+    throw new HttpError(400, 'names 必须是 provider name 数组');
+  }
+  if (new Set(names).size !== names.length) {
+    throw new HttpError(400, 'names 有重复');
+  }
+  const list = store.list();
+  const byName = new Map(list.map((p) => [p.name, p]));
+  if (names.length !== list.length || names.some((n) => !byName.has(n as string))) {
+    throw new HttpError(400, 'names 必须与现有 provider 名单一一对应');
+  }
+  store.save((names as string[]).map((n) => byName.get(n)!));
+  deps.llm!.onProvidersChanged?.();
+  return { ok: true };
+}
+
+/** 保存/清除 key：按 provider 存 settings 表；空 value = 清除面板填写（回退 .env keyEnvs） */
+function putLlmKey(deps: PanelDeps, body: unknown): unknown {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const name = typeof b.provider === 'string' ? b.provider.trim() : '';
+  const value = typeof b.value === 'string' ? b.value.trim() : '';
+  const list = deps.llm!.store?.list() ?? deps.llm!.config.providers;
+  const provider = list.find((p) => p.name === name);
+  if (!provider) throw new HttpError(404, `provider 不存在: ${name}`);
+  if (value && !/^[^\s,]+(\s*,\s*[^\s,]+)*$/.test(value)) {
+    throw new HttpError(400, '多个 key 用英文逗号分隔，key 内不能有空格');
+  }
+  deps.db.setSetting(`llm_key:${name}`, value);
+  deps.llm!.router?.refreshKeys();
+  return { ok: true, provider: name, key: llmKeySource(deps.db, provider) };
 }

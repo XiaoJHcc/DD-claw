@@ -1,12 +1,21 @@
 # 调研：LLM 接入
 
-基准日 2026-07-29。**所有免费额度政策变动频繁，实现前必须重新核实。**
+基准日 2026-07-29。**2026-08-06 修订**：选型结论推翻重来（见下「结论」），免费额度对比表保留作参考。**所有免费额度政策变动频繁，实现前必须重新核实。**
 
-## 结论
+## 结论（2026-08-06 修订版）
+
+- **多模态是硬要求**：信息量中含可用图片的任务一律走多模态模型（vision 路由）；纯文本任务走便宜文本模型（text 路由，DeepSeek 等打头）。文本融合仍是主路径，但视觉不再是「万不得已才用」
+- **OpenAI 兼容 API 直连，聚合层写在代码里**（`src/analysis/providers.ts`：text/vision 路由 + 熔断 + 多 key 池 + 降级链）。不引 LiteLLM/one-api 等外部网关——本项目已是常驻进程，两层路由/熔断是重复建设
+- **便宜付费 API 是主力**，不追求绝对免费：MiniMax-M3（多模态，OpenAI 兼容，约 ¥1.5/M tokens）、MiMo（mimo.mi.com，OpenAI/Anthropic 双兼容）已核实可用；DeepSeek 纯文本打 text 路由
+- **本地 LM Studio**（Qwen3-VL-8B / Gemma 多模态）作为 vision 路由降级位：OpenAI 兼容端点零成本接入，但 JSON schema 输出可靠性是门槛，`structuredOutput: "none"` + 围栏剥离兜底
+- **OpenCode Go 订阅**：风险评估修正（原「高」针对的是第三方 harness 盗用 OAuth 的场景；官方 CLI + 自有订阅不属此类）。但仍**只作实验性降级 provider，不当主力**——与 coding 共享配额（高峰 30+ 在播的分析流量会限流自己的编码会话）、无 SLA、无原生结构化输出
+- **coding 订阅反代成 API：不做**。这才是当初封号警告的本体（订阅流量伪装成 API 流量），核心基础设施不建在可随时被无预警收回的依赖上
+
+## 结论（2026-07-29 原版，已被上面取代）
 
 - 主路径是**文本融合**，不是视觉、不是音频 —— 免费额度压力小一个量级
 - 视觉首选 **Gemini 免费层**，备选 **智谱 GLM-4V-Flash**
-- **不采用 agent CLI 当后端**（封号风险）
+- ~~**不采用 agent CLI 当后端**（封号风险）~~ → 2026-08-06 修正为「OpenCode 可作实验性 provider；订阅反代不做」
 - 「唱歌 vs 说话」用**本地模型**，不用 LLM
 
 ## 免费视觉模型对比
@@ -22,7 +31,15 @@
 | **Cerebras** | 几乎全是文本模型；仅 `gemma-4-31b`(Preview) 支持图片，限 2 张/请求、10MB、**仅 base64 不支持外链** | 不需要 | ✅ | ✅ |
 | 豆包 / Moonshot / MiniMax | **均未找到官方明确的视觉免费额度页面**，第三方数据互相矛盾 [待验证] | 需要 | ✅ | ✅ |
 
-### 选型
+### 选型（2026-08-06 修订：转向便宜付费多模态）
+
+免费层对比表保留作兜底参考，但主力已改为付费 API：
+
+1. **text 路由**：DeepSeek 打头（纯文本、便宜），可叠加 MiMo 等
+2. **vision 路由**：MiniMax-M3 打头（已核实原生多模态 + OpenAI 兼容，约 ¥1.5/M tokens）→ 本地 LM Studio（Qwen3-VL-8B / Gemma）降级 → Gemini/GLM 免费层应急兜底
+3. 原 Gemini 首选 / GLM-4V-Flash 备选的免费层组合降级为「应急兜底」，不再当主力
+
+原免费层选型记录：
 
 1. **首选 Gemini flash 系** —— 不需国内实名、原生结构化输出、音频能复用同一 key。风险：免费层数据用于训练（直播画面有隐私顾虑需注意）；RPM/RPD 不再有保证，代码必须自适应重试降级
 2. **备选 GLM-4V-Flash** —— 免费不限量、国内网络直连，作为 Gemini 限流/不通时的 fallback。代价是要大陆手机号实名
@@ -65,48 +82,42 @@
 
 **注意**：纯 ASR 转出的是歌词文字，本身不判断「在唱歌」。而弹幕的 `UNIVERSAL_ASR_TEXT` cmd（见 [danmaku.md](danmaku.md)）看名字是 B站自己的 ASR 推送 —— 若可用，可能直接省掉这整块。
 
-## 不采用 agent CLI 当后端
+## agent CLI 当后端：风险评估（2026-08-06 修正）
 
 | CLI | 非交互 | 图片 | 强制 JSON | 风险 |
 |---|---|---|---|---|
 | `gemini-cli` | ✅ `-p` / 管道 | 靠 prompt 里 `@file.png`（issue #15532 被 close as not planned） | ❌ `--output-format json` 只包一层元数据，正文仍是自然语言 | **高** |
 | `claude` CLI | ✅ `-p` | 未找到明确证据支持传图做纯分类 [待验证] | ❌ 无原生 schema | 中 |
 | `codex` CLI | ✅ `codex exec` | ✅ `-i/--image`（本地文件） | ✅ **`--output-schema`** 走 Responses API strict 模式，三家里唯一原生支持。但 issue #15451：MCP/工具激活时可能静默降级为类 YAML 文本 | 中 |
-| `opencode` | 未核实 | 未核实 | 未核实 | **高**（正是被点名的第三方 harness） |
+| `opencode` | ✅ `run` / `serve` | 未核实 | ❌ 无原生 schema | **低于原评估**（见下） |
 
-**结论：不值得做。**
+**原结论「不值得做」对 harness 盗用场景依然成立，且同样适用于订阅反代：**
 
-1. **ToS/账号风险是硬伤**。2026-02 起 Google 已大规模封禁通过第三方 harness（如 OpenClaw）piggyback Gemini CLI OAuth 认证的账号，官方明确「利用第三方工具 harvest 或 piggyback Gemini CLI 的 OAuth 认证访问后端服务，直接违反条款」（[gemini-cli discussion #20632](https://github.com/google-gemini/gemini-cli/discussions/20632)）。Anthropic 明确 OAuth 登录仅限「ordinary, individual usage」，构建产品/服务应用 API Key（[legal-and-compliance](https://code.claude.com/docs/en/legal-and-compliance)）。**周期性无人值守跑分类任务的行为特征恰好符合「异常自动化流量」，而被封的账号往往就是日常写代码那个 —— 为省几美元赌这个不划算。**
-2. **工程上也不划算**。CLI 为人类交互式编程设计，冷启动开销大，stdout 混杂非结构化信息。
-3. **正路是官方免费 API key** —— 那本来就是官方划给开发者调用的额度，无灰色地带。
+1. **ToS/账号风险**。2026-02 起 Google 已大规模封禁通过第三方 harness（如 OpenClaw）piggyback Gemini CLI OAuth 认证的账号，官方明确「利用第三方工具 harvest 或 piggyback Gemini CLI 的 OAuth 认证访问后端服务，直接违反条款」（[gemini-cli discussion #20632](https://github.com/google-gemini/gemini-cli/discussions/20632)）。Anthropic 明确 OAuth 登录仅限「ordinary, individual usage」，构建产品/服务应用 API Key（[legal-and-compliance](https://code.claude.com/docs/en/legal-and-compliance)）。**「把 coding 订阅反代成 API」正是这个模式的本体——明确不做。**
+2. **工程上不划算**：CLI 为人类交互式编程设计，冷启动开销大，stdout 混杂非结构化信息，无原生 schema 保证。
+3. 正路是官方 API key —— 那本来就是官方划给开发者调用的额度，无灰色地带。
 
-若确实想用已有订阅，相对安全的替代是 Claude Agent SDK / Codex SDK 的 **API Key 模式**（非 OAuth 订阅登录），但那样费用模型就和普通 API 一样，失去了意义。
+**OpenCode Go 的修正评估（2026-08-06）**：用官方 opencode CLI + 自己的 Go 订阅，不属于上述 harness 盗用场景（不存在 piggyback 他人 OAuth）；调用时机随真实开播事件、prompt 经编排，行为特征也不接近典型自动化滥用。风险从「高」下调为「待定」（其订阅条款是否允许非编码自动化调用**未核实**）。但三条确定代价仍在：
 
-## Provider 抽象层
+- **与 coding 共享配额**——高峰 30+ 在播时分析流量会限流自己的编码会话
+- 无 SLA、限流阈值按交互编码节奏调、无原生结构化输出
+- 需要进程编排/会话管理的长期维护面
 
-```ts
-interface LLMProvider {
-  name: string;
-  classify(req: ClassifyRequest): Promise<SceneVerdict>;
-  healthCheck(): Promise<boolean>;
-  isCircuitOpen(): boolean;
-}
+结论：可作为 providers.ts 降级链上的**实验性 provider** 接入（熔断会自然兜住它的不可靠），不当主力或唯一后端。
 
-// 优先级链：Gemini → GLM → Qwen-VL
-for (const p of providers) {
-  if (p.isCircuitOpen()) continue;          // 连续 429/额度耗尽 → 冷却 10-30 分钟
-  try { return await p.classify(req); }
-  catch (e) { p.recordFailure(e); continue; }
-}
-throw new AllProvidersExhaustedError();
-```
+## Provider 抽象层（2026-08-06 已实现：`src/analysis/providers.ts`）
 
-要点：
+原始设计草图（`LLMProvider.classify` 单任务接口 + 固定优先级链）已演化为：
 
-- **统一输出 schema** —— 适配器层把各家结果 normalize 成同一结构，业务代码不感知底层模型
-- **熔断 + 冷却** —— 别每次都去撞一个已知耗尽的 key
-- **多 key 池** —— 同一 provider 下配多个 key（3 个 Gemini 项目 / 3 个百炼账号）轮询，延长免费额度寿命
-- **配置热更新** —— 优先级链、key 列表放配置，换模型不改代码
+- **`LlmRouter.completeJson(req, parse?)`**：按「输入是否含图」自动选 text / vision 路由（也可显式 `vision` 覆盖），沿路由有序尝试，全部失败抛 `AllProvidersExhaustedError`
+- **路由 = 配置里的 provider name 有序列表**（`llm.routes.text` / `llm.routes.vision`），前者优先、失败/熔断降级
+- **统一输出 schema**：任务层带 zod `parse` 进 router；parse 失败与端点失败同等计入熔断并降级——模型没按 schema 输出 = 本次不可靠
+- **结构化输出按 provider 能力分三档**（`structuredOutput: schema | object | none`）：json_schema 约束最强；none 用于不支持的小模型/本地端点，解析时剥 ```json 围栏兜底
+- **熔断 + 冷却**：连续失败到阈值（默认 3 次）打开，冷却期（默认 10 分钟）内直接跳过，不撞已知挂掉的端点
+- **多 key 池**：`keyEnvs` 列多个环境变量，轮询使用；key 只出现在 Authorization 头，绝不进日志
+- **配置热更新**：provider 列表、路由全在 `config.json` 的 `llm` 段，换模型不改代码
+
+OpenCode 若要实验性接入，同样封装成一个 provider 挂进降级链即可，熔断会自然兜住它的不稳定。
 
 ## 分类 schema 与 prompt
 
@@ -130,4 +141,5 @@ prompt 要点：只依据客观线索，不过度推测；画面与音频冲突�
 - [百炼新用户免费额度](https://help.aliyun.com/zh/model-studio/new-free-quota) / [Qwen3-Omni-Captioner](https://help.aliyun.com/zh/model-studio/qwen3-omni-captioner)
 - [Groq rate limits](https://console.groq.com/docs/rate-limits)
 - [inaSpeechSegmenter](https://github.com/ina-foss/inaSpeechSegmenter)
+- 2026-08-06 新增：[MiniMax API 模型文档](https://platform.minimax.io/docs/release-notes/models)（M3 原生多模态、OpenAI 兼容）/ [MiMo 开放平台](https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call)（OpenAI/Anthropic 双兼容）
 

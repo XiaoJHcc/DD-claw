@@ -7,16 +7,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from '../core/db.js';
 import { createPanelServer, type PanelDeps, type PanelStatus } from './server.js';
+import { createLlmRouter, seedLlmProvidersIfEmpty, listLlmProviders, saveLlmProviders, dbKeysOf, type LlmRouter, type FetchLike } from '../analysis/providers.js';
 
 interface Fixture {
   db: Db;
   base: string;
+  llmRouter?: LlmRouter;
 }
 
 /** 真实 http.Server 绑临时端口 + 内存库；connection:close 避免 keep-alive 挂住测试进程 */
 async function setup(
   t: import('node:test').TestContext,
-  opts: { auth?: PanelDeps['auth']; weiboAuth?: PanelDeps['weiboAuth']; weiboResolver?: PanelDeps['weiboResolver'] } = {},
+  opts: {
+    auth?: PanelDeps['auth']; weiboAuth?: PanelDeps['weiboAuth'];
+    weiboResolver?: PanelDeps['weiboResolver']; llm?: PanelDeps['llm'];
+    llmFetch?: FetchLike;
+  } = {},
 ): Promise<Fixture> {
   const db = new Db(':memory:');
   const status: PanelStatus = {
@@ -29,6 +35,24 @@ async function setup(
       { key: 'weibo', name: '微博', state: 'reserved' },
     ],
   };
+  // llm dep：按生产装配方式建（种子 config providers → settings；store 落库；
+  // onProvidersChanged 重建 router；key resolver = 面板 settings 覆盖 > process.env）
+  let llm: PanelDeps['llm'];
+  if (opts.llm) {
+    seedLlmProvidersIfEmpty(db, opts.llm.config.providers);
+    const dep: PanelDeps['llm'] = {
+      config: opts.llm.config,
+      store: { list: () => listLlmProviders(db), save: (ps) => saveLlmProviders(db, ps) },
+    };
+    const build = () => createLlmRouter(
+      { ...opts.llm!.config, providers: listLlmProviders(db) },
+      dbKeysOf(db),
+      opts.llmFetch ? { fetchFn: opts.llmFetch } : undefined,
+    );
+    dep.router = build();
+    dep.onProvidersChanged = () => { dep.router = build(); };
+    llm = dep;
+  }
   const server: Server = createPanelServer({
     db,
     weiboResolver: opts.weiboResolver,
@@ -39,6 +63,7 @@ async function setup(
     }),
     auth: opts.auth,
     weiboAuth: opts.weiboAuth,
+    llm,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {
@@ -46,7 +71,7 @@ async function setup(
     db.close();
   });
   const { port } = server.address() as AddressInfo;
-  return { db, base: `http://127.0.0.1:${port}` };
+  return { db, base: `http://127.0.0.1:${port}`, llmRouter: llm?.router };
 }
 
 interface ApiResult {
@@ -718,4 +743,167 @@ test('无 weiboAuth dep 时微博扫码路由 404', async (t) => {
   const { base } = await setup(t);
   assert.equal((await api(base, '/api/auth/weibo/qrcode', 'POST')).status, 404);
   assert.equal((await api(base, '/api/auth/weibo/qrcode/poll')).status, 404);
+});
+
+// ---- LLM key 管理 ----
+
+const LLM_CFG: NonNullable<PanelDeps['llm']>['config'] = {
+  enabled: true, requestTimeoutMs: 5000, circuitThreshold: 2, circuitCooldownMs: 60_000,
+  providers: [{
+    name: 'ds', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
+    vision: false, keyEnvs: ['TEST_PANEL_DS_KEY'], enabled: true, structuredOutput: 'schema',
+  }],
+};
+
+test('GET /api/llm：provider 与 key 状态（本机面板，key 值明文回显）', async (t) => {
+  const { base } = await setup(t, { llm: { config: LLM_CFG } });
+  const r = await api(base, '/api/llm');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.enabled, true);
+  const p = (r.json.providers as Array<Record<string, unknown>>)[0]!;
+  assert.equal(p.name, 'ds');
+  assert.deepEqual(p.routes, ['text']);
+  assert.deepEqual(p.key, { source: 'unset', count: 0, value: null });
+});
+
+test('PUT /api/llm/keys：保存 → source=panel + router 热更新 + GET 回显；清除 → 回退', async (t) => {
+  const { base, llmRouter } = await setup(t, { llm: { config: LLM_CFG } });
+  assert.match(llmRouter!.describe()[0]!.status, /缺 key/, '初始缺 key');
+
+  const r = await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-panel-123' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { ok: true, provider: 'ds', key: { source: 'panel', count: 1, value: 'sk-panel-123' } });
+  assert.equal(llmRouter!.describe()[0]!.status, 'ready', 'refreshKeys 热更新，免重启');
+
+  const info = await api(base, '/api/llm');
+  assert.deepEqual(
+    (info.json.providers as Array<{ key: unknown }>)[0]!.key,
+    { source: 'panel', count: 1, value: 'sk-panel-123' },
+    '本机面板，key 明文回显供编辑',
+  );
+
+  const cleared = await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: '' });
+  assert.deepEqual(cleared.json.key, { source: 'unset', count: 0, value: null }, '空值 = 清除面板填写');
+  assert.match(llmRouter!.describe()[0]!.status, /缺 key/);
+});
+
+test('PUT /api/llm/keys：provider 不存在 404；非法 value 400', async (t) => {
+  const { base } = await setup(t, { llm: { config: LLM_CFG } });
+  assert.equal((await api(base, '/api/llm/keys', 'PUT', { provider: 'nope', value: 'x' })).status, 404);
+  assert.equal((await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'has space' })).status, 400);
+});
+
+test('POST /api/llm/providers/:name/test：真实 ping 判断能不能用', async (t) => {
+  const okFetch: FetchLike = async () => new Response(
+    JSON.stringify({ choices: [{ message: { content: '{"pong":true}' } }] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+  const { base } = await setup(t, { llm: { config: LLM_CFG }, llmFetch: okFetch });
+
+  assert.equal((await api(base, '/api/llm/providers/nope/test', 'POST')).status, 404, '不存在 404');
+  const noKey = await api(base, '/api/llm/providers/ds/test', 'POST');
+  assert.equal(noKey.status, 400, '缺 key 400');
+
+  await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-ping-test' });
+  const ok = await api(base, '/api/llm/providers/ds/test', 'POST');
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.ok, true);
+  assert.equal(typeof ok.json.ms, 'number');
+});
+
+test('POST /api/llm/providers/:name/test：端点报错 502，错误信息不含 key', async (t) => {
+  const failFetch: FetchLike = async () => new Response('invalid api key', { status: 401 });
+  const { base } = await setup(t, { llm: { config: LLM_CFG }, llmFetch: failFetch });
+  await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-secret-xyz' });
+  const r = await api(base, '/api/llm/providers/ds/test', 'POST');
+  assert.equal(r.status, 502);
+  assert.equal(r.json.ok, false);
+  assert.match(r.json.error!, /401/);
+  assert.ok(!JSON.stringify(r.json).includes('sk-secret-xyz'), '错误信息不含 key');
+});
+
+test('PUT /api/llm/enabled：面板总开关覆盖 config 默认值', async (t) => {
+  const { base } = await setup(t, { llm: { config: { ...LLM_CFG, enabled: false } } });
+  assert.equal((await api(base, '/api/llm')).json.enabled, false, 'config 默认关');
+  assert.equal((await api(base, '/api/llm/enabled', 'PUT', { enabled: true })).status, 200);
+  assert.equal((await api(base, '/api/llm')).json.enabled, true, '面板打开');
+  assert.equal((await api(base, '/api/llm/enabled', 'PUT', { enabled: 'yes' })).status, 400);
+});
+
+test('无 llm dep 时 /api/llm* 一律 404', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/llm')).status, 404);
+  assert.equal((await api(base, '/api/llm/keys', 'PUT', { env: 'A', value: 'b' })).status, 404);
+  assert.equal((await api(base, '/api/llm/providers', 'POST', {})).status, 404);
+});
+
+// ---- LLM provider CRUD（settings 表是事实来源）----
+
+test('POST /api/llm/providers：新增即出现在 GET，路由自动推导；重名/非法 → 400', async (t) => {
+  const { base } = await setup(t, { llm: { config: LLM_CFG } });
+  const added = await api(base, '/api/llm/providers', 'POST', {
+    name: 'mm', baseURL: 'https://api.minimaxi.com/v1', model: 'MiniMax-M3',
+    vision: true, keyEnvs: ['TEST_PANEL_MM_KEY'], structuredOutput: 'schema',
+  });
+  assert.equal(added.status, 201);
+
+  const info = await api(base, '/api/llm');
+  const providers = info.json.providers as Array<{ name: string; routes: string[] }>;
+  assert.deepEqual(providers.map((p) => p.name), ['ds', 'mm'], 'config 种子 + 新增');
+  assert.deepEqual(providers[0]!.routes, ['text'], '纯文本只进 text 路由');
+  assert.deepEqual(providers[1]!.routes, ['text', 'vision'], '多模态进两条路由');
+
+  assert.equal((await api(base, '/api/llm/providers', 'POST', {
+    name: 'mm', baseURL: 'https://x.com/v1', model: 'm',
+  })).status, 400, '重名 400');
+  const bad = await api(base, '/api/llm/providers', 'POST', { name: 'x', baseURL: 'not-a-url', model: 'm' });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.error!, /baseURL/);
+});
+
+test('provider 表单可携带 key：POST/PUT 直接保存，GET 明文回显', async (t) => {
+  const { base } = await setup(t, { llm: { config: { ...LLM_CFG, providers: [] } } });
+  assert.equal((await api(base, '/api/llm/providers', 'POST', {
+    name: 'k', baseURL: 'https://api.x.com/v1', model: 'm', key: 'sk-form-1',
+  })).status, 201);
+  let info = await api(base, '/api/llm');
+  assert.deepEqual((info.json.providers as Array<{ key: { value: string } }>)[0]!.key,
+    { source: 'panel', count: 1, value: 'sk-form-1' }, 'POST 带 key 直接保存');
+  await api(base, '/api/llm/providers/k', 'PUT', { key: 'sk-form-2' });
+  info = await api(base, '/api/llm');
+  assert.equal((info.json.providers as Array<{ key: { value: string } }>)[0]!.key.value, 'sk-form-2', 'PUT 带 key 更新');
+  await api(base, '/api/llm/providers/k', 'PUT', { model: 'm2' });
+  info = await api(base, '/api/llm');
+  assert.equal((info.json.providers as Array<{ key: { value: string } }>)[0]!.key.value, 'sk-form-2',
+    '不带 key 的 PUT 不动现有 key');
+});
+
+test('PUT /api/llm/providers/order：整体重排；名单不对应/重复 → 400', async (t) => {
+  const { base } = await setup(t, { llm: { config: LLM_CFG } });
+  await api(base, '/api/llm/providers', 'POST', {
+    name: 'mm', baseURL: 'https://api.minimaxi.com/v1', model: 'MiniMax-M3', vision: true,
+  });
+  const r = await api(base, '/api/llm/providers/order', 'PUT', { names: ['mm', 'ds'] });
+  assert.equal(r.status, 200);
+  const info = await api(base, '/api/llm');
+  assert.deepEqual((info.json.providers as Array<{ name: string }>).map((p) => p.name), ['mm', 'ds']);
+  assert.equal((await api(base, '/api/llm/providers/order', 'PUT', { names: ['mm'] })).status, 400, '缺一个');
+  assert.equal((await api(base, '/api/llm/providers/order', 'PUT', { names: ['mm', 'mm'] })).status, 400, '重复');
+  assert.equal((await api(base, '/api/llm/providers/order', 'PUT', { names: ['mm', 'ghost'] })).status, 400, '不存在');
+});
+
+test('PUT 启停影响路由推导；DELETE 移除；onProvidersChanged 重建 router', async (t) => {
+  const { base, llmRouter } = await setup(t, { llm: { config: LLM_CFG } });
+  assert.deepEqual(llmRouter!.describe().map((s) => s.name), ['ds']);
+
+  const off = await api(base, '/api/llm/providers/ds', 'PUT', { enabled: false });
+  assert.equal(off.status, 200);
+  const info = await api(base, '/api/llm');
+  assert.deepEqual((info.json.providers as Array<{ routes: string[] }>)[0]!.routes, [], '停用后出路由');
+
+  assert.equal((await api(base, '/api/llm/providers/nope', 'PUT', { enabled: false })).status, 404);
+  assert.equal((await api(base, '/api/llm/providers/ds', 'DELETE')).status, 200);
+  const after = await api(base, '/api/llm');
+  assert.deepEqual(after.json.providers, [], '删除后名单为空（router 已随 onProvidersChanged 重建）');
+  assert.equal((await api(base, '/api/llm/providers/ds', 'DELETE')).status, 404);
 });

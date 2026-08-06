@@ -27,6 +27,28 @@ export const subscriptionSchema = z.object({
   mode: z.enum(['off', 'silent', 'on']).optional(),
 });
 
+/**
+ * LLM provider：OpenAI 兼容端点。key 不放 config，放 .env，
+ * keyEnvs 列环境变量名（多 key 池轮询）；空数组 = 无鉴权（本地 LM Studio 等）。
+ * keyEnvs 非空但一个变量都没填 → 运行时按「缺 key」跳过该 provider，不算配置错误
+ *（先接线后填 key 是合法状态）。
+ */
+export const llmProviderSchema = z.object({
+  name: z.string().min(1),
+  baseURL: z.url('baseURL 必须是合法 URL'),
+  model: z.string().min(1),
+  /** 是否可接含图任务（vision 路由候选） */
+  vision: z.boolean().default(false),
+  keyEnvs: z.array(z.string().min(1)).default([]),
+  enabled: z.boolean().default(true),
+  /**
+   * 结构化输出能力：schema = response_format json_schema（约束最强）；
+   * object = json_object（只保证是 JSON）；none = 不带 response_format
+   *（本地小模型/不支持的端点用，解析时剥代码围栏兜底）
+   */
+  structuredOutput: z.enum(['schema', 'object', 'none']).default('schema'),
+});
+
 export const configSchema = z.object({
   pollIntervalSec: z.number().int().min(20, '轮询间隔不要低于 20 秒').max(3600).default(45),
   pollJitterSec: z.number().int().min(0).max(120).default(8),
@@ -65,6 +87,26 @@ export const configSchema = z.object({
   }).default({ enabled: true, port: 8787 }),
 
   /**
+   * LLM 接入：provider 名单与总开关的事实来源都在 settings 表（面板管理），
+   * 这里仅提供默认值/首次种子。路由不用配：由 provider 列表自动推导
+   *（顺序 = 优先级，vision 路由只含多模态）。
+   * 未启用或名单为空时分析链路整体降级（Noop 行为），不影响推送。
+   */
+  llm: z.object({
+    /** 默认开关；面板 LLM 卡片的总开关（settings.llm_enabled）覆盖它 */
+    enabled: z.boolean().default(false),
+    requestTimeoutMs: z.number().int().min(1000).max(600_000).default(60_000),
+    /** 连续失败多少次打开熔断 */
+    circuitThreshold: z.number().int().min(1).max(20).default(3),
+    /** 熔断冷却时长（撞已知耗尽的 key 没有意义） */
+    circuitCooldownMs: z.number().int().min(10_000).max(3_600_000).default(600_000),
+    providers: z.array(llmProviderSchema).default([]),
+  }).default({
+    enabled: false, requestTimeoutMs: 60_000, circuitThreshold: 3,
+    circuitCooldownMs: 600_000, providers: [],
+  }),
+
+  /**
    * 历史种子来源：仅首次启动（streamers 表为空）时导入数据库，
    * 之后监听名单以 streamers 表为准，由面板管理。可整段省略。
    */
@@ -92,8 +134,14 @@ export const configSchema = z.object({
   if (dupUid) {
     ctx.addIssue({ code: 'custom', path: ['subscriptions'], message: `uid 重复: ${dupUid}` });
   }
+  const dupProvider = cfg.llm.providers.map((p) => p.name)
+    .find((n, i, a) => a.indexOf(n) !== i);
+  if (dupProvider) {
+    ctx.addIssue({ code: 'custom', path: ['llm', 'providers'], message: `provider name 重复: ${dupProvider}` });
+  }
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
 export type NotifyTarget = z.infer<typeof targetSchema>;
 export type Subscription = z.infer<typeof subscriptionSchema>;
+export type LlmProviderConfig = z.infer<typeof llmProviderSchema>;

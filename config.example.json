@@ -38,6 +38,23 @@
     "port": 8787
   },
 
+  // LLM 接入（OpenAI 兼容，可选）。全部管理都在控制面板的 LLM 卡片：
+  // provider 增删/启停、key 填写、总开关。这里只提供默认值/首次种子——
+  // enabled 只是默认开关（面板可覆盖），providers 仅空库时种子导入一次。
+  // 配好后用 npm run probe-llm 验证接线
+  "llm": {
+    "enabled": false,
+    "providers": [
+      // 便宜纯文本模型打头
+      // { "name": "deepseek", "baseURL": "https://api.deepseek.com/v1", "model": "deepseek-chat", "vision": false, "keyEnvs": ["DEEPSEEK_API_KEY"] },
+      // 多模态，接含图任务
+      // { "name": "minimax", "baseURL": "https://api.minimaxi.com/v1", "model": "MiniMax-M3", "vision": true, "keyEnvs": ["MINIMAX_API_KEY"] },
+      // 本地 LM Studio：无 keyEnvs = 不带 Authorization；
+      // 小模型结构化输出不可靠时把 structuredOutput 改成 "none"（解析时剥代码围栏兜底）
+      // { "name": "local-vl", "baseURL": "http://127.0.0.1:1234/v1", "model": "qwen3-vl-8b", "vision": true, "structuredOutput": "none" }
+    ]
+  },
+
   // 可选，仅作为首次启动种子（streamers 表为空时导入一次）；
   // 之后监听名单以数据库为准，由面板管理。整段可省略
   "subscriptions": [

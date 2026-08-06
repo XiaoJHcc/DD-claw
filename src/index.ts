@@ -7,6 +7,7 @@ import { Pipeline } from './core/pipeline.js';
 import { toLiveEvent } from './core/types.js';
 import { NoopAnalyzer } from './analysis/noop.js';
 import { AnalysisQueue } from './analysis/queue.js';
+import { createLlmRouter, seedLlmProvidersIfEmpty, listLlmProviders, saveLlmProviders, isLlmEnabled, dbKeysOf, migrateLiteralKeys } from './analysis/providers.js';
 import { OncePerSessionRule } from './rules/once-per-session.js';
 import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
@@ -18,7 +19,7 @@ import { fetchLiveStatus } from './sources/bili/live-status.js';
 import { loadCookies, cookieHeader, type SelfInfo } from './sources/bili/auth.js';
 import { FollowsSource } from './sources/bili/follows.js';
 import { DynamicSource } from './sources/bili/dynamic.js';
-import { createPanelServer, type PlatformStatus } from './panel/server.js';
+import { createPanelServer, type PlatformStatus, type PanelDeps } from './panel/server.js';
 import { createWeiboResolver } from './sources/weibo/resolve.js';
 import { loadWeiboCookies, weiboCookieHeader, type WeiboSelfInfo } from './sources/weibo/auth.js';
 import { WeiboFeedSource } from './sources/weibo/feed.js';
@@ -33,16 +34,18 @@ interface Args {
   dryRun: boolean;
   testNotify: boolean;
   probe: boolean;
+  probeLlm: boolean;
   forceUids: string[];
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { dryRun: false, testNotify: false, probe: false, forceUids: [] };
+  const args: Args = { dryRun: false, testNotify: false, probe: false, probeLlm: false, forceUids: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') args.dryRun = true;
     else if (a === '--test-notify') args.testNotify = true;
     else if (a === '--probe') args.probe = true;
+    else if (a === '--probe-llm') args.probeLlm = true;
     else if (a === '--force-uid') {
       const v = argv[++i];
       if (v) args.forceUids.push(...v.split(',').map((s) => s.trim()).filter(Boolean));
@@ -79,7 +82,78 @@ async function main(): Promise<void> {
     return;
   }
 
+  // --probe-llm 验证 LLM 接线：列出 provider 状态 + 向 text 路由发一个 ping。
+  // vision 路由只报可用性（没有真实图就不消耗多模态额度），填了 key 后跑这个确认链路
+  if (args.probeLlm) {
+    // 口径与主流程一致：开库读面板覆盖（provider 名单 / 总开关 / key）
+    const probeDb = new Db(secrets.dbPath);
+    seedLlmProvidersIfEmpty(probeDb, app.llm.providers);
+    migrateLiteralKeys(probeDb);
+    if (!isLlmEnabled(probeDb, app.llm)) {
+      log.error('LLM 未启用：在控制面板的 LLM 卡片打开总开关（或 config.json llm.enabled=true）');
+      process.exit(1);
+    }
+    const router = createLlmRouter(
+      { ...app.llm, providers: listLlmProviders(probeDb) },
+      dbKeysOf(probeDb),
+    );
+    probeDb.close();
+    log.info('LLM provider 状态:');
+    for (const s of router.describe()) {
+      log.info(
+        `  ${s.name} (${s.model}${s.vision ? ', 多模态' : ''}) ` +
+        `路由=[${s.routes.join(',') || '无'}] ${s.status}`,
+      );
+    }
+    try {
+      const raw = await router.completeJson({
+        messages: [{ role: 'user', content: '只回复这个 JSON：{"pong": true}' }],
+        maxTokens: 64,
+        jsonSchema: {
+          name: 'pong',
+          schema: {
+            type: 'object',
+            properties: { pong: { type: 'boolean' } },
+            required: ['pong'],
+            additionalProperties: false,
+          },
+        },
+      });
+      log.info(`text 路由 ping 成功: ${JSON.stringify(raw)}`);
+    } catch (e) {
+      log.error('text 路由 ping 失败', e);
+      process.exit(1);
+    }
+    return;
+  }
+
   const db = new Db(secrets.dbPath);
+
+  // LLM：provider 名单事实来源是 settings 表（面板增删改），config 仅作首次种子；
+  // 路由由名单自动推导（顺序 = 优先级）。key 优先级：面板填写 > .env。
+  // 面板改名单 → onProvidersChanged 重建 router；改 key → refreshKeys。均免重启。
+  // 分析任务（scene-classify 等）后续从 llmDep.router 取
+  const seededLlm = seedLlmProvidersIfEmpty(db, app.llm.providers);
+  if (seededLlm > 0) {
+    log.info(`已从 config.json 种子导入 ${seededLlm} 个 LLM provider 到 settings 表，之后由面板管理`);
+  }
+  // 早期面板误把 key 值填进 keyEnvs（变量名）字段的，挪进只写不读的 key 存储（一次性，值不进日志）
+  const migratedKeys = migrateLiteralKeys(db);
+  if (migratedKeys > 0) {
+    log.info(`已把 ${migratedKeys} 个 provider 误填的 key 迁移到 key 存储（不再明文展示）`);
+  }
+  const llmKeysOf = dbKeysOf(db);
+  const llmDep: NonNullable<PanelDeps['llm']> = {
+    config: app.llm,
+    store: {
+      list: () => listLlmProviders(db),
+      save: (ps) => saveLlmProviders(db, ps),
+    },
+  };
+  llmDep.onProvidersChanged = () => {
+    llmDep.router = createLlmRouter({ ...app.llm, providers: listLlmProviders(db) }, llmKeysOf);
+  };
+  llmDep.onProvidersChanged();
 
   // 监听名单事实来源是 streamers 表；config.json 的 subscriptions 仅作首次种子
   const seeded = db.seedStreamersIfEmpty(app.subscriptions);
@@ -236,6 +310,7 @@ async function main(): Promise<void> {
     panel = createPanelServer({
       db,
       weiboResolver: createWeiboResolver(),
+      llm: llmDep,
       status: () => {
         // state 推导：无 cookie=none；有 cookie 还没心跳=imported；
         // isLogin true=ok / false=expired（mid 随心跳带出）

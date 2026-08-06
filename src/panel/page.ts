@@ -10,6 +10,7 @@ import { APP_CORE } from './page/app-core.js';
 import { APP_STATUS } from './page/app-status.js';
 import { APP_STREAMERS } from './page/app-streamers.js';
 import { APP_PUSH } from './page/app-push.js';
+import { APP_LLM } from './page/app-llm.js';
 
 const QR_LIB = Buffer.from(QR_LIB_B64, 'base64').toString('utf8');
 
@@ -53,6 +54,11 @@ export const PANEL_PAGE = `<!doctype html>
 <div id="channel-add"></div>
 </section>
 
+<section class="card" id="card-llm">
+<h2>LLM</h2>
+<div id="llm-list">加载中…</div>
+</section>
+
 <div id="modal-mask" class="hidden"><div id="modal"></div></div>
 
 <script>${QR_LIB}</script>
@@ -61,6 +67,7 @@ ${APP_CORE}
 ${APP_STATUS}
 ${APP_STREAMERS}
 ${APP_PUSH}
+${APP_LLM}
 </script>
 </body>
 </html>

@@ -37,7 +37,7 @@
 | **弹幕流** | 低 | 观众反应最诚实：刷「好听」vs 刷「这波打得好」 |
 | **B站动态 / 微博** | 高（需凭据） | 「等会儿唱歌」这类预告，信息量最大 |
 | 画面内文字 | 低 | 游戏 HUD、歌名字幕、点歌台 |
-| 画面语义 | 中 | 前述信号都不足时才动用视觉模型 |
+| 画面语义 | 中 | 前述信号都不足时才动用视觉模型（2026-08-06 起：**凡输入含图一律走多模态模型**，见 [llm.md](research/llm.md)） |
 | 音频 music/speech | 中 | **纯辅助**，末位接入 |
 
 ### 为什么规则引擎不够
@@ -52,7 +52,7 @@
 
 规则必然判错（分区还挂着网游）。LLM 能得出「已切换到唱歌，依据是动态预告 + 弹幕反应，分区未更新」。
 
-这是纯文本任务，不需要视觉，不需要音频。也因此免费额度压力小一个量级。
+这是纯文本任务，不需要视觉，不需要音频。也因此免费额度压力小一个量级。（2026-08-06 修正：文本融合仍是**主路径**，但多模态已是硬要求——输入含图的任务一律走 vision 路由的多模态模型，纯文本任务才走便宜文本模型。）
 
 ## 3. 技术选型
 
@@ -62,7 +62,7 @@
 | 运行 | 本机 Windows 常驻 | 无 Docker；架构预留容器化 |
 | 数据库 | `better-sqlite3` | 实测下预编译二进制，不触发本机编译 |
 | 调度 | `croner` | 零依赖、TS 原生、支持重叠防护 |
-| LLM | Vercel AI SDK (`ai` + `@ai-sdk/google` + `@ai-sdk/openai-compatible`) | 业务只写一次 zod schema，换模型不改调用代码 |
+| LLM | OpenAI 兼容 API 直连（原生 fetch，`analysis/providers.ts` 聚合：text/vision 路由 + 熔断 + key 池） | 2026-08-06 修订：不引 SDK/网关，provider 配置数组即聚合层；多模态模型走 vision 路由，便宜文本模型走 text 路由 |
 | ffmpeg | `child_process.spawn` 直调 | `fluent-ffmpeg` 一年多未大动；本机已有 7.1.1 |
 | QQ | NapCatQQ（OneBot 11 HTTP） | 唯一活跃选择，详见 [notify](research/notify.md) |
 | Toast | `powertoast` | 比 `node-notifier` 更贴近原生 API |
@@ -70,7 +70,8 @@
 
 被否掉的方案，理由记录在案：
 
-- **借用 opencode / agent CLI 当 LLM 后端** — 封号风险，见 [llm.md](research/llm.md#不采用-agent-cli-当后端)
+- **coding 订阅反代成 API** — 正是被封号的 harness 模式本体，见 [llm.md](research/llm.md#agent-cli-当后端风险评估2026-08-06-修正)。（2026-08-06 修正：OpenCode 官方 CLI + 自有订阅不属此类，可作实验性降级 provider，但不当主力）
+- **外部 LLM 网关（LiteLLM / one-api）** — provider 配置数组已是聚合层，本项目常驻进程不需要第二个常驻进程做重复的路由/熔断
 - **依赖 `bilibili-api-python` 等封装库** — 已归档停维，见 [live-status.md](research/live-status.md#开源实现)
 - **自动读取浏览器 cookie** — Chrome ABE 已封死，见 [auth-cookie.md](research/auth-cookie.md)
 - **纯 Python 单体** — 音频不再是主路径后失去理由
@@ -105,7 +106,7 @@
 │   │              schedule-extract  从动态/微博解析预告时间表
 │   ├─ matcher     确定性偏好匹配：verdict × preference_clauses → 优先级/文案/目标
 │   ├─ context     按房间聚合时间窗内多源数据 → 一份 context
-│   └─ providers   熔断 + 多 key 池 + 降级链
+│   └─ providers   text/vision 路由 + 熔断 + 多 key 池 + 降级链
 │                            ↓
 │   判定结果入库：verdicts / schedules 表
 │                            ↓

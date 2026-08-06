@@ -123,4 +123,4 @@ export function loadConfig(): LoadedConfig {
 export { ConfigError };
 /** 仅供测试。生产代码不要用。 */
 export { stripJsonComments as __stripJsonCommentsForTest };
-export type { AppConfig, NotifyTarget, Subscription } from './schema.js';
+export type { AppConfig, NotifyTarget, Subscription, LlmProviderConfig } from './schema.js';
