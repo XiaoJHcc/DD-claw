@@ -497,6 +497,7 @@ function llmInfo(deps: PanelDeps): unknown {
       vision: p.vision,
       enabled: p.enabled,
       structuredOutput: p.structuredOutput,
+      api: p.api,
       routes: (['text', 'vision'] as const).filter((r) => routes[r].includes(p.name)),
       status: statusByName.get(p.name) ?? null,
       key: llmKeySource(deps.db, p),
@@ -521,7 +522,7 @@ function putLlmProvider(deps: PanelDeps, name: string | null, body: unknown): un
     if (!prev) throw new HttpError(404, 'provider 不存在');
     // 只允许这几个字段进 patch；name 是路径标识，不可改
     const patch: Record<string, unknown> = {};
-    for (const k of ['baseURL', 'model', 'vision', 'keyEnvs', 'enabled', 'structuredOutput'] as const) {
+    for (const k of ['baseURL', 'model', 'vision', 'keyEnvs', 'enabled', 'structuredOutput', 'api'] as const) {
       if (b[k] !== undefined) patch[k] = b[k];
     }
     merged = { ...prev, ...patch };

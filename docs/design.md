@@ -70,7 +70,7 @@
 
 被否掉的方案，理由记录在案：
 
-- **coding 订阅反代成 API** — 正是被封号的 harness 模式本体，见 [llm.md](research/llm.md#agent-cli-当后端风险评估2026-08-06-修正)。（2026-08-06 修正：OpenCode 官方 CLI + 自有订阅不属此类，可作实验性降级 provider，但不当主力）
+- **coding 订阅反代成 API** — 正是被封号的 harness 模式本体，见 [llm.md](research/llm.md#agent-cli-当后端风险评估2026-08-06-修正)。（2026-08-06 终版：OpenCode 走官方 API 接入，CLI / 反代方式舍弃；订阅反代仍不做）
 - **外部 LLM 网关（LiteLLM / one-api）** — provider 配置数组已是聚合层，本项目常驻进程不需要第二个常驻进程做重复的路由/熔断
 - **依赖 `bilibili-api-python` 等封装库** — 已归档停维，见 [live-status.md](research/live-status.md#开源实现)
 - **自动读取浏览器 cookie** — Chrome ABE 已封死，见 [auth-cookie.md](research/auth-cookie.md)

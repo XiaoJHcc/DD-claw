@@ -13,6 +13,7 @@ function spec(over: Partial<LlmProviderConfig> = {}): LlmProviderConfig {
   return {
     name: 'p1', baseURL: 'https://api.example.com/v1', model: 'm1',
     vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema',
+    api: 'chat-completions',
     ...over,
   };
 }
@@ -242,6 +243,69 @@ test('正文不是 JSON 计入失败并降级', async () => {
   const { fn: f2 } = fakeFetch([okResponse('{"v":1}')]);
   const router = new LlmRouter(
     [provider({ name: 'a' }, [], f1), provider({ name: 'b' }, [], f2)],
+    { text: ['a', 'b'], vision: [] },
+  );
+  const r = await router.completeJson<{ v: number }>({ messages: textMsg });
+  assert.equal(r.v, 1);
+});
+
+// ---- Responses API（api=responses）----
+
+/** 造一个 Responses API 信封响应；text 进 output[0] 的 output_text */
+function okResponsesApi(text: string): Response {
+  return new Response(
+    JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text }] }] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+}
+
+test('api=responses 打 /responses：system 进 instructions，text.format 下发 json_schema', async () => {
+  const { fn, calls } = fakeFetch([okResponsesApi('{"a":1}')]);
+  const router = new LlmRouter(
+    [provider({ name: 'a', api: 'responses' }, [], fn)],
+    { text: ['a'], vision: [] },
+  );
+  const r = await router.completeJson<{ a: number }>({
+    messages: [{ role: 'system', content: '你是分类器' }, ...textMsg],
+    jsonSchema: { name: 's', schema: { type: 'object' } },
+    maxTokens: 100,
+  });
+  assert.equal(r.a, 1);
+  assert.match(calls[0]!.url, /\/responses$/, '不打 /chat/completions');
+  const body = JSON.parse(calls[0]!.init.body as string);
+  assert.equal(body.instructions, '你是分类器');
+  assert.deepEqual(body.input, [{ role: 'user', content: [{ type: 'input_text', text: '你好' }] }]);
+  assert.equal(body.text.format.type, 'json_schema');
+  assert.equal(body.max_output_tokens, 100);
+  assert.equal(body.messages, undefined);
+});
+
+test('api=responses 图片部件换算成 input_image；output_text 便捷字段优先', async () => {
+  const { fn, calls } = fakeFetch([new Response(
+    JSON.stringify({ output_text: '{"a":3}', output: [] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  )]);
+  const router = new LlmRouter(
+    [provider({ name: 'a', api: 'responses', vision: true }, [], fn)],
+    { text: ['a'], vision: ['a'] },
+  );
+  const r = await router.completeJson<{ a: number }>({ messages: imgMsg });
+  assert.equal(r.a, 3);
+  const body = JSON.parse(calls[0]!.init.body as string);
+  assert.deepEqual(body.input[0].content, [
+    { type: 'input_text', text: '这是什么' },
+    { type: 'input_image', image_url: 'https://i0.hdslb.com/x.jpg' },
+  ]);
+});
+
+test('api=responses 响应缺 output_text 计入失败并降级', async () => {
+  const { fn: f1 } = fakeFetch([new Response(
+    JSON.stringify({ output: [] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  )]);
+  const { fn: f2 } = fakeFetch([okResponse('{"v":1}')]);
+  const router = new LlmRouter(
+    [provider({ name: 'a', api: 'responses' }, [], f1), provider({ name: 'b' }, [], f2)],
     { text: ['a', 'b'], vision: [] },
   );
   const r = await router.completeJson<{ v: number }>({ messages: textMsg });

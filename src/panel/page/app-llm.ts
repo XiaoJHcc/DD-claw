@@ -15,6 +15,7 @@ function llmRow(p, i) {
   return '<div class="chan"><span class="grow"><b>' + esc(p.name) + '</b> ' +
     '<span class="meta">' + esc(p.model) + '</span> ' +
     (p.vision ? '<span class="tag">多模态</span> ' : '') +
+    (p.api === 'responses' ? '<span class="tag">responses</span> ' : '') +
     '<span class="tag">路由: ' + (p.routes.join(', ') || '无') + '</span> ' +
     (p.status ? '<span class="tag">' + esc(p.status) + '</span>' : '') +
     '<span class="meta" id="lt-' + i + '"></span>' +
@@ -72,11 +73,14 @@ function openLlmModal(i) {
     (p && p.vision ? ' checked' : '') + '> 多模态（可接含图任务，进 vision 路由）</label> ' +
     '<select id="lp-so"><option value="schema">结构化输出: schema（默认）</option>' +
     '<option value="object">object</option>' +
-    '<option value="none">none（本地小模型）</option></select></div>' +
+    '<option value="none">none（本地小模型）</option></select> ' +
+    '<select id="lp-api"><option value="chat-completions">协议: chat/completions（默认）</option>' +
+    '<option value="responses">responses（GPT 5.6 等）</option></select></div>' +
     '<div class="mrow"><button onclick="saveLlmModal(' + (i === null ? 'null' : i) + ')">保存</button>' +
     '<button onclick="closeModal()">取消</button></div>'
   );
   if (p) document.getElementById('lp-so').value = p.structuredOutput || 'schema';
+  if (p) document.getElementById('lp-api').value = p.api || 'chat-completions';
 }
 function saveLlmModal(i) {
   var body = {
@@ -84,6 +88,7 @@ function saveLlmModal(i) {
     model: document.getElementById('lp-model').value.trim(),
     vision: document.getElementById('lp-vision').checked,
     structuredOutput: document.getElementById('lp-so').value,
+    api: document.getElementById('lp-api').value,
     key: document.getElementById('lp-key').value.trim(),
   };
   var req = i === null

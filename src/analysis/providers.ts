@@ -5,7 +5,8 @@ import type { Db } from '../core/db.js';
 const log = makeLogger('llm');
 
 /**
- * LLM provider 层：OpenAI 兼容端点聚合。
+ * LLM provider 层：OpenAI 兼容端点聚合（chat/completions 与 responses 双协议，
+ * 按 provider 的 api 字段选择；Anthropic /messages 协议不做）。
  *
  * 设计要点（docs/research/llm.md 2026-08 修订）：
  * - 不引外部网关（LiteLLM 等）：provider 配置数组本身就是聚合层，
@@ -191,8 +192,50 @@ export class OpenAiProvider {
     return key;
   }
 
-  /** 调 chat/completions，返回解析后的 JSON。任何失败抛 ProviderCallError */
+  /** 按 spec.api 选调用的协议，返回解析后的 JSON。任何失败抛 ProviderCallError */
   async complete(req: LlmRequest): Promise<unknown> {
+    const content = this.spec.api === 'responses'
+      ? await this.callResponses(req)
+      : await this.callChatCompletions(req);
+    try {
+      // structuredOutput=none 的端点可能把 JSON 包在 ```json 围栏里，剥掉兜底
+      return JSON.parse(stripCodeFence(content));
+    } catch {
+      throw new ProviderCallError(`正文不是合法 JSON: ${content.slice(0, 120)}`);
+    }
+  }
+
+  /** 共享：POST + 鉴权 + 错误归一化，返回响应 JSON。key 只在 Authorization 头 */
+  private async post(path: string, body: Record<string, unknown>): Promise<unknown> {
+    const key = this.nextKey();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (key) headers.Authorization = `Bearer ${key}`;
+
+    let res: Response;
+    const url = `${this.spec.baseURL.replace(/\/+$/, '')}${path}`;
+    try {
+      res = await this.fetchFn(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.opts.timeoutMs),
+      });
+    } catch (e) {
+      throw new ProviderCallError(`请求异常: ${(e as Error).message}`);
+    }
+    if (!res.ok) {
+      // 响应体可能含限流/额度信息，截断带上；key 不在响应里
+      const text = (await res.text().catch(() => '')).slice(0, 200);
+      throw new ProviderCallError(`HTTP ${res.status}${text ? `: ${text}` : ''}`);
+    }
+    try {
+      return await res.json();
+    } catch {
+      throw new ProviderCallError('响应不是合法 JSON 信封');
+    }
+  }
+
+  private async callChatCompletions(req: LlmRequest): Promise<string> {
     const body: Record<string, unknown> = {
       model: this.spec.model,
       messages: req.messages,
@@ -212,46 +255,81 @@ export class OpenAiProvider {
       body.response_format = { type: 'json_object' };
     }
 
-    const key = this.nextKey();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (key) headers.Authorization = `Bearer ${key}`;
-
-    let res: Response;
-    const url = `${this.spec.baseURL.replace(/\/+$/, '')}/chat/completions`;
-    try {
-      res = await this.fetchFn(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.opts.timeoutMs),
-      });
-    } catch (e) {
-      throw new ProviderCallError(`请求异常: ${(e as Error).message}`);
-    }
-    if (!res.ok) {
-      // 响应体可能含限流/额度信息，截断带上；key 不在响应里
-      const text = (await res.text().catch(() => '')).slice(0, 200);
-      throw new ProviderCallError(`HTTP ${res.status}${text ? `: ${text}` : ''}`);
-    }
-
-    let content: unknown;
-    try {
-      const data = (await res.json()) as {
-        choices?: Array<{ message?: { content?: unknown } }>;
-      };
-      content = data.choices?.[0]?.message?.content;
-    } catch {
-      throw new ProviderCallError('响应不是合法 JSON 信封');
-    }
+    const data = (await this.post('/chat/completions', body)) as {
+      choices?: Array<{ message?: { content?: unknown } }>;
+    };
+    const content = data.choices?.[0]?.message?.content;
     if (typeof content !== 'string' || !content.trim()) {
       throw new ProviderCallError('响应缺少 choices[0].message.content');
     }
-    try {
-      // structuredOutput=none 的端点可能把 JSON 包在 ```json 围栏里，剥掉兜底
-      return JSON.parse(stripCodeFence(content));
-    } catch {
-      throw new ProviderCallError(`正文不是合法 JSON: ${content.slice(0, 120)}`);
+    return content;
+  }
+
+  /**
+   * OpenAI Responses API（/responses，如 OpenCode Go 的 gpt-5.6-luna）：
+   * system 消息合并进 instructions；内容部件换算成 input_text / input_image；
+   * 结构化输出走 text.format；正文取 output_text 便捷字段，缺了再从 output 里找
+   */
+  private async callResponses(req: LlmRequest): Promise<string> {
+    const textOf = (m: ChatMessage): string =>
+      typeof m.content === 'string'
+        ? m.content
+        : m.content.filter((c) => c.type === 'text').map((c) => (c as { text: string }).text).join('\n');
+    const instructions = req.messages
+      .filter((m) => m.role === 'system')
+      .map(textOf)
+      .filter(Boolean)
+      .join('\n');
+    const input = req.messages
+      .filter((m) => m.role !== 'system')
+      .map((m) => ({
+        role: m.role,
+        content: typeof m.content === 'string'
+          ? [{ type: 'input_text', text: m.content }]
+          : m.content.map((c) => c.type === 'text'
+              ? { type: 'input_text', text: c.text }
+              : { type: 'input_image', image_url: c.image_url.url }),
+      }));
+
+    const body: Record<string, unknown> = { model: this.spec.model, input };
+    if (instructions) body.instructions = instructions;
+    if (req.maxTokens !== undefined) body.max_output_tokens = req.maxTokens;
+    if (req.temperature !== undefined) body.temperature = req.temperature;
+    if (this.spec.structuredOutput === 'schema' && req.jsonSchema) {
+      body.text = {
+        format: {
+          type: 'json_schema',
+          name: req.jsonSchema.name,
+          schema: req.jsonSchema.schema,
+          strict: req.jsonSchema.strict ?? true,
+        },
+      };
+    } else if (this.spec.structuredOutput !== 'none') {
+      body.text = { format: { type: 'json_object' } };
     }
+
+    const data = (await this.post('/responses', body)) as {
+      output_text?: unknown;
+      output?: Array<{ type?: string; content?: Array<{ type?: string; text?: unknown }> }>;
+    };
+    let content: unknown =
+      typeof data.output_text === 'string' && data.output_text.trim() ? data.output_text : undefined;
+    if (content === undefined) {
+      for (const item of data.output ?? []) {
+        if (item.type !== 'message') continue;
+        for (const part of item.content ?? []) {
+          if (part.type === 'output_text' && typeof part.text === 'string' && part.text.trim()) {
+            content = part.text;
+            break;
+          }
+        }
+        if (content !== undefined) break;
+      }
+    }
+    if (typeof content !== 'string' || !content.trim()) {
+      throw new ProviderCallError('响应缺少 output_text');
+    }
+    return content;
   }
 }
 

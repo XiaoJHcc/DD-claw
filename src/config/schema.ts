@@ -47,6 +47,12 @@ export const llmProviderSchema = z.object({
    *（本地小模型/不支持的端点用，解析时剥代码围栏兜底）
    */
   structuredOutput: z.enum(['schema', 'object', 'none']).default('schema'),
+  /**
+   * 端点协议：chat-completions = /chat/completions（绝大多数 OpenAI 兼容端点）；
+   * responses = /responses（OpenAI Responses API，如 OpenCode Go 的 gpt-5.6-luna）。
+   * Anthropic /messages 协议不做（他家模型贵，MiniMax/Qwen 走各自官方 API）
+   */
+  api: z.enum(['chat-completions', 'responses']).default('chat-completions'),
 });
 
 export const configSchema = z.object({

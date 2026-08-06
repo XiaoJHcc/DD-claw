@@ -752,6 +752,7 @@ const LLM_CFG: NonNullable<PanelDeps['llm']>['config'] = {
   providers: [{
     name: 'ds', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
     vision: false, keyEnvs: ['TEST_PANEL_DS_KEY'], enabled: true, structuredOutput: 'schema',
+    api: 'chat-completions',
   }],
 };
 
@@ -844,14 +845,23 @@ test('POST /api/llm/providers：新增即出现在 GET，路由自动推导；�
   const added = await api(base, '/api/llm/providers', 'POST', {
     name: 'mm', baseURL: 'https://api.minimaxi.com/v1', model: 'MiniMax-M3',
     vision: true, keyEnvs: ['TEST_PANEL_MM_KEY'], structuredOutput: 'schema',
+    api: 'responses',
   });
   assert.equal(added.status, 201);
 
   const info = await api(base, '/api/llm');
-  const providers = info.json.providers as Array<{ name: string; routes: string[] }>;
+  const providers = info.json.providers as Array<{ name: string; routes: string[]; api: string }>;
   assert.deepEqual(providers.map((p) => p.name), ['ds', 'mm'], 'config 种子 + 新增');
   assert.deepEqual(providers[0]!.routes, ['text'], '纯文本只进 text 路由');
   assert.deepEqual(providers[1]!.routes, ['text', 'vision'], '多模态进两条路由');
+  assert.equal(providers[0]!.api, 'chat-completions', '缺省协议回显');
+  assert.equal(providers[1]!.api, 'responses', 'POST 指定 responses 协议');
+
+  // PUT 可改协议；非法值 400
+  assert.equal((await api(base, '/api/llm/providers/mm', 'PUT', { api: 'chat-completions' })).status, 200);
+  const after = await api(base, '/api/llm');
+  assert.equal((after.json.providers as Array<{ api: string }>)[1]!.api, 'chat-completions');
+  assert.equal((await api(base, '/api/llm/providers/mm', 'PUT', { api: 'anthropic' })).status, 400, '不支持 anthropic 协议');
 
   assert.equal((await api(base, '/api/llm/providers', 'POST', {
     name: 'mm', baseURL: 'https://x.com/v1', model: 'm',
