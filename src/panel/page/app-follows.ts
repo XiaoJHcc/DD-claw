@@ -1,6 +1,6 @@
 /**
- * 面板前端 · 卡片6 关注列表：B站关注候选池（含已监听标记）+ 搜索过滤 + 一键加入监听。
- * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 app-core / app-streamers 段。
+ * 面板前端 · 卡片6 关注列表：B站关注候选池（头像网格 + 已监听标记 + 搜索过滤 + 一键加入监听）。
+ * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 icons / app-core / app-streamers 段。
  */
 export const APP_FOLLOWS = `
 var followAll = [];
@@ -25,7 +25,8 @@ function followCard(f) {
     '<div class="f-name">' + esc(f.uname || f.uid) + '</div>' +
     (f.watched
       ? '<span class="tag">已监听</span>'
-      : '<button onclick="watch(' + q(f.uid) + ')">+ 监听</button>') + '</div>';
+      : '<button class="btn btn-primary btn-sm" data-action="watch" data-uid="' + esc(f.uid) + '">' +
+        icon('plus') + ' 监听</button>') + '</div>';
 }
 function renderFollows() {
   var box = document.getElementById('follow-list');
@@ -37,20 +38,25 @@ function renderFollows() {
     html = '<p class="hint">' + (followSearch ? '没有匹配的关注' : '无（或关注同步未启用）') + '</p>';
   } else if (shown.length < list.length) {
     html += '<div class="f-more"><span class="hint">共 ' + list.length + ' 条 · ' +
-      '<a href="javascript:void(0)" onclick="followShowAll=true;renderFollows()">展开全部</a></span></div>';
+      '<a data-action="follow-expand">展开全部</a></span></div>';
   }
   box.innerHTML = html;
 }
-function onFollowSearch() {
-  followSearch = document.getElementById('follow-search').value.trim();
+
+INPUTS['follow-search'] = function (el) {
+  followSearch = el.value.trim();
   followShowAll = false;
   renderFollows();
-}
-function watch(uid) {
-  api('/api/streamers/' + uid + '/watch', 'POST').then(function () {
+};
+ACTIONS['follow-expand'] = function () {
+  followShowAll = true;
+  renderFollows();
+};
+ACTIONS['watch'] = function (el) {
+  api('/api/streamers/' + el.getAttribute('data-uid') + '/watch', 'POST').then(function () {
     toast('已加入监听'); loadStreamers(); loadFollows();
   }).catch(function (e) { toast(e.message, true); });
-}
+};
 
 loadFollows();
 setInterval(loadFollows, 30000);

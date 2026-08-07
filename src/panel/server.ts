@@ -45,8 +45,6 @@ export interface PanelStatus {
   notifiers: string[];
   watchedCount: number;
   liveCount: number;
-  /** 关注列表候选池数量（关注同步抓取状态） */
-  followsCount: number;
   platforms: PlatformStatus[];
 }
 
@@ -81,7 +79,7 @@ export interface PanelDeps {
   };
   /**
    * LLM provider 展示与 key 管理；不注入则 /api/llm* 一律 404。
-   * key 值只写不读：任何响应/日志都不含 key，只回「设置状态」。
+   * key 在本机面板明文回显/编辑（用户决策 2026-08-06，只绑 127.0.0.1）；key 不进日志。
    */
   llm?: {
     config: AppConfig['llm'];
@@ -212,7 +210,7 @@ async function handle(
     sendJson(res, 200, { ok: true });
     return;
   }
-  // ---- LLM provider 与 key 管理（llm dep 存在才挂；key 值只写不读）----
+  // ---- LLM provider 与 key 管理（llm dep 存在才挂；key 本机面板明文回显/编辑）----
   if (deps.llm && method === 'GET' && path === '/api/llm') {
     sendJson(res, 200, llmInfo(deps));
     return;
@@ -376,7 +374,8 @@ async function handle(
 }
 
 /** 渠道拖拽排序：ids 必须是现有渠道的全排列（长度一致/无重复/无增删）。 */
-function putChannelOrder(db: Db, body: unknown): unknown {  const ids = (body as Record<string, unknown> | null)?.ids;
+function putChannelOrder(db: Db, body: unknown): unknown {
+  const ids = (body as Record<string, unknown> | null)?.ids;
   if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
     throw new HttpError(400, 'ids 必须是正整数 id 数组');
   }

@@ -274,13 +274,60 @@ test('条件规则不命中且全局默认显式空：不推', async () => {
   assert.equal(h.disp.sent.length, 0);
 });
 
-test('命中规则但 channels 为空 = 用户明确不推', async () => {
+test('命中规则但渠道并集为空 = 用户明确不推', async () => {
   const h = harness();
   h.db.rules.push(rule({ keywords: ['歌'], channels: [] }));
   h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 0);
   assert.equal(h.db.notified.size, 0, '未推成功不得 markNotified');
+});
+
+test('多条规则命中：渠道取并集去重（保持顺序），推送词取 sort 序首个非空', async () => {
+  const h = harness();
+  h.db.channels.push(
+    { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '111',
+      enabled: true, createdAt: 0, updatedAt: 0 },
+    { id: 3, name: '亲友群', notifier: 'onebot', targetType: 'group', targetId: '333',
+      enabled: true, createdAt: 0, updatedAt: 0 },
+  );
+  h.db.rules.push(
+    rule({ id: 1, keywords: ['歌'], channels: [2, 1] }),
+    rule({ id: 2, keywords: ['歌'], channels: [1, 3], messageTemplate: '{alias}唱歌速来' }),
+    rule({ id: 3, keywords: ['不命中'], channels: [3] }),
+  );
+  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  const m = h.disp.sent[0]!;
+  assert.deepEqual(m.channels, ['2', '1', '3'], '命中规则 #1/#2 的渠道并集去重保序，未命中的 #3 不参与');
+  assert.equal(m.title, '阿梓唱歌速来', '推送词 = sort 序首个非空 messageTemplate（#1 未设，取 #2 的）');
+});
+
+test('空条件规则与其他规则同等命中：渠道并入并集，不再单独兜底', async () => {
+  const h = harness();
+  h.db.channels.push(
+    { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '111',
+      enabled: true, createdAt: 0, updatedAt: 0 },
+  );
+  h.db.rules.push(
+    rule({ id: 1, keywords: [], areas: [], channels: [1] }), // 空条件规则，恒命中
+    rule({ id: 2, keywords: ['歌'], channels: [2], messageTemplate: '{alias}唱歌速来' }),
+  );
+  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  assert.deepEqual(h.disp.sent[0]!.channels, ['1', '2'], '空条件规则与条件规则同时命中，渠道并集');
+
+  // 条件规则不命中时，空条件规则照常命中（仍是规则路径，不走全局默认渠道/模板）
+  // 新一场直播（liveTime 变了）才能绕过 OncePerSession 去重
+  h.db.settings.set('default_channels', '[]');
+  h.db.settings.set('default_template', '{alias} 默认模板');
+  h.bus.emit(sig({ status: status({ title: '打游戏', liveTime: 1_785_320_000 }) }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 2);
+  assert.deepEqual(h.disp.sent[1]!.channels, ['1'], '只剩空条件规则命中，不走全局默认渠道');
+  assert.equal(h.disp.sent[1]!.title, '阿梓 默认模板', '规则路径模板：规则无覆盖时回全局默认模板');
 });
 
 // ---- 健康告警 ----

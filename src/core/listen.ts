@@ -43,7 +43,7 @@ export function shouldRunListen(
   return s !== '0';
 }
 
-/** 面板切换：与 auto 默认一致则回 auto（清手动设置），否则落手动值；返回切换后有效态 */
+/** 面板切换：与 auto 默认一致则回 auto（删除手动设置的 key），否则落手动值；返回切换后有效态 */
 export function setListen(
   db: Db,
   feature: ListenFeature,
@@ -51,6 +51,7 @@ export function setListen(
   loggedIn: boolean,
 ): boolean {
   const auto = loggedIn;
-  db.setSetting(listenKey(feature), want === auto ? '' : (want ? '1' : '0'));
+  if (want === auto) db.deleteSetting(listenKey(feature));
+  else db.setSetting(listenKey(feature), want ? '1' : '0');
   return isListenEnabled(db, feature, loggedIn);
 }

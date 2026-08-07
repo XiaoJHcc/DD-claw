@@ -1,17 +1,12 @@
 /**
- * 面板前端公共段：esc / api / toast / 弹窗开关 / 时长格式化与每秒重算。
- * 内嵌进页面 <script>，内容不得出现反引号与 ${（外层是模板字面量），一律字符串拼接。
+ * 面板前端公共段：esc / api / toast（顶部胶囊）/ sheet（两级统一弹窗）/ iOS 开关与图标按钮 /
+ * 通用拖拽排序 makeSortable / 事件委托（data-action / data-change / data-input）/ 时长每秒重算。
+ * 内嵌进页面 <script>，内容不得出现反引号与 ${（外层是模板字面量），一律字符串拼接。依赖 icons 段。
  */
 export const APP_CORE = `
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-function q(s) { return "'" + String(s) + "'"; } // 生成内联 onclick 里的字符串实参
-// 渠道类型 → 人话标签（推送卡片与主播弹窗共用）
-function chanTypeName(c) {
-  if (c.notifier === 'toast') return '系统通知';
-  return c.targetType === 'group' ? 'QQ群' : 'QQ私聊';
 }
 function api(path, method, body) {
   return fetch(path, {
@@ -25,41 +20,143 @@ function api(path, method, body) {
     });
   });
 }
+// ---- toast：顶部居中浮动胶囊，成功绿/错误红，约 3s 自动消失，多条纵向堆叠 ----
 function toast(msg, isErr) {
-  var t = document.getElementById('toast');
-  t.textContent = msg; t.className = isErr ? 'err' : 'ok';
-  clearTimeout(t._tm);
-  t._tm = setTimeout(function () { t.textContent = ''; t.className = ''; }, 4000);
+  var host = document.getElementById('toasts');
+  if (!host) return;
+  var el = document.createElement('div');
+  el.className = 'toast-capsule ' + (isErr ? 'err' : 'ok');
+  el.innerHTML = icon(isErr ? 'xmark' : 'check') + '<span></span>';
+  el.querySelector('span').textContent = msg;
+  host.appendChild(el);
+  setTimeout(function () {
+    el.classList.add('out');
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 350);
+  }, 3000);
 }
-
-// ---- 弹窗（mask 点击空白处关闭；modalCleanup 由打开方注册清理逻辑） ----
-var modalCleanup = null;
-function openModal(html) {
-  document.getElementById('modal').innerHTML = html;
-  document.getElementById('modal-mask').classList.remove('hidden');
-}
-function closeModal() {
-  if (modalCleanup) { try { modalCleanup(); } catch (e) {} modalCleanup = null; }
-  document.getElementById('modal-mask').classList.add('hidden');
-  document.getElementById('modal').innerHTML = '';
-}
-document.getElementById('modal-mask').addEventListener('click', function (e) {
-  if (e.target === this) closeModal();
+// ---- 事件委托：消灭内联 on* 处理器。渲染只写 data-action / data-change / data-input 与 ----
+// ---- data-id 等数据属性，处理函数注册进这三张表；所有插值必须过 esc() ----
+var ACTIONS = {}; var CHANGES = {}; var INPUTS = {};
+document.addEventListener('click', function (e) {
+  if (!(e.target instanceof Element)) return;
+  var el = e.target.closest('[data-action]');
+  if (!el) return;
+  var fn = ACTIONS[el.getAttribute('data-action')];
+  if (fn) fn(el, e);
 });
-
-// ---- 嵌套弹窗（主播弹窗内的规则新增/编辑用；关掉回到上一层） ----
-function openModal2(html) {
-  document.getElementById('modal2').innerHTML = html;
-  document.getElementById('modal-mask2').classList.remove('hidden');
-}
-function closeModal2() {
-  document.getElementById('modal-mask2').classList.add('hidden');
-  document.getElementById('modal2').innerHTML = '';
-}
-document.getElementById('modal-mask2').addEventListener('click', function (e) {
-  if (e.target === this) closeModal2();
+document.addEventListener('change', function (e) {
+  if (!(e.target instanceof Element)) return;
+  var el = e.target.closest('[data-change]');
+  if (!el) return;
+  var fn = CHANGES[el.getAttribute('data-change')];
+  if (fn) fn(el, e);
 });
-
+document.addEventListener('input', function (e) {
+  if (!(e.target instanceof Element)) return;
+  var el = e.target.closest('[data-input]');
+  if (!el) return;
+  var fn = INPUTS[el.getAttribute('data-input')];
+  if (fn) fn(el, e);
+});
+// 卡片里的链接等需要吞掉卡片点击的元素标 data-action="noop"（导航等默认行为不受影响）
+ACTIONS.noop = function () {};
+// ---- sheet：统一两级弹窗（1 主弹窗 / 2 嵌套弹窗），遮罩点击或右上角 × 关闭 ----
+// sheetCleanups 由打开方注册清理逻辑（停轮询、清状态等），关窗时执行
+var sheetCleanups = { 1: null, 2: null };
+function openSheet(title, bodyHtml, level) {
+  var l = level || 1;
+  var mask = document.getElementById('sheet-mask' + l);
+  mask.querySelector('.sheet').innerHTML =
+    '<div class="sheet-head"><div class="sheet-title">' + esc(title) + '</div>' +
+    '<button class="icon-btn" data-action="close-sheet" data-level="' + l + '" title="关闭">' +
+    icon('xmark') + '</button></div>' +
+    '<div class="sheet-body">' + bodyHtml + '</div>';
+  mask.classList.remove('hidden');
+}
+function closeSheet(level) {
+  var l = level || 1;
+  if (sheetCleanups[l]) { try { sheetCleanups[l](); } catch (e) {} sheetCleanups[l] = null; }
+  document.getElementById('sheet-mask' + l).classList.add('hidden');
+  document.querySelector('#sheet-mask' + l + ' .sheet').innerHTML = '';
+}
+ACTIONS['close-sheet'] = function (el) { closeSheet(Number(el.getAttribute('data-level')) || 1); };
+(function () {
+  for (var l = 1; l <= 2; l++) {
+    (function (lv) {
+      document.getElementById('sheet-mask' + lv).addEventListener('click', function (e) {
+        if (e.target === this) closeSheet(lv);
+      });
+    })(l);
+  }
+})();
+// ---- 通用控件 ----
+function switchHtml(attrs, checked, disabled) {
+  return '<label class="switch"><input type="checkbox" ' + attrs +
+    (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + '><span class="knob"></span></label>';
+}
+function iconBtn(action, iconName, title, danger) {
+  return '<button class="icon-btn' + (danger ? ' danger' : '') + '" data-action="' + action +
+    '" title="' + esc(title) + '" aria-label="' + esc(title) + '">' + icon(iconName) + '</button>';
+}
+function gripHtml() { return '<span class="grip" title="拖拽排序">' + icon('grip') + '</span>'; }
+function field(label, inputHtml) {
+  return '<div class="field"><label>' + esc(label) + '</label>' + inputHtml + '</div>';
+}
+// 渠道类型 → 人话标签（推送卡片与规则编辑共用）
+function chanTypeName(c) {
+  if (c.notifier === 'toast') return '系统通知';
+  return c.targetType === 'group' ? 'QQ群' : 'QQ私聊';
+}
+function chanTag(c) {
+  if (c.targetType === 'group') return 'QQ群 ' + (c.targetId || '');
+  if (c.targetType === 'private') return 'QQ私聊 ' + (c.targetId || '');
+  return '系统通知';
+}
+// ---- 通用拖拽排序：provider / 渠道 / 规则三套列表共用 ----
+// 行需 .row[draggable][data-sid]；opts: { items: fn() 当前数组, getId: fn(item), onOrder: fn(ids) 落库 }
+function makeSortable(container, opts) {
+  var dragId = null;
+  container.addEventListener('dragstart', function (e) {
+    if (!(e.target instanceof Element)) return;
+    var row = e.target.closest('.row[draggable]');
+    if (!row) return;
+    dragId = row.getAttribute('data-sid');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragId || '');
+    row.classList.add('dragging');
+  });
+  container.addEventListener('dragover', function (e) {
+    if (dragId == null) return;
+    if (!(e.target instanceof Element)) return;
+    if (!e.target.closest('.row[draggable]')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+  container.addEventListener('drop', function (e) {
+    if (!(e.target instanceof Element)) return;
+    var row = e.target.closest('.row[draggable]');
+    if (!row || dragId == null) return;
+    e.preventDefault();
+    var items = opts.items();
+    var from = -1, to = -1, tid = row.getAttribute('data-sid');
+    for (var i = 0; i < items.length; i++) {
+      var id = String(opts.getId(items[i]));
+      if (id === dragId) from = i;
+      if (id === tid) to = i;
+    }
+    dragId = null;
+    if (from < 0 || to < 0 || from === to) return;
+    var ids = items.map(function (x) { return opts.getId(x); });
+    var moved = ids.splice(from, 1)[0];
+    ids.splice(to, 0, moved);
+    opts.onOrder(ids);
+  });
+  container.addEventListener('dragend', function () {
+    dragId = null;
+    var rows = container.querySelectorAll('.row.dragging');
+    for (var i = 0; i < rows.length; i++) rows[i].classList.remove('dragging');
+  });
+}
 // ---- 时长：.dur 元素带 data-ts（秒级时间戳）+ data-prefix，每秒本地重算，不打接口 ----
 function fmtDur(sec) {
   sec = Math.max(0, Math.floor(sec));
@@ -78,4 +175,9 @@ setInterval(function () {
     if (ts > 0) els[i].textContent = els[i].getAttribute('data-prefix') + fmtDur(now - ts);
   }
 }, 1000);
+// 壳里的静态图标位（data-icon 属性）统一填充
+(function () {
+  var els = document.querySelectorAll('[data-icon]');
+  for (var i = 0; i < els.length; i++) els[i].innerHTML = icon(els[i].getAttribute('data-icon'));
+})();
 `;

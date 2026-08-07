@@ -1,7 +1,7 @@
 import { makeLogger } from '../logger.js';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage } from '../notify/message.js';
-import { matchPushRule, renderTemplate } from '../analysis/matcher.js';
+import { matchPushRules, renderTemplate } from '../analysis/matcher.js';
 import { isPushEnabled } from './push.js';
 import type { Bus } from './bus.js';
 import type { Db } from './db.js';
@@ -142,8 +142,9 @@ export class Pipeline {
   }
 
   /**
-   * 透明条件规则 → PushMessage；返回 null = 不推（命中规则未选渠道 / 全局默认未选渠道）。
-   * - 主播只有条件规则：优先级第一条命中；命中规则的 channels 为空 = 用户明确不推
+   * 透明条件规则 → PushMessage；返回 null = 不推（命中集合渠道并集为空 / 全局默认未选渠道）。
+   * - 命中集合非空：所有命中规则独立生效——渠道 = 各命中规则 channels 的并集（去重保序）；
+   *   推送词 = sort 序首个非空 messageTemplate；并集为空 = 用户明确不推（记 log 不推）
    * - 条件规则均不命中（含一条都没有）→ 全局默认：settings.default_channels
    *   （未设置 = 全部启用渠道的旧兜底行为；显式空数组 = 默认不推）+ 全局默认模板
    * - 模板：规则覆盖 > settings.default_template > 内置默认；正文/图片/跳转沿用默认形状
@@ -151,18 +152,23 @@ export class Pipeline {
   private buildMessage(event: LiveEvent): PushMessage | null {
     const { db } = this.deps;
     const base = liveEventToMessage(event);
-    const rule = matchPushRule(db.listEnabledPushRules(event.uid), event);
+    const hits = matchPushRules(db.listEnabledPushRules(event.uid), event);
 
     let channelIds: number[];
     let templateOverride: string | null = null;
-    if (rule) {
-      if (rule.channels.length === 0) {
-        log.info(`不推送 ${event.alias || event.uname}: 命中规则 #${rule.id} 但未勾选渠道`);
+    if (hits.length > 0) {
+      channelIds = [];
+      for (const r of hits) {
+        for (const id of r.channels) {
+          if (!channelIds.includes(id)) channelIds.push(id);
+        }
+        templateOverride ??= r.messageTemplate;
+      }
+      if (channelIds.length === 0) {
+        log.info(`不推送 ${event.alias || event.uname}: 命中 ${hits.length} 条规则但都未勾选渠道`);
         return null;
       }
-      channelIds = rule.channels;
-      templateOverride = rule.messageTemplate;
-      log.info(`命中推送规则 #${rule.id}（${event.alias || event.uname}）`);
+      log.info(`命中推送规则 ${hits.map((r) => `#${r.id}`).join('/')}（${event.alias || event.uname}）`);
     } else {
       channelIds = this.defaultChannelIds();
       if (channelIds.length === 0) {

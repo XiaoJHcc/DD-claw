@@ -5,6 +5,7 @@ import type { Signal } from '../../core/types.js';
 import type { NewPost } from '../../core/posts.js';
 import type { Source, SourceContext } from '../types.js';
 import { BiliApiError, biliRequest, type BiliRequestFn } from './client.js';
+import { fetchSelf, type SelfInfo } from './auth.js';
 import { dmQueryParams } from './dm.js';
 
 const log = makeLogger('bili/dynamic');
@@ -15,11 +16,15 @@ const FEATURES = 'itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote';
 
 /** 注入点：便于单测风控/网络异常路径，生产环境用真实实现。返回原始 items */
 export type DynamicFetcher = (cookie: string, uid: string) => Promise<unknown[]>;
+export type DynamicSelfFetcher = (cookie: string) => Promise<SelfInfo>;
 
 export interface DynamicSourceOpts {
   /** 完整 Cookie 头（cookieHeader 的产物），绝不进日志 */
   cookie: string;
   fetcher?: DynamicFetcher;
+  selfFetcher?: DynamicSelfFetcher;
+  /** 每轮心跳拿到 self 后上报一次（无论 isLogin 真假），供面板展示登录态 */
+  onLoginState?: (s: SelfInfo) => void;
 }
 
 interface FeedSpaceData {
@@ -136,6 +141,9 @@ export function parseDynamicItem(item: unknown, uid: string): NewPost | null {
  * 空间动态轮询：listWatchedUids → mapLimit(2) 逐个拉 feed/space → 归档 posts
  * （INSERT OR IGNORE，去重只靠 (platform, item_id) UNIQUE）→ 新帖 emit feed_post。
  *
+ * 登录态心跳折进轮询周期（模子同 FollowsSource / WeiboFeedSource）：每轮先 fetchSelf，
+ * 失效发一次 health_alert 并跳过本轮，恢复复位；每轮 onLoginState 上报面板
+ * （follows.enabled=false 时这是 B站登录态唯一的心跳来源）。
  * 冷启动政策：每个 uid 首轮只归档不发信号（政策同 live-status 的 first_run）。
  * 失败纪律：拉取失败绝不当成「没动态」——本轮跳过、旧数据不动；
  * 同一 uid 连续失败到阈值发一次 health_alert，恢复复位（live-status 模式）。
@@ -150,13 +158,19 @@ export class DynamicSource implements Source {
   private polled = new Set<string>();
   private failures = new Map<string, number>();
   private alerted = new Set<string>();
+  /** 同一轮登录失效只告警一次，恢复后才复位（同 FollowsSource） */
+  private loginAlerted = false;
 
   private readonly cookie: string;
   private readonly fetcher: DynamicFetcher;
+  private readonly selfFetcher: DynamicSelfFetcher;
+  private readonly onLoginState?: (s: SelfInfo) => void;
 
   constructor(opts: DynamicSourceOpts) {
     this.cookie = opts.cookie;
     this.fetcher = opts.fetcher ?? fetchDynamics;
+    this.selfFetcher = opts.selfFetcher ?? fetchSelf;
+    this.onLoginState = opts.onLoginState;
   }
 
   start(ctx: SourceContext): void {
@@ -180,9 +194,43 @@ export class DynamicSource implements Source {
     log.info(`启动：空间动态轮询，间隔 ${ctx.config.dynamic.intervalSec}s`);
   }
 
-  /** 拉一轮：归档 + 新帖发信号。单 uid 失败不影响其他 uid。 */
+  /** 拉一轮：先心跳查登录态，有效才逐 uid 归档 + 新帖发信号。单 uid 失败不影响其他 uid。 */
   async pollOnce(): Promise<void> {
     const ctx = this.ctx!;
+
+    let self: SelfInfo;
+    try {
+      self = await this.selfFetcher(this.cookie);
+    } catch (e) {
+      // 心跳本身网络失败 ≠ cookie 失效，不告警，只跳过本轮（同 FollowsSource）
+      log.error('登录态查询失败，跳过本轮抓取', e);
+      return;
+    }
+    this.onLoginState?.(self);
+
+    if (!self.isLogin) {
+      if (!this.loginAlerted) {
+        this.loginAlerted = true;
+        ctx.bus.emit({
+          source: this.name,
+          kind: 'health_alert',
+          uid: '',
+          roomId: '',
+          ts: Math.floor(Date.now() / 1000),
+          payload: {
+            message: 'B站 cookie 已失效或未登录（isLogin=false），空间动态抓取已暂停。\n' +
+              '请在面板重新扫码登录，或更新 cookies.json；匿名开播监听不受影响。',
+          },
+        });
+      }
+      log.warn('cookie 失效或未登录，跳过本轮抓取');
+      return;
+    }
+    if (this.loginAlerted) {
+      this.loginAlerted = false;
+      log.info('登录态已恢复，继续抓取');
+    }
+
     const uids = ctx.db.listWatchedUids();
     await mapLimit(uids, 2, async (uid) => {
       await this.pollUid(uid);

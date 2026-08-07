@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  DynamicSource, fetchDynamics, parseDynamicItem, type DynamicFetcher,
+  DynamicSource, fetchDynamics, parseDynamicItem, type DynamicFetcher, type DynamicSelfFetcher,
 } from './dynamic.js';
 import { BiliApiError, BiliHttpError } from './client.js';
 import { Bus } from '../../core/bus.js';
@@ -28,21 +28,32 @@ interface Harness {
   src: DynamicSource;
   db: Db;
   signals: Signal[];
+  loginStates: Array<{ isLogin: boolean; mid: string | null }>;
   cleanup(): void;
 }
 
-/** 真 Bus + 收集信号，临时目录真实 Db（监听名单含 uid 1/2），假 fetcher */
-function harness(fetcher: DynamicFetcher, uids: string[] = ['1']): Harness {
+/** 真 Bus + 收集信号，临时目录真实 Db（监听名单含 uid 1/2），假 fetcher / 假登录态心跳 */
+function harness(
+  fetcher: DynamicFetcher,
+  uids: string[] = ['1'],
+  selfFetcher?: DynamicSelfFetcher,
+): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));
   const db = new Db(join(dir, 'test.db'));
   for (const uid of uids) db.upsertStreamer({ uid, watch: true });
   const bus = new Bus();
   const signals: Signal[] = [];
   bus.on('*', (s) => { signals.push(s); });
-  const src = new DynamicSource({ cookie: 'fake-cookie', fetcher });
+  const loginStates: Harness['loginStates'] = [];
+  const src = new DynamicSource({
+    cookie: 'fake-cookie',
+    fetcher,
+    selfFetcher: selfFetcher ?? (async () => ({ isLogin: true, mid: '99' })),
+    onLoginState: (s) => { loginStates.push(s); },
+  });
   src.bind({ bus, db, config: cfg() });
   return {
-    src, db, signals,
+    src, db, signals, loginStates,
     cleanup() { db.close(); rmSync(dir, { recursive: true, force: true }); },
   };
 }
@@ -274,4 +285,68 @@ test('单 uid 失败不影响其他 uid 本轮归档', async (t) => {
   await h.src.pollOnce();
   assert.equal(h.db.listRecentPosts(['1'], 10).get('1'), undefined, '失败的 uid 不写库');
   assert.equal(h.db.listRecentPosts(['2'], 10).get('2')!.length, 1, '其他 uid 正常归档');
+});
+
+// ---- 登录态心跳（折进轮询周期，同 FollowsSource 纪律）----
+
+test('每轮心跳上报登录态（onLoginState），供面板展示', async (t) => {
+  const h = harness(async () => [WORD]);
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  await h.src.pollOnce();
+  assert.deepEqual(h.loginStates, [
+    { isLogin: true, mid: '99' },
+    { isLogin: true, mid: '99' },
+  ], '每轮上报一次（无论 isLogin 真假）');
+});
+
+test('登录失效：发一次 health_alert 并跳过本轮，恢复后复位并重新归档', async (t) => {
+  let loggedIn = false;
+  let fetched = 0;
+  const h = harness(
+    async () => { fetched++; return [WORD]; },
+    ['1'],
+    async () => ({ isLogin: loggedIn, mid: loggedIn ? '99' : null }),
+  );
+  t.after(h.cleanup);
+
+  // 未登录：跳过抓取 + 告警一次
+  await h.src.pollOnce();
+  assert.equal(fetched, 0, '未登录不抓动态');
+  assert.equal(h.db.listRecentPosts(['1'], 10).get('1'), undefined);
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1);
+  const alert = h.signals.find((s) => s.kind === 'health_alert')!;
+  assert.equal(alert.source, 'bili/dynamic');
+  assert.match((alert.payload as { message: string }).message, /cookie 已失效/);
+  assert.deepEqual(h.loginStates.at(-1), { isLogin: false, mid: null }, '失效也上报登录态');
+
+  // 同一轮失效不重复告警
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1);
+
+  // 恢复：复位后继续抓取归档
+  loggedIn = true;
+  await h.src.pollOnce();
+  assert.equal(fetched, 1, '恢复后继续抓取');
+  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 1);
+
+  // 复位后再次失效会重新告警
+  loggedIn = false;
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 2);
+});
+
+test('心跳本身网络失败：不告警、不抓取，跳过本轮', async (t) => {
+  let fetched = 0;
+  const h = harness(
+    async () => { fetched++; return [WORD]; },
+    ['1'],
+    async () => { throw new Error('网络错误: connect ETIMEDOUT'); },
+  );
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(fetched, 0);
+  assert.equal(h.signals.length, 0, '网络失败 ≠ cookie 失效，不发 health_alert 也不上报');
 });

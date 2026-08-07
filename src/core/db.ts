@@ -665,7 +665,7 @@ export class Db {
     return out;
   }
 
-  // ---- settings：kv（目前只有 default_template）----
+  // ---- settings：kv（default_template / default_channels / push_enabled / listen_* / llm_* 等）----
 
   getSetting(key: string): string | null {
     const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
@@ -676,6 +676,10 @@ export class Db {
     this.db
       .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
       .run(key, value);
+  }
+
+  deleteSetting(key: string): void {
+    this.db.prepare('DELETE FROM settings WHERE key = ?').run(key);
   }
 
   close(): void {

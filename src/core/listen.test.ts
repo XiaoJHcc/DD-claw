@@ -27,14 +27,15 @@ test('手动开：即使未登录也显示开（无 cookie 时源实际不跑，
   assert.equal(isListenEnabled(db, 'weibo', false), true);
 });
 
-test('setListen 与 auto 一致则回 auto：清除手动设置', () => {
+test('setListen 与 auto 一致则回 auto：删除手动设置的 key', () => {
   const db = new Db(':memory:');
   // 已登录、auto 开 → 手动关
   assert.equal(setListen(db, 'dynamic', false, true), false);
   assert.equal(listenSetting(db, 'dynamic'), '0');
-  // 再开（= auto 默认开）→ 回 auto
+  // 再开（= auto 默认开）→ 回 auto：settings 里的 key 整个删掉
   assert.equal(setListen(db, 'dynamic', true, true), true);
   assert.equal(listenSetting(db, 'dynamic'), null);
+  assert.equal(db.getSetting('listen_dynamic'), null, '回 auto 后 key 不存在（不是空串）');
   // auto 下登录态变化会跟着走
   assert.equal(isListenEnabled(db, 'dynamic', false), false, '回 auto 后未登录又关');
 });

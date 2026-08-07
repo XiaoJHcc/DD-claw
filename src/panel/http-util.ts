@@ -194,7 +194,9 @@ function parseMessageTemplate(v: unknown): string | null {
 function parseRuleFields(o: Record<string, unknown>, p: PushRuleInput): void {
   if ('name' in o) {
     if (typeof o.name !== 'string') throw new HttpError(400, 'name 必须是字符串');
-    p.name = o.name.trim();
+    const name = o.name.trim();
+    if (!name) throw new HttpError(400, '规则名称不能为空');
+    p.name = name;
   }
   if ('keywords' in o) p.keywords = asStringArray(o.keywords, 'keywords');
   if ('areas' in o) p.areas = asStringArray(o.areas, 'areas');

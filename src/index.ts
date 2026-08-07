@@ -24,7 +24,7 @@ import { createWeiboResolver } from './sources/weibo/resolve.js';
 import { loadWeiboCookies, weiboCookieHeader, type WeiboSelfInfo } from './sources/weibo/auth.js';
 import { WeiboFeedSource } from './sources/weibo/feed.js';
 import type { NewPushChannel } from './core/push.js';
-import { isListenEnabled, shouldRunListen } from './core/listen.js';
+import { shouldRunListen } from './core/listen.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 import type { Source } from './sources/types.js';
@@ -250,7 +250,11 @@ async function main(): Promise<void> {
   };
   const startDynamic = (cookieHdr: string): void => {
     dynamicSrc?.stop();
-    dynamicSrc = new DynamicSource({ cookie: cookieHdr });
+    // 登录态心跳在 DynamicSource 内部：follows.enabled=false 时这是 B站登录态唯一来源
+    dynamicSrc = new DynamicSource({
+      cookie: cookieHdr,
+      onLoginState: (s) => { biliLogin = s; },
+    });
     dynamicSrc.start({ bus, db, config: app });
   };
   const stopDynamic = (): void => { dynamicSrc?.stop(); dynamicSrc = null; };
@@ -350,7 +354,6 @@ async function main(): Promise<void> {
           notifiers: dispatcher.channels,
           watchedCount: db.listWatchedUids().length,
           liveCount: db.countLiveRooms(),
-          followsCount: db.listFollows(true).length,
           platforms: [
             { key: 'bili', name: 'B站', state: biliState, mid: biliLogin?.mid ?? null },
             // mid 字段复用：微博存登录态心跳带出的 uid
@@ -368,8 +371,7 @@ async function main(): Promise<void> {
             log.info('扫码登录成功，热重启关注列表同步');
             startFollows(cookieHdr);
           }
-          stopDynamic();
-          log.info('扫码登录成功，热重启动态轮询');
+          // 动态源由 reconcileListen 统一启停（startDynamic 内部会先停旧实例）
           reconcileListen();
         },
       },
@@ -379,8 +381,7 @@ async function main(): Promise<void> {
           weiboCookieImported = true;
           weiboLogin = null; // 新 cookie 还没心跳，先按 imported 展示
           weiboCookieHdr = cookieHdr;
-          stopWeiboFeed();
-          log.info('微博扫码登录成功，热重启微博时间线');
+          // 微博源由 reconcileListen 统一启停（startWeiboFeed 内部会先停旧实例）
           reconcileListen();
         },
       },

@@ -35,7 +35,6 @@ async function setup(
     notifiers: ['onebot', 'toast'],
     watchedCount: 0,
     liveCount: 0,
-    followsCount: 0,
     platforms: [
       { key: 'bili', name: 'B站', state: 'ok', mid: '999' },
       { key: 'weibo', name: '微博', state: 'reserved' },
@@ -573,7 +572,7 @@ test('rule 空条件（关键词/分区都不填 = 任意匹配）可建可改',
   assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { keywords: [], areas: [] })).status, 200);
 });
 
-test('rule 名称：不传自动补「规则 N」，传了存自定义名；未知字段仍拒', async (t) => {
+test('rule 名称：不传自动补「规则 N」，传了存自定义名（trim）；空白名 400；未知字段仍拒', async (t) => {
   const { db, base } = await setup(t);
   db.upsertStreamer({ uid: '1001' });
 
@@ -581,11 +580,18 @@ test('rule 名称：不传自动补「规则 N」，传了存自定义名；未�
   const id = (auto.json as { id: number }).id;
   assert.equal(db.listPushRules().find((r) => r.id === id)!.name, `规则 ${id}`);
 
-  const named = await api(base, '/api/rules', 'POST', ruleBody({ name: '歌回专用' }));
+  const named = await api(base, '/api/rules', 'POST', ruleBody({ name: '  歌回专用  ' }));
   const id2 = (named.json as { id: number }).id;
-  assert.equal(db.listPushRules().find((r) => r.id === id2)!.name, '歌回专用');
+  assert.equal(db.listPushRules().find((r) => r.id === id2)!.name, '歌回专用', '名称 trim 后入库');
 
   assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ name: 5 }))).status, 400);
+  assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ name: '' }))).status, 400, 'POST 空白名 400');
+  assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ name: '   ' }))).status, 400, 'POST 全空格名 400');
+  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { name: '' })).status, 400, 'PUT 空白名 400');
+  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { name: '   ' })).status, 400, 'PUT 全空格名 400');
+  const renamed = await api(base, `/api/rules/${id}`, 'PUT', { name: ' 杂谈 ' });
+  assert.equal(renamed.status, 200);
+  assert.equal(db.listPushRules().find((r) => r.id === id)!.name, '杂谈', 'PUT 改名 trim 后入库');
 });
 
 test('PUT /api/rules/order：同 uid 拖拽排序，非法 ids 400', async (t) => {
