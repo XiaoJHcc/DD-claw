@@ -124,7 +124,7 @@ test('旧 mode 列迁移：off→watch=0，silent→notify=0，mode 列删除且
   );
 });
 
-test('每主播空条件「默认推送」规则迁移：开库即删，条件规则保留，幂等', (t) => {
+test('空条件规则（关键词和分区都不填 = 任意匹配）开库保留，不再当作旧「默认推送」删除', (t) => {
   let db: Db | undefined;
   const path = join(tmpdir_(t, () => db?.close()), 'mig.db');
   db = new Db(path);
@@ -133,13 +133,11 @@ test('每主播空条件「默认推送」规则迁移：开库即删，条件�
   db.close();
 
   db = new Db(path);
-  const rules = db.listPushRules();
-  assert.equal(rules.length, 1, '空条件规则开库即删（默认推送改全局设置）');
-  assert.deepEqual(rules[0]!.keywords, ['歌'], '条件规则保留');
+  assert.equal(db.listPushRules().length, 2, '空条件规则（任意匹配）保留，条件规则也保留');
 
   db.close();
   db = new Db(path);
-  assert.equal(db.listPushRules().length, 1, '二次打开幂等');
+  assert.equal(db.listPushRules().length, 2, '二次打开幂等');
 });
 
 test('saveRoomState / loadRoomStates 新字段往返一致', (t) => {

@@ -1,58 +1,43 @@
 /**
- * 面板前端 · 卡片5 LLM：总开关 + provider 列表（增/删/改/启停/测试）。
- * 新增与编辑都在弹窗里做（复用 app-core 的 openModal/closeModal）；
- * key 是本机面板，明文展示与编辑（用户决策 2026-08-06，不做掩码）。
+ * 面板前端 · 卡片2 LLM 分析：总开关（卡片右上角）+ provider 列表
+ * （勾选框/名称/多模态/测试/编辑/删除/拖拽把手）+ 最后一行新增按钮。
+ * 顺序 = 调用优先级，用拖拽排序，落库后热生效。
  * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 app-core 段。
  */
 export const APP_LLM = `
-// ---- 工具：name 嵌进 onclick 的 JS 字符串字面量要转义 ----
 function jsq(s) { return String(s).replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'"); }
 
 var llmCache = [];
+var llmDragName = null;
 
-// ---- provider 列表（每行一条；URL 与 key 在「编辑」弹窗里看和改） ----
 function llmRow(p, i) {
-  return '<div class="chan"><span class="grow"><b>' + esc(p.name) + '</b> ' +
-    '<span class="meta">' + esc(p.model) + '</span> ' +
-    (p.vision ? '<span class="tag">多模态</span> ' : '') +
-    (p.api === 'responses' ? '<span class="tag">responses</span> ' : '') +
-    '<span class="tag">路由: ' + (p.routes.join(', ') || '无') + '</span> ' +
-    (p.status ? '<span class="tag">' + esc(p.status) + '</span>' : '') +
-    '<span class="meta" id="lt-' + i + '"></span>' +
-    '</span>' +
+  return '<div class="llm-row" draggable="true" data-name="' + esc(p.name) + '"' +
+    ' ondragstart="llmDragStart(event)" ondragover="llmDragOver(event)"' +
+    ' ondrop="llmDrop(event, ' + i + ')" ondragend="llmDragEnd()">' +
+    '<span class="llm-grip">☰</span>' +
     '<label><input type="checkbox" onchange="toggleLlmProvider(\\'' + jsq(p.name) + '\\', this.checked)"' +
-    (p.enabled ? ' checked' : '') + '> 启用</label>' +
-    '<button onclick="moveLlmProvider(' + i + ', -1)"' + (i === 0 ? ' disabled' : '') + '>上移</button>' +
-    '<button onclick="moveLlmProvider(' + i + ', 1)"' +
-    (i === llmCache.length - 1 ? ' disabled' : '') + '>下移</button>' +
-    '<button onclick="testLlmProvider(\\'' + jsq(p.name) + '\\', ' + i + ')">测试</button>' +
+    (p.enabled ? ' checked' : '') + '></label>' +
+    '<span class="llm-name">' + esc(p.name) + '</span>' +
+    (p.vision ? '<span class="tag">多模态</span>' : '') +
+    '<span class="grow"></span>' +
+    '<button onclick="testLlmProvider(\\'' + jsq(p.name) + '\\')">测试</button>' +
     '<button onclick="openLlmModal(' + i + ')">编辑</button>' +
-    '<button onclick="delLlmProvider(\\'' + jsq(p.name) + '\\')">删除</button></div>';
+    '<button onclick="delLlmProvider(\\'' + jsq(p.name) + '\\')">删除</button>' +
+    '</div>';
 }
 function loadLlm() {
   return api('/api/llm').then(function (j) {
     llmCache = j.providers || [];
-    var rows = llmCache.map(function (p, i) { return llmRow(p, i); }).join('');
+    var en = document.getElementById('llm-enabled');
+    if (en) en.checked = j.enabled;
     document.getElementById('llm-list').innerHTML =
-      '<div class="mrow"><label><input type="checkbox" onchange="toggleLlm(this.checked)"' +
-      (j.enabled ? ' checked' : '') + '> <b>启用 LLM 分析</b></label> ' +
-      '<button onclick="openLlmModal(null)">新增 provider</button></div>' +
-      (rows || '<p class="hint">还没有 provider，点「新增 provider」添加。</p>') +
-      (rows ? '<p class="hint">顺序 = 调用优先级（用上移/下移调整），失败/熔断自动降级到后面的；改动即刻生效，无需重启。</p>' : '');
+      llmCache.map(llmRow).join('') +
+      '<div class="llm-add-row"><button onclick="openLlmModal(null)">新增 provider</button></div>';
   }).catch(function (e) { toast(e.message, true); });
-}
-function moveLlmProvider(i, dir) {
-  var j = i + dir;
-  if (j < 0 || j >= llmCache.length) return;
-  var names = llmCache.map(function (p) { return p.name; });
-  var t = names[i]; names[i] = names[j]; names[j] = t;
-  api('/api/llm/providers/order', 'PUT', { names: names })
-    .then(function () { loadLlm(); })
-    .catch(function (e) { toast(e.message, true); loadLlm(); });
 }
 function toggleLlm(on) {
   api('/api/llm/enabled', 'PUT', { enabled: on })
-    .then(function () { toast(on ? 'LLM 分析已启用' : 'LLM 分析已停用'); loadLlm(); })
+    .then(function () { toast(on ? 'LLM 分析已启用' : 'LLM 分析已停用'); })
     .catch(function (e) { toast(e.message, true); loadLlm(); });
 }
 
@@ -105,7 +90,7 @@ function saveLlmModal(i) {
 // ---- 行内操作 ----
 function toggleLlmProvider(name, enabled) {
   api('/api/llm/providers/' + encodeURIComponent(name), 'PUT', { enabled: enabled })
-    .then(function () { toast(enabled ? '已启用' : '已停用'); loadLlm(); })
+    .then(function () { toast(enabled ? '已启用' : '已停用'); })
     .catch(function (e) { toast(e.message, true); loadLlm(); });
 }
 function delLlmProvider(name) {
@@ -114,12 +99,40 @@ function delLlmProvider(name) {
     .then(function () { toast('已删除'); loadLlm(); })
     .catch(function (e) { toast(e.message, true); });
 }
-function testLlmProvider(name, i) {
-  var out = document.getElementById('lt-' + i);
-  out.textContent = '测试中…';
+function testLlmProvider(name) {
   api('/api/llm/providers/' + encodeURIComponent(name) + '/test', 'POST')
-    .then(function (j) { out.textContent = '可用（' + j.ms + 'ms）'; })
-    .catch(function (e) { out.textContent = '不可用: ' + e.message; });
+    .then(function (j) { toast('可用（' + j.ms + 'ms）'); })
+    .catch(function (e) { toast('不可用: ' + e.message, true); });
+}
+
+// ---- 拖拽排序 ----
+function llmDragStart(e) {
+  llmDragName = e.currentTarget.getAttribute('data-name');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', llmDragName);
+  e.currentTarget.classList.add('dragging');
+}
+function llmDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+}
+function llmDrop(e, i) {
+  e.preventDefault();
+  if (llmDragName == null) return;
+  var from = -1;
+  for (var k = 0; k < llmCache.length; k++) if (llmCache[k].name === llmDragName) { from = k; break; }
+  if (from < 0 || from === i) return;
+  var names = llmCache.map(function (p) { return p.name; });
+  var moved = names.splice(from, 1)[0];
+  names.splice(i, 0, moved);
+  api('/api/llm/providers/order', 'PUT', { names: names })
+    .then(loadLlm)
+    .catch(function (err) { toast(err.message, true); loadLlm(); });
+}
+function llmDragEnd() {
+  llmDragName = null;
+  var rows = document.querySelectorAll('.llm-row.dragging');
+  for (var i = 0; i < rows.length; i++) rows[i].classList.remove('dragging');
 }
 
 loadLlm();

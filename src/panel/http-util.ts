@@ -176,7 +176,7 @@ export function parseChannelPatch(body: unknown): PushChannelInput {
 
 // ---- push_rules ----
 
-const RULE_KEYS = ['uid', 'keywords', 'areas', 'channels', 'messageTemplate', 'enabled'] as const;
+const RULE_KEYS = ['name', 'uid', 'keywords', 'areas', 'channels', 'messageTemplate', 'enabled'] as const;
 
 function asIdArray(v: unknown, field: string): number[] {
   if (!Array.isArray(v) || v.some((x) => typeof x !== 'number' || !Number.isInteger(x) || x <= 0)) {
@@ -192,6 +192,10 @@ function parseMessageTemplate(v: unknown): string | null {
 }
 
 function parseRuleFields(o: Record<string, unknown>, p: PushRuleInput): void {
+  if ('name' in o) {
+    if (typeof o.name !== 'string') throw new HttpError(400, 'name 必须是字符串');
+    p.name = o.name.trim();
+  }
   if ('keywords' in o) p.keywords = asStringArray(o.keywords, 'keywords');
   if ('areas' in o) p.areas = asStringArray(o.areas, 'areas');
   if ('channels' in o) p.channels = asIdArray(o.channels, 'channels');
@@ -199,35 +203,27 @@ function parseRuleFields(o: Record<string, unknown>, p: PushRuleInput): void {
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
 }
 
-/** POST /api/rules 的新建体：uid 必填，其余缺省走默认值。条件规则至少一个条件（默认推送是全局设置）。 */
+/** POST /api/rules 的新建体：uid 必填，其余缺省走默认值。关键词/分区都可不填 = 任意匹配。 */
 export function parseNewRule(body: unknown): NewPushRule {
   const o = asObject(body);
   rejectUnknownKeys(o, RULE_KEYS);
   const p: PushRuleInput = {};
   parseRuleFields(o, p);
-  const rule = {
+  return {
     uid: parseUid(o.uid),
+    name: p.name ?? '',
     keywords: p.keywords ?? [],
     areas: p.areas ?? [],
     channels: p.channels ?? [],
     messageTemplate: p.messageTemplate ?? null,
     enabled: p.enabled ?? true,
   };
-  checkRuleConditions(rule);
-  return rule;
-}
-
-/** 条件规则必须至少有一个条件；空条件 = 默认推送，已改为全局设置（推送卡片）。 */
-export function checkRuleConditions(r: { keywords: string[]; areas: string[] }): void {
-  if (r.keywords.length === 0 && r.areas.length === 0) {
-    throw new HttpError(400, '条件规则至少填一个关键词或分区；默认推送请在「推送」卡片配置全局默认');
-  }
 }
 
 /** PUT /api/rules/:id 的部分更新体；至少一个字段。 */
 export function parseRulePatch(body: unknown): PushRuleInput {
   const o = asObject(body);
-  rejectUnknownKeys(o, ['keywords', 'areas', 'channels', 'messageTemplate', 'enabled']);
+  rejectUnknownKeys(o, ['name', 'keywords', 'areas', 'channels', 'messageTemplate', 'enabled']);
   const p: PushRuleInput = {};
   parseRuleFields(o, p);
   if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');

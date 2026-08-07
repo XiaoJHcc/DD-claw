@@ -79,17 +79,20 @@ CREATE TABLE IF NOT EXISTS push_channels (
   target_type TEXT    CHECK(target_type IN ('group','private')),
   target_id   TEXT,
   enabled     INTEGER NOT NULL DEFAULT 1,
+  sort        INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS push_rules (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   uid              TEXT    NOT NULL,
+  name             TEXT    NOT NULL DEFAULT '',
   keywords         TEXT    NOT NULL DEFAULT '[]',
   areas            TEXT    NOT NULL DEFAULT '[]',
   channels         TEXT    NOT NULL DEFAULT '[]',
   message_template TEXT,
   enabled          INTEGER NOT NULL DEFAULT 1,
+  sort             INTEGER NOT NULL DEFAULT 0,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL
 );
@@ -153,9 +156,14 @@ export class Db {
     this.ensureColumn('streamers', 'watch', 'watch INTEGER NOT NULL DEFAULT 1');
     this.ensureColumn('streamers', 'notify', 'notify INTEGER NOT NULL DEFAULT 1');
     this.ensureColumn('streamers', 'weibo_nick', 'weibo_nick TEXT');
+    // push_channels 展示顺序（面板拖拽排序；旧库默认全 0 按 id 稳定）
+    this.ensureColumn('push_channels', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
+    // push_rules 名称（面板规则列表展示）+ 排序（同 uid 内 = 匹配优先级）
+    this.ensureColumn('push_rules', 'name', 'name TEXT NOT NULL DEFAULT \'\'');
+    this.ensureColumn('push_rules', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
+    this.migratePushRuleNames();
     this.migrateStreamerMode();
     this.migratePreferenceClauses();
-    this.migratePerStreamerDefaultRules();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -165,6 +173,11 @@ export class Db {
     if (!cols.some((c) => c.name === column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
     }
+  }
+
+  /** 存量规则没有名称的补一个（面板列表展示用），对新库幂等。 */
+  private migratePushRuleNames(): void {
+    this.db.prepare(`UPDATE push_rules SET name = '规则 ' || id WHERE name IS NULL OR name = ''`).run();
   }
 
   /**
@@ -194,20 +207,6 @@ export class Db {
     if (!row) return;
     this.db.exec('DROP TABLE preference_clauses');
     log.info('preference_clauses 表已废弃并删除（推送规则改用 push_rules 表）');
-  }
-
-  /**
-   * 每主播的「默认推送」（空条件规则）已改为全局默认推送（settings.default_channels /
-   * default_template，推送卡片统一配置）：删除存量空条件规则，主播只留条件规则。
-   * 对新库幂等。
-   */
-  private migratePerStreamerDefaultRules(): void {
-    const { changes } = this.db
-      .prepare("DELETE FROM push_rules WHERE keywords = '[]' AND areas = '[]'")
-      .run();
-    if (changes > 0) {
-      log.info(`已删除 ${changes} 条每主播「默认推送」空条件规则（默认推送改为全局设置）`);
-    }
   }
 
   loadRoomStates(): Map<string, PrevState> {
@@ -472,7 +471,7 @@ export class Db {
   // ---- push_channels：推送渠道（事实来源；config 的 notify 目标仅为首次种子）----
 
   listPushChannels(): PushChannel[] {
-    const rows = this.db.prepare('SELECT * FROM push_channels ORDER BY id').all() as PushChannelRow[];
+    const rows = this.db.prepare('SELECT * FROM push_channels ORDER BY sort, id').all() as PushChannelRow[];
     return rows.map(rowToChannel);
   }
 
@@ -501,13 +500,26 @@ export class Db {
       return prev.id;
     }
     const t = now();
+    // 新渠道排到列表末尾
+    const { m } = this.db
+      .prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS m FROM push_channels')
+      .get() as { m: number };
     const info = this.db
       .prepare(
-        `INSERT INTO push_channels (name, notifier, target_type, target_id, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO push_channels (name, notifier, target_type, target_id, enabled, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(c.name, c.notifier, c.targetType, c.targetId, c.enabled ? 1 : 0, t, t);
+      .run(c.name, c.notifier, c.targetType, c.targetId, c.enabled ? 1 : 0, m, t, t);
     return Number(info.lastInsertRowid);
+  }
+
+  /** 拖拽排序：ids 是现有渠道的全排列，按数组顺序重写 sort。调用方负责校验。 */
+  reorderPushChannels(ids: number[]): void {
+    const tx = this.db.transaction(() => {
+      const stmt = this.db.prepare('UPDATE push_channels SET sort = ?, updated_at = ? WHERE id = ?');
+      for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i]);
+    });
+    tx();
   }
 
   deletePushChannel(id: number): boolean {
@@ -530,16 +542,16 @@ export class Db {
 
   // ---- push_rules：透明条件规则 ----
 
-  /** 面板用：全量规则（含 disabled），id 升序。matcher 消费请用 listEnabledPushRules。 */
+  /** 面板用：全量规则（含 disabled），排序（sort, id）。matcher 消费请用 listEnabledPushRules。 */
   listPushRules(): PushRule[] {
-    const rows = this.db.prepare('SELECT * FROM push_rules ORDER BY id').all() as PushRuleRow[];
+    const rows = this.db.prepare('SELECT * FROM push_rules ORDER BY sort, id').all() as PushRuleRow[];
     return rows.map(rowToRule);
   }
 
-  /** 某主播的启用规则，id 升序（= 匹配优先级：第一条命中生效）。 */
+  /** 某主播的启用规则，sort 升序（= 匹配优先级：第一条命中生效）。 */
   listEnabledPushRules(uid: string): PushRule[] {
     const rows = this.db
-      .prepare('SELECT * FROM push_rules WHERE enabled = 1 AND uid = ? ORDER BY id')
+      .prepare('SELECT * FROM push_rules WHERE enabled = 1 AND uid = ? ORDER BY sort, id')
       .all(uid) as PushRuleRow[];
     return rows.map(rowToRule);
   }
@@ -556,6 +568,7 @@ export class Db {
     if (!uid) throw new Error('新建 push_rule 必须提供 uid');
     const r: NewPushRule = {
       uid,
+      name: input.name !== undefined ? input.name : prev?.name ?? '',
       keywords: input.keywords ?? prev?.keywords ?? [],
       areas: input.areas ?? prev?.areas ?? [],
       channels: input.channels ?? prev?.channels ?? [],
@@ -566,22 +579,38 @@ export class Db {
     if (prev) {
       this.db
         .prepare(
-          `UPDATE push_rules SET uid=?, keywords=?, areas=?, channels=?, message_template=?, enabled=?, updated_at=?
+          `UPDATE push_rules SET name=?, keywords=?, areas=?, channels=?, message_template=?, enabled=?, updated_at=?
            WHERE id=?`,
         )
-        .run(r.uid, JSON.stringify(r.keywords), JSON.stringify(r.areas), JSON.stringify(r.channels),
+        .run(r.name, JSON.stringify(r.keywords), JSON.stringify(r.areas), JSON.stringify(r.channels),
           r.messageTemplate, r.enabled ? 1 : 0, now(), prev.id);
       return prev.id;
     }
     const t = now();
+    const { m } = this.db
+      .prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS m FROM push_rules')
+      .get() as { m: number };
     const info = this.db
       .prepare(
-        `INSERT INTO push_rules (uid, keywords, areas, channels, message_template, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO push_rules (uid, name, keywords, areas, channels, message_template, enabled, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(r.uid, JSON.stringify(r.keywords), JSON.stringify(r.areas), JSON.stringify(r.channels),
-        r.messageTemplate, r.enabled ? 1 : 0, t, t);
-    return Number(info.lastInsertRowid);
+      .run(r.uid, r.name, JSON.stringify(r.keywords), JSON.stringify(r.areas), JSON.stringify(r.channels),
+        r.messageTemplate, r.enabled ? 1 : 0, m, t, t);
+    const id = Number(info.lastInsertRowid);
+    if (!r.name) {
+      this.db.prepare('UPDATE push_rules SET name = ?, updated_at = ? WHERE id = ?').run(`规则 ${id}`, t, id);
+    }
+    return id;
+  }
+
+  /** 拖拽排序：ids 是该 uid 规则的全排列，按数组顺序重写 sort。调用方负责校验。 */
+  reorderPushRules(uid: string, ids: number[]): void {
+    const tx = this.db.transaction(() => {
+      const stmt = this.db.prepare('UPDATE push_rules SET sort = ?, updated_at = ? WHERE id = ? AND uid = ?');
+      for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i], uid);
+    });
+    tx();
   }
 
   deletePushRule(id: number): boolean {

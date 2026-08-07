@@ -1,5 +1,6 @@
 /**
- * 面板前端 · 卡片1 运行状态 + B站/微博登录弹窗 + 扫码登录流程。
+ * 面板前端 · 卡片1 监听：B站/微博登录（点击行扫码/查看）+ 动态/微博两个开关。
+ * 直播间开播轮询不依赖登录，常开无开关，不在卡片里展示。
  * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 app-core 段。
  */
 export const APP_STATUS = `
@@ -7,32 +8,55 @@ var PLAT_STATE = {
   ok: ['green', '已登录'], imported: ['green', '已导入'],
   expired: ['red', '已失效'], none: ['gray', '未导入'], reserved: ['gray', '预留'],
 };
-var lastStatus = null;
-
-function loadStatus() {
-  return api('/api/status').then(function (s) {
-    lastStatus = s;
-    document.getElementById('status-info').innerHTML =
-      '<div class="srow"><span class="slabel">运行时长</span>' + durSpan(s.startedAt, '') + '</div>' +
-      '<div class="srow"><span class="slabel">推送通道</span>' + esc((s.notifiers || []).join(', ') || '(无)') + '</div>' +
-      '<div class="srow"><span class="slabel">监听数</span>' + (s.watchedCount || 0) + '</div>' +
-      '<div class="srow"><span class="slabel">在播数</span>' + (s.liveCount || 0) + '</div>';
-    document.getElementById('status-platforms').innerHTML = (s.platforms || []).map(function (p) {
-      var st = PLAT_STATE[p.state] || ['gray', p.state];
-      var clickable = p.key === 'bili' || p.key === 'weibo';
-      return '<div class="plat' + (clickable ? ' clickable' : '') + '"' +
-        (clickable ? ' onclick="openPlatformLogin(' + q(p.key) + ')"' : '') + '>' +
-        '<span class="dot ' + st[0] + '"></span>' + esc(p.name) +
-        '<span class="pstate">' + st[1] + '</span></div>';
-    }).join('');
-  }).catch(function (e) { toast(e.message, true); });
-}
+var listenState = null;
 
 function platformByKey(key) {
-  var ps = (lastStatus && lastStatus.platforms) || [];
+  var ps = (listenState && listenState.platforms) || [];
   for (var i = 0; i < ps.length; i++) if (ps[i].key === key) return ps[i];
   return null;
 }
+
+function loadListen() {
+  return api('/api/listen').then(function (s) {
+    listenState = s;
+    var rows = [
+      loginRow('B站 登录', platformByKey('bili'), 'bili'),
+      featureRow('监听动态', s.rows.dynamic),
+      loginRow('微博 登录', platformByKey('weibo'), 'weibo'),
+      featureRow('监听微博', s.rows.weibo),
+    ];
+    document.getElementById('listen-rows').innerHTML = rows.join('');
+  }).catch(function (e) { toast(e.message, true); });
+}
+
+function loginRow(name, plat, key) {
+  var st = (plat && PLAT_STATE[plat.state]) || ['gray', '未导入'];
+  return '<div class="lrow clickable" onclick="openPlatformLogin(' + q(key) + ')">' +
+    '<span class="dot ' + st[0] + '"></span>' +
+    '<span class="lname">' + name + '</span>' +
+    '<span class="grow"></span>' +
+    '<span class="lstate">' + st[1] + '</span>' +
+    '</div>';
+}
+
+function featureRow(name, f) {
+  var dis = f.configEnabled === false ? ' disabled' : '';
+  var chk = f.enabled ? ' checked' : '';
+  return '<div class="lrow">' +
+    '<span class="lname">' + name + '</span>' +
+    '<span class="grow"></span>' +
+    '<label class="switch"><input type="checkbox"' + dis + chk +
+    ' onchange="toggleListen(' + q(f.feature) + ', this.checked)"><span class="slider"></span></label>' +
+    '</div>';
+}
+
+function toggleListen(feature, on) {
+  api('/api/listen/' + feature, 'PUT', { enabled: on }).then(function () {
+    toast(on ? '已开启' : '已关闭');
+    loadListen();
+  }).catch(function (e) { toast(e.message, true); loadListen(); });
+}
+
 function openPlatformLogin(key) {
   if (key === 'weibo') return openWeiboLogin();
   return openBiliLogin();
@@ -75,7 +99,7 @@ function pollQr() {
     if (j.status === 'scanned') { msg.textContent = '已扫码，请在手机确认'; return; }
     if (qrTimer) { clearInterval(qrTimer); qrTimer = null; }
     qrKey = null;
-    if (j.status === 'confirmed') { closeModal(); toast('登录成功'); loadStatus(); return; }
+    if (j.status === 'confirmed') { closeModal(); toast('登录成功'); loadListen(); return; }
     if (j.status === 'expired') msg.textContent = '二维码已过期，请重新点击「扫码登录」生成';
   }).catch(function () {});
 }
@@ -112,8 +136,11 @@ function pollWeiboQr() {
     if (j.status === 'waiting') return;
     if (j.status === 'scanned') { msg.textContent = '已扫码，请在手机确认'; return; }
     if (wqrTimer) { clearInterval(wqrTimer); wqrTimer = null; }
-    if (j.status === 'confirmed') { closeModal(); toast('微博登录成功'); loadStatus(); return; }
+    if (j.status === 'confirmed') { closeModal(); toast('微博登录成功'); loadListen(); return; }
     if (j.status === 'expired') msg.textContent = '二维码已过期，请重新点击「扫码登录」生成';
   }).catch(function () {});
 }
+
+loadListen();
+setInterval(loadListen, 60000);
 `;

@@ -24,6 +24,7 @@ import { createWeiboResolver } from './sources/weibo/resolve.js';
 import { loadWeiboCookies, weiboCookieHeader, type WeiboSelfInfo } from './sources/weibo/auth.js';
 import { WeiboFeedSource } from './sources/weibo/feed.js';
 import type { NewPushChannel } from './core/push.js';
+import { isListenEnabled, shouldRunListen } from './core/listen.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 import type { Source } from './sources/types.js';
@@ -236,9 +237,9 @@ async function main(): Promise<void> {
   // shutdown 时 stop 的必须是最新实例
   let followsSrc: FollowsSource | null = null;
   let dynamicSrc: DynamicSource | null = null;
-  // 最近一次登录态心跳结果（onLoginState 上报），面板状态展示用
   let biliLogin: SelfInfo | null = null;
   let cookieImported = false;
+  let biliCookieHdr: string | null = null;
   const startFollows = (cookieHdr: string): void => {
     followsSrc?.stop();
     followsSrc = new FollowsSource({
@@ -252,12 +253,15 @@ async function main(): Promise<void> {
     dynamicSrc = new DynamicSource({ cookie: cookieHdr });
     dynamicSrc.start({ bus, db, config: app });
   };
+  const stopDynamic = (): void => { dynamicSrc?.stop(); dynamicSrc = null; };
+  // 有 cookie 未心跳先按已登录（源会自校正），心跳后按真实值
+  const biliLoggedIn = (): boolean => cookieImported && (biliLogin === null ? true : biliLogin.isLogin);
 
   // weibo feed source 同样单独持有：扫码登录后要热重启
   let weiboFeedSrc: WeiboFeedSource | null = null;
-  // 最近一次微博登录态心跳结果（onLoginState 上报），面板状态展示用
   let weiboLogin: WeiboSelfInfo | null = null;
   let weiboCookieImported = false;
+  let weiboCookieHdr: string | null = null;
   const startWeiboFeed = (cookieHdr: string): void => {
     weiboFeedSrc?.stop();
     weiboFeedSrc = new WeiboFeedSource({
@@ -265,6 +269,31 @@ async function main(): Promise<void> {
       onLoginState: (s) => { weiboLogin = s; },
     });
     weiboFeedSrc.start({ bus, db, config: app });
+  };
+  const stopWeiboFeed = (): void => { weiboFeedSrc?.stop(); weiboFeedSrc = null; };
+  const weiboLoggedIn = (): boolean =>
+    weiboCookieImported && (weiboLogin === null ? true : weiboLogin.loggedIn);
+
+  // 动态 / 微博 两个源的启停唯一入口：面板开关 + config 开关 + cookie 存在共同决定
+  const reconcileListen = (): void => {
+    if (shouldRunListen(db, 'dynamic', biliCookieHdr !== null, app.dynamic.enabled)) {
+      if (!dynamicSrc) {
+        log.info(`动态轮询：${db.listWatchedUids().length} 个监听对象，间隔 ${app.dynamic.intervalSec}s`);
+        startDynamic(biliCookieHdr!);
+      }
+    } else if (dynamicSrc) {
+      log.info('动态轮询已停止（面板开关关闭 / config 停用 / 无 cookie）');
+      stopDynamic();
+    }
+    if (shouldRunListen(db, 'weibo', weiboCookieHdr !== null, app.weibo.enabled)) {
+      if (!weiboFeedSrc) {
+        log.info(`微博时间线：间隔 ${app.weibo.intervalSec}s`);
+        startWeiboFeed(weiboCookieHdr!);
+      }
+    } else if (weiboFeedSrc) {
+      log.info('微博时间线已停止（面板开关关闭 / config 停用 / 无 cookie）');
+      stopWeiboFeed();
+    }
   };
 
   // 凭据功能：cookies.json 不存在 → 停用并说明；坏 JSON → loadCookies 抛
@@ -275,16 +304,11 @@ async function main(): Promise<void> {
     log.info('未导入 cookies.json，关注列表同步 / 动态轮询等凭据功能停用（匿名开播监听不受影响）');
   } else {
     const cookieHdr = cookieHeader(cookies);
-    if (!app.follows.enabled) {
-      log.info('cookies.json 存在，但 config 里 follows.enabled=false，跳过关注列表同步');
-    } else {
+    biliCookieHdr = cookieHdr;
+    if (app.follows.enabled) {
       startFollows(cookieHdr);
-    }
-    if (!app.dynamic.enabled) {
-      log.info('cookies.json 存在，但 config 里 dynamic.enabled=false，跳过动态轮询');
     } else {
-      log.info(`动态轮询：${db.listWatchedUids().length} 个监听对象，间隔 ${app.dynamic.intervalSec}s`);
-      startDynamic(cookieHdr);
+      log.info('cookies.json 存在，但 config 里 follows.enabled=false，跳过关注列表同步');
     }
   }
 
@@ -294,14 +318,15 @@ async function main(): Promise<void> {
   weiboCookieImported = weiboCookies != null;
   if (!weiboCookies) {
     log.info('未导入 weibo-cookies.json，微博时间线停用（可在面板扫码登录生成，其他功能不受影响）');
-  } else if (!app.weibo.enabled) {
-    log.info('weibo-cookies.json 存在，但 config 里 weibo.enabled=false，跳过微博时间线');
   } else {
-    log.info(`微博时间线：间隔 ${app.weibo.intervalSec}s`);
-    startWeiboFeed(weiboCookieHeader(weiboCookies));
+    weiboCookieHdr = weiboCookieHeader(weiboCookies);
+    if (!app.weibo.enabled) {
+      log.info('weibo-cookies.json 存在，但 config 里 weibo.enabled=false，跳过微博时间线');
+    }
   }
 
   for (const s of sources) s.start({ bus, db, config: app });
+  reconcileListen();
 
   // 控制面板：辅助设施。EADDRINUSE 等错误走 'error' 事件，只记日志不影响主流程
   const startedAt = Math.floor(Date.now() / 1000);
@@ -325,6 +350,7 @@ async function main(): Promise<void> {
           notifiers: dispatcher.channels,
           watchedCount: db.listWatchedUids().length,
           liveCount: db.countLiveRooms(),
+          followsCount: db.listFollows(true).length,
           platforms: [
             { key: 'bili', name: 'B站', state: biliState, mid: biliLogin?.mid ?? null },
             // mid 字段复用：微博存登录态心跳带出的 uid
@@ -337,14 +363,14 @@ async function main(): Promise<void> {
         onCookiesSaved: (cookieHdr) => {
           cookieImported = true;
           biliLogin = null; // 新 cookie 还没心跳，先按 imported 展示
+          biliCookieHdr = cookieHdr;
           if (app.follows.enabled) {
             log.info('扫码登录成功，热重启关注列表同步');
             startFollows(cookieHdr);
           }
-          if (app.dynamic.enabled) {
-            log.info('扫码登录成功，热重启动态轮询');
-            startDynamic(cookieHdr);
-          }
+          stopDynamic();
+          log.info('扫码登录成功，热重启动态轮询');
+          reconcileListen();
         },
       },
       weiboAuth: {
@@ -352,11 +378,16 @@ async function main(): Promise<void> {
         onCookiesSaved: (cookieHdr) => {
           weiboCookieImported = true;
           weiboLogin = null; // 新 cookie 还没心跳，先按 imported 展示
-          if (app.weibo.enabled) {
-            log.info('微博扫码登录成功，热重启微博时间线');
-            startWeiboFeed(cookieHdr);
-          }
+          weiboCookieHdr = cookieHdr;
+          stopWeiboFeed();
+          log.info('微博扫码登录成功，热重启微博时间线');
+          reconcileListen();
         },
+      },
+      listen: {
+        config: { dynamic: app.dynamic, weibo: app.weibo },
+        login: () => ({ bili: biliLoggedIn(), weibo: weiboLoggedIn() }),
+        onChanged: () => reconcileListen(),
       },
     });
     panel.on('error', (e) => log.error('控制面板启动失败（不影响主流程）', e));

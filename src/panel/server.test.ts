@@ -15,6 +15,9 @@ interface Fixture {
   llmRouter?: LlmRouter;
 }
 
+/** 记录 listen dep 的 onChanged 被调用次数（面板改开关 → 热启停源） */
+let listenChangedCount = 0;
+
 /** 真实 http.Server 绑临时端口 + 内存库；connection:close 避免 keep-alive 挂住测试进程 */
 async function setup(
   t: import('node:test').TestContext,
@@ -22,6 +25,8 @@ async function setup(
     auth?: PanelDeps['auth']; weiboAuth?: PanelDeps['weiboAuth'];
     weiboResolver?: PanelDeps['weiboResolver']; llm?: PanelDeps['llm'];
     llmFetch?: FetchLike;
+    /** 注入 listen dep；缺省不注入（/api/listen* 404） */
+    listen?: { bili?: boolean; weibo?: boolean; dynamicEnabled?: boolean; weiboEnabled?: boolean };
   } = {},
 ): Promise<Fixture> {
   const db = new Db(':memory:');
@@ -30,6 +35,7 @@ async function setup(
     notifiers: ['onebot', 'toast'],
     watchedCount: 0,
     liveCount: 0,
+    followsCount: 0,
     platforms: [
       { key: 'bili', name: 'B站', state: 'ok', mid: '999' },
       { key: 'weibo', name: '微博', state: 'reserved' },
@@ -64,6 +70,18 @@ async function setup(
     auth: opts.auth,
     weiboAuth: opts.weiboAuth,
     llm,
+    ...(opts.listen
+      ? {
+          listen: {
+            config: {
+              dynamic: { enabled: opts.listen.dynamicEnabled ?? true, intervalSec: 300 },
+              weibo: { enabled: opts.listen.weiboEnabled ?? true, intervalSec: 300 },
+            },
+            login: () => ({ bili: opts.listen!.bili ?? false, weibo: opts.listen!.weibo ?? false }),
+            onChanged: () => { listenChangedCount++; },
+          },
+        }
+      : {}),
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {
@@ -93,26 +111,29 @@ async function api(
 
 // ---- 页面 ----
 
-test('GET / 返回内嵌页面，包含四个卡片与关注未监听区', async (t) => {
+test('GET / 返回内嵌页面，包含六张卡片（监听/LLM分析/推送/时间表/主播列表/关注列表）', async (t) => {
   const { base } = await setup(t);
   const res = await fetch(base + '/', { headers: { connection: 'close' } });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type') ?? '', /text\/html/);
   const html = await res.text();
-  for (const marker of ['运行状态', '直播计划时间表', '主播列表', '关注未监听', '推送']) {
+  for (const marker of ['监听', 'LLM 分析', '推送', '直播计划时间表', '主播列表', '关注列表']) {
     assert.ok(html.includes(marker), `页面应包含「${marker}」`);
   }
+  // 关注列表是独立卡片（不再嵌在主播列表里），且带搜索框
+  assert.ok(html.includes('id="card-follows"'), '关注列表应是独立卡片');
+  assert.ok(html.includes('id="follow-search"'), '关注列表应有搜索框');
 });
 
 // ---- streamers（含 face / live / rules 摘要）----
 
-test('GET /api/streamers：enrich face / live=null / rules 摘要（含 disabled 计数）', async (t) => {
+test('GET /api/streamers：enrich face / live=null / 规则名标签（含 disabled）', async (t) => {
   const { db, base } = await setup(t);
   db.upsertStreamer({ uid: '1001', uname: '阿梓', face: 'https://i0.hdslb.com/f1.jpg' });
   db.upsertStreamer({ uid: '1002', uname: '小可' });
-  db.upsertPushRule({ uid: '1001', keywords: [], areas: [], channels: [],
+  db.upsertPushRule({ uid: '1001', name: '歌回', keywords: [], areas: [], channels: [],
     messageTemplate: null, enabled: true });
-  db.upsertPushRule({ uid: '1001', keywords: ['歌'], areas: [], channels: [],
+  db.upsertPushRule({ uid: '1001', name: '杂谈', keywords: ['歌'], areas: [], channels: [],
     messageTemplate: null, enabled: false });
 
   const r = await api(base, '/api/streamers');
@@ -121,7 +142,7 @@ test('GET /api/streamers：enrich face / live=null / rules 摘要（含 disabled
     uid: string; face: string | null; roomId: string | null;
     watch: boolean; notify: boolean; analyze: boolean;
     weiboNick: string | null; weiboUid: string | null;
-    live: unknown; rules: { count: number };
+    live: unknown; rules: { names: string[] };
   }>;
   const s1 = list.find((s) => s.uid === '1001')!;
   const s2 = list.find((s) => s.uid === '1002')!;
@@ -132,8 +153,8 @@ test('GET /api/streamers：enrich face / live=null / rules 摘要（含 disabled
   assert.equal(s1.weiboUid, null);
   assert.equal(s1.roomId, null);
   assert.equal(s1.live, null, '无 room_state 记录时 live=null');
-  assert.deepEqual(s1.rules, { count: 2 }, 'disabled 规则也计入');
-  assert.deepEqual(s2.rules, { count: 0 });
+  assert.deepEqual(s1.rules, { names: ['歌回', '杂谈'] }, '规则名按优先级顺序，disabled 也带上');
+  assert.deepEqual(s2.rules, { names: [] });
 });
 
 test('GET /api/streamers：有 room_state 时 live 带实况字段与下播锚点', async (t) => {
@@ -389,6 +410,38 @@ test('channel CRUD：POST → GET → PUT → DELETE', async (t) => {
   assert.equal((await api(base, `/api/channels/${id}`, 'DELETE')).status, 404, '重复删除 404');
 });
 
+test('PUT /api/channels/order：拖拽排序重写展示顺序；非法 ids 400', async (t) => {
+  const { db, base } = await setup(t);
+  const a = db.upsertPushChannel({ name: 'a', notifier: 'toast', targetType: null, targetId: null, enabled: true });
+  const b = db.upsertPushChannel({ name: 'b', notifier: 'toast', targetType: null, targetId: null, enabled: true });
+  const c = db.upsertPushChannel({ name: 'c', notifier: 'toast', targetType: null, targetId: null, enabled: true });
+
+  const r = await api(base, '/api/channels/order', 'PUT', { ids: [c, a, b] });
+  assert.equal(r.status, 200);
+  assert.deepEqual(db.listPushChannels().map((x) => x.name), ['c', 'a', 'b'], '按新顺序返回');
+
+  assert.equal((await api(base, '/api/channels/order', 'PUT', { ids: [a, b] })).status, 400, '长度不一致');
+  assert.equal((await api(base, '/api/channels/order', 'PUT', { ids: [a, b, b] })).status, 400, '重复');
+  assert.equal((await api(base, '/api/channels/order', 'PUT', { ids: [a, b, 999] })).status, 400, '不存在的 id');
+  assert.equal((await api(base, '/api/channels/order', 'PUT', { ids: ['x'] })).status, 400);
+  assert.equal((await api(base, '/api/channels/order', 'PUT', {})).status, 400);
+});
+
+test('推送总开关：GET 缺省开，PUT 改后生效', async (t) => {
+  const { db, base } = await setup(t);
+  const get = await api(base, '/api/push');
+  assert.equal(get.status, 200);
+  assert.equal(get.json['enabled'], true, '缺省开');
+
+  const off = await api(base, '/api/push/enabled', 'PUT', { enabled: false });
+  assert.equal(off.status, 200);
+  assert.equal(off.json['enabled'], false);
+  assert.equal(db.getSetting('push_enabled'), '0');
+  assert.equal((await api(base, '/api/push')).json['enabled'], false);
+
+  assert.equal((await api(base, '/api/push/enabled', 'PUT', { enabled: 'x' })).status, 400);
+});
+
 test('channel 校验：notifier 枚举 / onebot 必填纯数字 targetId / name 非空 / toast 无目标', async (t) => {
   const { base } = await setup(t);
 
@@ -505,19 +558,56 @@ test('rule 校验：坏 uid / 坏 channels / 未知字段 / 坏 id / 缺失行 4
   assert.match(huge.json.error ?? '', /64KB/);
 });
 
-test('rule 校验：空条件规则被拒（默认推送已改全局设置）', async (t) => {
-  const { base } = await setup(t);
+test('rule 空条件（关键词/分区都不填 = 任意匹配）可建可改', async (t) => {
+  const { db, base } = await setup(t);
+  db.upsertStreamer({ uid: '1001' });
 
-  const empty = await api(base, '/api/rules', 'POST', ruleBody({ keywords: [], areas: [] }));
-  assert.equal(empty.status, 400);
-  assert.match(empty.json.error ?? '', /全局默认/);
-
-  const created = await api(base, '/api/rules', 'POST', ruleBody());
+  const created = await api(base, '/api/rules', 'POST', ruleBody({ keywords: [], areas: [] }));
+  assert.equal(created.status, 201, '空条件规则允许（任意匹配）');
   const id = (created.json as { id: number }).id;
-  // PUT 把条件清空 = 合并后空条件，同样被拒；只清一组而另一组保留则放行
-  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { keywords: [], areas: [] })).status, 400);
-  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { keywords: [] })).status, 200,
-    'areas 保留原值，合并后仍有条件');
+  const r = db.listPushRules().find((x) => x.id === id)!;
+  assert.deepEqual(r.keywords, []);
+  assert.deepEqual(r.areas, []);
+
+  // PUT 把条件清空同样放行
+  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { keywords: [], areas: [] })).status, 200);
+});
+
+test('rule 名称：不传自动补「规则 N」，传了存自定义名；未知字段仍拒', async (t) => {
+  const { db, base } = await setup(t);
+  db.upsertStreamer({ uid: '1001' });
+
+  const auto = await api(base, '/api/rules', 'POST', ruleBody());
+  const id = (auto.json as { id: number }).id;
+  assert.equal(db.listPushRules().find((r) => r.id === id)!.name, `规则 ${id}`);
+
+  const named = await api(base, '/api/rules', 'POST', ruleBody({ name: '歌回专用' }));
+  const id2 = (named.json as { id: number }).id;
+  assert.equal(db.listPushRules().find((r) => r.id === id2)!.name, '歌回专用');
+
+  assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ name: 5 }))).status, 400);
+});
+
+test('PUT /api/rules/order：同 uid 拖拽排序，非法 ids 400', async (t) => {
+  const { db, base } = await setup(t);
+  db.upsertStreamer({ uid: '1001' });
+  const a = (await api(base, '/api/rules', 'POST', ruleBody({ keywords: ['a'] }))).json as { id: number };
+  const b = (await api(base, '/api/rules', 'POST', ruleBody({ keywords: ['b'] }))).json as { id: number };
+  const c = (await api(base, '/api/rules', 'POST', ruleBody({ keywords: ['c'] }))).json as { id: number };
+
+  const r = await api(base, '/api/rules/order', 'PUT', { uid: '1001', ids: [c.id, a.id, b.id] });
+  assert.equal(r.status, 200);
+  assert.deepEqual(
+    db.listEnabledPushRules('1001').map((x) => x.keywords[0]),
+    ['c', 'a', 'b'],
+    '重排后按新顺序 = 匹配优先级',
+  );
+
+  assert.equal((await api(base, '/api/rules/order', 'PUT', { uid: '1001', ids: [a.id, b.id] })).status, 400);
+  assert.equal((await api(base, '/api/rules/order', 'PUT', { uid: '1001', ids: [a.id, a.id, c.id] })).status, 400);
+  assert.equal((await api(base, '/api/rules/order', 'PUT', { uid: '1001', ids: [a.id, b.id, 999] })).status, 400);
+  assert.equal((await api(base, '/api/rules/order', 'PUT', { uid: '1001', ids: ['x'] })).status, 400);
+  assert.equal((await api(base, '/api/rules/order', 'PUT', { uid: 'abc', ids: [1] })).status, 400);
 });
 
 // ---- status / 404 ----
@@ -541,6 +631,68 @@ test('GET /api/status 返回装配处注入的新形状状态', async (t) => {
     { key: 'bili', name: 'B站', state: 'ok', mid: '999' },
     { key: 'weibo', name: '微博', state: 'reserved' },
   ]);
+});
+
+// ---- 监听功能开关 ----
+
+test('GET /api/listen：auto 跟随登录态；无 listen dep 时 404', async (t) => {
+  // 未注入 listen dep → 404
+  const noDep = await setup(t);
+  assert.equal((await api(noDep.base, '/api/listen')).status, 404);
+  assert.equal((await api(noDep.base, '/api/listen/dynamic', 'PUT', { enabled: true })).status, 404);
+
+  // bili 已登录、weibo 未登录：dynamic=auto开、weibo=auto关
+  const { base } = await setup(t, { listen: { bili: true, weibo: false } });
+  const r = await api(base, '/api/listen');
+  assert.equal(r.status, 200);
+  assert.equal(r.json['biliLoggedIn'], true);
+  assert.equal(r.json['weiboLoggedIn'], false);
+  assert.deepEqual(r.json['platforms'], [
+    { key: 'bili', name: 'B站', state: 'ok', mid: '999' },
+    { key: 'weibo', name: '微博', state: 'reserved' },
+  ]);
+  const rows = r.json['rows'] as Record<string, any>;
+  assert.equal(rows['live'], undefined, '直播间常开不在卡片展示，API 也不回');
+  assert.equal(rows['dynamic'].enabled, true, 'B站已登录 → 动态 auto 开');
+  assert.equal(rows['dynamic'].setting, null, 'auto 模式');
+  assert.equal(rows['weibo'].enabled, false, '微博未登录 → 微博 auto 关');
+  assert.equal(rows['weibo'].setting, null);
+});
+
+test('PUT /api/listen/:feature：手动关闭粘住；与 auto 一致则回 auto', async (t) => {
+  // bili 已登录，dynamic 初始 auto 开；手动关 → setting=0，onChanged 触发
+  listenChangedCount = 0;
+  const { base } = await setup(t, { listen: { bili: true } });
+  const off = await api(base, '/api/listen/dynamic', 'PUT', { enabled: false });
+  assert.equal(off.status, 200);
+  assert.equal(off.json['enabled'], false);
+  assert.equal(off.json['setting'], '0', '手动关');
+  assert.equal(listenChangedCount, 1, '面板改开关触发热启停回调');
+
+  // GET 确认：手动关闭粘住（bili 仍已登录，但有效是关）
+  const g = await api(base, '/api/listen');
+  const dyn = (g.json['rows'] as Record<string, any>)['dynamic'];
+  assert.equal(dyn.setting, '0');
+  assert.equal(dyn.enabled, false, '手动关闭粘住（登录后仍关）');
+
+  // 再开（与 auto 默认一致）→ 清除手动设置回 auto
+  const on = await api(base, '/api/listen/dynamic', 'PUT', { enabled: true });
+  assert.equal(on.json['enabled'], true);
+  assert.equal(on.json['setting'], null, '与 auto 一致 → 回 auto 模式');
+});
+
+test('PUT /api/listen/:feature：config 停用时开关禁用；坏体 400', async (t) => {
+  const { base } = await setup(t, { listen: { bili: true, weibo: false, dynamicEnabled: false } });
+  const r = await api(base, '/api/listen');
+  const dyn = (r.json['rows'] as Record<string, any>)['dynamic'];
+  assert.equal(dyn.configEnabled, false);
+  assert.equal(dyn.enabled, false, 'config 停用 → 有效关');
+
+  const bad = await api(base, '/api/listen/weibo', 'PUT', { enabled: 'yes' });
+  assert.equal(bad.status, 400);
+
+  const nope = await api(base, '/api/listen/follows', 'PUT', { enabled: true });
+  assert.equal(nope.status, 404, '未知 feature 404');
 });
 
 test('未知路由 404 + 中文错误', async (t) => {

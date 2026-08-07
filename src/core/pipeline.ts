@@ -2,6 +2,7 @@ import { makeLogger } from '../logger.js';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage } from '../notify/message.js';
 import { matchPushRule, renderTemplate } from '../analysis/matcher.js';
+import { isPushEnabled } from './push.js';
 import type { Bus } from './bus.js';
 import type { Db } from './db.js';
 import type { AppConfig } from '../config/schema.js';
@@ -112,6 +113,12 @@ export class Pipeline {
       return;
     }
 
+    // 推送总开关（面板推送卡右上角）：关 = 全局不推，追踪照常
+    if (!isPushEnabled(db)) {
+      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 推送总开关已关`);
+      return;
+    }
+
     // verdict 只来自分析队列（将来接 LLM Analyzer；NoopAnalyzer 恒 null）。
     // 无 LLM 时不做分类，推送走用户自定的透明条件规则（buildMessage）。
     const verdict = await queue.submit({ event, signal });
@@ -136,7 +143,7 @@ export class Pipeline {
 
   /**
    * 透明条件规则 → PushMessage；返回 null = 不推（命中规则未选渠道 / 全局默认未选渠道）。
-   * - 主播只有条件规则：id 升序第一条命中；命中规则的 channels 为空 = 用户明确不推
+   * - 主播只有条件规则：优先级第一条命中；命中规则的 channels 为空 = 用户明确不推
    * - 条件规则均不命中（含一条都没有）→ 全局默认：settings.default_channels
    *   （未设置 = 全部启用渠道的旧兜底行为；显式空数组 = 默认不推）+ 全局默认模板
    * - 模板：规则覆盖 > settings.default_template > 内置默认；正文/图片/跳转沿用默认形状

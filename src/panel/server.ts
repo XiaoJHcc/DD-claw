@@ -8,7 +8,7 @@ import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
-  HttpError, checkChannelShape, checkRuleConditions, parseChannelPatch, parseNewChannel,
+  HttpError, checkChannelShape, parseChannelPatch, parseNewChannel,
   parseNewRule, parsePushDefaultBody, parseRulePatch, parseStreamerPatch, parseUid,
   readJsonBody, sendJson,
 } from './http-util.js';
@@ -26,6 +26,8 @@ import {
 import type { AppConfig } from '../config/index.js';
 import { llmProviderSchema, type LlmProviderConfig } from '../config/schema.js';
 import { deriveRoutes, isLlmEnabled, setLlmEnabled, type LlmRouter } from '../analysis/providers.js';
+import { isListenEnabled, listenSetting, setListen, type ListenFeature } from '../core/listen.js';
+import { isPushEnabled, setPushEnabled } from '../core/push.js';
 
 const log = makeLogger('panel');
 
@@ -43,6 +45,8 @@ export interface PanelStatus {
   notifiers: string[];
   watchedCount: number;
   liveCount: number;
+  /** 关注列表候选池数量（关注同步抓取状态） */
+  followsCount: number;
   platforms: PlatformStatus[];
 }
 
@@ -91,6 +95,17 @@ export interface PanelDeps {
     /** store.save 后调用：装配处重建 router，名单改动热生效 */
     onProvidersChanged?: () => void;
   };
+  /**
+   * 监听功能开关（面板「监听」卡片）；不注入则 /api/listen* 一律 404。
+   * 动态需 B站登录、微博需微博登录，未登录默认关、登录成功自动开、手动设置为准。
+   */
+  listen?: {
+    config: Pick<AppConfig, 'dynamic' | 'weibo'>;
+    /** 平台登录态（联动开关默认值用）：bili=动态、weibo=微博 */
+    login: () => { bili: boolean; weibo: boolean };
+    /** 面板改开关后回调：装配处热启停对应源 */
+    onChanged: () => void;
+  };
 }
 
 export function createPanelServer(deps: PanelDeps): http.Server {
@@ -128,6 +143,17 @@ async function handle(
     sendJson(res, 200, deps.status());
     return;
   }
+  // ---- 监听功能开关（listen dep 存在才挂）：动态（B站）/ 微博 ----
+  if (deps.listen && method === 'GET' && path === '/api/listen') {
+    sendJson(res, 200, listenInfo(deps));
+    return;
+  }
+  const lm = path.match(/^\/api\/listen\/(dynamic|weibo)$/);
+  if (deps.listen && lm && method === 'PUT') {
+    sendJson(res, 200, putListen(deps, lm[1] as ListenFeature, await readJsonBody(req)));
+    return;
+  }
+
   if (method === 'GET' && path === '/api/streamers') {
     sendJson(res, 200, { streamers: enrichedStreamers(db) });
     return;
@@ -150,6 +176,23 @@ async function handle(
   if (method === 'POST' && path === '/api/channels') {
     const id = db.upsertPushChannel(parseNewChannel(await readJsonBody(req)));
     sendJson(res, 201, { id });
+    return;
+  }
+  // 渠道拖拽排序：ids 是现有渠道的全排列（在 :id 通配之前匹配）
+  if (method === 'PUT' && path === '/api/channels/order') {
+    sendJson(res, 200, putChannelOrder(db, await readJsonBody(req)));
+    return;
+  }
+  // 推送总开关（面板推送卡右上角；settings.push_enabled，缺省开）
+  if (method === 'GET' && path === '/api/push') {
+    sendJson(res, 200, { enabled: isPushEnabled(db) });
+    return;
+  }
+  if (method === 'PUT' && path === '/api/push/enabled') {
+    const b = (await readJsonBody(req)) as Record<string, unknown>;
+    if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
+    setPushEnabled(db, b.enabled);
+    sendJson(res, 200, { ok: true, enabled: b.enabled });
     return;
   }
   // 全局默认推送：条件规则都不命中时走这里。channels 未设置时返回全部启用渠道 id
@@ -237,6 +280,11 @@ async function handle(
     sendJson(res, 201, { id });
     return;
   }
+  // 规则拖拽排序：ids 是该 uid 规则的全排列（在 :id 通配之前匹配）
+  if (method === 'PUT' && path === '/api/rules/order') {
+    sendJson(res, 200, putRuleOrder(db, await readJsonBody(req)));
+    return;
+  }
 
   // ---- 扫码登录（auth dep 存在才挂）----
   if (deps.auth && method === 'POST' && path === '/api/auth/bili/qrcode') {
@@ -313,11 +361,6 @@ async function handle(
       const patch = parseRulePatch(await readJsonBody(req));
       const prev = db.listPushRules().find((r) => r.id === id);
       if (!prev) throw new HttpError(404, '规则不存在');
-      // 联动校验要对合并后的形状做：不允许把条件清空（空条件 = 默认推送，已改全局设置）
-      checkRuleConditions({
-        keywords: patch.keywords ?? prev.keywords,
-        areas: patch.areas ?? prev.areas,
-      });
       db.upsertPushRule({ id, ...patch });
       sendJson(res, 200, { ok: true });
       return;
@@ -332,13 +375,45 @@ async function handle(
   throw new HttpError(404, '未知路由');
 }
 
-/** 名单 + face + 实况（room_state）+ 规则摘要 + 最近动态（posts）。一次请求内每表只查一次。 */
+/** 渠道拖拽排序：ids 必须是现有渠道的全排列（长度一致/无重复/无增删）。 */
+function putChannelOrder(db: Db, body: unknown): unknown {  const ids = (body as Record<string, unknown> | null)?.ids;
+  if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
+    throw new HttpError(400, 'ids 必须是正整数 id 数组');
+  }
+  const existing = new Set(db.listPushChannels().map((c) => c.id));
+  if (ids.length !== existing.size || new Set(ids).size !== ids.length || ids.some((id) => !existing.has(id))) {
+    throw new HttpError(400, 'ids 必须与现有渠道一一对应');
+  }
+  db.reorderPushChannels(ids);
+  return { ok: true };
+}
+
+/** 规则拖拽排序：ids 必须是该 uid 规则的全排列（长度一致/无重复/无增删）。 */
+function putRuleOrder(db: Db, body: unknown): unknown {
+  const o = (body ?? {}) as Record<string, unknown>;
+  const uid = parseUid(o.uid);
+  const ids = o.ids;
+  if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
+    throw new HttpError(400, 'ids 必须是正整数 id 数组');
+  }
+  const mine = db.listPushRules().filter((r) => r.uid === uid).map((r) => r.id);
+  if (ids.length !== mine.length || new Set(ids).size !== ids.length || ids.some((id) => !mine.includes(id))) {
+    throw new HttpError(400, 'ids 必须与该主播现有规则一一对应');
+  }
+  db.reorderPushRules(uid, ids);
+  return { ok: true };
+}
+
+/** 名单 + face + 实况（room_state）+ 规则名标签 + 最近动态（posts）。一次请求内每表只查一次。 */
 function enrichedStreamers(db: Db): unknown[] {
   const streamers = db.listStreamers();
   const roomStates = db.listRoomStatesFull();
-  const ruleCount = new Map<string, number>();
+  // 每个 uid 的规则名（listPushRules 已按 sort 排序 = 优先级顺序，含 disabled）
+  const ruleNames = new Map<string, string[]>();
   for (const r of db.listPushRules()) {
-    ruleCount.set(r.uid, (ruleCount.get(r.uid) ?? 0) + 1);
+    const list = ruleNames.get(r.uid) ?? [];
+    list.push(r.name);
+    ruleNames.set(r.uid, list);
   }
   // 一次分组查询：每个 uid 最近 5 条动态（跨平台按 pub_ts 混排），raw 不下发
   const recentPosts = db.listRecentPosts(streamers.map((s) => s.uid), 5);
@@ -356,7 +431,7 @@ function enrichedStreamers(db: Db): unknown[] {
             lastLiveAt: rs.lastLiveAt, polledAt: rs.polledAt,
           }
         : null,
-      rules: { count: ruleCount.get(s.uid) ?? 0 },
+      rules: { names: ruleNames.get(s.uid) ?? [] },
       posts: (recentPosts.get(s.uid) ?? []).map((p) => ({
         platform: p.platform, type: p.type, text: p.text,
         pics: p.pics, pubTs: p.pubTs, url: p.url,
@@ -462,6 +537,37 @@ async function pollWeiboQrcodeRoute(
     log.error('微博扫码登录成功但登录态查询失败（uid 暂缺，下轮心跳会补上）', e);
   }
   return { status: 'confirmed', uid };
+}
+
+// ---- 监听功能开关（面板「监听」卡片）----
+function listenInfo(deps: PanelDeps): unknown {
+  const login = deps.listen!.login();
+  const cfg = deps.listen!.config;
+  const row = (feature: ListenFeature, loggedIn: boolean, configEnabled: boolean) => ({
+    feature,
+    setting: listenSetting(deps.db, feature),
+    enabled: isListenEnabled(deps.db, feature, loggedIn, configEnabled),
+    configEnabled,
+  });
+  return {
+    biliLoggedIn: login.bili,
+    weiboLoggedIn: login.weibo,
+    platforms: deps.status().platforms,
+    rows: {
+      dynamic: row('dynamic', login.bili, cfg.dynamic.enabled),
+      weibo: row('weibo', login.weibo, cfg.weibo.enabled),
+    },
+  };
+}
+
+function putListen(deps: PanelDeps, feature: ListenFeature, body: unknown): unknown {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
+  const login = deps.listen!.login();
+  const loggedIn = feature === 'dynamic' ? login.bili : login.weibo;
+  const enabled = setListen(deps.db, feature, b.enabled, loggedIn);
+  deps.listen!.onChanged();
+  return { feature, enabled, setting: listenSetting(deps.db, feature) };
 }
 
 // ---- LLM key 管理（settings 表 llm_key:<providerName>；本机面板，值可回显/编辑）----

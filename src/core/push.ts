@@ -3,6 +3,7 @@
  * 类型与 JSON 字段的序列化集中在这里，同 streamers.ts 惯例；
  * 表结构见 db.ts SCHEMA 与 design.md。
  */
+import type { Db } from './db.js';
 
 // ---- push_channels：推送渠道（面板统一管理，主播规则只引用 id）----
 
@@ -16,6 +17,8 @@ export interface PushChannelRow {
   target_type: ChannelTargetType | null;
   target_id: string | null;
   enabled: number;
+  /** 面板拖拽排序（展示顺序）；行对象不暴露，排序是列表内部实现 */
+  sort: number;
   created_at: number;
   updated_at: number;
 }
@@ -47,16 +50,30 @@ export function rowToChannel(r: PushChannelRow): PushChannel {
   };
 }
 
-// ---- push_rules：透明条件规则（属于某个主播，id 升序第一条命中生效）----
+// ---- settings：推送总开关 ----
+
+export function isPushEnabled(db: Db): boolean {
+  return db.getSetting('push_enabled') !== '0';
+}
+
+export function setPushEnabled(db: Db, enabled: boolean): void {
+  db.setSetting('push_enabled', enabled ? '1' : '0');
+}
+
+// ---- push_rules：透明条件规则（属于某个主播，sort 升序第一条命中生效）----
 
 export interface PushRuleRow {
   id: number;
   uid: string;
+  /** 规则名称（面板列表展示）；存量为空时迁移补「规则 <id>」 */
+  name: string;
   keywords: string;
   areas: string;
   channels: string;
   message_template: string | null;
   enabled: number;
+  /** 同 uid 内 = 匹配优先级（面板拖拽排序）；行对象不暴露 */
+  sort: number;
   created_at: number;
   updated_at: number;
 }
@@ -65,6 +82,8 @@ export interface PushRule {
   id: number;
   /** 属于哪个主播 */
   uid: string;
+  /** 规则名称（面板列表展示） */
+  name: string;
   /** 标题子串，任一命中（大小写不敏感）；空 = 不限制 */
   keywords: string[];
   /** 分区子串（areaName / parentAreaName 都匹配），任一命中；空 = 不限制 */
@@ -83,7 +102,7 @@ export type PushRuleInput = Partial<NewPushRule> & { id?: number };
 
 export function rowToRule(r: PushRuleRow): PushRule {
   return {
-    id: r.id, uid: r.uid,
+    id: r.id, uid: r.uid, name: r.name,
     keywords: JSON.parse(r.keywords) as string[],
     areas: JSON.parse(r.areas) as string[],
     channels: JSON.parse(r.channels) as number[],

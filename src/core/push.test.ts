@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from './db.js';
-import type { NewPushChannel, NewPushRule } from './push.js';
+import { isPushEnabled, setPushEnabled, type NewPushChannel, type NewPushRule } from './push.js';
 
 /** 内存库：每个测试独立，不需要清理临时文件 */
 function memDb(t: import('node:test').TestContext): Db {
@@ -106,6 +106,26 @@ test('upsertPushRule 新建必须提供 uid', (t) => {
   assert.throws(() => db.upsertPushRule({ keywords: ['x'] }), /uid/);
 });
 
+test('规则名称：不传自动补「规则 N」，传了存自定义名', (t) => {
+  const db = memDb(t);
+  const id = db.upsertPushRule(rule());
+  assert.equal(db.listPushRules().find((x) => x.id === id)!.name, `规则 ${id}`);
+  const id2 = db.upsertPushRule(rule({ name: '歌回专用' }));
+  assert.equal(db.listPushRules().find((x) => x.id === id2)!.name, '歌回专用');
+});
+
+test('规则拖拽排序：reorderPushRules 重写同 uid 匹配优先级，新规则排末尾', (t) => {
+  const db = memDb(t);
+  const a = db.upsertPushRule(rule({ keywords: ['a'] }));
+  const b = db.upsertPushRule(rule({ keywords: ['b'] }));
+  const c = db.upsertPushRule(rule({ uid: '2', keywords: ['x'] }));
+  db.reorderPushRules('1', [b, a]);
+  assert.deepEqual(db.listEnabledPushRules('1').map((x) => x.keywords[0]), ['b', 'a']);
+  assert.deepEqual(db.listEnabledPushRules('2').map((x) => x.keywords[0]), ['x'], '其他 uid 不受影响');
+  const d = db.upsertPushRule(rule({ keywords: ['d'] }));
+  assert.deepEqual(db.listEnabledPushRules('1').map((x) => x.keywords[0]), ['b', 'a', 'd'], '新规则排末尾');
+});
+
 // ---- settings ----
 
 test('settings：未写为 null，写入可读，覆盖写生效', (t) => {
@@ -115,6 +135,26 @@ test('settings：未写为 null，写入可读，覆盖写生效', (t) => {
   assert.equal(db.getSetting('default_template'), '{alias} 开播了');
   db.setSetting('default_template', '{alias}来了');
   assert.equal(db.getSetting('default_template'), '{alias}来了');
+});
+
+test('推送总开关：缺省开，可开关，persist', (t) => {
+  const db = memDb(t);
+  assert.equal(isPushEnabled(db), true, '缺省开');
+  setPushEnabled(db, false);
+  assert.equal(isPushEnabled(db), false);
+  assert.equal(db.getSetting('push_enabled'), '0');
+  setPushEnabled(db, true);
+  assert.equal(isPushEnabled(db), true);
+});
+
+test('渠道拖拽排序：reorderPushChannels 重写顺序，新渠道排末尾', (t) => {
+  const db = memDb(t);
+  const a = db.upsertPushChannel(channel({ name: 'a' }));
+  const b = db.upsertPushChannel(channel({ name: 'b' }));
+  db.reorderPushChannels([b, a]);
+  assert.deepEqual(db.listPushChannels().map((x) => x.name), ['b', 'a']);
+  const c = db.upsertPushChannel(channel({ name: 'c' }));
+  assert.deepEqual(db.listPushChannels().map((x) => x.name), ['b', 'a', 'c'], '新渠道排末尾');
 });
 
 // ---- preference_clauses 迁移 ----

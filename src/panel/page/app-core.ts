@@ -47,6 +47,19 @@ document.getElementById('modal-mask').addEventListener('click', function (e) {
   if (e.target === this) closeModal();
 });
 
+// ---- 嵌套弹窗（主播弹窗内的规则新增/编辑用；关掉回到上一层） ----
+function openModal2(html) {
+  document.getElementById('modal2').innerHTML = html;
+  document.getElementById('modal-mask2').classList.remove('hidden');
+}
+function closeModal2() {
+  document.getElementById('modal-mask2').classList.add('hidden');
+  document.getElementById('modal2').innerHTML = '';
+}
+document.getElementById('modal-mask2').addEventListener('click', function (e) {
+  if (e.target === this) closeModal2();
+});
+
 // ---- 时长：.dur 元素带 data-ts（秒级时间戳）+ data-prefix，每秒本地重算，不打接口 ----
 function fmtDur(sec) {
   sec = Math.max(0, Math.floor(sec));
