@@ -10,7 +10,7 @@ var llmCache = [];
 function llmRowHtml(p) {
   return '<div class="row" draggable="true" data-sid="' + esc(p.name) + '">' +
     gripHtml() +
-    switchHtml('data-change="toggle-llm-provider"', p.enabled) +
+    checkDotHtml('data-change="toggle-llm-provider"', p.enabled) +
     '<span class="row-title">' + esc(p.name) + '</span>' +
     (p.vision ? '<span class="tag">多模态</span>' : '') +
     '<span class="row-end">' +
@@ -84,7 +84,7 @@ function openLlmSheet(name) {
     field('API key', '<input id="lp-key" placeholder="多个用英文逗号分隔；本地无鉴权端点留空" value="' +
       (p && p.key.value ? esc(p.key.value) : '') + '">') +
     '<div class="field-row">' +
-      field('多模态（可接含图任务）', switchHtml('id="lp-vision"', !!(p && p.vision))) +
+      field('多模态', checkboxHtml('id="lp-vision"', !!(p && p.vision), false, '可接含图任务（进 vision 路由）')) +
       field('结构化输出', '<select id="lp-so"><option value="schema">schema（默认）</option>' +
         '<option value="object">object</option>' +
         '<option value="none">none（本地小模型）</option></select>') +

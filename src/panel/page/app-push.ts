@@ -10,7 +10,7 @@ var chCache = [];
 function channelRowHtml(c) {
   return '<div class="row" draggable="true" data-sid="' + c.id + '">' +
     gripHtml() +
-    switchHtml('data-change="toggle-channel"', c.enabled) +
+    checkDotHtml('data-change="toggle-channel"', c.enabled) +
     '<span class="row-title">' + esc(c.name) + '</span>' +
     '<span class="tag">' + esc(chanTag(c)) + '</span>' +
     '<span class="row-end">' +
@@ -112,11 +112,9 @@ ACTIONS['open-push-default'] = function () {
   Promise.all([api('/api/push/default'), api('/api/channels')]).then(function (rs) {
     var def = rs[0], channels = rs[1].channels || [];
     var rows = channels.map(function (c) {
-      return '<div class="row"><span class="row-title">' + esc(c.name) + '</span>' +
-        '<span class="tag">' + esc(chanTag(c)) + '</span>' +
-        '<span class="row-end">' +
-        switchHtml('class="pd-ch" value="' + c.id + '"', (def.channels || []).indexOf(c.id) >= 0) +
-        '</span></div>';
+      return checkRowHtml('class="pd-ch" value="' + c.id + '"', (def.channels || []).indexOf(c.id) >= 0,
+        '<span class="row-title">' + esc(c.name) + '</span>' +
+        '<span class="tag">' + esc(chanTag(c)) + '</span>');
     }).join('');
     openSheet('全局默认推送',
       '<div class="field"><label>渠道</label>' + (rows || '<span class="hint">还没有渠道</span>') + '</div>' +

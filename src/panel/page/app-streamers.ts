@@ -107,10 +107,9 @@ function loadStreamers() {
   }).catch(function (e) { toast(e.message, true); });
 }
 
-// ---- 详情弹窗：上半区 iOS 分组表单（别名/直播间号/微博/画像 + 三开关），下半区推送规则 ----
-function formSwitch(label, id, checked) {
-  return '<div class="row"><span class="row-title">' + label + '</span><span class="row-end">' +
-    switchHtml('id="' + id + '"', checked) + '</span></div>';
+// ---- 详情弹窗：上半区分段卡片表单（别名/直播间号/微博/画像 + 三个勾选项），下半区推送规则 ----
+function formCheck(label, id, checked) {
+  return checkboxHtml('id="' + id + '"', checked, false, label);
 }
 function fieldVal(id) { var v = document.getElementById(id).value.trim(); return v || null; }
 
@@ -129,10 +128,10 @@ function openStreamer(uid) {
       field('微博昵称', '<input id="f-weibo" value="' + esc(s.weiboNick || '') + '">') +
       field('画像', '<input id="f-note" value="' + esc(s.profileNote || '') + '">') +
     '</div>' +
-    '<div class="form-card">' +
-      formSwitch('监听', 'f-watch', s.watch) +
-      formSwitch('LLM 分析', 'f-analyze', s.analyze) +
-      formSwitch('推送', 'f-notify', s.notify) +
+    '<div class="row">' +
+      formCheck('监听', 'f-watch', s.watch) +
+      formCheck('LLM 分析', 'f-analyze', s.analyze) +
+      formCheck('推送', 'f-notify', s.notify) +
     '</div>' +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">关闭</button>' +
     '<button class="btn btn-primary" data-action="save-streamer">保存</button></div>' +
@@ -187,7 +186,7 @@ function ruleRowHtml(r) {
   }).join('');
   return '<div class="row" draggable="true" data-sid="' + r.id + '">' +
     gripHtml() +
-    switchHtml('data-change="toggle-rule"', r.enabled) +
+    checkDotHtml('data-change="toggle-rule"', r.enabled) +
     '<span class="row-title">' + esc(r.name) + '</span>' + tags +
     '<span class="row-end">' +
     iconBtn('edit-rule', 'pencil', '编辑') +
@@ -237,11 +236,9 @@ function openRuleSheet(id) {
   var chanRows = modalChannels.length === 0
     ? ''
     : modalChannels.map(function (c) {
-        return '<div class="row"><span class="row-title">' + esc(c.name) + '</span>' +
-          '<span class="tag">' + esc(chanTypeName(c)) + '</span>' +
-          '<span class="row-end">' +
-          switchHtml('class="e-ch" value="' + c.id + '"', !!(r && (r.channels || []).indexOf(c.id) >= 0)) +
-          '</span></div>';
+        return checkRowHtml('class="e-ch" value="' + c.id + '"', !!(r && (r.channels || []).indexOf(c.id) >= 0),
+          '<span class="row-title">' + esc(c.name) + '</span>' +
+          '<span class="tag">' + esc(chanTypeName(c)) + '</span>');
       }).join('');
   openSheet(r ? '编辑规则' : '添加规则',
     field('名称', '<input id="r-name" value="' + (r ? esc(r.name) : '') + '">') +

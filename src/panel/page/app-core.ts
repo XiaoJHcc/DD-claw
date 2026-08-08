@@ -98,6 +98,23 @@ function iconBtn(action, iconName, title, danger) {
   return '<button class="icon-btn' + (danger ? ' danger' : '') + '" data-action="' + action +
     '" title="' + esc(title) + '" aria-label="' + esc(title) + '">' + icon(iconName) + '</button>';
 }
+// macOS 勾选框（16x16 圆角小方块，选中蓝底白勾）：并排多选场景用（详情三选项 / 渠道多选）
+// text 非空时把文字包进同一个 label（点击文字也切换）
+function checkboxHtml(attrs, checked, disabled, text) {
+  return '<label class="checkbox"><input type="checkbox" ' + attrs +
+    (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + '><span class="box"></span>' +
+    (text ? '<span class="check-text">' + esc(text) + '</span>' : '') + '</label>';
+}
+// 多选行：整行是 label，点击任意处切换（不能套 checkboxHtml，避免 label 嵌套）
+function checkRowHtml(attrs, checked, innerHtml) {
+  return '<label class="check-row"><span class="checkbox"><input type="checkbox" ' + attrs +
+    (checked ? ' checked' : '') + '><span class="box"></span></span>' + innerHtml + '</label>';
+}
+// 勾选排序列表的启停勾：无方框，选中 = 蓝色勾，未选 = 浅灰空心圆环（占位对齐）
+function checkDotHtml(attrs, checked, disabled) {
+  return '<label class="checkdot"><input type="checkbox" ' + attrs +
+    (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + '><span class="cd"></span></label>';
+}
 function gripHtml() { return '<span class="grip" title="拖拽排序">' + icon('grip') + '</span>'; }
 function field(label, inputHtml) {
   return '<div class="field"><label>' + esc(label) + '</label>' + inputHtml + '</div>';
