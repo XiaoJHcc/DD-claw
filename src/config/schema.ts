@@ -58,7 +58,10 @@ export const llmProviderSchema = z.object({
 export const configSchema = z.object({
   pollIntervalSec: z.number().int().min(20, '轮询间隔不要低于 20 秒').max(3600).default(45),
   pollJitterSec: z.number().int().min(0).max(120).default(8),
-  /** 首次运行时，已在直播的主播是否推送。默认关，避免启动即刷屏。 */
+  /**
+   * 启动时已在直播的主播是否推送：首次运行（库空）与重启恢复（停机期间开播）
+   * 共用此开关。默认关，避免启动即刷屏 —— 启动只追轨迹，只有运行期实时开播才推。
+   */
   notifyOnFirstRun: z.boolean().default(false),
   /**
    * 后续新增订阅时，该主播若正在直播是否推送。默认开 ——
@@ -127,6 +130,21 @@ export const configSchema = z.object({
       enabled: z.boolean().default(true),
     }).default({ enabled: true }),
   }),
+
+  /**
+   * NapCat 托管（Windows）：配置后 onebot 端点只读跟随 NapCat 自己的
+   * onebot11_<uin>.json（端口/token 事实来源，.env NAPCAT_BASE_URL 降为兜底），
+   * 看门狗周期探测，NapCat 不在线时经「最高权限」计划任务自动拉起 + 快速登录 uin
+   *（一次性 npm run napcat-setup 创建计划任务，弹一次 UAC）。
+   * 端口冲突/拉起失败只告警，DD-claw 不改 NapCat 任何文件。
+   */
+  napcat: z.object({
+    enabled: z.boolean().default(false),
+    /** NapCat 一键包目录（含 launcher.bat 与 config/） */
+    dir: z.string().default(''),
+    /** 快速登录的机器人 QQ 号（对应 config/onebot11_<uin>.json） */
+    uin: z.string().default(''),
+  }).default({ enabled: false, dir: '', uin: '' }),
 }).superRefine((cfg, ctx) => {
   if (cfg.notify.onebot.enabled && !cfg.notify.onebot.targets.some((t) => t.enabled)) {
     ctx.addIssue({
@@ -144,6 +162,14 @@ export const configSchema = z.object({
     .find((n, i, a) => a.indexOf(n) !== i);
   if (dupProvider) {
     ctx.addIssue({ code: 'custom', path: ['llm', 'providers'], message: `provider name 重复: ${dupProvider}` });
+  }
+  if (cfg.napcat.enabled) {
+    if (!cfg.napcat.dir) {
+      ctx.addIssue({ code: 'custom', path: ['napcat', 'dir'], message: 'napcat.enabled=true 时 dir（NapCat 一键包目录）必填' });
+    }
+    if (!/^\d+$/.test(cfg.napcat.uin)) {
+      ctx.addIssue({ code: 'custom', path: ['napcat', 'uin'], message: 'napcat.enabled=true 时 uin 必填且必须是纯数字 QQ 号' });
+    }
   }
 });
 

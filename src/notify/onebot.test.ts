@@ -95,3 +95,16 @@ test('alert 仍用构造参数的目标（跳过 disabled）', async () => {
     restore();
   }
 });
+
+test('updateEndpoint 热更新 baseUrl（去尾斜杠），后续请求走新端点', async () => {
+  const posted: Posted[] = [];
+  const restore = stubFetch(posted);
+  try {
+    const n = new OneBotNotifier('http://napcat:3000', '', []);
+    n.updateEndpoint('http://napcat:41234/', 'tk');
+    await n.send(msg({ targets: [{ type: 'private', id: '22222' }] }));
+    assert.ok(posted[0]!.url.startsWith('http://napcat:41234/'));
+  } finally {
+    restore();
+  }
+});

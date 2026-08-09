@@ -23,7 +23,7 @@ export const PANEL_CSS = `
   :root{
     --bg:#000000;--card-bg:#1c1c1e;--row-bg:#2c2c2e;--text:#f5f5f7;--text-secondary:#98989d;
     --separator:rgba(255,255,255,.14);--border-strong:rgba(255,255,255,.3);
-    --fill:rgba(120,120,128,.22);--hover:rgba(0,0,0,.2);
+    --fill:rgba(120,120,128,.22);--hover:rgba(255,255,255,.12);
     --shadow:none;
   }
 }
@@ -40,10 +40,12 @@ h2{font-size:17px;font-weight:600;margin:0}
 @media (prefers-color-scheme: dark){.card{border:0.5px solid var(--separator)}}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;min-height:24px}
 .card-sub{font-size:12px;color:var(--text-secondary)}
-/* 顶部三卡并列：监听 / LLM 分析 / 推送 */
-.row-top{display:flex;gap:20px;align-items:stretch;margin-bottom:20px}
-.row-top .card{flex:1;min-width:0;margin-bottom:0}
-@media (max-width:900px){.row-top{flex-wrap:wrap}.row-top .card{flex:1 1 100%}}
+/* 顶部小卡片区（监听 / LLM 分析 / 推送 / NapCat，可增至 5-6 张）：
+   响应式换行，宽屏一行最多三张，中等宽度两张，窄屏一张 */
+.row-top{display:flex;gap:20px;align-items:stretch;margin-bottom:20px;flex-wrap:wrap}
+.row-top .card{flex:1 1 calc((100% - 40px)/3);min-width:0;margin-bottom:0;max-width:calc((100% - 40px)/3)}
+@media (max-width:1100px){.row-top .card{flex-basis:calc(50% - 10px);max-width:calc(50% - 10px)}}
+@media (max-width:720px){.row-top .card{flex-basis:100%;max-width:100%}}
 .card-actions{display:flex;gap:10px;margin-top:14px}
 .card-actions .btn{flex:1}
 /* 通用列表行（单行卡片）：每行一张小卡片（浅填充底、统一 --row-h 高、行间距 8），不用分隔线 */

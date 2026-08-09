@@ -27,6 +27,8 @@ async function setup(
     llmFetch?: FetchLike;
     /** 注入 listen dep；缺省不注入（/api/listen* 404） */
     listen?: { bili?: boolean; weibo?: boolean; dynamicEnabled?: boolean; weiboEnabled?: boolean };
+    /** 注入 napcat dep；缺省不注入（/api/napcat* 404） */
+    napcat?: PanelDeps['napcat'];
   } = {},
 ): Promise<Fixture> {
   const db = new Db(':memory:');
@@ -69,6 +71,7 @@ async function setup(
     auth: opts.auth,
     weiboAuth: opts.weiboAuth,
     llm,
+    napcat: opts.napcat,
     ...(opts.listen
       ? {
           listen: {
@@ -1074,4 +1077,89 @@ test('PUT 启停影响路由推导；DELETE 移除；onProvidersChanged 重建 r
   const after = await api(base, '/api/llm');
   assert.deepEqual(after.json.providers, [], '删除后名单为空（router 已随 onProvidersChanged 重建）');
   assert.equal((await api(base, '/api/llm/providers/ds', 'DELETE')).status, 404);
+});
+
+// ---- NapCat 托管 ----
+
+/** 假 napcat dep：生效配置内存可变，state/launch/setup 可注入 */
+function fakeNapcatDep(): NonNullable<PanelDeps['napcat']> & { saved: Array<Record<string, unknown>> } {
+  const cfg = { enabled: true, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774' };
+  const saved: Array<Record<string, unknown>> = [];
+  return {
+    saved,
+    effective: () => ({ ...cfg }),
+    source: () => ({ enabled: 'config', dir: 'config', uin: 'config' }),
+    save: (patch) => {
+      saved.push(patch as Record<string, unknown>);
+      if (patch.enabled !== undefined) cfg.enabled = patch.enabled;
+      if (patch.dir !== undefined) cfg.dir = patch.dir;
+      if (patch.uin !== undefined) cfg.uin = patch.uin;
+    },
+    state: async () => ({
+      endpoint: 'http://127.0.0.1:3000',
+      probe: { state: 'ok', loggedIn: true },
+      taskRegistered: true,
+    }),
+    launch: async () => {},
+    setupTask: async () => {},
+  };
+}
+
+test('GET /api/napcat：生效配置 + source + 状态；无 dep 404', async (t) => {
+  const noDep = await setup(t);
+  assert.equal((await api(noDep.base, '/api/napcat')).status, 404);
+  assert.equal((await api(noDep.base, '/api/napcat', 'PUT', { enabled: true })).status, 404);
+  assert.equal((await api(noDep.base, '/api/napcat/launch', 'POST')).status, 404);
+
+  const dep = fakeNapcatDep();
+  const { base } = await setup(t, { napcat: dep });
+  const r = await api(base, '/api/napcat');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, {
+    enabled: true, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774',
+    source: { enabled: 'config', dir: 'config', uin: 'config' },
+    endpoint: 'http://127.0.0.1:3000',
+    probe: { state: 'ok', loggedIn: true },
+    taskRegistered: true,
+  });
+});
+
+test('PUT /api/napcat：保存生效；uin 非纯数字 400', async (t) => {
+  const dep = fakeNapcatDep();
+  const { base } = await setup(t, { napcat: dep });
+
+  const bad = await api(base, '/api/napcat', 'PUT', { uin: 'abc' });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.error!, /纯数字/);
+  assert.equal((await api(base, '/api/napcat', 'PUT', { enabled: 'yes' })).status, 400);
+  assert.equal(dep.saved.length, 0, '校验失败不落库');
+
+  const ok = await api(base, '/api/napcat', 'PUT', { dir: 'E:/NC', uin: '111', enabled: false });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.json, { ok: true, enabled: false, dir: 'E:/NC', uin: '111' });
+  assert.deepEqual(dep.saved, [{ dir: 'E:/NC', uin: '111', enabled: false }]);
+});
+
+test('POST /api/napcat/launch：失败信息透传为 400', async (t) => {
+  const dep = fakeNapcatDep();
+  dep.launch = async () => { throw new Error('拉起失败：计划任务未创建（先点「计划任务」一次性设置）'); };
+  const { base } = await setup(t, { napcat: dep });
+  const r = await api(base, '/api/napcat/launch', 'POST');
+  assert.equal(r.status, 400);
+  assert.match(r.json.error!, /计划任务未创建/);
+
+  dep.launch = async () => {};
+  assert.equal((await api(base, '/api/napcat/launch', 'POST')).status, 200);
+});
+
+test('POST /api/napcat/setup：创建失败为 500 且含原因', async (t) => {
+  const dep = fakeNapcatDep();
+  dep.setupTask = async () => { throw new Error('创建计划任务失败（UAC 被拒绝？）exit=1'); };
+  const { base } = await setup(t, { napcat: dep });
+  const r = await api(base, '/api/napcat/setup', 'POST');
+  assert.equal(r.status, 500);
+  assert.match(r.json.error!, /UAC/);
+
+  dep.setupTask = async () => {};
+  assert.equal((await api(base, '/api/napcat/setup', 'POST')).status, 200);
 });

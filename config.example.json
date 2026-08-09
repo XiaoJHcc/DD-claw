@@ -75,5 +75,17 @@
     "toast": {
       "enabled": true
     }
+  },
+
+  // NapCat 托管（Windows，可选但推荐）：配置后不再需要 .env 的 NAPCAT_BASE_URL ——
+  // DD-claw 在 NapCat 的 onebot11_<uin>.json 里自建自管 name=dd-claw 的专属 HTTP 条目
+  //（自动选高位空闲端口、被占自动换，其他服务条目不受影响；你不用手动改 NapCat 配置）。
+  // 看门狗周期探测，NapCat 不在线/配置未生效时经计划任务自动停止旧实例 + 拉起快速登录 uin。
+  // 一次性设置：配好本段后跑 npm run napcat-setup（或面板 NapCat 卡片点「计划任务」，
+  // 弹一次 UAC 创建拉起/停止双任务，之后全静默）
+  "napcat": {
+    "enabled": false,
+    "dir": "D:\\CLI\\NapCat.Shell",
+    "uin": "REPLACE_ME_机器人QQ号"
   }
 }

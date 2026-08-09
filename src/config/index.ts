@@ -106,8 +106,10 @@ export function loadConfig(): LoadedConfig {
   }
 
   const baseUrl = (process.env.NAPCAT_BASE_URL ?? '').replace(/\/+$/, '');
-  if (result.data.notify.onebot.enabled && !baseUrl) {
-    throw new ConfigError('onebot 已启用，但 .env 里没有 NAPCAT_BASE_URL');
+  if (result.data.notify.onebot.enabled && !baseUrl && !result.data.napcat.enabled) {
+    throw new ConfigError(
+      'onebot 已启用，但 .env 里没有 NAPCAT_BASE_URL（也可在 config.json 配置 napcat 段，由 DD-claw 从 NapCat 配置自动发现端点）',
+    );
   }
 
   return {

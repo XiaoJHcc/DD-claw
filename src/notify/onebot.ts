@@ -30,10 +30,16 @@ export class OneBotNotifier implements Notifier {
   private readonly chains = new Map<string, Promise<void>>();
 
   constructor(
-    private readonly baseUrl: string,
-    private readonly token: string,
+    private baseUrl: string,
+    private token: string,
     private readonly targets: NotifyTarget[],
   ) {}
+
+  /** NapCat 看门狗热跟随：webui 改了端口/token 时免重启更新端点 */
+  updateEndpoint(baseUrl: string, token: string): void {
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.token = token;
+  }
 
   async send(msg: PushMessage): Promise<NotifyResult[]> {
     // 常规发送只看 msg.targets（dispatcher 已按选中渠道解析好）；

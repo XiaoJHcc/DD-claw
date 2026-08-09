@@ -28,6 +28,7 @@ import { llmProviderSchema, type LlmProviderConfig } from '../config/schema.js';
 import { deriveRoutes, isLlmEnabled, setLlmEnabled, type LlmRouter } from '../analysis/providers.js';
 import { isListenEnabled, listenSetting, setListen, type ListenFeature } from '../core/listen.js';
 import { isPushEnabled, setPushEnabled } from '../core/push.js';
+import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 
 const log = makeLogger('panel');
 
@@ -104,6 +105,22 @@ export interface PanelDeps {
     /** 面板改开关后回调：装配处热启停对应源 */
     onChanged: () => void;
   };
+  /**
+   * NapCat 托管（面板 NapCat 卡片）；不注入则 /api/napcat* 一律 404。
+   * 配置事实来源是 settings 表（面板覆盖 > config 默认），保存在装配处闭包里热生效。
+   */
+  napcat?: {
+    /** 生效配置与来源标注（panel/config） */
+    effective: () => NapcatConfig;
+    source: () => { enabled: 'panel' | 'config'; dir: 'panel' | 'config'; uin: 'panel' | 'config' };
+    save: (patch: { enabled?: boolean; dir?: string; uin?: string }) => void;
+    /** 实时状态：发现的端点 + 三态探测 + 计划任务是否已建 */
+    state: () => Promise<{ endpoint: string | null; probe: ProbeResult | null; taskRegistered: boolean }>;
+    /** 手动拉起；失败抛中文错（如计划任务未创建） */
+    launch: () => Promise<void>;
+    /** 一次性创建「最高权限」计划任务（主机弹一次 UAC） */
+    setupTask: () => Promise<void>;
+  };
 }
 
 export function createPanelServer(deps: PanelDeps): http.Server {
@@ -149,6 +166,52 @@ async function handle(
   const lm = path.match(/^\/api\/listen\/(dynamic|weibo)$/);
   if (deps.listen && lm && method === 'PUT') {
     sendJson(res, 200, putListen(deps, lm[1] as ListenFeature, await readJsonBody(req)));
+    return;
+  }
+
+  // ---- NapCat 托管（napcat dep 存在才挂）：配置（settings 覆盖 > config）+ 状态 + 手动操作 ----
+  if (deps.napcat && method === 'GET' && path === '/api/napcat') {
+    const st = await deps.napcat.state();
+    sendJson(res, 200, { ...deps.napcat.effective(), source: deps.napcat.source(), ...st });
+    return;
+  }
+  if (deps.napcat && method === 'PUT' && path === '/api/napcat') {
+    const b = (await readJsonBody(req)) as Record<string, unknown>;
+    const patch: { enabled?: boolean; dir?: string; uin?: string } = {};
+    if (b.enabled !== undefined) {
+      if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
+      patch.enabled = b.enabled;
+    }
+    if (b.dir !== undefined) {
+      if (typeof b.dir !== 'string') throw new HttpError(400, '路径必须是字符串');
+      patch.dir = b.dir.trim();
+    }
+    if (b.uin !== undefined) {
+      if (typeof b.uin !== 'string') throw new HttpError(400, 'QQ号必须是字符串');
+      const uin = b.uin.trim();
+      if (uin !== '' && !/^\d+$/.test(uin)) throw new HttpError(400, 'QQ号必须是纯数字');
+      patch.uin = uin;
+    }
+    deps.napcat.save(patch);
+    sendJson(res, 200, { ok: true, ...deps.napcat.effective() });
+    return;
+  }
+  if (deps.napcat && method === 'POST' && path === '/api/napcat/launch') {
+    try {
+      await deps.napcat.launch();
+    } catch (e) {
+      throw new HttpError(400, (e as Error).message);
+    }
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (deps.napcat && method === 'POST' && path === '/api/napcat/setup') {
+    try {
+      await deps.napcat.setupTask();
+    } catch (e) {
+      throw new HttpError(500, (e as Error).message);
+    }
+    sendJson(res, 200, { ok: true });
     return;
   }
 

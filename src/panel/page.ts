@@ -14,6 +14,7 @@ import { APP_LISTEN } from './page/app-listen.js';
 import { APP_STREAMERS } from './page/app-streamers.js';
 import { APP_PUSH } from './page/app-push.js';
 import { APP_LLM } from './page/app-llm.js';
+import { APP_NAPCAT } from './page/app-napcat.js';
 import { APP_FOLLOWS } from './page/app-follows.js';
 
 const QR_LIB = Buffer.from(QR_LIB_B64, 'base64').toString('utf8');
@@ -55,6 +56,17 @@ export const PANEL_PAGE = `<!doctype html>
 <button class="btn" data-action="open-push-default"><span data-icon="gear"></span>全局默认推送</button>
 </div>
 </section>
+
+<section class="card" id="card-napcat">
+<div class="card-head"><h2>NapCat</h2>
+<label class="switch"><input type="checkbox" id="napcat-enabled" data-change="toggle-napcat"><span class="knob"></span></label>
+</div>
+<div id="napcat-rows">加载中…</div>
+<div class="card-actions">
+<button class="btn" data-action="napcat-launch"><span data-icon="bolt"></span>手动拉起</button>
+<button class="btn" data-action="napcat-setup"><span data-icon="gear"></span>计划任务</button>
+</div>
+</section>
 </div>
 
 <section class="card" id="card-schedule">
@@ -85,6 +97,7 @@ ${APP_LISTEN}
 ${APP_STREAMERS}
 ${APP_PUSH}
 ${APP_LLM}
+${APP_NAPCAT}
 ${APP_FOLLOWS}
 </script>
 </body>
