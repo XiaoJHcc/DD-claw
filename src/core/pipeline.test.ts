@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { Pipeline } from './pipeline.js';
 import { Bus } from './bus.js';
 import { AnalysisQueue } from '../analysis/queue.js';
-import { NoopAnalyzer } from '../analysis/noop.js';
 import { OncePerSessionRule } from '../rules/once-per-session.js';
+import type { AnalysisContext, Classification, Classifier } from '../analysis/types.js';
 import type { PushMessage, Signal } from './types.js';
 import type { PushChannel, PushRule } from './push.js';
 import type { RoomStatus } from '../sources/bili/types.js';
@@ -26,6 +26,17 @@ function sig(over: Partial<Signal> = {}): Signal {
   };
 }
 
+/** 桩分类器：返回固定判定结果，记录调用次数（验证 live_end 不做分类） */
+class StubClassifier implements Classifier {
+  readonly name = 'stub';
+  calls: AnalysisContext[] = [];
+  constructor(public result: Classification[] = []) {}
+  async classify(ctx: AnalysisContext): Promise<Classification[]> {
+    this.calls.push(ctx);
+    return this.result;
+  }
+}
+
 class FakeDb {
   sessions: string[] = [];
   notified = new Set<string>();
@@ -44,8 +55,8 @@ class FakeDb {
   hasNotified(r: string, t: number) { return this.notified.has(`${r}:${t}`); }
   markNotified(r: string, t: number) { this.notified.add(`${r}:${t}`); }
   getStreamer(uid: string) { return this.streamers.get(uid); }
-  listEnabledPushRules(uid: string) {
-    return this.rules.filter((r) => r.enabled && r.uid === uid).sort((a, b) => a.id - b.id);
+  listEnabledPushRules() {
+    return this.rules.filter((r) => r.enabled).sort((a, b) => a.id - b.id);
   }
   listPushChannels() { return this.channels; }
   getSetting(key: string) { return this.settings.get(key) ?? null; }
@@ -53,10 +64,14 @@ class FakeDb {
 
 function rule(over: Partial<PushRule> = {}): PushRule {
   return {
-    id: 1, uid: '1', keywords: [], areas: [], channels: [1],
+    id: 1, name: '规则 1', categoryId: null, uids: [], channels: [1],
     messageTemplate: null, enabled: true, createdAt: 0, updatedAt: 0,
     ...over,
   };
+}
+
+function classification(categoryId: number): Classification {
+  return { categoryId, name: `分类 ${categoryId}`, source: 'rule', confidence: null, evidence: '' };
 }
 
 class FakeDispatcher {
@@ -84,20 +99,21 @@ function config(over: Partial<AppConfig> = {}): AppConfig {
   } as AppConfig;
 }
 
-function harness(over: Partial<AppConfig> = {}, dispatchDelayMs = 0) {
+function harness(over: Partial<AppConfig> = {}, dispatchDelayMs = 0, classifications: Classification[] = []) {
   const bus = new Bus();
   const db = new FakeDb();
   const disp = new FakeDispatcher(dispatchDelayMs);
+  const classifier = new StubClassifier(classifications);
   const pipeline = new Pipeline({
     bus,
     db: db as never,
     config: config(over),
-    queue: new AnalysisQueue(new NoopAnalyzer()),
+    queue: new AnalysisQueue(classifier),
     rule: new OncePerSessionRule(db),
     dispatcher: disp as never,
   });
   pipeline.attach();
-  return { bus, db, disp, pipeline };
+  return { bus, db, disp, pipeline, classifier };
 }
 
 // ---- 冷启动抑制（政策判断在 pipeline）----
@@ -113,6 +129,7 @@ test('first_run 且 notifyOnFirstRun=false：不通知，但 recordSession 照�
 
 test('first_run 可配置为推送，消息为 PushMessage 且 markNotified', async () => {
   const h = harness({ notifyOnFirstRun: true });
+  h.db.rules.push(rule()); // 任开播×全部主播兜底规则（无命中 = 不推）
   h.bus.emit(sig({ coldStart: 'first_run' }));
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
@@ -127,6 +144,7 @@ test('first_run 可配置为推送，消息为 PushMessage 且 markNotified', as
 
 test('new_subscription 默认推送，配置可关闭', async () => {
   let h = harness();
+  h.db.rules.push(rule());
   h.bus.emit(sig({ coldStart: 'new_subscription' }));
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1, '默认 notifyOnNewSubscription=true');
@@ -147,6 +165,7 @@ test('restart_recovery 默认不推送（与 first_run 共用 notifyOnFirstRun�
   assert.equal(h.db.notified.size, 0);
 
   h = harness({ notifyOnFirstRun: true });
+  h.db.rules.push(rule());
   h.bus.emit(sig({ coldStart: 'restart_recovery' }));
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1, 'notifyOnFirstRun=true 时也推送');
@@ -164,6 +183,7 @@ test('推送总开关（settings.push_enabled=0）：全局不推，追踪照常
 
 test('同一场不重复推（OncePerSession + markNotified）', async () => {
   const h = harness({ notifyOnFirstRun: true });
+  h.db.rules.push(rule());
   h.bus.emit(sig({ coldStart: 'first_run' }));
   await h.pipeline.whenIdle();
   h.bus.emit(sig());
@@ -171,12 +191,15 @@ test('同一场不重复推（OncePerSession + markNotified）', async () => {
   assert.equal(h.disp.sent.length, 1);
 });
 
-test('live_end / title_change 不推送（M1 规则）', async () => {
+test('live_start 做分类判定，live_end / title_change 不调分类器（不烧 LLM）', async () => {
   const h = harness();
+  h.db.rules.push(rule());
+  h.bus.emit(sig());
   h.bus.emit(sig({ kind: 'live_end' }));
   h.bus.emit(sig({ kind: 'title_change', previousTitle: '旧标题' }));
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 0);
+  assert.equal(h.classifier.calls.length, 1, '只有 live_start 进分类队列');
+  assert.equal(h.disp.sent.length, 1, 'M1 规则只推开播');
 });
 
 // ---- notify=false（旧 silent 语义）：追踪照常，推送抑制 ----
@@ -191,9 +214,17 @@ test('notify=false：抑制推送但 recordSession 照做', async () => {
   assert.equal(h.db.notified.size, 0);
 });
 
-// ---- 推送规则（matcher × push_rules / push_channels）----
+// ---- 推送规则 v2（分类引用 × 生效主播 × push_channels）----
 
-test('主播无规则且未设全局默认：兜底全部启用渠道 + 内置默认模板', async () => {
+test('无规则 = 不推送（全局默认推送已删除，兜底靠「任意开播 × 全部主播」规则）', async () => {
+  const h = harness();
+  h.bus.emit(sig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0, '无命中规则 = 不推');
+  assert.equal(h.db.notified.size, 0, '未推成功不得 markNotified');
+});
+
+test('「任意开播 × 全部主播」规则 = 旧全局默认的等价物：兜底推送 + 内置默认模板', async () => {
   const h = harness();
   h.db.channels.push(
     { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '111',
@@ -201,48 +232,44 @@ test('主播无规则且未设全局默认：兜底全部启用渠道 + 内置�
     { id: 3, name: '停用的', notifier: 'onebot', targetType: 'group', targetId: '222',
       enabled: false, createdAt: 0, updatedAt: 0 },
   );
+  h.db.rules.push(rule({ categoryId: null, uids: [], channels: [1, 2] }));
   h.bus.emit(sig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '阿梓 开播了', '内置默认模板渲染');
-  assert.deepEqual(m.channels, ['1', '2'], '未设全局默认 = 全部启用渠道（停用不算）');
+  assert.equal(m.title, '阿梓 开播了', '规则无覆盖推送词 → 内置默认模板');
+  assert.deepEqual(m.channels, ['1', '2'], '渠道 = 规则勾选的渠道');
 });
 
-test('无规则且没有任何启用渠道：不推', async () => {
+test('规则未覆盖推送词时用内置默认模板', async () => {
   const h = harness();
-  h.db.channels = [];
-  h.bus.emit(sig());
+  h.db.rules.push(rule({ categoryId: null }));
+  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 0);
+  assert.equal(h.disp.sent[0]!.title, '阿梓 开播了');
 });
 
-test('全局默认渠道（settings.default_channels）设置后按其推送', async () => {
+test('分类规则不命中（无其他规则）= 不推', async () => {
   const h = harness();
-  h.db.channels.push(
-    { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '111',
-      enabled: true, createdAt: 0, updatedAt: 0 },
-  );
-  h.db.settings.set('default_channels', '[2]');
-  h.bus.emit(sig());
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1);
-  assert.deepEqual(h.disp.sent[0]!.channels, ['2'], '全局默认只推勾选的渠道');
-});
-
-test('全局默认显式空数组 = 默认不推', async () => {
-  const h = harness();
-  h.db.settings.set('default_channels', '[]');
-  h.bus.emit(sig());
+  h.db.rules.push(rule({ categoryId: 9, channels: [1] })); // 分类 9 不在判定结果里
+  h.bus.emit(sig({ status: status({ title: '打游戏' }) }));
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 0);
   assert.equal(h.db.notified.size, 0, '未推成功不得 markNotified');
 });
 
-test('命中条件规则：渠道与推送词按规则', async () => {
+test('生效主播集合限定：uid 不在名单内的规则不命中（无其他规则 = 不推）', async () => {
   const h = harness();
+  h.db.rules.push(rule({ categoryId: null, uids: ['别人'], channels: [2] }));
+  h.bus.emit(sig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0, '唯一规则不命中 = 不推');
+});
+
+test('命中分类规则：渠道与推送词按规则（categoryId 来自分类判定）', async () => {
+  const h = harness({}, 0, [classification(7)]);
   h.db.rules.push(rule({
-    id: 7, keywords: ['歌'], channels: [2], messageTemplate: '{alias}唱歌速来',
+    id: 7, categoryId: 7, channels: [2], messageTemplate: '{alias}唱歌速来',
   }));
   h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
   await h.pipeline.whenIdle();
@@ -253,52 +280,17 @@ test('命中条件规则：渠道与推送词按规则', async () => {
   assert.equal(m.url, 'https://live.bilibili.com/r1', '跳转字段沿用默认形状');
 });
 
-test('规则未覆盖推送词时用全局默认模板（settings.default_template）', async () => {
-  const h = harness();
-  h.db.settings.set('default_template', '{alias} 开播：{title}');
-  h.db.rules.push(rule({ keywords: ['歌'] }));
-  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent[0]!.title, '阿梓 开播：今晚歌回！');
-});
-
-test('条件规则不命中 → 全局默认（渠道与模板都按全局设置）', async () => {
-  const h = harness();
-  h.db.channels.push(
-    { id: 2, name: 'QQ私聊', notifier: 'onebot', targetType: 'private', targetId: '111',
-      enabled: true, createdAt: 0, updatedAt: 0 },
-  );
-  h.db.settings.set('default_channels', '[2]');
-  h.db.settings.set('default_template', '{alias} 来了');
-  h.db.rules.push(rule({ keywords: ['歌'], channels: [1] }));
-  h.bus.emit(sig({ status: status({ title: '打游戏' }) }));
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1);
-  const m = h.disp.sent[0]!;
-  assert.deepEqual(m.channels, ['2'], '条件规则不命中落全局默认渠道');
-  assert.equal(m.title, '阿梓 来了', '模板也走全局默认');
-});
-
-test('条件规则不命中且全局默认显式空：不推', async () => {
-  const h = harness();
-  h.db.settings.set('default_channels', '[]');
-  h.db.rules.push(rule({ keywords: ['歌'] }));
-  h.bus.emit(sig({ status: status({ title: '打游戏' }) }));
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 0);
-});
-
 test('命中规则但渠道并集为空 = 用户明确不推', async () => {
   const h = harness();
-  h.db.rules.push(rule({ keywords: ['歌'], channels: [] }));
-  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
+  h.db.rules.push(rule({ categoryId: null, channels: [] }));
+  h.bus.emit(sig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 0);
   assert.equal(h.db.notified.size, 0, '未推成功不得 markNotified');
 });
 
 test('多条规则命中：渠道取并集去重（保持顺序），推送词取 sort 序首个非空', async () => {
-  const h = harness();
+  const h = harness({}, 0, [classification(7)]);
   h.db.channels.push(
     { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '111',
       enabled: true, createdAt: 0, updatedAt: 0 },
@@ -306,11 +298,11 @@ test('多条规则命中：渠道取并集去重（保持顺序），推送词�
       enabled: true, createdAt: 0, updatedAt: 0 },
   );
   h.db.rules.push(
-    rule({ id: 1, keywords: ['歌'], channels: [2, 1] }),
-    rule({ id: 2, keywords: ['歌'], channels: [1, 3], messageTemplate: '{alias}唱歌速来' }),
-    rule({ id: 3, keywords: ['不命中'], channels: [3] }),
+    rule({ id: 1, categoryId: null, channels: [2, 1] }), // 任意开播
+    rule({ id: 2, categoryId: 7, channels: [1, 3], messageTemplate: '{alias}唱歌速来' }),
+    rule({ id: 3, categoryId: 9, channels: [3] }), // 分类不命中
   );
-  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
+  h.bus.emit(sig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
@@ -318,30 +310,31 @@ test('多条规则命中：渠道取并集去重（保持顺序），推送词�
   assert.equal(m.title, '阿梓唱歌速来', '推送词 = sort 序首个非空 messageTemplate（#1 未设，取 #2 的）');
 });
 
-test('空条件规则与其他规则同等命中：渠道并入并集，不再单独兜底', async () => {
-  const h = harness();
+test('「任意开播」规则与分类规则同时命中：渠道并集；分类不命中时任开播规则照常命中', async () => {
+  const h = harness({}, 0, [classification(7)]);
   h.db.channels.push(
     { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '111',
       enabled: true, createdAt: 0, updatedAt: 0 },
   );
   h.db.rules.push(
-    rule({ id: 1, keywords: [], areas: [], channels: [1] }), // 空条件规则，恒命中
-    rule({ id: 2, keywords: ['歌'], channels: [2], messageTemplate: '{alias}唱歌速来' }),
+    rule({ id: 1, categoryId: null, channels: [1] }), // 任意开播，恒命中
+    rule({ id: 2, categoryId: 7, channels: [2], messageTemplate: '{alias}唱歌速来' }),
   );
-  h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
+  h.bus.emit(sig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
-  assert.deepEqual(h.disp.sent[0]!.channels, ['1', '2'], '空条件规则与条件规则同时命中，渠道并集');
+  assert.deepEqual(h.disp.sent[0]!.channels, ['1', '2'], '任开播规则与分类规则同时命中，渠道并集');
 
-  // 条件规则不命中时，空条件规则照常命中（仍是规则路径，不走全局默认渠道/模板）
+  // 分类不命中时（无判定结果），任开播规则照常命中；推送词无覆盖回内置默认模板
   // 新一场直播（liveTime 变了）才能绕过 OncePerSession 去重
-  h.db.settings.set('default_channels', '[]');
-  h.db.settings.set('default_template', '{alias} 默认模板');
-  h.bus.emit(sig({ status: status({ title: '打游戏', liveTime: 1_785_320_000 }) }));
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 2);
-  assert.deepEqual(h.disp.sent[1]!.channels, ['1'], '只剩空条件规则命中，不走全局默认渠道');
-  assert.equal(h.disp.sent[1]!.title, '阿梓 默认模板', '规则路径模板：规则无覆盖时回全局默认模板');
+  const h2 = harness();
+  h2.db.rules.push(rule({ id: 1, categoryId: null, channels: [1] }));
+  h2.db.rules.push(rule({ id: 2, categoryId: 7, channels: [2], messageTemplate: '{alias}唱歌速来' }));
+  h2.bus.emit(sig());
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 1);
+  assert.deepEqual(h2.disp.sent[0]!.channels, ['1'], '只剩任开播规则命中');
+  assert.equal(h2.disp.sent[0]!.title, '阿梓 开播了', '规则无覆盖推送词 → 内置默认模板');
 });
 
 // ---- 健康告警 ----
@@ -363,6 +356,7 @@ test('health_alert 转 alertAll，文案带失败次数/订阅数/最后错误',
 
 test('信号处理并发但上限 4', async () => {
   const h = harness({}, 20);
+  h.db.rules.push(rule()); // 任开播×全部主播兜底规则
   for (let i = 0; i < 12; i++) {
     h.bus.emit(sig({
       uid: `u${i}`, roomId: `r${i}`,
@@ -373,5 +367,5 @@ test('信号处理并发但上限 4', async () => {
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 12);
   assert.ok(h.disp.concurrentPeak > 1, `应并发处理，实测峰值 ${h.disp.concurrentPeak}`);
-  assert.ok(h.disp.concurrentPeak <= 4, `并发峰值应受限，实测 ${h.disp.concurrentPeak}`);
+  assert.ok(h.disp.concurrentPeak <= 4, `并发峰值应受限，实测峰值 ${h.disp.concurrentPeak}`);
 });

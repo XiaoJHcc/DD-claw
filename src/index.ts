@@ -5,8 +5,8 @@ import { Db } from './core/db.js';
 import { Bus } from './core/bus.js';
 import { Pipeline } from './core/pipeline.js';
 import { toLiveEvent } from './core/types.js';
-import { NoopAnalyzer } from './analysis/noop.js';
 import { AnalysisQueue } from './analysis/queue.js';
+import { RulesClassifier } from './analysis/classifier.js';
 import { createLlmRouter, seedLlmProvidersIfEmpty, listLlmProviders, saveLlmProviders, isLlmEnabled, dbKeysOf, migrateLiteralKeys } from './analysis/providers.js';
 import { OncePerSessionRule } from './rules/once-per-session.js';
 import { NotifyDispatcher } from './notify/dispatcher.js';
@@ -277,12 +277,15 @@ async function main(): Promise<void> {
   }
 
   // 装配：bus → pipeline（编排唯一入口）→ sources（只产信号）
+  // 分类器：router 用 getter 每轮取最新（面板改名单热重建），LLM 总开关读 settings 覆盖
   const bus = new Bus();
   const pipeline = new Pipeline({
     bus,
     db,
     config: app,
-    queue: new AnalysisQueue(new NoopAnalyzer()),
+    queue: new AnalysisQueue(
+      new RulesClassifier(db, () => llmDep.router ?? null, () => isLlmEnabled(db, app.llm)), 2,
+    ),
     rule: new OncePerSessionRule(db),
     dispatcher,
   });

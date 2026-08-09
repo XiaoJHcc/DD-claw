@@ -125,17 +125,17 @@ export class Pipeline {
       return;
     }
 
-    // verdict 只来自分析队列（将来接 LLM Analyzer；NoopAnalyzer 恒 null）。
-    // 无 LLM 时不做分类，推送走用户自定的透明条件规则（buildMessage）。
-    const verdict = await queue.submit({ event, signal });
-    const decision = await rule.decide({ ...event, verdict }, signal, verdict);
+    // 分类判定只在 live_start 做（live_end / title_change 不烧 LLM）；
+    // 判定结果进规则匹配：推送规则按 categoryId 引用分类（buildMessage）
+    const classifications = signal.kind === 'live_start' ? await queue.submit({ event, signal }) : [];
+    const decision = await rule.decide({ ...event, classifications }, signal, classifications);
 
     if (!decision.shouldNotify) {
       log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: ${decision.reason}`);
       return;
     }
 
-    const msg = this.buildMessage({ ...event, verdict });
+    const msg = this.buildMessage({ ...event, classifications });
     if (!msg) return; // buildMessage 已记日志（规则不命中 / 规则未选渠道）
 
     log.info(`推送 [${signal.kind}] ${event.alias || event.uname} — ${decision.reason}`);
@@ -148,62 +148,42 @@ export class Pipeline {
   }
 
   /**
-   * 透明条件规则 → PushMessage；返回 null = 不推（命中集合渠道并集为空 / 全局默认未选渠道）。
+   * 推送规则 → PushMessage；返回 null = 不推（命中集合渠道并集为空 / 无命中规则）。
    * - 命中集合非空：所有命中规则独立生效——渠道 = 各命中规则 channels 的并集（去重保序）；
    *   推送词 = sort 序首个非空 messageTemplate；并集为空 = 用户明确不推（记 log 不推）
-   * - 条件规则均不命中（含一条都没有）→ 全局默认：settings.default_channels
-   *   （未设置 = 全部启用渠道的旧兜底行为；显式空数组 = 默认不推）+ 全局默认模板
-   * - 模板：规则覆盖 > settings.default_template > 内置默认；正文/图片/跳转沿用默认形状
+   * - 无命中规则（含一条都没有）= 不推——「任意开播 × 全部主播」规则即旧全局默认的等价物，
+   *   需要兜底推送的用户自建一条即可
+   * - 模板：规则覆盖 > 内置默认 '{alias} 开播了'；正文/图片/跳转沿用默认形状
    */
   private buildMessage(event: LiveEvent): PushMessage | null {
     const { db } = this.deps;
     const base = liveEventToMessage(event);
-    const hits = matchPushRules(db.listEnabledPushRules(event.uid), event);
+    const hits = matchPushRules(
+      db.listEnabledPushRules(), event,
+      new Set(event.classifications.map((c) => c.categoryId)),
+    );
 
-    let channelIds: number[];
-    let templateOverride: string | null = null;
-    if (hits.length > 0) {
-      channelIds = [];
-      for (const r of hits) {
-        for (const id of r.channels) {
-          if (!channelIds.includes(id)) channelIds.push(id);
-        }
-        templateOverride ??= r.messageTemplate;
-      }
-      if (channelIds.length === 0) {
-        log.info(`不推送 ${event.alias || event.uname}: 命中 ${hits.length} 条规则但都未勾选渠道`);
-        return null;
-      }
-      log.info(`命中推送规则 ${hits.map((r) => `#${r.id}`).join('/')}（${event.alias || event.uname}）`);
-    } else {
-      channelIds = this.defaultChannelIds();
-      if (channelIds.length === 0) {
-        log.info(`不推送 ${event.alias || event.uname}: 条件规则均不命中，且全局默认未选渠道`);
-        return null;
-      }
+    if (hits.length === 0) {
+      log.info(`不推送 ${event.alias || event.uname}: 无命中规则`);
+      return null;
     }
+    const channelIds: number[] = [];
+    let templateOverride: string | null = null;
+    for (const r of hits) {
+      for (const id of r.channels) {
+        if (!channelIds.includes(id)) channelIds.push(id);
+      }
+      templateOverride ??= r.messageTemplate;
+    }
+    if (channelIds.length === 0) {
+      log.info(`不推送 ${event.alias || event.uname}: 命中 ${hits.length} 条规则但都未勾选渠道`);
+      return null;
+    }
+    log.info(`命中推送规则 ${hits.map((r) => `#${r.id}`).join('/')}（${event.alias || event.uname}）`);
 
-    const tpl = templateOverride ?? db.getSetting('default_template') ?? '{alias} 开播了';
+    const tpl = templateOverride ?? '{alias} 开播了';
     const text = renderTemplate(tpl, event).trim();
     return { ...base, title: text || base.title, channels: channelIds.map(String) };
-  }
-
-  /**
-   * 全局默认推送渠道：settings.default_channels（JSON id 数组）。
-   * 未设置 = 全部启用渠道（旧兜底行为，面板里显示为全勾）；显式空数组 = 默认不推。
-   */
-  private defaultChannelIds(): number[] {
-    const raw = this.deps.db.getSetting('default_channels');
-    if (raw === null) {
-      return this.deps.db.listPushChannels().filter((c) => c.enabled).map((c) => c.id);
-    }
-    try {
-      const ids = JSON.parse(raw) as unknown;
-      return Array.isArray(ids) ? ids.filter((x): x is number => typeof x === 'number') : [];
-    } catch {
-      log.warn(`settings.default_channels 不是合法 JSON，按默认不推处理: ${raw}`);
-      return [];
-    }
   }
 
   private async handleHealthAlert(signal: Signal): Promise<void> {

@@ -8,9 +8,9 @@ import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
-  HttpError, checkChannelShape, parseChannelPatch, parseNewChannel,
-  parseNewRule, parsePushDefaultBody, parseRulePatch, parseStreamerPatch, parseUid,
-  readJsonBody, sendJson,
+  HttpError, checkCategoryConditions, checkChannelShape, parseCategoryPatch, parseChannelPatch,
+  parseNewCategory, parseNewChannel, parseNewRule, parseRulePatch,
+  parseStreamerPatch, parseUid, readJsonBody, sendJson,
 } from './http-util.js';
 import { PANEL_PAGE } from './page.js';
 import { cookieHeader, fetchSelf, loadCookies, saveCookies, type SelfInfo } from '../sources/bili/auth.js';
@@ -256,23 +256,6 @@ async function handle(
     sendJson(res, 200, { ok: true, enabled: b.enabled });
     return;
   }
-  // 全局默认推送：条件规则都不命中时走这里。channels 未设置时返回全部启用渠道 id
-  // （= pipeline 的兜底行为，前端显示为全勾）；显式空数组 = 默认不推。
-  if (method === 'GET' && path === '/api/push/default') {
-    const raw = db.getSetting('default_channels');
-    const channels = raw === null
-      ? db.listPushChannels().filter((c) => c.enabled).map((c) => c.id)
-      : (JSON.parse(raw) as number[]);
-    sendJson(res, 200, { template: db.getSetting('default_template'), channels });
-    return;
-  }
-  if (method === 'PUT' && path === '/api/push/default') {
-    const patch = parsePushDefaultBody(await readJsonBody(req));
-    if (patch.template !== undefined) db.setSetting('default_template', patch.template);
-    if (patch.channels !== undefined) db.setSetting('default_channels', JSON.stringify(patch.channels));
-    sendJson(res, 200, { ok: true });
-    return;
-  }
   // ---- LLM provider 与 key 管理（llm dep 存在才挂；key 本机面板明文回显/编辑）----
   if (deps.llm && method === 'GET' && path === '/api/llm') {
     sendJson(res, 200, llmInfo(deps));
@@ -329,19 +312,40 @@ async function handle(
       return;
     }
   }
+  // ---- 分类规则（全局定义：LLM 提示词 + 确定性条件，归类结果入 verdicts）----
+  if (method === 'GET' && path === '/api/categories') {
+    sendJson(res, 200, { categories: db.listCategories() });
+    return;
+  }
+  if (method === 'POST' && path === '/api/categories') {
+    const id = db.upsertCategory(parseNewCategory(await readJsonBody(req)));
+    sendJson(res, 201, { id });
+    return;
+  }
+  // 分类拖拽排序：ids 是现有分类的全排列（在 :id 通配之前匹配）
+  if (method === 'PUT' && path === '/api/categories/order') {
+    sendJson(res, 200, putCategoryOrder(db, await readJsonBody(req)));
+    return;
+  }
+
+  // ---- 推送规则 v2（全局：分类引用 + 生效主播集合 + 渠道）----
   if (method === 'GET' && path === '/api/rules') {
     const uidParam = url.searchParams.get('uid');
     const uid = uidParam === null ? null : parseUid(uidParam);
     const rules = db.listPushRules();
-    sendJson(res, 200, { rules: uid === null ? rules : rules.filter((r) => r.uid === uid) });
+    // ?uid= 语义：对该主播生效的规则（uids 空 = 全部主播，含未来新增）
+    sendJson(res, 200, {
+      rules: uid === null ? rules : rules.filter((r) => r.uids.length === 0 || r.uids.includes(uid)),
+    });
     return;
   }
   if (method === 'POST' && path === '/api/rules') {
-    const id = db.upsertPushRule(parseNewRule(await readJsonBody(req)));
-    sendJson(res, 201, { id });
+    const rule = parseNewRule(await readJsonBody(req));
+    checkRuleRefs(db, rule);
+    sendJson(res, 201, { id: db.upsertPushRule(rule) });
     return;
   }
-  // 规则拖拽排序：ids 是该 uid 规则的全排列（在 :id 通配之前匹配）
+  // 规则拖拽排序：ids 是全部规则的全排列（在 :id 通配之前匹配）
   if (method === 'PUT' && path === '/api/rules/order') {
     sendJson(res, 200, putRuleOrder(db, await readJsonBody(req)));
     return;
@@ -415,6 +419,32 @@ async function handle(
     }
   }
 
+  const cam = path.match(/^\/api\/categories\/([^/]+)$/);
+  if (cam) {
+    const id = Number(parseUid(cam[1], 'id'));
+    const prev = db.listCategories().find((c) => c.id === id);
+    if (!prev) throw new HttpError(404, '分类不存在');
+    if (method === 'PUT') {
+      const patch = parseCategoryPatch(await readJsonBody(req));
+      // 条件校验要对合并后的形状做（如把唯一的条件清空 → 400）
+      checkCategoryConditions({
+        llmPrompt: patch.llmPrompt !== undefined ? patch.llmPrompt : prev.llmPrompt,
+        keywords: patch.keywords ?? prev.keywords,
+        areas: patch.areas ?? prev.areas,
+      });
+      db.upsertCategory({ id, ...patch });
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (method === 'DELETE') {
+      // 级联：先停用引用它的推送规则（规则保留可恢复），条数返回给面板提示
+      const disabledRules = db.disablePushRulesByCategory(id);
+      db.deleteCategory(id);
+      sendJson(res, 200, { ok: true, disabledRules });
+      return;
+    }
+  }
+
   const rm = path.match(/^\/api\/rules\/([^/]+)$/);
   if (rm) {
     const id = Number(parseUid(rm[1], 'id'));
@@ -422,6 +452,12 @@ async function handle(
       const patch = parseRulePatch(await readJsonBody(req));
       const prev = db.listPushRules().find((r) => r.id === id);
       if (!prev) throw new HttpError(404, '规则不存在');
+      // 存在性校验要对合并后的形状做（如只改 uids 时 categoryId/channels 沿用旧值）
+      checkRuleRefs(db, {
+        categoryId: patch.categoryId !== undefined ? patch.categoryId : prev.categoryId,
+        uids: patch.uids ?? prev.uids,
+        channels: patch.channels ?? prev.channels,
+      });
       db.upsertPushRule({ id, ...patch });
       sendJson(res, 200, { ok: true });
       return;
@@ -450,33 +486,56 @@ function putChannelOrder(db: Db, body: unknown): unknown {
   return { ok: true };
 }
 
-/** 规则拖拽排序：ids 必须是该 uid 规则的全排列（长度一致/无重复/无增删）。 */
-function putRuleOrder(db: Db, body: unknown): unknown {
-  const o = (body ?? {}) as Record<string, unknown>;
-  const uid = parseUid(o.uid);
-  const ids = o.ids;
+/** 分类拖拽排序：ids 必须是现有分类的全排列（长度一致/无重复/无增删）。 */
+function putCategoryOrder(db: Db, body: unknown): unknown {
+  const ids = (body as Record<string, unknown> | null)?.ids;
   if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
     throw new HttpError(400, 'ids 必须是正整数 id 数组');
   }
-  const mine = db.listPushRules().filter((r) => r.uid === uid).map((r) => r.id);
-  if (ids.length !== mine.length || new Set(ids).size !== ids.length || ids.some((id) => !mine.includes(id))) {
-    throw new HttpError(400, 'ids 必须与该主播现有规则一一对应');
+  const existing = new Set(db.listCategories().map((c) => c.id));
+  if (ids.length !== existing.size || new Set(ids).size !== ids.length || ids.some((id) => !existing.has(id))) {
+    throw new HttpError(400, 'ids 必须与现有分类一一对应');
   }
-  db.reorderPushRules(uid, ids);
+  db.reorderCategories(ids);
   return { ok: true };
 }
 
-/** 名单 + face + 实况（room_state）+ 规则名标签 + 最近动态（posts）。一次请求内每表只查一次。 */
+/** 规则引用存在性校验：分类 / 渠道 / 主播（监听名单内）都必须存在。 */
+function checkRuleRefs(db: Db, r: { categoryId: number | null; uids: string[]; channels: number[] }): void {
+  if (r.categoryId !== null && !db.listCategories().some((c) => c.id === r.categoryId)) {
+    throw new HttpError(400, '分类不存在');
+  }
+  const channelIds = new Set(db.listPushChannels().map((c) => c.id));
+  for (const id of r.channels) {
+    if (!channelIds.has(id)) throw new HttpError(400, `渠道不存在: ${id}`);
+  }
+  const streamerUids = new Set(db.listStreamers().map((s) => s.uid));
+  for (const uid of r.uids) {
+    if (!streamerUids.has(uid)) throw new HttpError(400, `主播不在监听名单: ${uid}`);
+  }
+}
+
+/** 规则拖拽排序：ids 必须是全部规则的全排列（长度一致/无重复/无增删）。 */
+function putRuleOrder(db: Db, body: unknown): unknown {
+  const ids = (body as Record<string, unknown> | null)?.ids;
+  if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
+    throw new HttpError(400, 'ids 必须是正整数 id 数组');
+  }
+  const existing = new Set(db.listPushRules().map((r) => r.id));
+  if (ids.length !== existing.size || new Set(ids).size !== ids.length || ids.some((id) => !existing.has(id))) {
+    throw new HttpError(400, 'ids 必须与现有规则一一对应');
+  }
+  db.reorderPushRules(ids);
+  return { ok: true };
+}
+
+/** 名单 + face + 实况（room_state）+ 生效规则名标签 + 最近动态（posts）。一次请求内每表只查一次。 */
 function enrichedStreamers(db: Db): unknown[] {
   const streamers = db.listStreamers();
   const roomStates = db.listRoomStatesFull();
-  // 每个 uid 的规则名（listPushRules 已按 sort 排序 = 优先级顺序，含 disabled）
-  const ruleNames = new Map<string, string[]>();
-  for (const r of db.listPushRules()) {
-    const list = ruleNames.get(r.uid) ?? [];
-    list.push(r.name);
-    ruleNames.set(r.uid, list);
-  }
+  // 每个 uid 的生效规则名（listPushRules 已按全局 sort 排序，含 disabled；
+  // uids 空 = 对全部主播生效，含未来新增）
+  const allRules = db.listPushRules();
   // 一次分组查询：每个 uid 最近 5 条动态（跨平台按 pub_ts 混排），raw 不下发
   const recentPosts = db.listRecentPosts(streamers.map((s) => s.uid), 5);
   return streamers.map((s) => {
@@ -493,7 +552,11 @@ function enrichedStreamers(db: Db): unknown[] {
             lastLiveAt: rs.lastLiveAt, polledAt: rs.polledAt,
           }
         : null,
-      rules: { names: ruleNames.get(s.uid) ?? [] },
+      rules: {
+        names: allRules
+          .filter((r) => r.uids.length === 0 || r.uids.includes(s.uid))
+          .map((r) => r.name),
+      },
       posts: (recentPosts.get(s.uid) ?? []).map((p) => ({
         platform: p.platform, type: p.type, text: p.text,
         pics: p.pics, pubTs: p.pubTs, url: p.url,

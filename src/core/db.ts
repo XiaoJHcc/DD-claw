@@ -8,9 +8,11 @@ import {
   type Follow, type FollowRow, type Streamer, type StreamerInput, type StreamerRow,
 } from './streamers.js';
 import {
-  rowToChannel, rowToRule,
-  type NewPushChannel, type NewPushRule, type PushChannel, type PushChannelInput,
-  type PushChannelRow, type PushRule, type PushRuleInput, type PushRuleRow,
+  rowToCategory, rowToChannel, rowToRule,
+  type Category, type CategoryInput, type CategoryRow, type NewCategory,
+  type NewPushChannel, type NewPushRule, type NewVerdict,
+  type PushChannel, type PushChannelInput, type PushChannelRow,
+  type PushRule, type PushRuleInput, type PushRuleRow, type Verdict, type VerdictRow,
 } from './push.js';
 import {
   rowToPost,
@@ -83,12 +85,36 @@ CREATE TABLE IF NOT EXISTS push_channels (
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS categories (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT    NOT NULL,
+  llm_prompt  TEXT,
+  keywords    TEXT    NOT NULL DEFAULT '[]',
+  areas       TEXT    NOT NULL DEFAULT '[]',
+  cond_mode   TEXT    NOT NULL DEFAULT 'and' CHECK(cond_mode IN ('and','or')),
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS verdicts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id       TEXT    NOT NULL,
+  live_time     INTEGER NOT NULL,
+  uid           TEXT    NOT NULL,
+  category_id   INTEGER NOT NULL,
+  category_name TEXT    NOT NULL,
+  source        TEXT    NOT NULL CHECK(source IN ('llm','rule')),
+  confidence    REAL,
+  evidence      TEXT    NOT NULL DEFAULT '',
+  created_at    INTEGER NOT NULL,
+  UNIQUE(room_id, live_time, category_id)
+);
 CREATE TABLE IF NOT EXISTS push_rules (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  uid              TEXT    NOT NULL,
   name             TEXT    NOT NULL DEFAULT '',
-  keywords         TEXT    NOT NULL DEFAULT '[]',
-  areas            TEXT    NOT NULL DEFAULT '[]',
+  category_id      INTEGER,
+  uids             TEXT    NOT NULL DEFAULT '[]',
   channels         TEXT    NOT NULL DEFAULT '[]',
   message_template TEXT,
   enabled          INTEGER NOT NULL DEFAULT 1,
@@ -96,7 +122,6 @@ CREATE TABLE IF NOT EXISTS push_rules (
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_push_rules_uid ON push_rules (uid);
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -158,12 +183,9 @@ export class Db {
     this.ensureColumn('streamers', 'weibo_nick', 'weibo_nick TEXT');
     // push_channels 展示顺序（面板拖拽排序；旧库默认全 0 按 id 稳定）
     this.ensureColumn('push_channels', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
-    // push_rules 名称（面板规则列表展示）+ 排序（同 uid 内 = 匹配优先级）
-    this.ensureColumn('push_rules', 'name', 'name TEXT NOT NULL DEFAULT \'\'');
-    this.ensureColumn('push_rules', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
-    this.migratePushRuleNames();
     this.migrateStreamerMode();
     this.migratePreferenceClauses();
+    this.migratePushRulesV2();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -175,9 +197,29 @@ export class Db {
     }
   }
 
-  /** 存量规则没有名称的补一个（面板列表展示用），对新库幂等。 */
-  private migratePushRuleNames(): void {
-    this.db.prepare(`UPDATE push_rules SET name = '规则 ' || id WHERE name IS NULL OR name = ''`).run();
+  /**
+   * push_rules v1（按主播、带 uid 列）与 v2（全局、category_id/uids 引用）结构无法映射，
+   * 检出旧 uid 列即 DROP 重建为新结构（与 preference_clauses 同政策）。对新库幂等。
+   */
+  private migratePushRulesV2(): void {
+    const cols = this.db.prepare('PRAGMA table_info(push_rules)').all() as Array<{ name: string }>;
+    if (cols.length === 0 || !cols.some((c) => c.name === 'uid')) return;
+    this.db.exec(`
+      DROP TABLE push_rules;
+      CREATE TABLE push_rules (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        name             TEXT    NOT NULL DEFAULT '',
+        category_id      INTEGER,
+        uids             TEXT    NOT NULL DEFAULT '[]',
+        channels         TEXT    NOT NULL DEFAULT '[]',
+        message_template TEXT,
+        enabled          INTEGER NOT NULL DEFAULT 1,
+        sort             INTEGER NOT NULL DEFAULT 0,
+        created_at       INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL
+      );
+    `);
+    log.info('push_rules 旧结构（按主播）已删除并重建为 v2 全局结构，旧规则需重新配置');
   }
 
   /**
@@ -540,7 +582,88 @@ export class Db {
     return seeds.length;
   }
 
-  // ---- push_rules：透明条件规则 ----
+  // ---- categories：分类规则（全局；LLM 提示词 + 确定性条件，归类结果入 verdicts）----
+
+  /** 面板用：全量分类（含 disabled），排序（sort, id）。判定消费请用 listEnabledCategories。 */
+  listCategories(): Category[] {
+    const rows = this.db.prepare('SELECT * FROM categories ORDER BY sort, id').all() as CategoryRow[];
+    return rows.map(rowToCategory);
+  }
+
+  /** 启用的分类，sort 升序。RulesClassifier 每场 live_start 逐个判定。 */
+  listEnabledCategories(): Category[] {
+    const rows = this.db
+      .prepare('SELECT * FROM categories WHERE enabled = 1 ORDER BY sort, id')
+      .all() as CategoryRow[];
+    return rows.map(rowToCategory);
+  }
+
+  private getCategory(id: number): Category | undefined {
+    const row = this.db.prepare('SELECT * FROM categories WHERE id = ?').get(id) as CategoryRow | undefined;
+    return row ? rowToCategory(row) : undefined;
+  }
+
+  /** 带 id 且存在 = 改行（未提供字段保留原值）；否则建行（空名补「分类 N」，排到末尾）。返回分类 id。 */
+  upsertCategory(input: CategoryInput): number {
+    const prev = input.id !== undefined ? this.getCategory(input.id) : undefined;
+    const c: NewCategory = {
+      name: input.name !== undefined ? input.name : prev?.name ?? '',
+      llmPrompt: input.llmPrompt !== undefined ? input.llmPrompt : prev?.llmPrompt ?? null,
+      keywords: input.keywords ?? prev?.keywords ?? [],
+      areas: input.areas ?? prev?.areas ?? [],
+      condMode: input.condMode ?? prev?.condMode ?? 'and',
+      enabled: input.enabled ?? prev?.enabled ?? true,
+    };
+    if (prev) {
+      this.db
+        .prepare(
+          `UPDATE categories SET name=?, llm_prompt=?, keywords=?, areas=?, cond_mode=?, enabled=?, updated_at=?
+           WHERE id=?`,
+        )
+        .run(c.name, c.llmPrompt, JSON.stringify(c.keywords), JSON.stringify(c.areas),
+          c.condMode, c.enabled ? 1 : 0, now(), prev.id);
+      return prev.id;
+    }
+    const t = now();
+    // 新分类排到列表末尾
+    const { m } = this.db
+      .prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS m FROM categories')
+      .get() as { m: number };
+    const info = this.db
+      .prepare(
+        `INSERT INTO categories (name, llm_prompt, keywords, areas, cond_mode, enabled, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(c.name, c.llmPrompt, JSON.stringify(c.keywords), JSON.stringify(c.areas),
+        c.condMode, c.enabled ? 1 : 0, m, t, t);
+    const id = Number(info.lastInsertRowid);
+    if (!c.name) {
+      this.db.prepare('UPDATE categories SET name = ?, updated_at = ? WHERE id = ?').run(`分类 ${id}`, t, id);
+    }
+    return id;
+  }
+
+  /** 拖拽排序：ids 是现有分类的全排列，按数组顺序重写 sort。调用方负责校验。 */
+  reorderCategories(ids: number[]): void {
+    const tx = this.db.transaction(() => {
+      const stmt = this.db.prepare('UPDATE categories SET sort = ?, updated_at = ? WHERE id = ?');
+      for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i]);
+    });
+    tx();
+  }
+
+  deleteCategory(id: number): boolean {
+    return this.db.prepare('DELETE FROM categories WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** 删除分类前的级联：停用引用它的推送规则（规则保留可恢复）。返回受影响条数供面板提示。 */
+  disablePushRulesByCategory(categoryId: number): number {
+    return this.db
+      .prepare('UPDATE push_rules SET enabled = 0, updated_at = ? WHERE category_id = ? AND enabled = 1')
+      .run(now(), categoryId).changes;
+  }
+
+  // ---- push_rules v2：推送规则（全局；分类引用 + 生效主播集合 + 渠道）----
 
   /** 面板用：全量规则（含 disabled），排序（sort, id）。matcher 消费请用 listEnabledPushRules。 */
   listPushRules(): PushRule[] {
@@ -548,11 +671,11 @@ export class Db {
     return rows.map(rowToRule);
   }
 
-  /** 某主播的启用规则，sort 升序（= 匹配优先级：第一条命中生效）。 */
-  listEnabledPushRules(uid: string): PushRule[] {
+  /** 全部启用规则，sort 升序（= 全局匹配优先级，全部命中独立生效）。 */
+  listEnabledPushRules(): PushRule[] {
     const rows = this.db
-      .prepare('SELECT * FROM push_rules WHERE enabled = 1 AND uid = ? ORDER BY sort, id')
-      .all(uid) as PushRuleRow[];
+      .prepare('SELECT * FROM push_rules WHERE enabled = 1 ORDER BY sort, id')
+      .all() as PushRuleRow[];
     return rows.map(rowToRule);
   }
 
@@ -561,16 +684,13 @@ export class Db {
     return row ? rowToRule(row) : undefined;
   }
 
-  /** 带 id 且存在 = 改行（未提供字段保留原值）；否则建行（uid 必填）。返回规则 id。 */
+  /** 带 id 且存在 = 改行（未提供字段保留原值）；否则建行（空名补「规则 N」，排到末尾）。返回规则 id。 */
   upsertPushRule(input: PushRuleInput): number {
     const prev = input.id !== undefined ? this.getPushRule(input.id) : undefined;
-    const uid = input.uid ?? prev?.uid;
-    if (!uid) throw new Error('新建 push_rule 必须提供 uid');
     const r: NewPushRule = {
-      uid,
       name: input.name !== undefined ? input.name : prev?.name ?? '',
-      keywords: input.keywords ?? prev?.keywords ?? [],
-      areas: input.areas ?? prev?.areas ?? [],
+      categoryId: input.categoryId !== undefined ? input.categoryId : prev?.categoryId ?? null,
+      uids: input.uids ?? prev?.uids ?? [],
       channels: input.channels ?? prev?.channels ?? [],
       messageTemplate: input.messageTemplate !== undefined
         ? input.messageTemplate : prev?.messageTemplate ?? null,
@@ -579,10 +699,10 @@ export class Db {
     if (prev) {
       this.db
         .prepare(
-          `UPDATE push_rules SET name=?, keywords=?, areas=?, channels=?, message_template=?, enabled=?, updated_at=?
+          `UPDATE push_rules SET name=?, category_id=?, uids=?, channels=?, message_template=?, enabled=?, updated_at=?
            WHERE id=?`,
         )
-        .run(r.name, JSON.stringify(r.keywords), JSON.stringify(r.areas), JSON.stringify(r.channels),
+        .run(r.name, r.categoryId, JSON.stringify(r.uids), JSON.stringify(r.channels),
           r.messageTemplate, r.enabled ? 1 : 0, now(), prev.id);
       return prev.id;
     }
@@ -592,10 +712,10 @@ export class Db {
       .get() as { m: number };
     const info = this.db
       .prepare(
-        `INSERT INTO push_rules (uid, name, keywords, areas, channels, message_template, enabled, sort, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO push_rules (name, category_id, uids, channels, message_template, enabled, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(r.uid, r.name, JSON.stringify(r.keywords), JSON.stringify(r.areas), JSON.stringify(r.channels),
+      .run(r.name, r.categoryId, JSON.stringify(r.uids), JSON.stringify(r.channels),
         r.messageTemplate, r.enabled ? 1 : 0, m, t, t);
     const id = Number(info.lastInsertRowid);
     if (!r.name) {
@@ -604,17 +724,43 @@ export class Db {
     return id;
   }
 
-  /** 拖拽排序：ids 是该 uid 规则的全排列，按数组顺序重写 sort。调用方负责校验。 */
-  reorderPushRules(uid: string, ids: number[]): void {
+  /** 拖拽排序：ids 是全部规则的全排列，按数组顺序重写 sort。调用方负责校验。 */
+  reorderPushRules(ids: number[]): void {
     const tx = this.db.transaction(() => {
-      const stmt = this.db.prepare('UPDATE push_rules SET sort = ?, updated_at = ? WHERE id = ? AND uid = ?');
-      for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i], uid);
+      const stmt = this.db.prepare('UPDATE push_rules SET sort = ?, updated_at = ? WHERE id = ?');
+      for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i]);
     });
     tx();
   }
 
   deletePushRule(id: number): boolean {
     return this.db.prepare('DELETE FROM push_rules WHERE id = ?').run(id).changes > 0;
+  }
+
+  // ---- verdicts：每场直播的分类判定结果（UNIQUE(room_id, live_time, category_id) 去重）----
+
+  /** INSERT OR IGNORE：同一场同一分类重复判定静默跳过。 */
+  insertVerdict(v: NewVerdict): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO verdicts
+           (room_id, live_time, uid, category_id, category_name, source, confidence, evidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(v.roomId, v.liveTime, v.uid, v.categoryId, v.categoryName,
+        v.source, v.confidence, v.evidence, now());
+  }
+
+  /** 一场直播的全部判定结果（面板/调试用）。 */
+  listVerdicts(roomId: string, liveTime: number): Verdict[] {
+    const rows = this.db
+      .prepare('SELECT * FROM verdicts WHERE room_id = ? AND live_time = ? ORDER BY id')
+      .all(roomId, liveTime) as VerdictRow[];
+    return rows.map((r) => ({
+      id: r.id, roomId: r.room_id, liveTime: r.live_time, uid: r.uid,
+      categoryId: r.category_id, categoryName: r.category_name,
+      source: r.source, confidence: r.confidence, evidence: r.evidence, createdAt: r.created_at,
+    }));
   }
 
   // ---- posts：动态/微博时间线归档 ----
@@ -665,7 +811,7 @@ export class Db {
     return out;
   }
 
-  // ---- settings：kv（default_template / default_channels / push_enabled / listen_* / llm_* 等）----
+  // ---- settings：kv（push_enabled / listen_* / llm_* / napcat_* 等）----
 
   getSetting(key: string): string | null {
     const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;

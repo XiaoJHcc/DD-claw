@@ -124,20 +124,49 @@ test('旧 mode 列迁移：off→watch=0，silent→notify=0，mode 列删除且
   );
 });
 
-test('空条件规则（关键词和分区都不填 = 任意匹配）开库保留，不再当作旧「默认推送」删除', (t) => {
+test('push_rules v1（带 uid 列）开库即 DROP 重建为 v2，新三表齐备且幂等', (t) => {
   let db: Db | undefined;
   const path = join(tmpdir_(t, () => db?.close()), 'mig.db');
-  db = new Db(path);
-  db.upsertPushRule({ uid: '1', keywords: [], areas: [], channels: [1], messageTemplate: null, enabled: true });
-  db.upsertPushRule({ uid: '1', keywords: ['歌'], areas: [], channels: [1], messageTemplate: null, enabled: true });
-  db.close();
+  const raw = new Database(path);
+  raw.exec(`
+    CREATE TABLE push_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      uid TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+      keywords TEXT NOT NULL DEFAULT '[]', areas TEXT NOT NULL DEFAULT '[]',
+      channels TEXT NOT NULL DEFAULT '[]', message_template TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    INSERT INTO push_rules (uid, name, created_at, updated_at) VALUES ('1', '旧规则', 1, 1);
+  `);
+  raw.close();
 
   db = new Db(path);
-  assert.equal(db.listPushRules().length, 2, '空条件规则（任意匹配）保留，条件规则也保留');
+  assert.ok(!columns(path, 'push_rules').includes('uid'), '旧 uid 列应随表 DROP');
+  for (const col of ['category_id', 'uids', 'channels']) {
+    assert.ok(columns(path, 'push_rules').includes(col), `push_rules v2 应有列 ${col}`);
+  }
+  assert.equal(db.listPushRules().length, 0, '旧规则不迁移（结构无法映射，清库重建）');
+  assert.deepEqual(db.listCategories(), [], 'categories 表可用');
+  assert.deepEqual(db.listVerdicts('r1', 1), [], 'verdicts 表可用');
 
+  // 幂等：v2 数据二次打开原样保留
+  db.upsertPushRule({ name: '新规则', categoryId: null, uids: [], channels: [], messageTemplate: null, enabled: true });
   db.close();
   db = new Db(path);
-  assert.equal(db.listPushRules().length, 2, '二次打开幂等');
+  assert.equal(db.listPushRules().length, 1, 'v2 结构不再触发重建');
+  assert.equal(db.listPushRules()[0]!.name, '新规则');
+});
+
+test('全新库直接建出 v2 push_rules + categories + verdicts', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'new.db');
+  db = new Db(path);
+  for (const table of ['categories', 'verdicts', 'push_rules']) {
+    const cols = columns(path, table);
+    assert.ok(cols.length > 0, `${table} 表应存在`);
+  }
+  assert.ok(!columns(path, 'push_rules').includes('uid'), '新库 push_rules 无 uid 列');
 });
 
 test('saveRoomState / loadRoomStates 新字段往返一致', (t) => {

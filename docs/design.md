@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-监听B站关注列表**全部主播**（直播间 + B站动态 + 微博），对抓取到的信息做**持续状态追踪**，用 LLM 分析（直播内容分类、预告时间表），按用户填写的**偏好子句**生成并路由推送。
+监听B站关注列表**全部主播**（直播间 + B站动态 + 微博），对抓取到的信息做**持续状态追踪**，用 LLM 分析（直播内容分类、预告时间表），按用户填写的**推送规则**生成并路由推送。
 
 「阿梓唱歌才推送」只是偏好规则的一个实例，不是系统目标本身。系统目标是把「抓取 → 追踪 → 分析 → 偏好 → 推送」每一环都做成可替换的模块，以承载不断变复杂的需求。
 
@@ -13,7 +13,7 @@
 | 关注主播 | 上百位 | 订阅列表不能手写，必须**关注列表同步**（需 SESSDATA，凭据从 M3 提前到 M2） |
 | 高峰同时在播 | 30+ | 开播检测必须**批量一次拉取**；LLM 分析必须**排队限流**，不能内联在轮询循环里 |
 | 信号性质 | 持续状态，非一次性事件 | 原始数据**全部入库归档**，供后续分析反复使用（动态 → 预告时间表，截图 → 主题判断） |
-| 偏好描述 | 每主播若干条「条件 → 动作」（唱歌就群发「阿梓唱歌速来」） | 面板直填结构化子句，确定性匹配执行，不依赖 LLM |
+| 偏好描述 | 每主播若干条「条件 → 动作」（唱歌就群发「阿梓唱歌速来」） | 面板直填分类规则 + 推送规则，确定性匹配执行，偏好链路不依赖 LLM |
 
 ### 目标分层
 
@@ -21,7 +21,7 @@
 |---|---|---|
 | **基础** | 批量开播检测 → 标题/分区/开播时间 → 推 QQ + 本机 Toast | 匿名 |
 | **规模化** | 关注列表同步、全员持续追踪、原始数据归档 | SESSDATA |
-| **智能** | 弹幕+多源 LLM 内容判定、预告时间表、按主播偏好子句路由推送 | cookie 全套 |
+| **智能** | 弹幕+多源 LLM 内容判定、预告时间表、按推送规则路由推送 | cookie 全套 |
 | **远期** | 直播中抽查触发、时间表自动维护、产品化 UI | — |
 
 ## 2. 核心判断：这是一个自然语言融合问题
@@ -102,9 +102,10 @@
 ├─ 2. 分析 analysis/  LLM 即任务：zod schema 进，JSON 出
 │   ├─ triggers    触发策略：开播时 / 新动态时 /（预留）直播中抽查、定时全量
 │   ├─ queue       分析队列：并发受限 + 优先级 + 结果缓存  ← 高峰 30+ 在播的关键
-│   ├─ tasks/      scene-classify    内容分类（游戏/唱歌/杂谈/演出…）
+│   ├─ tasks/      classify          内容分类（单次批量 LLM 调用，判定入 verdicts）
 │   │              schedule-extract  从动态/微博解析预告时间表
-│   ├─ matcher     确定性偏好匹配：verdict × preference_clauses → 优先级/文案/目标
+│   ├─ classifier  RulesClassifier：LLM 优先（仅 analyze=1 主播）+ 失败回退确定性条件
+│   ├─ matcher     确定性匹配：matchCategory（分类条件）/ matchPushRules（分类引用 × 主播集合 → 渠道/文案）
 │   ├─ context     按房间聚合时间窗内多源数据 → 一份 context
 │   └─ providers   text/vision 路由 + 熔断 + 多 key 池 + 降级链
 │                            ↓
@@ -125,7 +126,7 @@
 - 换模型 / 换服务商 → 只动 providers，task 的 schema 和 prompt 不变
 - 加 LLM 任务（新分析维度）→ 只在 tasks/ 加一个文件
 - 加推送通道 → 只实现 Notifier 接口
-- 改偏好措辞 → 只改面板里的偏好子句，不动代码
+- 改偏好措辞 → 只改面板里的推送规则，不动代码
 
 ### Pipeline：唯一的装配点
 
@@ -157,11 +158,11 @@
 
 实际并发只有「正在直播 且 已开启分析」的几路。高峰 30+ 在播时也可用配置限制只对重点主播开分析。
 
-### 偏好放哪一层（已决策，2026-07-30 修订）
+### 偏好放哪一层（已决策，2026-07-30 定稿，2026-08-09 修订）
 
-**人类需求是唯一锚点信源，直接以结构化形式落地，不做 NL→结构化的衍生编译。** 用户在控制面板按主播直接填写偏好子句（`preference_clauses` 表）：条件（场景 / 置信度下限 / 标题关键词）→ 优先级、推送词模板、目标。习惯上一句话压缩了三个阶段（评价 / 文案 / 路由）的偏好，在面板上就是一行表单；三个阶段在入库和推送执行各有落点，互不耦合。
+**人类需求是唯一锚点信源，直接以结构化形式落地，不做 NL→结构化的衍生编译。** 用户在控制面板直接填写**推送规则**（`push_rules` v2，全局）：分类引用（可空 = 任意开播）× 生效主播集合（空 = 全部主播，含未来新增）→ 渠道、推送词模板。习惯上一句话压缩了三个阶段（评价 / 文案 / 路由）的偏好，在面板上就是一行表单；三个阶段在入库和推送执行各有落点，互不耦合。
 
-LLM 不解释偏好。LLM 不可用时偏好链路完全不受影响：匹配、模板渲染、路由全确定性。唯一读自由文本的是 `profile_note`（主播画像），它喂给 scene-classify 的 prompt——自由文本是它的原生格式，无需衍生。
+LLM 不解释偏好，只做**内容分类**这种客观判定（本场直播属于哪些分类，结果入 `verdicts` 表）；分类口径也是人填的（`categories` 表：LLM 提示词 + 确定性关键词/分区条件〔且/或〕）。判定语义是 LLM 优先：分类配了提示词且 LLM 可用时以 LLM 判定为准；LLM 关闭/熔断/调用失败时回退该分类的确定性条件路径，无提示词的分类永远走确定性。推送规则的匹配、模板渲染、路由全确定性，LLM 不可用时偏好链路只损失分类精度、不断链。唯一读自由文本的是 `profile_note`（主播画像），预留给分类 prompt 增强——自由文本是它的原生格式，无需衍生。
 
 抓取→推送的运行管线中**没有任何人工参与环节**（不设人工确认队列）；人工只在面板指定需求。可选的 LLM 文案润色（模板之上）是增强而非主路径，挂了回退模板。
 
@@ -170,7 +171,7 @@ LLM 不解释偏好。LLM 不可用时偏好链路完全不受影响：匹配、
 | 层 | 管什么 | 例子 |
 |---|---|---|
 | analysis（LLM） | **判定**：这场直播在干什么 | 「这是唱歌，依据是动态预告 + 弹幕反应」 |
-| matcher（确定性） | **偏好执行**：verdict × 子句 → 优先级 / 文案 / 目标 | 命中「singing → high / 群发 / {alias}唱歌速来」 |
+| matcher（确定性） | **偏好执行**：分类判定 × 推送规则 → 渠道 / 文案 | 命中「歌回分类 → 群发 / {alias}唱歌速来」 |
 | rules（确定性） | **护栏**：无论如何都要执行的过滤 | 静音名单、静默时段、每场一次去重、冷却窗口 |
 | notify（执行） | **路由**：通道级覆盖与发送 | 某群屏蔽某主播、低优先级不推、图片降级、失败重试 |
 
@@ -200,12 +201,13 @@ DD-claw/
 │  │       └─ dynamic.ts          空间动态
 │  │   （weibo/feed.ts、media/keyframe.ts 与 bili/ 同级）
 │  ├─ analysis/
-│  │   ├─ types.ts                Analyzer / AnalysisContext / SceneVerdict / LlmTask
+│  │   ├─ types.ts                Classifier / Classification / AnalysisContext / LlmTask
 │  │   ├─ queue.ts                分析队列：并发受限（预留合并、缓存）
+│  │   ├─ classifier.ts           RulesClassifier：分类编排 + LLM 优先/回退 + verdicts 入库
 │  │   ├─ triggers.ts             触发策略（开播/新动态/抽查）
 │  │   ├─ providers.ts            熔断 + 多 key 池 + 降级链
-│  │   ├─ matcher.ts              确定性偏好匹配（verdict × preference_clauses）
-│  │   └─ tasks/                  scene-classify / schedule-extract
+│  │   ├─ matcher.ts              确定性匹配（matchCategory / matchPushRules）
+│  │   └─ tasks/                  classify / schedule-extract
 │  ├─ rules/{types,once-per-session,preference}.ts
 │  ├─ notify/
 │  │   ├─ types.ts                Notifier / PushMessage
@@ -244,11 +246,12 @@ type Signal = {
   payload?: unknown;                        // 各 source 自定义
 };
 
-type SceneVerdict = {
-  scene: 'chatting' | 'singing' | 'gaming' | 'show' | 'other';
-  confidence: number;                     // 0-1
-  evidence: string[];                     // 2-4 条判断依据
-  secondaryScene?: SceneVerdict['scene'] | null;   // 边打游戏边聊天
+/** 一场直播被判属于某分类的结果（入 verdicts 表） */
+type Classification = {
+  categoryId: number; name: string;       // name 冗余存名，分类删除后历史仍可读
+  source: 'llm' | 'rule';                 // LLM 判定 / 确定性条件（无提示词分类或 LLM 失败回退）
+  confidence: number | null;              // LLM 路径置信度 0-1，rule 路径为 null
+  evidence: string;                       // LLM 证据 / 命中的关键词·分区说明
 };
 
 /** pipeline 内部载荷：一场直播的完整快照 + 判定结果 */
@@ -256,7 +259,7 @@ type LiveEvent = {
   platform: 'bilibili'; roomId: string; uid: string; uname: string;
   title: string; areaName: string; parentAreaName: string;
   cover: string; keyframe?: string; roomUrl: string; startedAt: number;
-  verdict?: SceneVerdict;                 // 分析层未启用时为空
+  classifications: Classification[];      // live_start 由分析队列填充，其余信号恒空
 };
 ```
 
@@ -287,25 +290,34 @@ type Streamer = {
   weiboUid: string | null;              // 手动映射
   mode: 'off' | 'silent' | 'on';        // off=不监听 silent=追踪不推送 on=正常
   analyze: boolean;                     // 是否开 LLM 分析（弹幕/内容判定），默认关
-  profileNote: string | null;           // 主播画像自由文本（常见内容/语言风格/优先级经验），喂 scene-classify prompt
+  profileNote: string | null;           // 主播画像自由文本（常见内容/语言风格/优先级经验），预留给分类 prompt 增强
   source: 'follows' | 'manual';
 };
 
-/** 偏好子句：人类需求的唯一锚点，面板直填，一行 = 一个条件分支。LLM 不参与解释 */
-type PreferenceClause = {
-  uid: string;
-  condition: { scenes: SceneVerdict['scene'][]; minConfidence?: number; titleKeywords?: string[] };
-  priority: 'high' | 'normal' | 'low';
-  messageTemplate: string;              // 支持 {alias} {uname} {title} 变量
-  targets: Array<{ type: 'group' | 'private'; id: string }>;
+/** 分类规则：内容分类的判定口径，面板直填。LLM 提示词 + 确定性条件双通道 */
+type Category = {
+  name: string;
+  llmPrompt: string | null;               // 空 = 纯确定性分类（永远走条件路径）
+  keywords: string[]; areas: string[];    // 标题子串 / 分区子串，组内任一、大小写不敏感
+  condMode: 'and' | 'or';                 // 两组间关系；空组忽略，两组皆空 = 不命中
   enabled: boolean;
 };
 
-/** 推送指令（matcher 产出，rules 护栏过滤后交 notify 执行） */
+/** 推送规则：人类需求的唯一锚点，面板直填，全局排序（= 匹配优先级）。LLM 不参与解释 */
+type PushRule = {
+  name: string;
+  categoryId: number | null;              // null = 任意开播
+  uids: string[];                         // 生效主播集合；空 = 全部主播（含未来新增）
+  channels: number[];                     // 引用 push_channels.id
+  messageTemplate: string | null;         // null = 用内置默认模板（'{alias} 开播了'）；支持 {alias} {uname} {title} 变量
+  enabled: boolean;
+};
+
+/** 推送指令（分析→推送的解耦点；当前由 pipeline buildMessage 直接产 PushMessage 承担） */
 type PushDirective = {
   priority: 'high' | 'normal' | 'low';
   targets: Array<{ type: 'group' | 'private'; id: string }>;
-  message: string;                        // LLM 按偏好规则写好的推送词
+  message: string;                        // 规则覆盖或内置默认模板渲染的推送词
   image?: string;
   event: LiveEvent;                       // 溯源用
 };
@@ -334,11 +346,12 @@ interface Notifier {
 | `live_sessions` / `notify_log` / `room_state` | 这场推过没 / 推的时候发生了什么 / 重启恢复基线 | 已有 |
 | `follows` | 关注列表快照，streamers 的候选池 | 已建 |
 | `streamers` | 监听名单 + 主播画像（面板管理），source 的事实来源 | 已建 |
-| `preference_clauses` | 结构化偏好子句（条件 → 优先级/文案/目标），面板直填 | 已建 |
+| `push_channels` / `push_rules` v2 | 推送渠道（面板统一管理，可停用）/ 推送规则（分类引用 × 主播集合 → 渠道/文案），面板直填 | 已建 |
+| `categories` | 分类规则（LLM 提示词 + 确定性关键词/分区条件），面板直填 | 已建 |
 | `signals` | 原始信号流归档（所有 source 的原始 payload） | 待建 |
-| `posts` | 动态/微博原文，供预告解析反复使用 | 待建 |
+| `posts` | 动态/微博原文，供预告解析反复使用 | 已建 |
 | `snapshots` | 画面采样引用，供内容判定 | 待建 |
-| `verdicts` | LLM 判定结果（含 evidence，可追溯误判） | 待建 |
+| `verdicts` | 每场直播的分类判定结果（source llm/rule + evidence，可追溯误判） | 已建 |
 | `schedules` | 预告时间表 | 待建 |
 
 ## 7. 降本分层
@@ -383,7 +396,7 @@ LLM 不是每次采样都调。分层拦截，越靠前越便宜：
 
 ### M2 — 规模化 + 内容判定
 
-凭据管理（cookie 导入、`isLogin` 心跳失效告警）→ follows 同步 → `streamers` 表（config.json 的 subscriptions 迁库，库成为监听名单事实来源）→ 原始数据归档（signals/posts/snapshots 表）→ 弹幕 WS 按需拉起 → scene-classify → verdicts 入库。
+凭据管理（cookie 导入、`isLogin` 心跳失效告警）→ follows 同步 → `streamers` 表（config.json 的 subscriptions 迁库，库成为监听名单事实来源）→ 原始数据归档（signals/posts/snapshots 表）→ 弹幕 WS 按需拉起 → 内容分类（classify，LLM 优先 + 确定性回退）→ verdicts 入库。
 
 验收：上百位订阅批量轮询稳定运行；高峰在播时分析排队不阻塞通知；阿梓唱歌推、打游戏静默，判定依据可从 verdicts 表追溯。
 
@@ -393,11 +406,11 @@ dynamic / weibo sources → schedule-extract → schedules 表（置信度入库
 
 ### M4 — 偏好与路由
 
-matcher（preference_clauses × verdict → PushDirective）→ rules 护栏完善（冷却窗口、状态跳变抑制）→ dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）→ 直播中抽查触发器。
+matcher（push_rules × classifications → PushMessage；已落地基础版）→ rules 护栏完善（冷却窗口、状态跳变抑制）→ dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）→ 直播中抽查触发器。
 
 ### M5 — 产品化
 
-控制面板（localhost WebUI，轻量起步不引框架）：扫码登录与 cookie 健康、监听名单管理、主播画像与偏好子句编辑、verdicts 总览、时间表日历。v0（名单管理）与 v1（三卡片展示 + 扫码登录 + 主播实况）已提前至 M2 落地；多平台数据源。
+控制面板（localhost WebUI，轻量起步不引框架）：扫码登录与 cookie 健康、监听名单管理、主播画像与分类/推送规则编辑、verdicts 总览、时间表日历。v0（名单管理）与 v1（三卡片展示 + 扫码登录 + 主播实况）已提前至 M2 落地；多平台数据源。
 
 ## 9. 风险登记
 

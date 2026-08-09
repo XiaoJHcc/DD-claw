@@ -123,11 +123,20 @@ button{font-family:inherit}
 /* 表单控件：--ctl-h 高（二级圆角，与按钮同档），focus accent 描边；label 13px secondary */
 input:not([type]),input[type=text],select{font:inherit;font-size:14px;height:var(--ctl-h);padding:0 10px;
   border:1px solid var(--separator);border-radius:var(--r-md);background:var(--card-bg);color:var(--text);outline:none;width:100%}
-input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,122,255,.18)}
+/* 多行文本：同款浅填充底与圆角，纵向可拖高；高度由 rows 属性 + min-height 兜底 */
+textarea{font:inherit;font-size:14px;padding:8px 10px;min-height:calc(var(--ctl-h)*2 + 8px);
+  border:1px solid var(--separator);border-radius:var(--r-md);background:var(--fill);color:var(--text);outline:none;width:100%;resize:vertical}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,122,255,.18)}
 input:disabled{opacity:.5;background:var(--fill)}
 .field{margin:10px 0}
 .field>label{display:block;font-size:12px;color:var(--text-secondary);margin-bottom:4px}
-.field input,.field select{width:100%}
+.field input,.field select,.field textarea{width:100%}
+/* 关键词/分区并排 + 中间且/或切换小方钮（与输入框同高，方形 --r-md） */
+.cond-row{display:flex;gap:8px;align-items:center}
+.cond-row input{flex:1;min-width:0}
+.cond-toggle{flex:none;width:var(--ctl-h);height:var(--ctl-h);padding:0;border:none;border-radius:var(--r-md);
+  background:var(--fill);color:var(--text);cursor:pointer;font:inherit;font-size:13px}
+.cond-toggle:hover{background:var(--hover)}
 .field-row{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
 .field-row .field{flex:1;min-width:110px}
 .field-static{padding:7px 0;font-size:14px}

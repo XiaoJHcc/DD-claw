@@ -1,37 +1,36 @@
 import type { LiveEvent, Signal } from '../core/types.js';
 
-export type Scene = 'chatting' | 'singing' | 'gaming' | 'show' | 'other';
-
-export interface SceneVerdict {
-  scene: Scene;
-  /** 0-1 */
-  confidence: number;
-  /** 2-4 条判断依据，用于事后追溯误判原因 */
-  evidence: string[];
-  secondaryScene?: Scene | null;
+/** 一场直播被判属于某分类的结果（入 verdicts 表） */
+export interface Classification {
+  categoryId: number;
+  /** 冗余存名（= categories.name），分类删除后历史仍可读 */
+  name: string;
+  /** llm = LLM 判定（权威路径）；rule = 确定性条件（无提示词分类 / LLM 不可用时的回退） */
+  source: 'llm' | 'rule';
+  /** LLM 路径置信度（0-1），rule 路径为 null */
+  confidence: number | null;
+  /** LLM 证据 / 命中的关键词·分区说明 */
+  evidence: string;
 }
 
 /**
- * 聚合后的多源信号。M1 只有 event + signal 两个字段，
- * M2 加弹幕/动态时在这里扩充（danmaku?: string[]、feedPosts?: ... 等），
- * Analyzer 的签名不变。
+ * 聚合后的多源信号。当前只有 event + signal 两个字段，
+ * 后续加弹幕/动态时在这里扩充（danmaku?: string[]、feedPosts?: ... 等），
+ * Classifier 的签名不变。
  */
 export interface AnalysisContext {
   event: LiveEvent;
   signal: Signal;
 }
 
-export interface Analyzer {
+export interface Classifier {
   readonly name: string;
-  /**
-   * 返回 null 表示「不做判定」。规则层必须能在 verdict 为 null 时正常工作，
-   * 这样 M2 接上真 Analyzer 后规则层不用改。
-   */
-  analyze(ctx: AnalysisContext): Promise<SceneVerdict | null>;
+  /** 非 live_start 信号返回 []。判定结果由实现自行入 verdicts 表。 */
+  classify(ctx: AnalysisContext): Promise<Classification[]>;
 }
 
 /**
- * LLM 任务统一形态（M2 占位）：zod schema 进，JSON 出，provider 可替换。
+ * LLM 任务统一形态：zod schema 进，JSON 出，provider 可替换。
  * buildPrompt 返回文本或多模态消息；parse 里做 zod 校验。
  */
 export interface LlmTask<I, O> {

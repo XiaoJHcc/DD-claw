@@ -5,7 +5,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from './db.js';
-import { isPushEnabled, setPushEnabled, type NewPushChannel, type NewPushRule } from './push.js';
+import {
+  isPushEnabled, setPushEnabled,
+  type NewCategory, type NewPushChannel, type NewPushRule, type NewVerdict,
+} from './push.js';
 
 /** 内存库：每个测试独立，不需要清理临时文件 */
 function memDb(t: import('node:test').TestContext): Db {
@@ -21,10 +24,26 @@ function channel(over: Partial<NewPushChannel> = {}): NewPushChannel {
   };
 }
 
+function category(over: Partial<NewCategory> = {}): NewCategory {
+  return {
+    name: '歌回', llmPrompt: null, keywords: ['歌回'], areas: ['虚拟Singer'],
+    condMode: 'and', enabled: true,
+    ...over,
+  };
+}
+
 function rule(over: Partial<NewPushRule> = {}): NewPushRule {
   return {
-    uid: '1', keywords: ['歌回'], areas: ['虚拟Singer'], channels: [1, 2],
-    messageTemplate: '{alias} 开歌回了', enabled: true,
+    name: '', categoryId: null, uids: [], channels: [1, 2],
+    messageTemplate: '{alias} 开播了', enabled: true,
+    ...over,
+  };
+}
+
+function verdict(over: Partial<NewVerdict> = {}): NewVerdict {
+  return {
+    roomId: 'r1', liveTime: 1_785_310_737, uid: '1', categoryId: 1, categoryName: '歌回',
+    source: 'rule', confidence: null, evidence: '关键词「歌回」',
     ...over,
   };
 }
@@ -73,37 +92,95 @@ test('seedPushChannelsIfEmpty：onebot targets + toast → 渠道行，幂等', 
   assert.equal(db.listPushChannels().length, 3, '表内容不变');
 });
 
-// ---- push_rules ----
+// ---- categories ----
 
-test('push_rules CRUD：JSON 数组字段往返 / uid 过滤 / disabled 不进 enabled 列表', (t) => {
+test('categories CRUD：JSON 数组字段往返 / 部分更新保留原值 / disabled 不进 enabled 列表', (t) => {
   const db = memDb(t);
-  const id = db.upsertPushRule(rule());
+  const id = db.upsertCategory(category());
   assert.ok(id > 0);
-  db.upsertPushRule(rule({ uid: '2', enabled: false }));
+  db.upsertCategory(category({ name: '游戏', enabled: false }));
 
-  const mine = db.listEnabledPushRules('1');
-  assert.equal(mine.length, 1);
-  assert.deepEqual(mine[0]!.keywords, ['歌回'], 'JSON 数组字段正确解析');
-  assert.deepEqual(mine[0]!.areas, ['虚拟Singer']);
-  assert.deepEqual(mine[0]!.channels, [1, 2]);
-  assert.equal(mine[0]!.messageTemplate, '{alias} 开歌回了');
-  assert.equal(db.listEnabledPushRules('2').length, 0, 'disabled 不进 enabled 列表');
+  const enabled = db.listEnabledCategories();
+  assert.equal(enabled.length, 1, 'disabled 不进 enabled 列表');
+  assert.deepEqual(enabled[0]!.keywords, ['歌回'], 'JSON 数组字段正确解析');
+  assert.deepEqual(enabled[0]!.areas, ['虚拟Singer']);
+  assert.equal(enabled[0]!.condMode, 'and');
+  assert.equal(db.listCategories().length, 2, 'listCategories 含 disabled');
+
+  db.upsertCategory({ id, llmPrompt: '判断是否在唱歌', condMode: 'or', enabled: false });
+  const c = db.listCategories().find((x) => x.id === id)!;
+  assert.equal(c.llmPrompt, '判断是否在唱歌', '提供的字段被更新');
+  assert.equal(c.condMode, 'or');
+  assert.equal(c.enabled, false);
+  assert.equal(c.name, '歌回', '未提供的字段保留原值');
+  assert.deepEqual(c.keywords, ['歌回']);
+
+  assert.equal(db.deleteCategory(id), true);
+  assert.equal(db.deleteCategory(id), false);
+});
+
+test('分类名称：不传自动补「分类 N」，传了存自定义名', (t) => {
+  const db = memDb(t);
+  const id = db.upsertCategory(category({ name: '' }));
+  assert.equal(db.listCategories().find((x) => x.id === id)!.name, `分类 ${id}`);
+  const id2 = db.upsertCategory(category({ name: '杂谈' }));
+  assert.equal(db.listCategories().find((x) => x.id === id2)!.name, '杂谈');
+});
+
+test('分类拖拽排序：reorderCategories 重写顺序，新分类排末尾', (t) => {
+  const db = memDb(t);
+  const a = db.upsertCategory(category({ name: 'a' }));
+  const b = db.upsertCategory(category({ name: 'b' }));
+  db.reorderCategories([b, a]);
+  assert.deepEqual(db.listCategories().map((x) => x.name), ['b', 'a']);
+  const c = db.upsertCategory(category({ name: 'c' }));
+  assert.deepEqual(db.listCategories().map((x) => x.name), ['b', 'a', 'c'], '新分类排末尾');
+});
+
+test('删除分类级联停用引用它的推送规则，返回受影响条数', (t) => {
+  const db = memDb(t);
+  const cat = db.upsertCategory(category());
+  const other = db.upsertCategory(category({ name: '游戏' }));
+  db.upsertPushRule(rule({ categoryId: cat }));
+  db.upsertPushRule(rule({ categoryId: cat, enabled: false })); // 已停用不再计数
+  db.upsertPushRule(rule({ categoryId: other }));
+  db.upsertPushRule(rule()); // 任意开播，不受影响
+
+  assert.equal(db.disablePushRulesByCategory(cat), 1, '只计新停用的规则（已停用的不重复计数）');
+  const rules = db.listPushRules();
+  assert.equal(rules.filter((r) => r.categoryId === cat && !r.enabled).length, 2, '规则保留可恢复');
+  assert.equal(rules.find((r) => r.categoryId === other)!.enabled, true, '其他分类的规则不受影响');
+  assert.equal(rules.find((r) => r.categoryId === null)!.enabled, true);
+  assert.equal(db.disablePushRulesByCategory(cat), 0, '重复调用幂等（已全部停用）');
+
+  assert.equal(db.deleteCategory(cat), true);
+});
+
+// ---- push_rules v2 ----
+
+test('push_rules v2 CRUD：JSON 数组字段往返 / categoryId 可空 / disabled 不进 enabled 列表', (t) => {
+  const db = memDb(t);
+  const id = db.upsertPushRule(rule({ categoryId: 3, uids: ['1', '2'] }));
+  assert.ok(id > 0);
+  db.upsertPushRule(rule({ enabled: false }));
+
+  const enabled = db.listEnabledPushRules();
+  assert.equal(enabled.length, 1, 'disabled 不进 enabled 列表');
+  assert.equal(enabled[0]!.categoryId, 3);
+  assert.deepEqual(enabled[0]!.uids, ['1', '2'], 'JSON 数组字段正确解析');
+  assert.deepEqual(enabled[0]!.channels, [1, 2]);
+  assert.equal(enabled[0]!.messageTemplate, '{alias} 开播了');
   assert.equal(db.listPushRules().length, 2, 'listPushRules 含 disabled');
 
-  db.upsertPushRule({ id, keywords: [], areas: [], channels: [3], messageTemplate: null });
+  db.upsertPushRule({ id, categoryId: null, uids: [], channels: [3], messageTemplate: null });
   const r = db.listPushRules().find((x) => x.id === id)!;
-  assert.deepEqual(r.keywords, [], '空条件规则（默认推送）可存');
+  assert.equal(r.categoryId, null, 'categoryId 可置空（任意开播）');
+  assert.deepEqual(r.uids, [], 'uids 可置空（全部主播）');
   assert.deepEqual(r.channels, [3]);
-  assert.equal(r.messageTemplate, null, 'messageTemplate 可置空（用全局默认模板）');
-  assert.equal(r.uid, '1', '未提供的 uid 保留原值');
+  assert.equal(r.messageTemplate, null, 'messageTemplate 可置空（用内置默认模板）');
 
   assert.equal(db.deletePushRule(id), true);
   assert.equal(db.deletePushRule(id), false);
-});
-
-test('upsertPushRule 新建必须提供 uid', (t) => {
-  const db = memDb(t);
-  assert.throws(() => db.upsertPushRule({ keywords: ['x'] }), /uid/);
 });
 
 test('规则名称：不传自动补「规则 N」，传了存自定义名', (t) => {
@@ -114,16 +191,36 @@ test('规则名称：不传自动补「规则 N」，传了存自定义名', (t)
   assert.equal(db.listPushRules().find((x) => x.id === id2)!.name, '歌回专用');
 });
 
-test('规则拖拽排序：reorderPushRules 重写同 uid 匹配优先级，新规则排末尾', (t) => {
+test('规则拖拽排序：reorderPushRules 全局重写匹配优先级，新规则排末尾', (t) => {
   const db = memDb(t);
-  const a = db.upsertPushRule(rule({ keywords: ['a'] }));
-  const b = db.upsertPushRule(rule({ keywords: ['b'] }));
-  const c = db.upsertPushRule(rule({ uid: '2', keywords: ['x'] }));
-  db.reorderPushRules('1', [b, a]);
-  assert.deepEqual(db.listEnabledPushRules('1').map((x) => x.keywords[0]), ['b', 'a']);
-  assert.deepEqual(db.listEnabledPushRules('2').map((x) => x.keywords[0]), ['x'], '其他 uid 不受影响');
-  const d = db.upsertPushRule(rule({ keywords: ['d'] }));
-  assert.deepEqual(db.listEnabledPushRules('1').map((x) => x.keywords[0]), ['b', 'a', 'd'], '新规则排末尾');
+  const a = db.upsertPushRule(rule({ name: 'a' }));
+  const b = db.upsertPushRule(rule({ name: 'b' }));
+  const c = db.upsertPushRule(rule({ name: 'c', uids: ['9'] }));
+  db.reorderPushRules([c, b, a]);
+  assert.deepEqual(db.listEnabledPushRules().map((x) => x.name), ['c', 'b', 'a'], '全局排序，不按主播分组');
+  const d = db.upsertPushRule(rule({ name: 'd' }));
+  assert.deepEqual(db.listEnabledPushRules().map((x) => x.name), ['c', 'b', 'a', 'd'], '新规则排末尾');
+});
+
+// ---- verdicts ----
+
+test('verdicts：插入 / UNIQUE(room_id, live_time, category_id) 去重 / 按场查询', (t) => {
+  const db = memDb(t);
+  db.insertVerdict(verdict());
+  db.insertVerdict(verdict({ categoryId: 2, categoryName: '游戏', source: 'llm', confidence: 0.9, evidence: '在打 APEX' }));
+  db.insertVerdict(verdict({ evidence: '重复插入' }));
+
+  const list = db.listVerdicts('r1', 1_785_310_737);
+  assert.equal(list.length, 2, '同场同分类重复插入被 IGNORE');
+  assert.equal(list[0]!.categoryName, '歌回');
+  assert.equal(list[0]!.source, 'rule');
+  assert.equal(list[0]!.confidence, null, 'rule 路径置信度为 null');
+  assert.equal(list[0]!.evidence, '关键词「歌回」', '首插生效，重复插入不覆盖');
+  assert.equal(list[1]!.categoryName, '游戏');
+  assert.equal(list[1]!.source, 'llm');
+  assert.equal(list[1]!.confidence, 0.9);
+
+  assert.equal(db.listVerdicts('r1', 999).length, 0, '另一场直播互不影响');
 });
 
 // ---- settings ----

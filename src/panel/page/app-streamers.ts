@@ -1,13 +1,15 @@
 /**
- * 面板前端 · 卡片5 主播列表 + 详情弹窗（全字段编辑 + 该主播推送规则 CRUD，规则编辑是二级 sheet）。
+ * 面板前端 · 卡片5 主播列表 + 详情弹窗（全字段编辑 + 该主播的生效推送规则视图）。
  * 卡片4 时间表占位是静态 HTML，在 page.ts 壳里。
+ * 规则的新增/编辑/排序收编在「推送」卡片；详情弹窗只勾选「该规则是否对本主播生效」。
  * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 icons / app-core 段。
  */
 export const APP_STREAMERS = `
 var streamers = [];
 var modalUid = null;
 var modalChannels = [];
-var rulesCache = [];
+var modalCats = [];
+var modalRules = [];
 
 function avatarHtml(face, name, cls) {
   cls = cls || 'avatar';
@@ -107,7 +109,7 @@ function loadStreamers() {
   }).catch(function (e) { toast(e.message, true); });
 }
 
-// ---- 详情弹窗：上半区分段卡片表单（别名/直播间号/微博/画像 + 三个勾选项），下半区推送规则 ----
+// ---- 详情弹窗：上半区分段卡片表单（别名/直播间号/微博/画像 + 三个勾选项），下半区生效规则视图 ----
 function formCheck(label, id, checked) {
   return checkboxHtml('id="' + id + '"', checked, false, label);
 }
@@ -135,20 +137,10 @@ function openStreamer(uid) {
     '</div>' +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">关闭</button>' +
     '<button class="btn btn-primary" data-action="save-streamer">保存</button></div>' +
-    '<div class="sheet-section"><div class="sheet-sub">推送规则</div>' +
-    '<div class="hint">命中即推，同渠道去重；顺序决定同渠道推送词取舍</div>' +
+    '<div class="sheet-section"><div class="sheet-sub">生效的推送规则</div>' +
+    '<div class="hint">勾选 = 该规则对本主播生效；规则的新增/编辑/排序在推送卡片中进行</div>' +
     '<div id="modal-rules">加载中…</div></div>');
-  sheetCleanups[1] = function () { modalUid = null; modalChannels = []; rulesCache = []; };
-  // modal-rules 容器每次开窗都是新元素，sortable 在开窗时绑定一次
-  makeSortable(document.getElementById('modal-rules'), {
-    items: function () { return rulesCache; },
-    getId: function (r) { return r.id; },
-    onOrder: function (ids) {
-      api('/api/rules/order', 'PUT', { uid: modalUid, ids: ids })
-        .then(function () { loadModalRules(); loadStreamers(); })
-        .catch(function (err) { toast(err.message, true); loadModalRules(); });
-    },
-  });
+  sheetCleanups[1] = function () { modalUid = null; modalChannels = []; modalCats = []; modalRules = []; };
   loadModalRules();
 }
 
@@ -170,114 +162,87 @@ ACTIONS['save-streamer'] = function () {
   }), '已保存');
 };
 
-// ---- 推送规则（uid 固定为 modalUid；可排序开关列表 + 二级 sheet 编辑，默认推送在「推送」卡片全局配置） ----
-function splitCsv(v) {
-  return v.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-}
-
+// ---- 生效的推送规则（只读视图 + 勾选本主播是否生效；增删改/排序在「推送」卡片） ----
 function modalChannelById(id) {
   for (var k = 0; k < modalChannels.length; k++) if (modalChannels[k].id === id) return modalChannels[k];
   return null;
 }
-function ruleRowHtml(r) {
-  var tags = (r.channels || []).map(function (cid) {
+
+function modalCatName(categoryId) {
+  if (categoryId == null) return '任意开播';
+  for (var i = 0; i < modalCats.length; i++) if (modalCats[i].id === categoryId) return modalCats[i].name;
+  return '分类已删除';
+}
+
+// 勾选 = 该规则对本主播生效（uids 空 = 全部主播，勾上）；行序 = 全局 sort，不可拖拽
+function modalRuleRowHtml(r) {
+  var uid = String(modalUid);
+  var checked = r.uids.length === 0 || r.uids.indexOf(uid) >= 0;
+  var chanTags = (r.channels || []).map(function (cid) {
     var c = modalChannelById(cid);
     return c ? '<span class="tag">' + esc(c.name) + '</span>' : '';
   }).join('');
-  return '<div class="row" draggable="true" data-sid="' + r.id + '">' +
-    gripHtml() +
-    checkDotHtml('data-change="toggle-rule"', r.enabled) +
-    '<span class="row-title">' + esc(r.name) + '</span>' + tags +
-    '<span class="row-end">' +
-    iconBtn('edit-rule', 'pencil', '编辑') +
-    iconBtn('del-rule', 'trash', '删除', true) +
-    '</span></div>';
+  return '<div class="row" data-rid="' + r.id + '">' +
+    checkboxHtml('data-change="toggle-modal-rule"', checked, false, r.name) +
+    (r.enabled ? '' : '<span class="tag">已停用</span>') +
+    '<span class="tag">' + esc(modalCatName(r.categoryId)) + '</span>' +
+    chanTags +
+    '</div>';
 }
+
 function loadModalRules() {
   var box = document.getElementById('modal-rules');
   if (!box || modalUid == null) return;
-  Promise.all([api('/api/channels'), api('/api/rules?uid=' + modalUid)]).then(function (rs) {
-    modalChannels = rs[0].channels || [];
-    rulesCache = rs[1].rules || [];
-    box.innerHTML = rulesCache.map(ruleRowHtml).join('') +
-      '<div class="add-row"><button class="btn btn-block" data-action="add-rule">' +
-      icon('plus') + ' 添加规则</button></div>';
-  }).catch(function (e) { toast(e.message, true); });
+  Promise.all([api('/api/channels'), api('/api/categories'), api('/api/rules?uid=' + modalUid)])
+    .then(function (rs) {
+      modalChannels = rs[0].channels || [];
+      modalCats = rs[1].categories || [];
+      modalRules = rs[2].rules || [];
+      box.innerHTML = modalRules.map(modalRuleRowHtml).join('') ||
+        '<p class="hint">还没有推送规则（在推送卡片中添加）。</p>';
+    }).catch(function (e) { toast(e.message, true); });
 }
 
-CHANGES['toggle-rule'] = function (el) {
-  var id = el.closest('.row').getAttribute('data-sid');
-  var on = el.checked;
-  api('/api/rules/' + id, 'PUT', { enabled: on })
-    .then(function () { toast(on ? '已启用' : '已停用'); loadModalRules(); loadStreamers(); })
-    .catch(function (e) { toast(e.message, true); loadModalRules(); });
-};
-
-ACTIONS['del-rule'] = function (el) {
-  var id = el.closest('.row').getAttribute('data-sid');
-  if (!confirm('删除这条规则？')) return;
-  api('/api/rules/' + id, 'DELETE')
-    .then(function () { toast('已删除'); loadModalRules(); loadStreamers(); })
-    .catch(function (e) { toast(e.message, true); });
-};
-
-// ---- 规则 新增/编辑 弹窗（二级 sheet；id=null 新增）；保存报错内联在按钮行 ----
-ACTIONS['add-rule'] = function () { openRuleSheet(null); };
-ACTIONS['edit-rule'] = function (el) {
-  openRuleSheet(Number(el.closest('.row').getAttribute('data-sid')));
-};
-
-function openRuleSheet(id) {
+// 勾选切换 = 把本主播加进/移出规则的 uids。
+// 「全部主播」规则（uids 空）取消勾选 → 展开为「当前全部其他主播」的显式名单（PUT 并 toast 说明）；
+// 再次勾回只把本主播加回名单，不再收拢回「全部」。
+CHANGES['toggle-modal-rule'] = function (el) {
+  var row = el.closest('.row');
+  var id = Number(row.getAttribute('data-rid'));
   var r = null;
-  if (id !== null) {
-    for (var i = 0; i < rulesCache.length; i++) if (rulesCache[i].id === id) r = rulesCache[i];
-    if (!r) { toast('规则数据未加载', true); return; }
+  for (var i = 0; i < modalRules.length; i++) if (modalRules[i].id === id) r = modalRules[i];
+  if (!r || modalUid == null) return;
+  var uid = String(modalUid);
+  var on = el.checked;
+  var uids;
+  var msg = null;
+  if (on) {
+    if (r.uids.indexOf(uid) >= 0) return; // 已在名单内（全部主播规则的勾上态不会走到这里）
+    uids = r.uids.slice();
+    uids.push(uid);
+  } else if (r.uids.length === 0) {
+    uids = [];
+    for (var k = 0; k < streamers.length; k++) {
+      var su = String(streamers[k].uid);
+      if (su !== uid) uids.push(su);
+    }
+    if (uids.length === 0) {
+      // 空名单 = 全部主播：排除唯一一位主播无法表示，拒绝并还原勾选态
+      toast('名单里只有这一位主播，无法单独排除', true);
+      loadModalRules();
+      return;
+    }
+    msg = '已转为显式主播名单';
+  } else {
+    uids = r.uids.filter(function (u) { return u !== uid; });
   }
-  var chanRows = modalChannels.length === 0
-    ? ''
-    : modalChannels.map(function (c) {
-        return checkRowHtml('class="e-ch" value="' + c.id + '"', !!(r && (r.channels || []).indexOf(c.id) >= 0),
-          '<span class="row-title">' + esc(c.name) + '</span>' +
-          '<span class="tag">' + esc(chanTypeName(c)) + '</span>');
-      }).join('');
-  openSheet(r ? '编辑规则' : '添加规则',
-    field('名称', '<input id="r-name" value="' + (r ? esc(r.name) : '') + '">') +
-    field('关键词', '<input id="r-kw" placeholder="逗号分隔，留空 = 任意匹配" value="' +
-      (r ? esc(r.keywords.join(', ')) : '') + '">') +
-    field('分区', '<input id="r-area" placeholder="逗号分隔，留空 = 任意匹配" value="' +
-      (r ? esc(r.areas.join(', ')) : '') + '">') +
-    '<div class="field"><label>渠道</label>' + (chanRows || '<span class="hint">还没有渠道</span>') + '</div>' +
-    field('推送词', '<input id="r-tpl" placeholder="留空 = 全局默认推送词" value="' +
-      (r ? esc(r.messageTemplate || '') : '') + '">') +
-    '<div class="sheet-foot"><span id="rule-err" class="form-err"></span>' +
-    '<button class="btn" data-action="close-sheet" data-level="2">取消</button>' +
-    '<button class="btn btn-primary" data-action="save-rule" data-id="' + (r ? r.id : '') + '">保存</button></div>',
-    2);
-}
-
-ACTIONS['save-rule'] = function (el) {
-  var err = document.getElementById('rule-err');
-  if (err) err.textContent = '';
-  var name = document.getElementById('r-name').value.trim();
-  if (!name) { if (err) err.textContent = '请填写规则名称'; return; }
-  var body = {
-    name: name,
-    keywords: splitCsv(document.getElementById('r-kw').value),
-    areas: splitCsv(document.getElementById('r-area').value),
-    channels: Array.prototype.slice.call(document.querySelectorAll('#sheet-mask2 .e-ch'))
-      .filter(function (x) { return x.checked; }).map(function (x) { return Number(x.value); }),
-    messageTemplate: document.getElementById('r-tpl').value.trim() || null,
-  };
-  var idAttr = el.getAttribute('data-id');
-  var req = idAttr
-    ? api('/api/rules/' + idAttr, 'PUT', body)
-    : api('/api/rules', 'POST', Object.assign({ uid: modalUid }, body));
-  req.then(function () {
-    closeSheet(2);
-    toast(idAttr ? '已保存' : '已添加');
-    loadModalRules();
-    loadStreamers();
-  }).catch(function (e) { if (err) err.textContent = e.message; });
+  api('/api/rules/' + id, 'PUT', { uids: uids })
+    .then(function () {
+      if (msg) toast(msg);
+      loadModalRules();
+      loadStreamers(); // 主播卡的规则名标签
+    })
+    .catch(function (e) { toast(e.message, true); loadModalRules(); });
 };
 
 // ---- 启动与轮询：监听卡 60s（app-listen 段），主播列表 30s（弹窗 DOM 不被重建） ----

@@ -4,7 +4,9 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { StreamerInput } from '../core/streamers.js';
-import type { NewPushChannel, NewPushRule, PushChannelInput, PushRuleInput } from '../core/push.js';
+import type {
+  CategoryInput, NewCategory, NewPushChannel, NewPushRule, PushChannelInput, PushRuleInput,
+} from '../core/push.js';
 
 export class HttpError extends Error {
   constructor(
@@ -174,9 +176,69 @@ export function parseChannelPatch(body: unknown): PushChannelInput {
   return patch;
 }
 
-// ---- push_rules ----
+// ---- categories：分类规则 ----
 
-const RULE_KEYS = ['name', 'uid', 'keywords', 'areas', 'channels', 'messageTemplate', 'enabled'] as const;
+const CATEGORY_KEYS = ['name', 'llmPrompt', 'keywords', 'areas', 'condMode', 'enabled'] as const;
+const COND_MODES = ['and', 'or'] as const;
+
+function parseCategoryFields(o: Record<string, unknown>, p: CategoryInput): void {
+  if ('name' in o) {
+    if (typeof o.name !== 'string') throw new HttpError(400, 'name 必须是字符串');
+    const name = o.name.trim();
+    if (!name) throw new HttpError(400, '分类名称不能为空');
+    p.name = name;
+  }
+  if ('llmPrompt' in o) {
+    const v = asNullableString(o.llmPrompt, 'llmPrompt');
+    p.llmPrompt = v === '' ? null : v; // 空串 = 不用 LLM（纯确定性分类）
+  }
+  if ('keywords' in o) p.keywords = asStringArray(o.keywords, 'keywords');
+  if ('areas' in o) p.areas = asStringArray(o.areas, 'areas');
+  if ('condMode' in o) p.condMode = asEnum(o.condMode, 'condMode', COND_MODES);
+  if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
+}
+
+/** LLM 提示词 / 关键词 / 分区至少一项非空。POST 对缺省合并后的形状调，PUT 对合并后形状调。 */
+export function checkCategoryConditions(c: {
+  llmPrompt?: string | null; keywords?: string[]; areas?: string[];
+}): void {
+  const prompt = c.llmPrompt?.trim() ?? '';
+  if (!prompt && (c.keywords ?? []).length === 0 && (c.areas ?? []).length === 0) {
+    throw new HttpError(400, '至少配置 LLM 提示词或关键词/分区条件');
+  }
+}
+
+/** POST /api/categories 的新建体：全部可省（name 空由 Db 补「分类 N」），但条件至少一项。 */
+export function parseNewCategory(body: unknown): NewCategory {
+  const o = asObject(body);
+  rejectUnknownKeys(o, CATEGORY_KEYS);
+  const p: CategoryInput = {};
+  parseCategoryFields(o, p);
+  const c: NewCategory = {
+    name: p.name ?? '',
+    llmPrompt: p.llmPrompt !== undefined ? p.llmPrompt : null,
+    keywords: p.keywords ?? [],
+    areas: p.areas ?? [],
+    condMode: p.condMode ?? 'and',
+    enabled: p.enabled ?? true,
+  };
+  checkCategoryConditions(c);
+  return c;
+}
+
+/** PUT /api/categories/:id 的部分更新体；至少一个字段。条件校验在路由层对合并后形状做。 */
+export function parseCategoryPatch(body: unknown): CategoryInput {
+  const o = asObject(body);
+  rejectUnknownKeys(o, CATEGORY_KEYS);
+  const p: CategoryInput = {};
+  parseCategoryFields(o, p);
+  if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
+  return p;
+}
+
+// ---- push_rules v2：推送规则（全局；分类引用 + 生效主播集合）----
+
+const RULE_KEYS = ['name', 'categoryId', 'uids', 'channels', 'messageTemplate', 'enabled'] as const;
 
 function asIdArray(v: unknown, field: string): number[] {
   if (!Array.isArray(v) || v.some((x) => typeof x !== 'number' || !Number.isInteger(x) || x <= 0)) {
@@ -185,10 +247,27 @@ function asIdArray(v: unknown, field: string): number[] {
   return v as number[];
 }
 
+/** categoryId：正整数 id 或 null（null = 任意开播） */
+function asNullableId(v: unknown, field: string): number | null {
+  if (v === null) return null;
+  if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
+    throw new HttpError(400, `${field} 必须是正整数 id 或 null`);
+  }
+  return v;
+}
+
+function asUidArray(v: unknown, field: string): string[] {
+  const arr = asStringArray(v, field);
+  for (const u of arr) {
+    if (!/^\d+$/.test(u)) throw new HttpError(400, `${field} 元素必须是纯数字 uid`);
+  }
+  return arr;
+}
+
 function parseMessageTemplate(v: unknown): string | null {
   if (v === null) return null;
   if (typeof v !== 'string') throw new HttpError(400, 'messageTemplate 必须是字符串或 null');
-  return v === '' ? null : v; // 空串 = 用全局默认模板
+  return v === '' ? null : v; // 空串 = 用内置默认模板
 }
 
 function parseRuleFields(o: Record<string, unknown>, p: PushRuleInput): void {
@@ -198,24 +277,23 @@ function parseRuleFields(o: Record<string, unknown>, p: PushRuleInput): void {
     if (!name) throw new HttpError(400, '规则名称不能为空');
     p.name = name;
   }
-  if ('keywords' in o) p.keywords = asStringArray(o.keywords, 'keywords');
-  if ('areas' in o) p.areas = asStringArray(o.areas, 'areas');
+  if ('categoryId' in o) p.categoryId = asNullableId(o.categoryId, 'categoryId');
+  if ('uids' in o) p.uids = asUidArray(o.uids, 'uids');
   if ('channels' in o) p.channels = asIdArray(o.channels, 'channels');
   if ('messageTemplate' in o) p.messageTemplate = parseMessageTemplate(o.messageTemplate);
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
 }
 
-/** POST /api/rules 的新建体：uid 必填，其余缺省走默认值。关键词/分区都可不填 = 任意匹配。 */
+/** POST /api/rules 的新建体：全部可省（缺省 = 任意开播 / 全部主播 / 无渠道 / 默认模板）。引用存在性校验在路由层。 */
 export function parseNewRule(body: unknown): NewPushRule {
   const o = asObject(body);
   rejectUnknownKeys(o, RULE_KEYS);
   const p: PushRuleInput = {};
   parseRuleFields(o, p);
   return {
-    uid: parseUid(o.uid),
     name: p.name ?? '',
-    keywords: p.keywords ?? [],
-    areas: p.areas ?? [],
+    categoryId: p.categoryId !== undefined ? p.categoryId : null,
+    uids: p.uids ?? [],
     channels: p.channels ?? [],
     messageTemplate: p.messageTemplate ?? null,
     enabled: p.enabled ?? true,
@@ -225,29 +303,9 @@ export function parseNewRule(body: unknown): NewPushRule {
 /** PUT /api/rules/:id 的部分更新体；至少一个字段。 */
 export function parseRulePatch(body: unknown): PushRuleInput {
   const o = asObject(body);
-  rejectUnknownKeys(o, ['name', 'keywords', 'areas', 'channels', 'messageTemplate', 'enabled']);
+  rejectUnknownKeys(o, RULE_KEYS);
   const p: PushRuleInput = {};
   parseRuleFields(o, p);
   if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
   return p;
-}
-
-// ---- settings ----
-
-/**
- * PUT /api/push/default：全局默认推送（条件规则都不命中时走这里）。
- * { template?: string（空串 = 清除，回到内置默认）, channels?: number[]（空数组 = 默认不推） }
- * 至少一个字段。
- */
-export function parsePushDefaultBody(body: unknown): { template?: string; channels?: number[] } {
-  const o = asObject(body);
-  rejectUnknownKeys(o, ['template', 'channels']);
-  const out: { template?: string; channels?: number[] } = {};
-  if ('template' in o) {
-    if (typeof o.template !== 'string') throw new HttpError(400, 'template 必须是字符串');
-    out.template = o.template;
-  }
-  if ('channels' in o) out.channels = asIdArray(o.channels, 'channels');
-  if (Object.keys(out).length === 0) throw new HttpError(400, '没有可更新的字段');
-  return out;
 }

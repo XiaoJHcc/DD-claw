@@ -1,4 +1,4 @@
-import type { SceneVerdict } from '../analysis/types.js';
+import type { Classification } from '../analysis/types.js';
 import type { LiveEvent, Signal } from '../core/types.js';
 
 export interface NotifyDecision {
@@ -9,6 +9,6 @@ export interface NotifyDecision {
 
 export interface DecisionRule {
   readonly name: string;
-  /** verdict 可为 null（M1 就是 null）。规则不得假设它一定存在。 */
-  decide(event: LiveEvent, signal: Signal, verdict: SceneVerdict | null): Promise<NotifyDecision>;
+  /** classifications 可为空数组（未判定/无分类）。规则不得假设它非空。 */
+  decide(event: LiveEvent, signal: Signal, classifications: Classification[]): Promise<NotifyDecision>;
 }

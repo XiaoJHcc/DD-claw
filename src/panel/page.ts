@@ -14,6 +14,7 @@ import { APP_LISTEN } from './page/app-listen.js';
 import { APP_STREAMERS } from './page/app-streamers.js';
 import { APP_PUSH } from './page/app-push.js';
 import { APP_LLM } from './page/app-llm.js';
+import { APP_CATEGORIES } from './page/app-categories.js';
 import { APP_NAPCAT } from './page/app-napcat.js';
 import { APP_FOLLOWS } from './page/app-follows.js';
 
@@ -46,15 +47,24 @@ export const PANEL_PAGE = `<!doctype html>
 <div id="llm-list">加载中…</div>
 </section>
 
+<section class="card" id="card-categories">
+<div class="card-head"><h2>分类规则</h2></div>
+<div id="category-list">加载中…</div>
+</section>
+
 <section class="card" id="card-push">
-<div class="card-head"><h2>推送</h2>
+<div class="card-head"><h2>推送渠道</h2>
 <label class="switch"><input type="checkbox" id="push-enabled" data-change="toggle-push"><span class="knob"></span></label>
 </div>
 <div id="channel-list">加载中…</div>
 <div class="card-actions">
 <button class="btn" data-action="add-channel"><span data-icon="plus"></span>新增渠道</button>
-<button class="btn" data-action="open-push-default"><span data-icon="gear"></span>全局默认推送</button>
 </div>
+</section>
+
+<section class="card" id="card-rules">
+<div class="card-head"><h2>推送规则</h2></div>
+<div id="rule-list">加载中…</div>
 </section>
 
 <section class="card" id="card-napcat">
@@ -97,6 +107,7 @@ ${APP_LISTEN}
 ${APP_STREAMERS}
 ${APP_PUSH}
 ${APP_LLM}
+${APP_CATEGORIES}
 ${APP_NAPCAT}
 ${APP_FOLLOWS}
 </script>

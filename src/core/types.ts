@@ -1,5 +1,5 @@
 // 仅类型导入，编译期擦除，不构成运行时循环依赖
-import type { SceneVerdict } from '../analysis/types.js';
+import type { Classification } from '../analysis/types.js';
 
 /**
  * 平台无关的直播间状态。core 层只认识它；各平台 source 把自己的原始类型
@@ -51,7 +51,7 @@ export interface Signal {
   payload?: unknown;
 }
 
-/** 推送用的事件载荷。analysis 层接上后 verdict 会被填充。 */
+/** 推送用的事件载荷。live_start 信号的 classifications 由分析队列填充（其余信号恒空）。 */
 export interface LiveEvent {
   platform: 'bilibili';
   uid: string;
@@ -67,8 +67,8 @@ export interface LiveEvent {
   liveTime: number;
   /** 主播头像 URL（来自 LiveStatus.face；刚开播没有关键帧时推送用它兜底） */
   face?: string;
-  /** M1 恒为 null；M2 接上 Analyzer 后填入判定结果。类型必须允许两者。 */
-  verdict: SceneVerdict | null;
+  /** 本场直播的分类判定结果（LLM 或确定性规则路径）；无分类/未判定为空数组 */
+  classifications: Classification[];
 }
 
 export function toLiveEvent(status: LiveStatus, alias: string): LiveEvent {
@@ -86,7 +86,7 @@ export function toLiveEvent(status: LiveStatus, alias: string): LiveEvent {
     roomUrl: `https://live.bilibili.com/${status.roomId}`,
     liveTime: status.liveTime,
     face: status.face,
-    verdict: null,
+    classifications: [],
   };
 }
 
