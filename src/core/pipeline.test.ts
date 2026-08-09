@@ -138,6 +138,20 @@ test('new_subscription 默认推送，配置可关闭', async () => {
   assert.equal(h.db.sessions.length, 1, '抑制时 recordSession 仍照做');
 });
 
+test('restart_recovery 默认不推送（与 first_run 共用 notifyOnFirstRun），可配置为推送', async () => {
+  let h = harness();
+  h.bus.emit(sig({ coldStart: 'restart_recovery' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0, '默认不推停机期间开播');
+  assert.equal(h.db.sessions.length, 1, '抑制只跳通知，场次仍入库');
+  assert.equal(h.db.notified.size, 0);
+
+  h = harness({ notifyOnFirstRun: true });
+  h.bus.emit(sig({ coldStart: 'restart_recovery' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, 'notifyOnFirstRun=true 时也推送');
+});
+
 test('推送总开关（settings.push_enabled=0）：全局不推，追踪照常', async () => {
   const h = harness();
   h.db.settings.set('push_enabled', '0');

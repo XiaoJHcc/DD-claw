@@ -240,7 +240,7 @@ type Signal = {
   uid: string; roomId: string; ts: number;
   status?: LiveStatus;                      // live 系信号携带（平台无关；bili 的 RoomStatus 是其扩展）
   previousTitle?: string;
-  coldStart?: 'first_run' | 'new_subscription';   // source 只标记，抑制策略在 pipeline
+  coldStart?: 'first_run' | 'new_subscription' | 'restart_recovery';   // source 只标记，抑制策略在 pipeline
   payload?: unknown;                        // 各 source 自定义
 };
 
@@ -325,7 +325,7 @@ interface Notifier {
 }
 ```
 
-注意冷启动抑制的归属：`diffRoom` 永远如实产出 `live_start`（打上 `coldStart` 标记），「首次运行不刷屏 / 新增订阅要通知」的政策判断在 pipeline 按配置执行。状态机不做政策判断。
+注意冷启动抑制的归属：`diffRoom` 永远如实产出 `live_start`（打上 `coldStart` 标记），「首次运行不刷屏 / 新增订阅要通知 / 停机期间开播不刷屏」的政策判断在 pipeline 按配置执行。`restart_recovery` 与 `first_run` 同属「启动时已在播」，共用 `notifyOnFirstRun` 开关（默认关：启动只追轨迹，只有运行期实时开播才推）。状态机不做政策判断。
 
 ### 数据库表（在 M1 三表之上扩展）
 

@@ -30,8 +30,8 @@ export interface DiffOptions {
  * - 一场直播的身份是 liveTime（服务端给的开播时间戳）。
  *   liveTime 变了就是新的一场，即使中间我们没观测到下播。
  * - 无 prev（冷启动/新增订阅）且在播也如实产 live_start —— 本函数不做
- *   任何政策判断，「首次运行不刷屏/新增订阅要通知」由 source 打 coldStart
- *   标记、pipeline 按配置抑制。
+ *   任何政策判断，「首次运行不刷屏/新增订阅要通知/重启恢复不刷屏」由
+ *   source 打 coldStart 标记、pipeline 按配置抑制。
  */
 export function diffRoom(
   uid: string,

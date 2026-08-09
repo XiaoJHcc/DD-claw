@@ -31,6 +31,8 @@ export class LiveStatusSource implements Source {
   private prev = new Map<string, PrevState>();
   /** 见过的 uid（含未开播的）。用来区分「首次运行」与「新增订阅」。 */
   private known = new Set<string>();
+  /** 启动后的第一轮轮询（bind/restore 之后）。这轮的开播是历史遗留，不是实时开播。 */
+  private firstRound = true;
   private consecutiveFailures = 0;
   private alerted = false;
 
@@ -80,6 +82,8 @@ export class LiveStatusSource implements Source {
   restore(): void {
     this.prev = this.ctx!.db.loadRoomStates();
     this.known = new Set(this.prev.keys());
+    // 恢复基线即进入冷启动观察期：第一轮轮询里出现的历史开播要标 restart_recovery
+    this.firstRound = true;
   }
 
   /** 拉取一轮：diff 产信号、批量落状态、emit 上总线。返回是否成功。 */
@@ -101,6 +105,10 @@ export class LiveStatusSource implements Source {
     // known 为空 = 首次运行。整轮统一判定（而不是逐 uid），否则首轮里
     // 排在后面的 uid 会被误判成「新增订阅」。
     const firstRun = this.known.size === 0;
+    // 启动后第一轮：restore 恢复的旧状态到本轮新状态之间可能隔着长时间停机，
+    // 这轮产生的开播是「启动时已在播」，不是运行期实时开播。
+    const coldRound = this.firstRound;
+    this.firstRound = false;
     const signals: Signal[] = [];
     const stateWrites: Array<{ uid: string; state: PrevState }> = [];
 
@@ -111,6 +119,7 @@ export class LiveStatusSource implements Source {
 
       const cold: Signal['coldStart'] = firstRun ? 'first_run'
         : !this.known.has(uid) ? 'new_subscription'
+        : coldRound ? 'restart_recovery'
         : undefined;
       if (cold) for (const s of sigs) s.coldStart = cold;
 

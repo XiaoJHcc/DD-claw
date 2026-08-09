@@ -40,8 +40,13 @@ export interface Signal {
   status?: LiveStatus;
   /** title_change 专用 */
   previousTitle?: string;
-  /** source 只标记，抑制策略在 pipeline */
-  coldStart?: 'first_run' | 'new_subscription';
+  /**
+   * 冷启动来源。source 只标记，抑制策略在 pipeline：
+   * - first_run：整轮首次运行（库中无历史状态），启动时已在播
+   * - new_subscription：新增订阅时正在直播（运行期，可能值得通知）
+   * - restart_recovery：上次下播、本次启动前开播（重启恢复，无法得知真实开播时间）
+   */
+  coldStart?: 'first_run' | 'new_subscription' | 'restart_recovery';
   /** 各 source 自定义载荷（如 health_alert 的失败详情） */
   payload?: unknown;
 }

@@ -177,6 +177,37 @@ test('已运行后新出现的 uid 标 new_subscription，老 uid 不标', async
   assert.deepEqual(h.signals.map((s) => [s.uid, s.coldStart]), [['1', undefined]]);
 });
 
+test('重启恢复：停机期间开播的已订阅主播标 restart_recovery，后续轮不带标记', async (t) => {
+  // 上次运行结束时主播 1 已下播（DB 里有离线记录），停机期间他开播了
+  const h = harness(['1'], async () => new Map());
+  t.after(h.cleanup);
+  h.db.saveRoomState('1', {
+    roomId: 'room-1', isLive: false, liveTime: 0, title: '标题',
+    areaName: '', parentAreaName: '', keyframe: '', cover: '', online: 0, face: '',
+  });
+  h.src.restore();
+
+  // 重启后首轮：标 restart_recovery（不是实时开播）
+  const live = new Map([['1', room('1')]]);
+  const bus2 = new Bus();
+  const signals2: Signal[] = [];
+  bus2.on('*', (s) => { signals2.push(s); });
+  const src2 = new LiveStatusSource({ fetcher: async () => live });
+  src2.bind({ bus: bus2, db: h.db, config: h.cfg });
+
+  await src2.pollOnce();
+  assert.deepEqual(
+    signals2.map((s) => [s.uid, s.kind, s.coldStart]),
+    [['1', 'live_start', 'restart_recovery']],
+    '停机期间开播 = 启动时已在播，标 restart_recovery',
+  );
+
+  // 第二轮：在播持续，不再产任何信号
+  signals2.length = 0;
+  await src2.pollOnce();
+  assert.equal(signals2.length, 0);
+});
+
 // ---- restore 恢复基线 ----
 
 test('restore 恢复基线：重启后同一场不重复产 live_start', async (t) => {

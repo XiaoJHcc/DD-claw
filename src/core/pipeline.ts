@@ -101,6 +101,12 @@ export class Pipeline {
       log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 首次运行已在播，按配置不推送`);
       return;
     }
+    // 重启恢复：上次下播、本次启动前开播的主播，无法得知真实开播时间，
+    // 与 first_run 同属「启动时已在播」，共用 notifyOnFirstRun 这一个开关。
+    if (signal.coldStart === 'restart_recovery' && !config.notifyOnFirstRun) {
+      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 停机期间开播（启动时已在播），按配置不推送`);
+      return;
+    }
     if (signal.coldStart === 'new_subscription' && !config.notifyOnNewSubscription) {
       log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 新增订阅正在直播，按配置不推送`);
       return;
