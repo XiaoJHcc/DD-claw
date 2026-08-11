@@ -17,6 +17,7 @@ export const PANEL_CSS = `
   --separator:rgba(0,0,0,.09);--border-strong:rgba(0,0,0,.24);--accent:#007aff;--red:#ff3b30;--green:#34c759;
   --fill:rgba(120,120,128,.055);--hover:rgba(120,120,128,.08);--switch-off:rgba(120,120,128,.28);
   --r-lg:14px;--r-md:8px;--r-sm:6px;--ctl-h:36px;--row-h:44px;
+  --sched-lane-h:20px;--sched-mini-lane-h:5px;
   --shadow:0 1px 2px rgba(0,0,0,.05);
 }
 @media (prefers-color-scheme: dark){
@@ -227,4 +228,50 @@ a.post:hover{background:var(--hover)}
 .f-more{margin:10px 0;text-align:center}
 .f-more a{color:var(--accent);cursor:pointer;text-decoration:none}
 .f-more a:hover{text-decoration:underline}
+/* 时间表：轴表头独立在滚动区之上（天然吸附），日列表内部滚动翻页 */
+.sched-axis{position:relative;height:22px;margin-left:118px;border-bottom:1px solid var(--separator)}
+.sched-tick{position:absolute;top:0;bottom:0;width:1px;background:var(--separator)}
+.sched-tick-label{position:absolute;top:3px;transform:translateX(4px);font-size:10px;
+  color:var(--text-secondary);white-space:nowrap}
+.sched-body{/* 5 天滑动窗口制：无内部滚动容器，随页面整体滚动 */}
+/* 缩略行（窗口两端 2 天）：同一套装箱，超窄道高，条只留颜色 */
+.sched-day.mini .sched-lane{height:var(--sched-mini-lane-h)}
+.sched-day.mini .sched-lanes{gap:1px}
+.sched-day.mini .sched-day-head{padding-top:0;font-size:10px}
+.sched-mini-seg{position:absolute;top:0;bottom:0;border-radius:2px}
+.sched-day[data-action]{cursor:pointer}
+/* 点击居中/滚轮步进的方向感滑动动画：向未来内容上移进场，向过去下移 */
+.sched-anim-up{animation:schedUp .2s ease-out}
+.sched-anim-down{animation:schedDown .2s ease-out}
+@keyframes schedUp{from{transform:translateY(14px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes schedDown{from{transform:translateY(-14px);opacity:0}to{transform:translateY(0);opacity:1}}
+/* 泳道高度固定（--sched-lane-h），日行走高 = 泳道数 × 道高（空天 = 一道）——
+   高峰同播几十路时行高自适应，不再出现几像素高的不可用泳道 */
+.sched-day{display:flex;gap:8px;margin:8px 0}
+.sched-day-head{flex:none;width:110px;padding-top:3px;font-size:12px;color:var(--text-secondary)}
+.sched-day-head.today{color:var(--accent);font-weight:600}
+.sched-lanes{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;position:relative;overflow:hidden}
+.sched-lane{position:relative;flex:none;height:var(--sched-lane-h);background:var(--row-bg);border-radius:var(--r-sm)}
+.sched-seg{position:absolute;top:1px;bottom:1px;display:flex;align-items:center;gap:4px;
+  padding:0 5px;border-radius:var(--r-sm);overflow:visible;color:#fff;font-size:11px;line-height:1.2;white-space:nowrap}
+.sched-seg.cont{border-left:2px solid rgba(255,255,255,.55)}
+/* 条内文字允许向右溢出条范围完整显示（不截断），阴影保证落在条外也可读 */
+/* 条内文字允许向右溢出条范围完整显示（不截断），阴影保证落在条外也可读；
+   不设 z-index：同泳道后一个条按 DOM 序自然覆盖前条溢出的文字（换段/换场防叠压） */
+.sched-seg-text{overflow:visible;white-space:nowrap;text-shadow:0 0 3px rgba(0,0,0,.45)}
+/* 当前时间红线（macOS 日历样式：细线 + 顶端圆点），在色条之上、不拦截鼠标 */
+.sched-now{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--red);
+  z-index:2;pointer-events:none}
+.sched-now:before{content:"";position:absolute;top:-2px;left:-3px;width:8px;height:8px;
+  border-radius:50%;background:var(--red)}
+.sched-pop{position:fixed;z-index:15;max-width:320px;padding:10px 12px;font-size:12px;
+  background:var(--card-bg);border-radius:var(--r-md);box-shadow:0 8px 28px rgba(0,0,0,.25);
+  pointer-events:none}
+@media (prefers-color-scheme: dark){.sched-pop{border:0.5px solid var(--separator)}}
+.sched-pop img{display:block;width:100%;border-radius:var(--r-sm);margin:6px 0;background:var(--fill)}
+.sched-pop-title{font-size:13px;margin-bottom:2px}
+.sched-pop-meta{color:var(--text-secondary);margin:2px 0}
+.sched-pop-v{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:6px}
+.sched-pop-src{color:var(--text-secondary);font-size:11px}
+.sched-pop-ev{flex-basis:100%;color:var(--text-secondary)}
 `;

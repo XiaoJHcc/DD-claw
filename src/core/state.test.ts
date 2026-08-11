@@ -44,6 +44,27 @@ test('同一场内标题变更产出 title_change 并带上旧标题', () => {
   assert.equal(s.length, 1);
   assert.equal(s[0]!.kind, 'title_change');
   assert.equal(s[0]!.previousTitle, '孩子们下午好');
+  assert.equal(s[0]!.previousAreaName, undefined, '分区没变不带 previousAreaName');
+});
+
+test('同一场内分区变更也产出 title_change（带 previousAreaName）', () => {
+  const s = diffRoom(UID, prev(), status({ areaName: '虚拟Singer', title: '孩子们下午好' }), OPTS);
+  assert.equal(s.length, 1);
+  assert.equal(s[0]!.kind, 'title_change');
+  assert.equal(s[0]!.previousAreaName, '无畏契约');
+  assert.equal(s[0]!.previousTitle, '孩子们下午好');
+
+  const p = diffRoom(UID, prev(), status({ parentAreaName: '虚拟主播', title: '孩子们下午好' }), OPTS);
+  assert.equal(p.length, 1, '母分区变更同样产信号');
+  assert.equal(p[0]!.previousAreaName, '无畏契约');
+});
+
+test('标题与分区同时变更只产一条 title_change', () => {
+  const s = diffRoom(UID, prev(), status({ title: '开始唱歌了', areaName: '虚拟Singer' }), OPTS);
+  assert.equal(s.length, 1);
+  assert.equal(s[0]!.kind, 'title_change');
+  assert.equal(s[0]!.previousTitle, '孩子们下午好');
+  assert.equal(s[0]!.previousAreaName, '无畏契约');
 });
 
 test('1 → 0 产出 live_end', () => {

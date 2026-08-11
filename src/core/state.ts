@@ -6,8 +6,8 @@ export interface PrevState {
   isLive: boolean;
   liveTime: number;
   title: string;
-  // 以下为展示用字段：随状态持久化供面板展示实况，diffRoom 不读，
-  // diff 仍只看 roomId / isLive / liveTime / title
+  // 以下为展示用字段：随状态持久化供面板展示实况；
+  // diff 只看 roomId / isLive / liveTime / title / areaName / parentAreaName
   areaName: string;
   parentAreaName: string;
   keyframe: string;
@@ -78,8 +78,10 @@ export function diffRoom(
     return signals;
   }
 
-  // 同一场直播中，标题变了
-  if (prev.title !== curr.title) {
+  // 同一场直播中，标题或分区变了（内容变更；标题分区同时变只产一条，
+  // kind 仍用 title_change = 标题/分区内容变更）
+  const areaChanged = prev.areaName !== curr.areaName || prev.parentAreaName !== curr.parentAreaName;
+  if (prev.title !== curr.title || areaChanged) {
     signals.push({
       source: 'bili/live-status',
       kind: 'title_change',
@@ -88,6 +90,7 @@ export function diffRoom(
       ts,
       status: curr,
       previousTitle: prev.title,
+      ...(areaChanged ? { previousAreaName: prev.areaName } : {}),
     });
   }
   return signals;

@@ -38,8 +38,10 @@ export interface Signal {
   ts: number;
   /** live 系信号携带：live_start / title_change 为当前状态，live_end 为最后已知状态 */
   status?: LiveStatus;
-  /** title_change 专用 */
+  /** title_change（标题/分区内容变更）专用：旧标题 */
   previousTitle?: string;
+  /** title_change 专用：分区变了时带上旧分区 */
+  previousAreaName?: string;
   /**
    * 冷启动来源。source 只标记，抑制策略在 pipeline：
    * - first_run：整轮首次运行（库中无历史状态），启动时已在播

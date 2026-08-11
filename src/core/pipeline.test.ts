@@ -39,6 +39,8 @@ class StubClassifier implements Classifier {
 
 class FakeDb {
   sessions: string[] = [];
+  ended: Array<{ roomId: string; ts: number }> = [];
+  rotated: Array<{ roomId: string; liveTime: number; ts: number; title: string }> = [];
   notified = new Set<string>();
   streamers = new Map<string, { alias: string | null; notify: boolean }>([
     ['1', { alias: '阿梓', notify: true }],
@@ -51,6 +53,10 @@ class FakeDb {
   settings = new Map<string, string>();
   recordSession(p: { roomId: string; liveTime: number }) {
     this.sessions.push(`${p.roomId}:${p.liveTime}`);
+  }
+  endSession(roomId: string, ts: number) { this.ended.push({ roomId, ts }); }
+  rotateSegment(roomId: string, liveTime: number, ts: number, seg: { title: string }) {
+    this.rotated.push({ roomId, liveTime, ts, title: seg.title });
   }
   hasNotified(r: string, t: number) { return this.notified.has(`${r}:${t}`); }
   markNotified(r: string, t: number) { this.notified.add(`${r}:${t}`); }
@@ -200,6 +206,38 @@ test('live_start 做分类判定，live_end / title_change 不调分类器（不
   await h.pipeline.whenIdle();
   assert.equal(h.classifier.calls.length, 1, '只有 live_start 进分类队列');
   assert.equal(h.disp.sent.length, 1, 'M1 规则只推开播');
+});
+
+// ---- 归档分派（live_end / title_change 在抑制检查之前落库）----
+
+test('live_end 归档：endSession 按房间 + 信号 ts 关闭场次（不推送）', async () => {
+  const h = harness();
+  h.bus.emit(sig({ kind: 'live_end', ts: 1_800_000_000 }));
+  await h.pipeline.whenIdle();
+  assert.deepEqual(h.db.ended, [{ roomId: 'r1', ts: 1_800_000_000 }]);
+  assert.equal(h.disp.sent.length, 0);
+});
+
+test('title_change 归档：rotateSegment 换段（不推送、不重复分类）', async () => {
+  const h = harness();
+  h.bus.emit(sig({ kind: 'title_change', ts: 1_800_000_100, status: status({ title: '换内容唱歌' }) }));
+  await h.pipeline.whenIdle();
+  assert.deepEqual(h.db.rotated, [
+    { roomId: 'r1', liveTime: 1_785_310_737, ts: 1_800_000_100, title: '换内容唱歌' },
+  ]);
+  assert.equal(h.disp.sent.length, 0);
+});
+
+test('被抑制信号照样归档：冷启动 live_start 录场次，notify=false 的 title_change 照换段', async () => {
+  const h = harness(); // notifyOnFirstRun=false
+  h.bus.emit(sig({ coldStart: 'first_run' }));
+  await h.pipeline.whenIdle();
+  assert.deepEqual(h.db.sessions, ['r1:1785310737'], '冷启动抑制只跳推送，归档照做');
+  h.db.streamers.set('1', { alias: '阿梓', notify: false });
+  h.bus.emit(sig({ kind: 'title_change', ts: 1_800_000_100, status: status({ title: '新标题' }) }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.db.rotated.length, 1, 'notify=false 抑制推送但归档照做');
+  assert.equal(h.disp.sent.length, 0);
 });
 
 // ---- notify=false（旧 silent 语义）：追踪照常，推送抑制 ----

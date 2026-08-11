@@ -152,6 +152,13 @@ export class LiveStatusSource implements Source {
 
     // 批量落状态：单事务，避免订阅多了以后每轮 N 次 fsync
     ctx.db.saveRoomStates(stateWrites);
+    // 在播场次的存活打点：last_seen 每轮刷新（近似下播时间锚点，崩溃恢复也有近似终点）
+    // + 非空 keyframe 快照覆盖。room_state.keyframe 会被新一场覆盖，场次表的是历史留痕
+    ctx.db.touchLiveSessions(
+      stateWrites
+        .filter((w) => w.state.isLive)
+        .map((w) => ({ roomId: w.state.roomId, liveTime: w.state.liveTime, keyframe: w.state.keyframe })),
+    );
     for (const s of signals) ctx.bus.emit(s);
     return true;
   }

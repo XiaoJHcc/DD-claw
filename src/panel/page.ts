@@ -17,6 +17,7 @@ import { APP_LLM } from './page/app-llm.js';
 import { APP_CATEGORIES } from './page/app-categories.js';
 import { APP_NAPCAT } from './page/app-napcat.js';
 import { APP_FOLLOWS } from './page/app-follows.js';
+import { APP_SCHEDULE } from './page/app-schedule.js';
 
 const QR_LIB = Buffer.from(QR_LIB_B64, 'base64').toString('utf8');
 
@@ -80,8 +81,9 @@ export const PANEL_PAGE = `<!doctype html>
 </div>
 
 <section class="card" id="card-schedule">
-<div class="card-head"><h2>直播计划时间表</h2></div>
-<p class="hint">预留：预告时间表（M3）</p>
+<div class="card-head"><h2>时间表</h2></div>
+<div id="schedule-axis" class="sched-axis"></div>
+<div id="schedule-body" class="sched-body">加载中…</div>
 </section>
 
 <section class="card" id="card-streamers">
@@ -110,6 +112,7 @@ ${APP_LLM}
 ${APP_CATEGORIES}
 ${APP_NAPCAT}
 ${APP_FOLLOWS}
+${APP_SCHEDULE}
 </script>
 </body>
 </html>

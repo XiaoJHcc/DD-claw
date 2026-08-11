@@ -141,9 +141,25 @@ CREATE TABLE IF NOT EXISTS posts (
   UNIQUE(platform, item_id)
 );
 CREATE INDEX IF NOT EXISTS idx_posts_uid_ts ON posts (uid, pub_ts);
+CREATE TABLE IF NOT EXISTS live_segments (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id         TEXT    NOT NULL,
+  live_time       INTEGER NOT NULL,
+  start_ts        INTEGER NOT NULL,
+  end_ts          INTEGER,
+  title           TEXT    NOT NULL DEFAULT '',
+  area_name       TEXT,
+  parent_area_name TEXT,
+  keyframe        TEXT,
+  created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_live_segments_room ON live_segments (room_id, live_time);
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
+
+/** listTimeline 在播判定：last_seen 超过该秒数未刷新 = 已下播（崩溃/停机错过 live_end 的兜底） */
+const TIMELINE_LIVE_STALE_S = 600;
 
 /** 面板实况展示用的完整 room_state 行（PrevState 展示字段 + 下播锚点/轮询时间） */
 export interface RoomStateFull {
@@ -162,6 +178,52 @@ export interface RoomStateFull {
   polledAt: number;
 }
 
+/** live_segments 行类型（时间表：一场直播按内容变更切分的连续时间段） */
+export interface LiveSegmentRow {
+  id: number;
+  room_id: string;
+  live_time: number;
+  start_ts: number;
+  /** NULL = 进行中 */
+  end_ts: number | null;
+  title: string;
+  area_name: string | null;
+  parent_area_name: string | null;
+  keyframe: string | null;
+  created_at: number;
+}
+
+/** 时间轴（/api/schedule）组装的段形状 */
+export interface TimelineSegment {
+  startTs: number;
+  endTs: number | null;
+  title: string;
+  areaName: string;
+  parentAreaName: string;
+}
+
+/** 时间轴条目：场次 + 段 + 分类判定 + 主播信息 */
+export interface TimelineEntry {
+  roomId: string;
+  liveTime: number;
+  uid: string;
+  /** alias ?? uname */
+  name: string;
+  face: string | null;
+  startTs: number;
+  /** null = 仍在播（或从未观测到下播） */
+  endTs: number | null;
+  keyframe: string | null;
+  cover: string | null;
+  segments: TimelineSegment[];
+  verdicts: Array<{
+    categoryName: string;
+    source: 'llm' | 'rule';
+    confidence: number | null;
+    evidence: string;
+  }>;
+}
+
 export class Db {
   private readonly db: Database.Database;
 
@@ -177,6 +239,11 @@ export class Db {
     }
     this.ensureColumn('streamers', 'face', 'face TEXT');
     this.ensureColumn('follows', 'face', 'face TEXT');
+    // live_sessions 时间轴字段（last_seen = 在播期间每轮刷新，近似下播时间锚点；
+    // keyframe/cover 开场快照 + 在播刷新，供时间表 hover 缩略图）
+    this.ensureColumn('live_sessions', 'last_seen', 'last_seen INTEGER');
+    this.ensureColumn('live_sessions', 'keyframe', 'keyframe TEXT');
+    this.ensureColumn('live_sessions', 'cover', 'cover TEXT');
     // streamers 三开关（watch/analyze/notify）替代旧 mode 列
     this.ensureColumn('streamers', 'watch', 'watch INTEGER NOT NULL DEFAULT 1');
     this.ensureColumn('streamers', 'notify', 'notify INTEGER NOT NULL DEFAULT 1');
@@ -349,19 +416,182 @@ export class Db {
     return m;
   }
 
-  /** 记录一场直播。已存在则不动（保留原 notified_at）。 */
+  /** 记录一场直播（开场快照含 keyframe/cover）并插入首个 segment。已存在则不动（保留原 notified_at/首段）。 */
   recordSession(p: {
     roomId: string; liveTime: number; uid: string;
-    uname: string; title: string; areaName: string;
+    uname: string; title: string; areaName: string; parentAreaName: string;
+    keyframe?: string; cover?: string;
   }): void {
-    this.db
+    const t = now();
+    const info = this.db
       .prepare(
         `INSERT INTO live_sessions
-           (room_id, live_time, uid, uname, title, area_name, first_seen, notified_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+           (room_id, live_time, uid, uname, title, area_name, keyframe, cover, first_seen, notified_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(room_id, live_time) DO NOTHING`,
       )
-      .run(p.roomId, p.liveTime, p.uid, p.uname, p.title, p.areaName, Math.floor(Date.now() / 1000));
+      .run(p.roomId, p.liveTime, p.uid, p.uname, p.title, p.areaName,
+        p.keyframe ?? null, p.cover ?? null, t);
+    // 仅新场次插首段（重复 live_start 是冲突无操作，不能重复开段）
+    if (info.changes > 0) {
+      this.db
+        .prepare(
+          `INSERT INTO live_segments
+             (room_id, live_time, start_ts, end_ts, title, area_name, parent_area_name, keyframe, created_at)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+        )
+        .run(p.roomId, p.liveTime, t, p.title, p.areaName, p.parentAreaName,
+          p.keyframe ?? null, t);
+    }
+  }
+
+  /** 在播场次的存活打点（live-status source 每轮随 saveRoomStates 调）：刷 last_seen + 非空 keyframe 覆盖。 */
+  touchLiveSessions(entries: Array<{ roomId: string; liveTime: number; keyframe?: string }>): void {
+    if (entries.length === 0) return;
+    const stmt = this.db.prepare(
+      `UPDATE live_sessions SET last_seen = ?,
+         keyframe = CASE WHEN ? != '' THEN ? ELSE keyframe END
+       WHERE room_id = ? AND live_time = ?`,
+    );
+    const t = now();
+    const tx = this.db.transaction((rows: Array<{ roomId: string; liveTime: number; keyframe?: string }>) => {
+      for (const e of rows) stmt.run(t, e.keyframe ?? '', e.keyframe ?? null, e.roomId, e.liveTime);
+    });
+    tx(entries);
+  }
+
+  /**
+   * live_end 归档：关闭该房间 first_seen 最新的一场（last_seen 取大、开口 segment 以 endTs 收尾）。
+   * 不带 liveTime：live_end 信号里它不可靠（下播合成状态 liveTime=0；下播又开播的成对信号里
+   * 带的是新一场的 liveTime），而 pipeline 在信号的同步前缀里按序归档（endSession 先于配对
+   * live_start 的 recordSession 执行），所以此刻该房间最新一场就是要结束的那场。
+   */
+  endSession(roomId: string, endTs: number): void {
+    const s = this.db
+      .prepare('SELECT live_time FROM live_sessions WHERE room_id = ? ORDER BY first_seen DESC LIMIT 1')
+      .get(roomId) as { live_time: number } | undefined;
+    if (!s) return;
+    this.db
+      .prepare('UPDATE live_sessions SET last_seen = MAX(COALESCE(last_seen, 0), ?) WHERE room_id = ? AND live_time = ?')
+      .run(endTs, roomId, s.live_time);
+    this.db
+      .prepare('UPDATE live_segments SET end_ts = ? WHERE room_id = ? AND live_time = ? AND end_ts IS NULL')
+      .run(endTs, roomId, s.live_time);
+  }
+
+  /** title_change 归档：关闭当前开口 segment（end_ts = ts）并以新内容开下一段。场次不存在则不动。 */
+  rotateSegment(
+    roomId: string, liveTime: number, ts: number,
+    seg: { title: string; areaName: string; parentAreaName: string; keyframe?: string },
+  ): void {
+    const exists = this.db
+      .prepare('SELECT 1 FROM live_sessions WHERE room_id = ? AND live_time = ?')
+      .get(roomId, liveTime);
+    if (!exists) return;
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare('UPDATE live_segments SET end_ts = ? WHERE room_id = ? AND live_time = ? AND end_ts IS NULL')
+        .run(ts, roomId, liveTime);
+      this.db
+        .prepare(
+          `INSERT INTO live_segments
+             (room_id, live_time, start_ts, end_ts, title, area_name, parent_area_name, keyframe, created_at)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+        )
+        .run(roomId, liveTime, ts, seg.title, seg.areaName, seg.parentAreaName,
+          seg.keyframe ?? null, now());
+    });
+    tx();
+  }
+
+  /**
+   * 时间轴组装（/api/schedule）：first_seen 落在 [fromTs, toTs) 的场次 + 其 segments +
+   * verdicts + 主播信息（alias/uname/face）。三表各查一次（join 场次过滤），JS 按
+   * (room_id, live_time) 归并，无 N+1。endTs 语义：在播（last_seen 鲜度窗口内）= null；
+   * 已下播 = last_seen，兜底关闭开口段；legacy 无打点场次 = first_seen（零长，前端不画）。
+   */
+  listTimeline(fromTs: number, toTs: number): TimelineEntry[] {
+    const nowTs = now();
+    const sessions = this.db
+      .prepare('SELECT * FROM live_sessions WHERE first_seen >= ? AND first_seen < ? ORDER BY first_seen')
+      .all(fromTs, toTs) as Array<{
+        room_id: string; live_time: number; uid: string; uname: string | null;
+        title: string | null; area_name: string | null; parent_area_name?: string | null;
+        keyframe: string | null; cover: string | null;
+        first_seen: number; last_seen: number | null;
+      }>;
+    if (sessions.length === 0) return [];
+    const segRows = this.db
+      .prepare(
+        `SELECT s.* FROM live_segments s
+         JOIN live_sessions ls ON ls.room_id = s.room_id AND ls.live_time = s.live_time
+         WHERE ls.first_seen >= ? AND ls.first_seen < ?
+         ORDER BY s.start_ts, s.id`,
+      )
+      .all(fromTs, toTs) as LiveSegmentRow[];
+    const verdictRows = this.db
+      .prepare(
+        `SELECT v.room_id, v.live_time, v.category_name, v.source, v.confidence, v.evidence
+         FROM verdicts v
+         JOIN live_sessions ls ON ls.room_id = v.room_id AND ls.live_time = v.live_time
+         WHERE ls.first_seen >= ? AND ls.first_seen < ?
+         ORDER BY v.id`,
+      )
+      .all(fromTs, toTs) as Array<{
+        room_id: string; live_time: number; category_name: string;
+        source: 'llm' | 'rule'; confidence: number | null; evidence: string;
+      }>;
+    const streamerByUid = new Map(this.listStreamers().map((s) => [s.uid, s]));
+
+    const key = (roomId: string, liveTime: number) => `${roomId}:${liveTime}`;
+    const segsBySession = new Map<string, TimelineSegment[]>();
+    for (const r of segRows) {
+      const k = key(r.room_id, r.live_time);
+      const list = segsBySession.get(k) ?? [];
+      list.push({
+        startTs: r.start_ts, endTs: r.end_ts, title: r.title,
+        areaName: r.area_name ?? '', parentAreaName: r.parent_area_name ?? '',
+      });
+      segsBySession.set(k, list);
+    }
+    const verdictsBySession = new Map<string, TimelineEntry['verdicts']>();
+    for (const v of verdictRows) {
+      const k = key(v.room_id, v.live_time);
+      const list = verdictsBySession.get(k) ?? [];
+      list.push({
+        categoryName: v.category_name, source: v.source,
+        confidence: v.confidence, evidence: v.evidence,
+      });
+      verdictsBySession.set(k, list);
+    }
+
+    return sessions.map((s) => {
+      const st = streamerByUid.get(s.uid);
+      // 在播判定：last_seen 在打点鲜度窗口内才算在播（endTs=null）；超时未刷新 = 已下播
+      // （崩溃/停机错过 live_end 的兜底），legacy 无打点场次终点取 first_seen（零长不画）
+      const isLive = s.last_seen != null && nowTs - s.last_seen <= TIMELINE_LIVE_STALE_S;
+      const endTs = isLive ? null : (s.last_seen ?? s.first_seen);
+      let segments = segsBySession.get(key(s.room_id, s.live_time));
+      if (!segments || segments.length === 0) {
+        // 旧场次（segments 表建立前归档的）没有段：回退为单段，标题/分区取开场快照
+        segments = [{
+          startTs: s.first_seen, endTs,
+          title: s.title ?? '', areaName: s.area_name ?? '', parentAreaName: '',
+        }];
+      } else if (!isLive) {
+        // 已下播：开口段以场次终点收尾（正常路径 endSession 已关，这里是兜底）
+        segments = segments.map((g) => (g.endTs === null ? { ...g, endTs } : g));
+      }
+      return {
+        roomId: s.room_id, liveTime: s.live_time, uid: s.uid,
+        name: st ? (st.alias || st.uname) : (s.uname ?? ''),
+        face: st?.face ?? null,
+        startTs: s.first_seen, endTs,
+        keyframe: s.keyframe, cover: s.cover,
+        segments,
+        verdicts: verdictsBySession.get(key(s.room_id, s.live_time)) ?? [],
+      };
+    });
   }
 
   hasNotified(roomId: string, liveTime: number): boolean {

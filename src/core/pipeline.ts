@@ -88,15 +88,26 @@ export class Pipeline {
     const { db, config, queue, rule, dispatcher } = this.deps;
     const event = toLiveEvent(signal.status, this.aliasOf(signal.uid));
 
+    // 归档分派：在抑制检查之前（冷启动/静音场次照样归档），且在信号的同步前缀里
+    // 按序执行——live_end 的 endSession 先于配对 live_start 的 recordSession，
+    // 所以 endSession 按房间取最新一场关闭不会误关新场（见 db.endSession 注释）
     if (signal.kind === 'live_start') {
       db.recordSession({
         roomId: event.roomId, liveTime: event.liveTime, uid: event.uid,
         uname: event.uname, title: event.title, areaName: event.areaName,
+        parentAreaName: event.parentAreaName, keyframe: event.keyframe, cover: event.cover,
+      });
+    } else if (signal.kind === 'live_end') {
+      db.endSession(signal.roomId, signal.ts);
+    } else if (signal.kind === 'title_change') {
+      db.rotateSegment(event.roomId, event.liveTime, signal.ts, {
+        title: event.title, areaName: event.areaName,
+        parentAreaName: event.parentAreaName, keyframe: event.keyframe,
       });
     }
 
     // 冷启动抑制（政策在这层，diffRoom 只如实产信号、source 只打标记）：
-    // 跳过通知，但上面 live_start 的 recordSession 照做。
+    // 跳过通知，但上面 live_start 的 recordSession 等归档照做。
     if (signal.coldStart === 'first_run' && !config.notifyOnFirstRun) {
       log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 首次运行已在播，按配置不推送`);
       return;

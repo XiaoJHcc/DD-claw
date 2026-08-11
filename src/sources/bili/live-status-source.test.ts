@@ -301,3 +301,25 @@ test('直播间号回填：streamers.roomId 为空时用本轮 room_id 补上，
   assert.equal(s1.alias, '别名1', '回填不碰其他字段');
   assert.equal(h.db.getStreamer('2')?.roomId, '已有房间号', '已有 roomId 不覆盖');
 });
+
+test('在播条目触发 touchLiveSessions：last_seen 刷新 + 非空 keyframe 覆盖，未开播不打点', async (t) => {
+  const all = new Map([
+    ['1', room('1')],
+    ['2', room('2', { isLive: false, rawLiveStatus: 0, liveTime: 0 })],
+  ]);
+  const h = harness(['1', '2'], async () => all);
+  t.after(h.cleanup);
+  // 预置场次（recordSession 是 pipeline 的职责，这里直接落库模拟已在归档的场次）
+  h.db.recordSession({
+    roomId: 'room-1', liveTime: 1_785_310_737, uid: '1', uname: '主播1',
+    title: '标题', areaName: '虚拟主播', parentAreaName: '虚拟主播', keyframe: 'old.jpg',
+  });
+
+  await h.src.pollOnce();
+
+  const entries = h.db.listTimeline(0, 2_000_000_000);
+  const e = entries.find((x) => x.roomId === 'room-1')!;
+  assert.equal(e.endTs, null, '在播轮询打点新鲜 → listTimeline 判在播（endTs=null）');
+  assert.equal(e.keyframe, 'k.jpg', '非空 keyframe 覆盖开场快照');
+  assert.equal(entries.some((x) => x.uid === '2'), false, '未开播条目不打点');
+});

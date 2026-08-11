@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
@@ -29,9 +30,11 @@ async function setup(
     listen?: { bili?: boolean; weibo?: boolean; dynamicEnabled?: boolean; weiboEnabled?: boolean };
     /** 注入 napcat dep；缺省不注入（/api/napcat* 404） */
     napcat?: PanelDeps['napcat'];
+    /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
+    db?: Db;
   } = {},
 ): Promise<Fixture> {
-  const db = new Db(':memory:');
+  const db = opts.db ?? new Db(':memory:');
   const status: PanelStatus = {
     startedAt: Math.floor(Date.now() / 1000),
     notifiers: ['onebot', 'toast'],
@@ -102,11 +105,22 @@ interface ApiResult {
 async function api(
   base: string, path: string, method = 'GET', body?: unknown, rawBody?: string,
 ): Promise<ApiResult> {
-  const res = await fetch(base + path, {
-    method,
-    headers: { connection: 'close', ...(body !== undefined || rawBody ? { 'content-type': 'application/json' } : {}) },
-    body: rawBody ?? (body !== undefined ? JSON.stringify(body) : undefined),
-  });
+  // 全套件并行时 Windows + undici 偶发 'fetch failed'（连接被重置），多次重试兜底
+  let res: Response | null = null;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 5 && res === null; attempt++) {
+    try {
+      res = await fetch(base + path, {
+        method,
+        headers: { connection: 'close', ...(body !== undefined || rawBody ? { 'content-type': 'application/json' } : {}) },
+        body: rawBody ?? (body !== undefined ? JSON.stringify(body) : undefined),
+      });
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 30));
+    }
+  }
+  if (res === null) throw lastErr;
   const json = (await res.json().catch(() => null)) as ApiResult['json'] | null;
   return { status: res.status, json: json ?? {} };
 }
@@ -119,7 +133,7 @@ test('GET / 返回内嵌页面，包含六张卡片（监听/LLM分析/推送/�
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type') ?? '', /text\/html/);
   const html = await res.text();
-  for (const marker of ['监听', 'LLM 分析', '推送', '直播计划时间表', '主播列表', '关注列表']) {
+  for (const marker of ['监听', 'LLM 分析', '推送', 'id="schedule-body"', '主播列表', '关注列表']) {
     assert.ok(html.includes(marker), `页面应包含「${marker}」`);
   }
   // 关注列表是独立卡片（不再嵌在主播列表里），且带搜索框
@@ -1281,4 +1295,113 @@ test('POST /api/napcat/setup：创建失败为 500 且含原因', async (t) => {
 
   dep.setupTask = async () => {};
   assert.equal((await api(base, '/api/napcat/setup', 'POST')).status, 200);
+});
+
+// ---- 时间表 /api/schedule ----
+
+/** 与 server 同口径：日界日串 → 起点 ts（北京时间 06:00） */
+function dayStart(day: string): number {
+  return Math.floor(Date.parse(day + 'T06:00:00+08:00') / 1000);
+}
+
+interface SchedFixture { db: Db; raw: Database.Database; base: string }
+
+/** 文件库 + 旁路 raw 连接（预置历史时间戳），注入 panel setup */
+async function schedSetup(t: import('node:test').TestContext): Promise<SchedFixture> {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-sched-'));
+  const db = new Db(join(dir, 's.db'));
+  const raw = new Database(join(dir, 's.db'));
+  t.after(() => { raw.close(); db.close(); rmSync(dir, { recursive: true, force: true }); });
+  const { base } = await setup(t, { db });
+  return { db, raw, base };
+}
+
+function insertSession(
+  raw: Database.Database,
+  p: { roomId: string; liveTime: number; uid: string; title: string;
+    firstSeen: number; lastSeen: number | null },
+): void {
+  raw.prepare(
+    `INSERT INTO live_sessions
+       (room_id, live_time, uid, uname, title, area_name, keyframe, cover, first_seen, notified_at, last_seen)
+     VALUES (?, ?, ?, '主播1', ?, '网游', 'k.jpg', 'c.jpg', ?, NULL, ?)`,
+  ).run(p.roomId, p.liveTime, p.uid, p.title, p.firstSeen, p.lastSeen);
+}
+
+test('/api/schedule：日界归属 + 空日期占位 + segments/verdicts 组装', async (t) => {
+  const { db, raw, base } = await schedSetup(t);
+  db.upsertStreamer({ uid: '1', uname: '主播1', alias: '阿梓', face: 'f.jpg' });
+  const d9 = dayStart('2026-08-09');
+
+  // A：08-10 05:59:59 开播、跨 06:00 播到 08:00 —— 按开播日归 08-09（06:00 前开播算前一天）
+  const startA = d9 + DAY_S - 1; // d9 日界 + 86399 = 次日 05:59:59
+  insertSession(raw, { roomId: 'rA', liveTime: 1001, uid: '1', title: '凌晨场',
+    firstSeen: startA, lastSeen: startA + 7300 });
+  raw.prepare(
+    `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, area_name, parent_area_name, keyframe, created_at)
+     VALUES ('rA', 1001, ?, ?, '上半场', '网游', '电子竞技', 'k.jpg', 1)`,
+  ).run(startA, startA + 3600);
+  raw.prepare(
+    `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, area_name, parent_area_name, keyframe, created_at)
+     VALUES ('rA', 1001, ?, NULL, '下半场', '虚拟Singer', '虚拟主播', 'k2.jpg', 1)`,
+  ).run(startA + 3600);
+  db.insertVerdict({ roomId: 'rA', liveTime: 1001, uid: '1', categoryId: 1, categoryName: '歌回',
+    source: 'llm', confidence: 0.9, evidence: '在唱歌' });
+
+  // B：08-10 06:01 开播 —— 归 08-10（06:00 后开播算当天）
+  insertSession(raw, { roomId: 'rB', liveTime: 1002, uid: '1', title: '早场',
+    firstSeen: d9 + DAY_S + 61, lastSeen: null });
+
+  const r = await api(base, '/api/schedule?from=2026-08-09&to=2026-08-11');
+  assert.equal(r.status, 200);
+  const days = r.json['days'] as Array<{ date: string; entries: Array<Record<string, unknown>> }>;
+  assert.deepEqual(days.map((d) => d.date), ['2026-08-09', '2026-08-10', '2026-08-11']);
+  assert.deepEqual(days[2]!.entries, [], '无场次的日期返回空 entries');
+
+  const dayA = days[0]!.entries;
+  assert.equal(dayA.length, 1);
+  const a = dayA[0]!;
+  assert.equal(a['kind'], 'live');
+  assert.equal(a['name'], '阿梓', 'alias 优先');
+  assert.equal(a['face'], 'f.jpg');
+  assert.deepEqual([a['startTs'], a['endTs']], [startA, startA + 7300], '跨 06:00 整体按开播日归属');
+  assert.deepEqual([a['keyframe'], a['cover']], ['k.jpg', 'c.jpg']);
+  const aSegs = a['segments'] as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    aSegs.map((s) => [s['startTs'], s['endTs'], s['title']]),
+    [[startA, startA + 3600, '上半场'], [startA + 3600, startA + 7300, '下半场']],
+    'last_seen 过鲜度窗口 = 已下播，开口段兜底关闭到场次终点',
+  );
+  assert.deepEqual(a['verdicts'], [
+    { categoryName: '歌回', source: 'llm', confidence: 0.9, evidence: '在唱歌' },
+  ]);
+
+  const dayB = days[1]!.entries;
+  assert.equal(dayB.length, 1);
+  assert.equal(dayB[0]!['roomId'], 'rB', '06:01 开播归当天');
+  assert.equal(dayB[0]!['endTs'], dayB[0]!['startTs'], '无 last_seen 的 legacy 场终点 = first_seen（零长，前端不画）');
+});
+
+const DAY_S = 86400;
+
+test('/api/schedule：缺省 from/to = 今天-7 ~ 今天+1（北京日），共 9 天', async (t) => {
+  const { base } = await setup(t);
+  const r = await api(base, '/api/schedule');
+  assert.equal(r.status, 200);
+  const days = r.json['days'] as Array<{ date: string; entries: unknown[] }>;
+  assert.equal(days.length, 9);
+  const tomorrow = new Date(Date.now() + 8 * 3600_000 + DAY_S * 1000).toISOString().slice(0, 10);
+  assert.equal(days[8]!.date, tomorrow, '缺省 to = 北京明天');
+  for (const d of days) assert.deepEqual(d.entries, [], '空库全空 entries');
+});
+
+test('/api/schedule 参数校验：坏格式 / from 晚于 to / 跨度超 62 天 → 400', async (t) => {
+  const { base } = await setup(t);
+  const bad1 = await api(base, '/api/schedule?from=2026/08/01');
+  assert.equal(bad1.status, 400);
+  assert.match(bad1.json.error ?? '', /YYYY-MM-DD/);
+  assert.equal((await api(base, '/api/schedule?from=2026-13-01')).status, 400, '非法月份');
+  assert.equal((await api(base, '/api/schedule?from=2026-08-10&to=2026-08-09')).status, 400, 'from 晚于 to');
+  assert.equal((await api(base, '/api/schedule?from=2026-08-01&to=2026-10-10')).status, 400, '跨度 70 天');
+  assert.equal((await api(base, '/api/schedule?from=2026-08-01&to=2026-10-02')).status, 200, '62 天整放行');
 });

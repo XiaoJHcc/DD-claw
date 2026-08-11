@@ -402,7 +402,9 @@ LLM 不是每次采样都调。分层拦截，越靠前越便宜：
 
 ### M3 — 预告时间表
 
-dynamic / weibo sources → schedule-extract → schedules 表（置信度入库，推送时机按置信度阈值过滤）→ 新推送时机：预告发布时、预告时间临近时。
+过往直播统计侧已落地（2026-08-09）：`live_sessions` 补结束时间/画面快照列 + `live_segments` 内容变更切段 → `GET /api/schedule`（北京 06:00 日界归属）→ 面板时间轴卡（共享轴、泳道色条、hover 对照分类证据）。
+
+预告侧仍为预留：dynamic / weibo sources → schedule-extract → schedules 表（置信度入库，推送时机按置信度阈值过滤）→ 新推送时机：预告发布时、预告时间临近时。响应结构的 `kind` 字段已为预告条目预留（半透明条），「预定时间到」推送不实现。
 
 ### M4 — 偏好与路由
 
