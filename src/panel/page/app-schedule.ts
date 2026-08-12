@@ -7,13 +7,18 @@
  * 滚轮按天步进（preventDefault 阻止页面滚动，300ms 节流，动画期内忽略后续滚动）。
  * 无内部滚动容器，随页面整体滚动。
  *
- * 共享轴（偏移语义）：轴 = 相对当天北京 06:00 日界的偏移秒数（offStart/offEnd，
- * 0 = 06:00），按**中间 3 个全量天**的归属场次一次算定，仅 center 变化时重算；
- * 空窗口兜底 {0, 86400}。每天行内独立换算窗口（winStart = 当天 06:00 + offStart），
- * 跨天竖向对齐天然成立，>24h 场次的溢出部分与次日行窗口求交才画到次日。
+ * 共享轴（偏移语义）：轴 = 相对各行归属日 06:00 的偏移秒数（offStart/offEnd，
+ * 0 = 06:00；06:00 日界只用于「归属哪天」，与渲染窗口无关），按**当前可见全部
+ * 5 天**的实际内容算定（center 变化 / 60s 定时器重算）；在播场终点用真实 now——
+ * 「假定播 2 小时 + 30 分钟散尾」是纯绘制层假设，绝不进轴。空窗口兜底 {0, 86400}。
+ * 每天行窗口 = 当天 06:00 + [offStart, offEnd]（可延伸到次日白天，正是设计意图），
+ * 跨天竖向对齐天然成立；offEnd ≤ offStart + 24h ⇒ 相邻天窗口不重叠（至多首尾相接）。
+ * 红线跟随行窗口：now 落在哪行窗口就画哪行（至多一行命中；缩略行 / 空档不画）。
  *
- * 泳道按**完整日窗**（当天 06:00 起 24h）裁剪后贪心装箱（行高 = 泳道数 × 道高，
- * 与轴重算解耦）；绘制按共享轴窗口裁剪，落在轴外的条占泳道位不画。
+ * 泳道候选 = 当天 entries + 前一天 entries（通宵场溢出段接续：归属日行画到该行窗口
+ * 右端，次日行从其窗口左起接续，相邻窗口首尾相接故无缝）。段与行窗口求交后按
+ * **uid 分组整体装箱**（同主播当天多场永远同泳道；组内条互叠的异常数据退化为
+ * 逐 bar 装箱）。装箱窗口 == 绘制窗口，行高 = 泳道数 × 道高。
  *
  * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 icons / app-core 段。
  */
@@ -35,7 +40,7 @@ function schedDayStartTs(day) { return Math.floor(Date.parse(day + 'T06:00:00+08
 /**
  * 场次的有效终点：真实下播后 = endTs；在播中 = max(now, startTs + 7200) + 1800——
  * 假定至少播 2 小时，尾端再加 30 分钟渐变散尾区（齐头散尾；将来的直播预告条同样式）。
- * 装箱 / 绘制 / 共享轴三处统一走它，语义一致。
+ * 仅装箱 / 绘制使用（纯绘制层假设）；共享轴用真实 now（见 recomputeSchedAxis）。
  */
 function schedEffEnd(e, now) {
   return e.endTs !== null && e.endTs !== undefined
@@ -138,7 +143,7 @@ function schedLoad(center, dir) {
     schedCenter = center;
     schedDays = days;
     schedPrepareColors(days);
-    recomputeSchedAxis(); // 仅 center 变化时重算（按中间 3 天一次算定）
+    recomputeSchedAxis(); // center 变化时重算（按可见 5 天实际内容）
     renderSched();
     if (dir) playSchedAnim(dir);
   }).catch(function (e) {
@@ -165,20 +170,18 @@ function playSchedAnim(dir) {
   body.classList.add(dir === 'past' ? 'sched-anim-down' : 'sched-anim-up');
 }
 
-// ---- 共享轴：按中间 3 个全量天的归属场次一次算定；返回轴是否变化 ----
+// ---- 共享轴：按当前可见全部 5 天的实际内容算定（缩略行也在视野内，同样参与）；
+// 在播场终点用真实 now（2h/散尾假设只属于绘制层）；返回轴是否变化 ----
 function recomputeSchedAxis() {
   var now = Math.floor(Date.now() / 1000);
   var minOff = -1, maxOff = 0;
-  var miniFrom = schedAddDays(schedCenter, -2), miniTo = schedAddDays(schedCenter, 2);
   for (var i = 0; i < schedDays.length; i++) {
-    var dd = schedDays[i].date;
-    if (dd === miniFrom || dd === miniTo) continue; // 缩略行不参与轴计算
-    // 每天先换算成相对自己 06:00 日界的偏移（offE 可 > 24h），再合并取轴
-    var base = schedDayStartTs(dd);
+    // 每天先换算成相对自己归属日 06:00 的偏移（offE 可 > 24h），再合并取轴
+    var base = schedDayStartTs(schedDays[i].date);
     var es = schedDays[i].entries;
     for (var j = 0; j < es.length; j++) {
       var offS = es[j].startTs - base;
-      var offE = schedEffEnd(es[j], now) - base;
+      var offE = (es[j].endTs !== null && es[j].endTs !== undefined ? es[j].endTs : now) - base;
       if (minOff < 0 || offS < minOff) minOff = offS;
       if (offE > maxOff) maxOff = offE;
     }
@@ -189,7 +192,7 @@ function recomputeSchedAxis() {
     schedAxis = { offStart: 0, offEnd: 86400 };
     return true;
   }
-  var offStart = Math.max(0, Math.floor(minOff / 3600) * 3600);
+  var offStart = Math.floor(minOff / 3600) * 3600;
   var offEnd = Math.min(offStart + 86400, Math.ceil(maxOff / 3600) * 3600);
   if (offEnd <= offStart) offEnd = offStart + 3600;
   if (schedAxis && schedAxis.offStart === offStart && schedAxis.offEnd === offEnd) return false;
@@ -197,26 +200,47 @@ function recomputeSchedAxis() {
   return true;
 }
 
-/** 全量行内是否有在播场次（60s 定时器用：有才需要重渲染推进右端） */
-function schedHasLive() {
+/** 一行窗口是否包含 now（[winStart, winEnd)；相邻窗口不重叠，至多一行命中） */
+function schedRowHasNow(day, now) {
+  var base = schedDayStartTs(day);
+  return now >= base + schedAxis.offStart && now < base + schedAxis.offEnd;
+}
+
+/** now 是否落在某个全量行的窗口内（60s 定时器红线刷新用；缩略行不画红线） */
+function schedNowInFullRow() {
+  if (!schedCenter || !schedAxis) return false;
+  var now = Math.floor(Date.now() / 1000);
   var miniFrom = schedAddDays(schedCenter, -2), miniTo = schedAddDays(schedCenter, 2);
   for (var i = 0; i < schedDays.length; i++) {
     var dd = schedDays[i].date;
     if (dd === miniFrom || dd === miniTo) continue;
-    var winEnd = schedDayStartTs(dd) + schedAxis.offEnd;
-    var es = schedDays[i].entries;
-    for (var j = 0; j < es.length; j++) {
-      if (es[j].endTs === null && es[j].startTs < winEnd) return true;
-    }
+    if (schedRowHasNow(dd, now)) return true;
   }
   return false;
 }
 
-/** 今天是否作为全量行在窗口内（红线分钟级刷新用；缩略行不画红线） */
-function schedTodayFull() {
-  if (!schedCenter) return false;
-  var today = bjToday();
-  return today >= schedAddDays(schedCenter, -1) && today <= schedAddDays(schedCenter, 1);
+/** 全量行内是否有在播场次（60s 定时器用：有才需要重渲染推进右端） */
+function schedHasLive() {
+  var now = Math.floor(Date.now() / 1000);
+  var miniFrom = schedAddDays(schedCenter, -2), miniTo = schedAddDays(schedCenter, 2);
+  for (var i = 0; i < schedDays.length; i++) {
+    var dd = schedDays[i].date;
+    if (dd === miniFrom || dd === miniTo) continue;
+    var winStart = schedDayStartTs(dd) + schedAxis.offStart;
+    var winEnd = schedDayStartTs(dd) + schedAxis.offEnd;
+    // 候选 = 当天 + 前一天 entries（在播场的溢出段落在本行窗口内也算）
+    for (var k = i - 1; k <= i; k++) {
+      if (k < 0) continue;
+      var es = schedDays[k].entries;
+      for (var j = 0; j < es.length; j++) {
+        var e = es[j];
+        // 在播 = [startTs, 绘制终点 schedEffEnd)，与行窗口有交集才算
+        if ((e.endTs === null || e.endTs === undefined) &&
+          e.startTs < winEnd && schedEffEnd(e, now) > winStart) return true;
+      }
+    }
+  }
+  return false;
 }
 
 // ---- 渲染 ----
@@ -246,19 +270,23 @@ function renderSchedAxis() {
 }
 
 /**
- * 一天的条贪心装箱：候选 = 本天归属 + 前一天归属（溢出段）。
- * 装箱用**完整日窗**（当天 06:00 起 24h，行高稳定）；绘制范围（ds/de）仍与
- * 共享轴窗口求交——落在轴外的条占泳道位但不画。
- * 条按 startTs 排序后放入第一条「最后一条结束 ≤ 本条开始」的泳道，
- * 都冲突才开新泳道。同场次相邻段 end==start 自然共道。返回泳道数组（元素 = 条数组）。
+ * 一天的条装箱：候选 = 当天 entries + 前一天 entries（通宵场溢出段接续绘制：
+ * 归属日行画到该行窗口右端，次日行从其窗口左起接续，相邻窗口首尾相接故无缝）。
+ * 装箱窗口 == 绘制窗口 = 当天 06:00 + [offStart, offEnd]（可延伸到次日白天）。
+ * 末段在播的绘制终点带「假定 2h + 30min 散尾」假设（schedEffEnd，纯绘制层）；
+ * 非末段缺 endTs 不至于发生，兜底 e.endTs ?? now。
+ * 装箱按 **uid 分组整体放置**（同主播当天多场 + 其前一天溢出段同组，永远同泳道；
+ * 这会故意增加泳道数，是明确选择）：组按最早 bar.start 排序，逐组放入第一条
+ * 「该组所有 bar 与泳道已有 bar 全不相交」的泳道，都冲突才开新泳道。
+ * 防御：组内 bar 互相重叠（数据异常）时该组退化为逐 bar 独立装箱。
+ * 返回泳道数组（元素 = 条数组，道内按 start 排序）。
  */
 function packSchedLanes(dayIdx) {
   var day = schedDays[dayIdx];
   var now = Math.floor(Date.now() / 1000);
-  var fullStart = schedDayStartTs(day.date);
-  var fullEnd = fullStart + 86400;
-  var winStart = fullStart + schedAxis.offStart;
-  var winEnd = fullStart + schedAxis.offEnd;
+  var dayStart = schedDayStartTs(day.date);
+  var winStart = dayStart + schedAxis.offStart;
+  var winEnd = dayStart + schedAxis.offEnd;
   var bars = [];
   var cand = [];
   var j;
@@ -270,35 +298,71 @@ function packSchedLanes(dayIdx) {
   for (var c = 0; c < cand.length; c++) {
     var item = cand[c];
     var e = item.e;
-    var effEnd = schedEffEnd(e, now);
-    if (effEnd <= fullStart || e.startTs >= fullEnd) continue; // 与完整日窗无交集
+    var effEnd = schedEffEnd(e, now); // 末段在播的绘制终点（含散尾假设）
     for (var s = 0; s < e.segments.length; s++) {
       var seg = e.segments[s];
-      var segEnd = seg.endTs || effEnd;
-      var a = Math.max(seg.startTs, fullStart);
-      var b = Math.min(segEnd, fullEnd);
-      if (b <= a) continue;
+      var live = s === e.segments.length - 1 && (e.endTs === null || e.endTs === undefined);
+      var segEnd = seg.endTs || (live ? effEnd : (e.endTs || now));
+      var a = Math.max(seg.startTs, winStart);
+      var b = Math.min(segEnd, winEnd);
+      if (b <= a) continue; // 与行窗口无交集
       bars.push({
         start: a, end: b,
-        ds: Math.max(a, winStart), de: Math.min(b, winEnd),
         di: item.di, ei: item.ei, si: s, uid: e.uid,
-        live: s === e.segments.length - 1 && e.endTs === null,
+        live: live,
         cont: s > 0,
       });
     }
   }
   bars.sort(function (x, y) { return x.start - y.start || x.end - y.end; });
+  // 按 uid 分组（同主播当天多场 + 其前一天溢出段同组 → 同泳道）；组内保持 start 升序
+  var groupByUid = {};
+  for (var g = 0; g < bars.length; g++) {
+    var u = String(bars[g].uid);
+    (groupByUid[u] || (groupByUid[u] = [])).push(bars[g]);
+  }
+  var units = [];
+  for (var key in groupByUid) {
+    var grp = groupByUid[key];
+    // 防御：组内 bar 互相重叠（数据异常）→ 退化为逐 bar 独立装箱
+    var bad = false;
+    for (var m = 0; m < grp.length && !bad; m++) {
+      for (var n = m + 1; n < grp.length; n++) {
+        if (grp[m].start < grp[n].end && grp[n].start < grp[m].end) { bad = true; break; }
+      }
+    }
+    if (bad) { for (var q = 0; q < grp.length; q++) units.push([grp[q]]); }
+    else units.push(grp);
+  }
+  units.sort(function (x, y) { return x[0].start - y[0].start || x[0].end - y[0].end; });
+  // 逐组放入第一条「组内所有 bar 与泳道已有 bar 全不相交」的泳道，都冲突开新泳道
   var lanes = [];
-  for (var k = 0; k < bars.length; k++) {
-    var bar = bars[k];
+  for (var w = 0; w < units.length; w++) {
+    var unit = units[w];
     var placed = false;
     for (var L = 0; L < lanes.length; L++) {
-      var lane = lanes[L];
-      if (lane[lane.length - 1].end <= bar.start) { lane.push(bar); placed = true; break; }
+      if (schedUnitFitsLane(unit, lanes[L])) {
+        for (var t = 0; t < unit.length; t++) lanes[L].push(unit[t]);
+        placed = true;
+        break;
+      }
     }
-    if (!placed) lanes.push([bar]);
+    if (!placed) lanes.push(unit.slice());
+  }
+  for (var r = 0; r < lanes.length; r++) {
+    lanes[r].sort(function (x, y) { return x.start - y.start || x.end - y.end; });
   }
   return lanes;
+}
+
+/** 一组 bar 是否与泳道内已有 bar 全不相交（区间相交 = a.start < b.end && b.start < a.end） */
+function schedUnitFitsLane(unit, lane) {
+  for (var i = 0; i < unit.length; i++) {
+    for (var j = 0; j < lane.length; j++) {
+      if (unit[i].start < lane[j].end && lane[j].start < unit[i].end) return false;
+    }
+  }
+  return true;
 }
 
 function renderSchedBody() {
@@ -312,34 +376,31 @@ function renderSchedBody() {
   var today = bjToday();
   var now = Math.floor(Date.now() / 1000);
   var miniFrom = schedAddDays(schedCenter, -2), miniTo = schedAddDays(schedCenter, 2);
-  // 当前时间红线（仅今天的全量行，且落在轴范围内才画）
-  var nowOff = now - schedDayStartTs(today);
-  var nowPct = nowOff >= schedAxis.offStart && nowOff <= schedAxis.offEnd
-    ? ((nowOff - schedAxis.offStart) / span) * 100
-    : -1;
   var html = '';
   for (var d = 0; d < schedDays.length; d++) {
     var day = schedDays[d];
     var isMini = day.date === miniFrom || day.date === miniTo;
     var winStart = schedDayStartTs(day.date) + schedAxis.offStart;
+    // 当前时间红线跟随行窗口：now 落在本行窗口内才画（相邻窗口不重叠，至多一行命中；
+    // 落在缩略行或行窗口外的空档不画）
+    var nowPct = schedRowHasNow(day.date, now) ? ((now - winStart) / span) * 100 : -1;
     var lanes = packSchedLanes(d);
     var lanesHtml = '';
     for (var L = 0; L < lanes.length; L++) {
       var barsHtml = '';
       for (var k = 0; k < lanes[L].length; k++) {
-        var bar = lanes[L][k];
-        if (bar.de <= bar.ds) continue; // 落在当前轴外：占泳道位（行高稳定）但不画
+        var bar = lanes[L][k]; // 装箱窗口 == 绘制窗口，条已全部在轴内
         var e = schedDays[bar.di].entries[bar.ei];
         var seg = e.segments[bar.si];
-        var left = ((bar.ds - winStart) / span) * 100;
-        var width = ((bar.de - bar.ds) / span) * 100;
+        var left = ((bar.start - winStart) / span) * 100;
+        var width = ((bar.end - bar.start) / span) * 100;
         // 在播条 = 一根连续条（齐头散尾）：实色到红线 → 40% 半透平台补齐到开播满 2h
         // → 30 分钟渐变散尾；真实下播后 endTs 非空自动失效
         var bg = schedColorOf(bar.uid);
-        if (bar.live && bar.de > now && now > bar.ds) {
-          var spanDs = bar.de - bar.ds;
-          var p1 = ((now - bar.ds) / spanDs) * 100;
-          var p2 = Math.min(100, ((Math.max(now, e.startTs + 7200) - bar.ds) / spanDs) * 100);
+        if (bar.live && bar.end > now && now > bar.start) {
+          var spanDs = bar.end - bar.start;
+          var p1 = ((now - bar.start) / spanDs) * 100;
+          var p2 = Math.min(100, ((Math.max(now, e.startTs + 7200) - bar.start) / spanDs) * 100);
           bg = schedLiveBg(bg, p1, p2);
         }
         if (isMini) {
@@ -366,7 +427,7 @@ function renderSchedBody() {
       '<div class="sched-day-head' + (day.date === today ? ' today' : '') + '">' +
       esc(schedDayLabel(day.date)) + '</div>' +
       '<div class="sched-lanes">' + (lanesHtml || '<div class="sched-lane"></div>') +
-      (!isMini && day.date === today && nowPct >= 0
+      (!isMini && nowPct >= 0
         ? '<span class="sched-now" style="left:' + nowPct + '%"></span>'
         : '') +
       '</div></div>';
@@ -458,11 +519,11 @@ function schedMovePop(evt) {
   schedLoad(bjToday(), null);
 
   // 在播条右端与当前时间红线跟随时间：轴变了整体重渲；轴没变时，
-  // 全量行内有在播场或今天为全量行才重画条区（省电）
+  // 全量行内有在播场或 now 落在某全量行窗口内（红线需推进）才重画条区（省电）
   setInterval(function () {
     if (!schedCenter || schedDays.length === 0 || !schedAxis) return;
     if (recomputeSchedAxis()) { renderSched(); return; }
-    if (schedHasLive() || schedTodayFull()) renderSchedBody();
+    if (schedHasLive() || schedNowInFullRow()) renderSchedBody();
   }, 60000);
 })();
 `;
