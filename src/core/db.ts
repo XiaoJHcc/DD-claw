@@ -250,9 +250,6 @@ export class Db {
     this.ensureColumn('streamers', 'weibo_nick', 'weibo_nick TEXT');
     // push_channels 展示顺序（面板拖拽排序；旧库默认全 0 按 id 稳定）
     this.ensureColumn('push_channels', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
-    this.migrateStreamerMode();
-    this.migratePreferenceClauses();
-    this.migratePushRulesV2();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -262,60 +259,6 @@ export class Db {
     if (!cols.some((c) => c.name === column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
     }
-  }
-
-  /**
-   * push_rules v1（按主播、带 uid 列）与 v2（全局、category_id/uids 引用）结构无法映射，
-   * 检出旧 uid 列即 DROP 重建为新结构（与 preference_clauses 同政策）。对新库幂等。
-   */
-  private migratePushRulesV2(): void {
-    const cols = this.db.prepare('PRAGMA table_info(push_rules)').all() as Array<{ name: string }>;
-    if (cols.length === 0 || !cols.some((c) => c.name === 'uid')) return;
-    this.db.exec(`
-      DROP TABLE push_rules;
-      CREATE TABLE push_rules (
-        id               INTEGER PRIMARY KEY AUTOINCREMENT,
-        name             TEXT    NOT NULL DEFAULT '',
-        category_id      INTEGER,
-        uids             TEXT    NOT NULL DEFAULT '[]',
-        channels         TEXT    NOT NULL DEFAULT '[]',
-        message_template TEXT,
-        enabled          INTEGER NOT NULL DEFAULT 1,
-        sort             INTEGER NOT NULL DEFAULT 0,
-        created_at       INTEGER NOT NULL,
-        updated_at       INTEGER NOT NULL
-      );
-    `);
-    log.info('push_rules 旧结构（按主播）已删除并重建为 v2 全局结构，旧规则需重新配置');
-  }
-
-  /**
-   * 旧 mode 列（off/silent/on）迁移为 watch/notify 开关后删除：
-   * off → watch=0；silent → notify=0。对新库（无 mode 列）幂等。
-   * 前置：watch/notify 列已由 ensureColumn 补好（默认 1）。
-   */
-  private migrateStreamerMode(): void {
-    const cols = this.db.prepare('PRAGMA table_info(streamers)').all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === 'mode')) return;
-    this.db.exec(`
-      UPDATE streamers SET watch = 0 WHERE mode = 'off';
-      UPDATE streamers SET notify = 0 WHERE mode = 'silent';
-      ALTER TABLE streamers DROP COLUMN mode;
-    `);
-    log.info('streamers 表 mode 列已迁移为 watch/notify 开关并删除');
-  }
-
-  /**
-   * preference_clauses（旧场景子句）已废弃：推送规则改用 push_rules 透明条件模型，
-   * 旧数据无法映射，直接 DROP。对新库幂等。
-   */
-  private migratePreferenceClauses(): void {
-    const row = this.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='preference_clauses'")
-      .get();
-    if (!row) return;
-    this.db.exec('DROP TABLE preference_clauses');
-    log.info('preference_clauses 表已废弃并删除（推送规则改用 push_rules 表）');
   }
 
   loadRoomStates(): Map<string, PrevState> {
@@ -632,30 +575,6 @@ export class Db {
     return rows.map((r) => r.uid).filter((uid) => /^\d+$/.test(uid));
   }
 
-  /**
-   * 仅当 streamers 为空时，把 config.json 的 subscriptions 种子导入。
-   * 返回导入条数（非空时返回 0，幂等）。
-   * 旧 mode 字段兼容映射：'off'→watch:false，'silent'→notify:false；
-   * 无 mode 时按 enabled 推导（false→watch:false）。
-   */
-  seedStreamersIfEmpty(
-    subs: Array<{ uid: string; alias: string; enabled: boolean; mode?: 'off' | 'silent' | 'on' }>,
-  ): number {
-    const { c } = this.db.prepare('SELECT COUNT(*) AS c FROM streamers').get() as { c: number };
-    if (c > 0 || subs.length === 0) return 0;
-    const tx = this.db.transaction(() => {
-      for (const s of subs) {
-        const mode = s.mode ?? (s.enabled ? 'on' : 'off');
-        this.upsertStreamer({
-          uid: s.uid, alias: s.alias, source: 'manual',
-          watch: mode !== 'off', notify: mode !== 'silent',
-        });
-      }
-    });
-    tx();
-    return subs.length;
-  }
-
   listStreamers(): Streamer[] {
     const rows = this.db.prepare('SELECT * FROM streamers ORDER BY created_at, uid').all() as StreamerRow[];
     return rows.map(rowToStreamer);
@@ -798,20 +717,6 @@ export class Db {
 
   deletePushChannel(id: number): boolean {
     return this.db.prepare('DELETE FROM push_channels WHERE id = ?').run(id).changes > 0;
-  }
-
-  /**
-   * 仅当 push_channels 为空时，把 config 的 notify 目标种子导入（onebot targets + toast）。
-   * 返回导入条数（非空时返回 0，幂等）。之后渠道以表为准，由面板管理。
-   */
-  seedPushChannelsIfEmpty(seeds: NewPushChannel[]): number {
-    const { c } = this.db.prepare('SELECT COUNT(*) AS c FROM push_channels').get() as { c: number };
-    if (c > 0 || seeds.length === 0) return 0;
-    const tx = this.db.transaction(() => {
-      for (const s of seeds) this.upsertPushChannel(s);
-    });
-    tx();
-    return seeds.length;
   }
 
   // ---- categories：分类规则（全局；LLM 提示词 + 确定性条件，归类结果入 verdicts）----

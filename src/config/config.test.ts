@@ -1,36 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { __stripJsonCommentsForTest as strip } from './index.js';
-import { configSchema } from './schema.js';
+import { configSchema, defaultAppConfig } from './schema.js';
 
-const minimal = {
-  notify: { onebot: { enabled: false }, toast: { enabled: true } },
-};
-
-test('subscriptions 可省略（已迁库，仅作种子）', () => {
-  const r = configSchema.safeParse(minimal);
+test('空对象/缺文件 → 全默认值（panel 默认 8787 开）', () => {
+  const r = configSchema.safeParse({});
   assert.ok(r.success, JSON.stringify(r.success ? {} : r.error.issues));
-  assert.deepEqual(r.data!.subscriptions, []);
+  assert.deepEqual(r.data!.panel, { enabled: true, port: 8787 });
 });
 
-test('follows 可省略，默认 1800s；间隔下限 300s', () => {
-  const r = configSchema.safeParse(minimal);
+test('schema 只认 panel 段：其余顶层字段剥离无视', () => {
+  const r = configSchema.safeParse({ panel: { port: 9999 }, pollIntervalSec: 10, subscriptions: [] });
   assert.ok(r.success);
-  assert.deepEqual(r.data!.follows, { syncIntervalSec: 1800 }, 'enabled 闸门已删（有 cookie 即跑）');
-
-  const tooLow = configSchema.safeParse({ ...minimal, follows: { syncIntervalSec: 60 } });
-  assert.equal(tooLow.success, false);
+  assert.equal(r.data!.panel.port, 9999);
+  assert.deepEqual(Object.keys(r.data!), ['panel'], '遗留字段不进解析结果');
 });
 
-test('subscriptions 是首次种子：不做语义校验（uid 重复也只是种子数据，upsert 天然去重）', () => {
-  const r = configSchema.safeParse({
-    ...minimal,
-    subscriptions: [
-      { uid: '123', alias: 'A' },
-      { uid: '123', alias: 'B' },
-    ],
-  });
-  assert.ok(r.success, '种子字段的语义校验已移除——config.json 不再是运行时信源');
+test('panel.port 越界仍启动即失败', () => {
+  assert.equal(configSchema.safeParse({ panel: { port: 0 } }).success, false);
+});
+
+test('defaultAppConfig：运行参数代码默认值', () => {
+  const app = defaultAppConfig();
+  assert.equal(app.pollIntervalSec, 45);
+  assert.equal(app.notify.onebot.enabled, false, 'QQ 通道默认关（面板高级设置开）');
+  assert.equal(app.notify.toast.enabled, true);
 });
 
 test('剥掉行注释', () => {
@@ -57,16 +51,12 @@ test('正确处理转义引号', () => {
   assert.equal(o.s, 'say "hi" // not comment');
 });
 
-test('保留换行以免行号错位', () => {
-  assert.match(strip('{\n// c\n"a":1}'), /\n/);
-});
-
 test('config.example.json 剥注释后是合法 JSON（只剩 panel 自举段）', async () => {
   const { readFileSync } = await import('node:fs');
   const { resolve } = await import('node:path');
   const { projectRoot } = await import('./index.js');
   const raw = readFileSync(resolve(projectRoot, 'config.example.json'), 'utf8');
   const parsed = JSON.parse(strip(raw.replace(/^﻿/, '')));
-  assert.deepEqual(Object.keys(parsed), ['panel'], '示例只保留面板自举段，其余字段都是遗留迁移来源，不展示');
+  assert.deepEqual(Object.keys(parsed), ['panel'], '示例只保留面板自举段');
   assert.equal(configSchema.safeParse(parsed).success, true);
 });

@@ -1,25 +1,18 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configSchema, type AppConfig } from './schema.js';
+import { configSchema, defaultAppConfig, type AppConfig } from './schema.js';
 import { setLogLevel, type LogLevel } from '../logger.js';
 
 export const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 export interface Secrets {
-  napcatBaseUrl: string;
-  napcatToken: string;
   dbPath: string;
 }
 
 export interface LoadedConfig {
   app: AppConfig;
   secrets: Secrets;
-  /**
-   * config.json 里出现的遗留顶层字段（panel 以外）。这些字段已不再是运行时信源：
-   * 启动时按迁移规则一次性入库（库空/未配置才导），装配处据此打日志提示用户删除。
-   */
-  legacyKeys: string[];
 }
 
 /** 极简 .env 解析。不引 dotenv：只需要 KEY=VALUE 和注释。 */
@@ -86,9 +79,8 @@ export function loadConfig(): LoadedConfig {
   if (['debug', 'info', 'warn', 'error'].includes(level)) setLogLevel(level);
 
   const cfgPath = resolve(projectRoot, 'config.json');
-  // config.json 全程可选，且只有 panel 段是活配置（面板自举）。其余顶层字段都是
-  // 遗留迁移来源：启动时一次性入库（库空/未配置才导），之后以 settings/库表为准。
-  // 文件不存在 = 全部用默认值启动。
+  // config.json 全程可选，且只有 panel 段是活配置（面板自举）；
+  // 其余顶层字段一律无视（zod 非 strict 剥离），文件不存在 = 全部用默认值
   let parsedJson: unknown = {};
   if (existsSync(cfgPath)) {
     try {
@@ -101,11 +93,6 @@ export function loadConfig(): LoadedConfig {
     }
   }
 
-  const legacyKeys =
-    parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)
-      ? Object.keys(parsedJson).filter((k) => k !== 'panel')
-      : [];
-
   const result = configSchema.safeParse(parsedJson);
   if (!result.success) {
     const lines = result.error.issues.map(
@@ -114,16 +101,9 @@ export function loadConfig(): LoadedConfig {
     throw new ConfigError(`config.json 校验失败:\n${lines.join('\n')}`);
   }
 
-  // onebot 端点检查在装配处（index.ts）做：napcat 生效配置（settings）发现失败
-  // 且 .env 无 NAPCAT_BASE_URL 才报错，这里不重复
-  const baseUrl = (process.env.NAPCAT_BASE_URL ?? '').replace(/\/+$/, '');
-
   return {
-    app: result.data,
-    legacyKeys,
+    app: { ...defaultAppConfig(), panel: result.data.panel },
     secrets: {
-      napcatBaseUrl: baseUrl,
-      napcatToken: process.env.NAPCAT_TOKEN ?? '',
       dbPath: process.env.DB_PATH || resolve(projectRoot, 'data', 'dd-claw.db'),
     },
   };
@@ -132,4 +112,4 @@ export function loadConfig(): LoadedConfig {
 export { ConfigError };
 /** 仅供测试。生产代码不要用。 */
 export { stripJsonComments as __stripJsonCommentsForTest };
-export type { AppConfig, NotifyTarget, Subscription, LlmProviderConfig } from './schema.js';
+export type { AppConfig, LlmProviderConfig } from './schema.js';

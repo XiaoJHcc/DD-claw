@@ -16,7 +16,7 @@ function tmpdir_(t: import('node:test').TestContext, afterClose: () => void): st
   return dir;
 }
 
-/** 手工建一个「旧 schema」库：room_state / streamers / follows 均不含新列 */
+/** 手工建一个「旧 schema」库：room_state / streamers / follows 均不含后加的展示列 */
 function makeOldDb(path: string): void {
   const raw = new Database(path);
   raw.exec(`
@@ -27,8 +27,8 @@ function makeOldDb(path: string): void {
     CREATE TABLE streamers (
       uid TEXT PRIMARY KEY, uname TEXT NOT NULL DEFAULT '', alias TEXT,
       room_id TEXT, weibo_uid TEXT,
-      mode TEXT NOT NULL DEFAULT 'on' CHECK(mode IN ('off','silent','on')),
-      analyze INTEGER NOT NULL DEFAULT 0, profile_note TEXT,
+      watch INTEGER NOT NULL DEFAULT 1, analyze INTEGER NOT NULL DEFAULT 0,
+      notify INTEGER NOT NULL DEFAULT 1, profile_note TEXT,
       source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('follows','manual')),
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
@@ -38,8 +38,8 @@ function makeOldDb(path: string): void {
       is_followed INTEGER NOT NULL DEFAULT 1
     );
     INSERT INTO room_state VALUES ('1', '80397', 1, 1785310737, '旧标题', 1800000000);
-    INSERT INTO streamers (uid, uname, mode, source, created_at, updated_at)
-      VALUES ('1', '旧主播', 'on', 'manual', 1800000000, 1800000000);
+    INSERT INTO streamers (uid, uname, source, created_at, updated_at)
+      VALUES ('1', '旧主播', 'manual', 1800000000, 1800000000);
     INSERT INTO follows VALUES ('1', '旧关注', 1800000000, 1800000000, 1);
   `);
   raw.close();
@@ -66,7 +66,6 @@ test('旧库迁移：新列补齐，旧数据原样保留', (t) => {
   for (const col of ['face', 'watch', 'notify', 'weibo_nick']) {
     assert.ok(columns(path, 'streamers').includes(col), `streamers 应补列 ${col}`);
   }
-  assert.ok(!columns(path, 'streamers').includes('mode'), 'streamers 旧 mode 列应被删除');
   assert.ok(columns(path, 'follows').includes('face'), 'follows 应补列 face');
 
   // 旧数据还在，新列读出为缺省值
@@ -78,84 +77,10 @@ test('旧库迁移：新列补齐，旧数据原样保留', (t) => {
   const st = db.getStreamer('1')!;
   assert.equal(st.uname, '旧主播');
   assert.equal(st.face, null);
-  assert.equal(st.watch, true, '旧 mode=on → watch=1');
+  assert.equal(st.watch, true);
   assert.equal(st.notify, true);
   assert.equal(st.weiboNick, null);
   assert.equal(db.listFollows().find((f) => f.uid === '1')?.uname, '旧关注');
-});
-
-test('旧 mode 列迁移：off→watch=0，silent→notify=0，mode 列删除且幂等', (t) => {
-  let db: Db | undefined;
-  const path = join(tmpdir_(t, () => db?.close()), 'mig.db');
-  const raw = new Database(path);
-  raw.exec(`
-    CREATE TABLE streamers (
-      uid TEXT PRIMARY KEY, uname TEXT NOT NULL DEFAULT '', alias TEXT,
-      room_id TEXT, weibo_uid TEXT,
-      mode TEXT NOT NULL DEFAULT 'on' CHECK(mode IN ('off','silent','on')),
-      analyze INTEGER NOT NULL DEFAULT 0, profile_note TEXT,
-      source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('follows','manual')),
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    INSERT INTO streamers (uid, uname, mode, analyze, created_at, updated_at) VALUES
-      ('1', 'A', 'on', 1, 1800000000, 1800000000),
-      ('2', 'B', 'off', 0, 1800000000, 1800000000),
-      ('3', 'C', 'silent', 0, 1800000000, 1800000000);
-  `);
-  raw.close();
-
-  db = new Db(path);
-
-  assert.ok(!columns(path, 'streamers').includes('mode'), 'mode 列应被删除');
-  const s1 = db.getStreamer('1')!;
-  assert.deepEqual([s1.watch, s1.notify, s1.analyze], [true, true, true], 'on → 全开，analyze 保留');
-  const s2 = db.getStreamer('2')!;
-  assert.deepEqual([s2.watch, s2.notify], [false, true], 'off → watch=0');
-  const s3 = db.getStreamer('3')!;
-  assert.deepEqual([s3.watch, s3.notify], [true, false], 'silent → notify=0');
-
-  // 幂等：再开一次（无 mode 列）不报错、数据不变
-  db.close();
-  db = new Db(path);
-  assert.deepEqual(
-    [db.getStreamer('2')!.watch, db.getStreamer('3')!.notify],
-    [false, false],
-    '二次打开不重复迁移',
-  );
-});
-
-test('push_rules v1（带 uid 列）开库即 DROP 重建为 v2，新三表齐备且幂等', (t) => {
-  let db: Db | undefined;
-  const path = join(tmpdir_(t, () => db?.close()), 'mig.db');
-  const raw = new Database(path);
-  raw.exec(`
-    CREATE TABLE push_rules (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      uid TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
-      keywords TEXT NOT NULL DEFAULT '[]', areas TEXT NOT NULL DEFAULT '[]',
-      channels TEXT NOT NULL DEFAULT '[]', message_template TEXT,
-      enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    INSERT INTO push_rules (uid, name, created_at, updated_at) VALUES ('1', '旧规则', 1, 1);
-  `);
-  raw.close();
-
-  db = new Db(path);
-  assert.ok(!columns(path, 'push_rules').includes('uid'), '旧 uid 列应随表 DROP');
-  for (const col of ['category_id', 'uids', 'channels']) {
-    assert.ok(columns(path, 'push_rules').includes(col), `push_rules v2 应有列 ${col}`);
-  }
-  assert.equal(db.listPushRules().length, 0, '旧规则不迁移（结构无法映射，清库重建）');
-  assert.deepEqual(db.listCategories(), [], 'categories 表可用');
-  assert.deepEqual(db.listVerdicts('r1', 1), [], 'verdicts 表可用');
-
-  // 幂等：v2 数据二次打开原样保留
-  db.upsertPushRule({ name: '新规则', categoryId: null, uids: [], channels: [], messageTemplate: null, enabled: true });
-  db.close();
-  db = new Db(path);
-  assert.equal(db.listPushRules().length, 1, 'v2 结构不再触发重建');
-  assert.equal(db.listPushRules()[0]!.name, '新规则');
 });
 
 test('全新库直接建出 v2 push_rules + categories + verdicts', (t) => {

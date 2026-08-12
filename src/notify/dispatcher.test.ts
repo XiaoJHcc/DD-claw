@@ -31,11 +31,9 @@ function harness(t: import('node:test').TestContext) {
 
 /** 种子三条渠道：1=toast / 2=onebot 群 / 3=onebot 私聊（停用） */
 function seedChannels(db: Db): void {
-  db.seedPushChannelsIfEmpty([
-    { name: '系统通知', notifier: 'toast', targetType: null, targetId: null, enabled: true },
-    { name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '11111', enabled: true },
-    { name: '私聊', notifier: 'onebot', targetType: 'private', targetId: '22222', enabled: false },
-  ]);
+  db.upsertPushChannel({ name: '系统通知', notifier: 'toast', targetType: null, targetId: null, enabled: true });
+  db.upsertPushChannel({ name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '11111', enabled: true });
+  db.upsertPushChannel({ name: '私聊', notifier: 'onebot', targetType: 'private', targetId: '22222', enabled: false });
 }
 
 test('channels 路由：按 notifier 分组，onebot 渠道解析成 msg.targets', async (t) => {

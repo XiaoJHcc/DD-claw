@@ -23,7 +23,6 @@ import {
 import {
   fetchWeiboSelf, loadWeiboCookies, saveWeiboCookies, weiboCookieHeader, type WeiboSelfInfo,
 } from '../sources/weibo/auth.js';
-import type { AppConfig } from '../config/index.js';
 import { llmProviderSchema, type LlmProviderConfig } from '../config/schema.js';
 import { deriveRoutes, isLlmEnabled, setLlmEnabled, type LlmRouter } from '../analysis/providers.js';
 import { isListenEnabled, listenSetting, setListen, type ListenFeature } from '../core/listen.js';
@@ -87,10 +86,9 @@ export interface PanelDeps {
    * key 在本机面板明文回显/编辑（用户决策 2026-08-06，只绑 127.0.0.1）；key 不进日志。
    */
   llm?: {
-    config: AppConfig['llm'];
     /** 注入后 GET /api/llm 带运行状态；PUT key 后 router.refreshKeys() 热更新 */
     router?: LlmRouter;
-    /** provider 名单管理（settings 表是事实来源）；不注入则 providers CRUD 404 */
+    /** provider 名单管理（settings 表是唯一信源）；不注入则 providers CRUD 404 */
     store?: {
       list(): LlmProviderConfig[];
       save(providers: LlmProviderConfig[]): void;
@@ -805,30 +803,25 @@ function putListen(deps: PanelDeps, feature: ListenFeature, body: unknown): unkn
 
 // ---- LLM key 管理（settings 表 llm_key:<providerName>；本机面板，值可回显/编辑）----
 
-/** key 来源、池子大小与值本身：panel = 面板填写（优先）；env = .env keyEnvs；unset = 未设置 */
+/** key 来源、池子大小与值本身：panel = 面板填写；unset = 未设置（key 唯一来源是 settings） */
 function llmKeySource(
   db: Db,
   p: LlmProviderConfig,
-): { source: 'panel' | 'env' | 'unset'; count: number; value: string | null } {
+): { source: 'panel' | 'unset'; count: number; value: string | null } {
   const panel = db.getSetting(`llm_key:${p.name}`);
   if (panel && panel.trim()) {
     const v = panel.trim();
     return { source: 'panel', count: v.split(',').map((s) => s.trim()).filter(Boolean).length, value: v };
   }
-  const envKeys = p.keyEnvs
-    .map((n) => process.env[n])
-    .filter((k): k is string => !!k);
-  if (envKeys.length > 0) return { source: 'env', count: envKeys.length, value: envKeys.join(',') };
   return { source: 'unset', count: 0, value: null };
 }
 
 function llmInfo(deps: PanelDeps): unknown {
-  const cfg = deps.llm!.config;
-  const list = deps.llm!.store?.list() ?? cfg.providers;
+  const list = deps.llm!.store?.list() ?? [];
   const routes = deriveRoutes(list);
   const statusByName = new Map((deps.llm!.router?.describe() ?? []).map((s) => [s.name, s.status]));
   return {
-    enabled: isLlmEnabled(deps.db, cfg),
+    enabled: isLlmEnabled(deps.db),
     providers: list.map((p) => ({
       name: p.name,
       baseURL: p.baseURL,
@@ -911,12 +904,12 @@ function putLlmProviderOrder(deps: PanelDeps, body: unknown): unknown {
   return { ok: true };
 }
 
-/** 保存/清除 key：按 provider 存 settings 表；空 value = 清除面板填写（回退 .env keyEnvs） */
+/** 保存/清除 key：按 provider 存 settings 表；空 value = 清除已填 key */
 function putLlmKey(deps: PanelDeps, body: unknown): unknown {
   const b = (body ?? {}) as Record<string, unknown>;
   const name = typeof b.provider === 'string' ? b.provider.trim() : '';
   const value = typeof b.value === 'string' ? b.value.trim() : '';
-  const list = deps.llm!.store?.list() ?? deps.llm!.config.providers;
+  const list = deps.llm!.store?.list() ?? [];
   const provider = list.find((p) => p.name === name);
   if (!provider) throw new HttpError(404, `provider 不存在: ${name}`);
   if (value && !/^[^\s,]+(\s*,\s*[^\s,]+)*$/.test(value)) {

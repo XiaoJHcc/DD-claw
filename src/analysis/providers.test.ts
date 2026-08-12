@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   OpenAiProvider, LlmRouter, AllProvidersExhaustedError, createLlmRouter,
-  seedLlmProvidersIfEmpty, listLlmProviders, saveLlmProviders, deriveRoutes,
-  isLlmEnabled, setLlmEnabled, envKeysOf, dbKeysOf, migrateLiteralKeys,
+  listLlmProviders, saveLlmProviders, deriveRoutes,
+  isLlmEnabled, setLlmEnabled, dbKeysOf,
   type ChatMessage, type FetchLike,
 } from './providers.js';
 import { Db } from '../core/db.js';
-import type { LlmProviderConfig, AppConfig } from '../config/index.js';
+import type { LlmProviderConfig } from '../config/index.js';
 
 function spec(over: Partial<LlmProviderConfig> = {}): LlmProviderConfig {
   return {
@@ -178,7 +178,7 @@ test('keyEnvs 声明了但 env 全空 → 标缺 key 并跳过', async () => {
         spec({ name: 'local', baseURL: 'http://127.0.0.1:1234/v1' }),
       ],
     },
-    envKeysOf({}),
+    () => [], // 无 key：云端标「缺 key」跳过，本地无鉴权端点 ready
     { fetchFn: fn },
   );
   const d = router.describe();
@@ -190,13 +190,13 @@ test('keyEnvs 声明了但 env 全空 → 标缺 key 并跳过', async () => {
   assert.equal((calls[0]!.init.headers as Record<string, string>).Authorization, undefined, '无 key 端点不带 Authorization');
 });
 
-test('createLlmRouter 从 env 解析 key', () => {
+test('createLlmRouter 从 keysOf 解析 key', () => {
   const router = createLlmRouter(
     {
       requestTimeoutMs: 5000, circuitThreshold: 2, circuitCooldownMs: 60_000,
-      providers: [spec({ name: 'ds', keyEnvs: ['TEST_DS_KEY'] })],
+      providers: [spec({ name: 'ds' })],
     },
-    envKeysOf({ TEST_DS_KEY: 'sk-test' }),
+    () => ['sk-test'],
   );
   assert.equal(router.describe()[0]!.status, 'ready');
 });
@@ -353,12 +353,11 @@ test('refreshKeys：resolver 值变化后热更新，轮询归零', async () => 
 
 // ---- provider 名单存储（settings 表）与路由推导 ----
 
-test('seedLlmProvidersIfEmpty：仅空库种子一次；list/save 往返', () => {
+test('listLlmProviders/saveLlmProviders 往返（settings 表唯一信源）', () => {
   const db = new Db(':memory:');
   try {
     assert.equal(listLlmProviders(db).length, 0);
-    assert.equal(seedLlmProvidersIfEmpty(db, [spec({ name: 'a' })]), 1, '空库种子');
-    assert.equal(seedLlmProvidersIfEmpty(db, [spec({ name: 'b' })]), 0, '已有名单不再种子');
+    saveLlmProviders(db, [spec({ name: 'a' })]);
     assert.deepEqual(listLlmProviders(db).map((p) => p.name), ['a']);
     saveLlmProviders(db, [spec({ name: 'c', vision: true })]);
     assert.deepEqual(listLlmProviders(db).map((p) => p.name), ['c']);
@@ -376,44 +375,28 @@ test('deriveRoutes：顺序即优先级；vision 路由只含启用的多模态'
   assert.deepEqual(routes, { text: ['t1', 'v1'], vision: ['v1'] }, '多模态也能接纯文本任务');
 });
 
-test('isLlmEnabled：settings 覆盖（1/0）> config 默认', () => {
+test('isLlmEnabled：settings 唯一信源，缺省 = 关', () => {
   const db = new Db(':memory:');
   try {
-    assert.equal(isLlmEnabled(db, { enabled: false }), false, '无覆盖用 config 默认');
-    assert.equal(isLlmEnabled(db, { enabled: true }), true);
+    assert.equal(isLlmEnabled(db), false, '缺省关');
     setLlmEnabled(db, true);
-    assert.equal(isLlmEnabled(db, { enabled: false }), true, '面板打开覆盖 config 关');
+    assert.equal(isLlmEnabled(db), true);
     setLlmEnabled(db, false);
-    assert.equal(isLlmEnabled(db, { enabled: true }), false, '面板关闭覆盖 config 开');
+    assert.equal(isLlmEnabled(db), false);
   } finally {
     db.close();
   }
 });
 
-test('dbKeysOf：面板填写（逗号分隔多 key）优先，未填回退 env keyEnvs', () => {
+test('dbKeysOf：面板填写（逗号分隔多 key）是唯一来源', () => {
   const db = new Db(':memory:');
   try {
-    const keysOf = dbKeysOf(db, { ENV_A: 'env-a' });
-    assert.deepEqual(keysOf(spec({ name: 'p', keyEnvs: ['ENV_A'] })), ['env-a'], '回退 env');
+    const keysOf = dbKeysOf(db);
+    assert.deepEqual(keysOf(spec({ name: 'p' })), [], '未填 = 无 key');
     db.setSetting('llm_key:p', 'sk-1, sk-2');
-    assert.deepEqual(keysOf(spec({ name: 'p', keyEnvs: ['ENV_A'] })), ['sk-1', 'sk-2'], '面板优先且拆分多 key');
+    assert.deepEqual(keysOf(spec({ name: 'p' })), ['sk-1', 'sk-2'], '拆分多 key');
     db.setSetting('llm_key:p', '  ');
-    assert.deepEqual(keysOf(spec({ name: 'p', keyEnvs: ['ENV_A'] })), ['env-a'], '空白 = 未填，回退 env');
-  } finally {
-    db.close();
-  }
-});
-
-test('migrateLiteralKeys：误填进 keyEnvs 的 key 值挪进 key 存储，不再明文留在名单里', () => {
-  const db = new Db(':memory:');
-  try {
-    saveLlmProviders(db, [spec({ name: 'k', keyEnvs: ['sk-kimi-abc-123', 'REAL_ENV_NAME'] })]);
-    assert.equal(migrateLiteralKeys(db), 1);
-    const p = listLlmProviders(db)[0]!;
-    assert.deepEqual(p.keyEnvs, ['REAL_ENV_NAME'], 'keyEnvs 只剩真变量名');
-    assert.equal(db.getSetting('llm_key:k'), 'sk-kimi-abc-123', 'key 值进只写不读存储');
-    assert.ok(!JSON.stringify(p).includes('sk-kimi'), '名单里不再有 key 值');
-    assert.equal(migrateLiteralKeys(db), 0, '幂等，不再迁移');
+    assert.deepEqual(keysOf(spec({ name: 'p' })), [], '空白 = 未填');
   } finally {
     db.close();
   }

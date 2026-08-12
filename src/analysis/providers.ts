@@ -40,51 +40,17 @@ export interface LlmRequest {
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
-/** key 解析器：按 provider 定义给出 key 池（面板填写 > .env keyEnvs，由装配处选择实现） */
+/** key 解析器：按 provider 定义给出 key 池 */
 export type SpecKeysOf = (spec: LlmProviderConfig) => string[];
 
-/** 默认解析：keyEnvs 里的变量名逐个查 env */
-export function envKeysOf(env: NodeJS.ProcessEnv = process.env): SpecKeysOf {
-  return (spec) => spec.keyEnvs.map((n) => env[n]).filter((k): k is string => !!k);
-}
-
-/**
- * 生产解析：面板填写的 key（settings 表 `llm_key:<providerName>`，逗号分隔多 key）
- * 优先；没填才回退 keyEnvs 环境变量。
- */
-export function dbKeysOf(db: Db, env: NodeJS.ProcessEnv = process.env): SpecKeysOf {
-  const fromEnv = envKeysOf(env);
+/** 生产解析：面板填写的 key（settings 表 `llm_key:<providerName>`，逗号分隔多 key），唯一来源 */
+export function dbKeysOf(db: Db): SpecKeysOf {
   return (spec) => {
     const panel = db.getSetting(`llm_key:${spec.name}`);
-    if (panel && panel.trim()) {
-      return panel.split(',').map((s) => s.trim()).filter(Boolean);
-    }
-    return fromEnv(spec);
+    return panel && panel.trim()
+      ? panel.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
   };
-}
-
-const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/**
- * 一次性迁移：早期面板把 key 值本身误填进 keyEnvs（环境变量名）字段的，
- * 识别出来（不是合法变量名 = 是 key 值）挪进只写不读的 `llm_key:<name>`，
- * keyEnvs 只保留真变量名。迁移后 key 值不再出现在 provider 定义和任何展示里。
- * 返回迁移的 provider 数；值绝不进日志。
- */
-export function migrateLiteralKeys(db: Db): number {
-  const list = listLlmProviders(db);
-  let migrated = 0;
-  const next = list.map((p) => {
-    const literals = p.keyEnvs.filter((e) => !ENV_NAME_RE.test(e));
-    if (literals.length === 0) return p;
-    migrated++;
-    const existing = db.getSetting(`llm_key:${p.name}`);
-    const merged = [existing?.trim(), ...literals].filter(Boolean).join(',');
-    db.setSetting(`llm_key:${p.name}`, merged);
-    return { ...p, keyEnvs: p.keyEnvs.filter((e) => ENV_NAME_RE.test(e)) };
-  });
-  if (migrated > 0) saveLlmProviders(db, next);
-  return migrated;
 }
 
 /** 单次调用失败（HTTP 错误 / 响应缺内容 / JSON 解析失败），计入熔断 */
@@ -440,13 +406,13 @@ function hasImage(messages: ChatMessage[]): boolean {
 }
 
 /**
- * 从配置装配 router。keysOf 缺省 = keyEnvs 逐个查 process.env；
- * 生产用 dbKeysOf(db)（面板填写 > .env）。路由由 provider 列表自动推导
+ * 从配置装配 router。keysOf 缺省 = 无 key（本地无鉴权端点用）；
+ * 生产用 dbKeysOf(db)（面板填写的 key，唯一来源）。路由由 provider 列表自动推导
  *（deriveRoutes），顺序即优先级。
  */
 export function createLlmRouter(
-  cfg: Omit<AppConfig['llm'], 'enabled'>,
-  keysOf: SpecKeysOf = envKeysOf(),
+  cfg: AppConfig['llm'] & { providers: LlmProviderConfig[] },
+  keysOf: SpecKeysOf = () => [],
   opts?: Partial<ProviderOptions>,
 ): LlmRouter {
   const providers = cfg.providers.map((spec) =>
@@ -460,16 +426,9 @@ export function createLlmRouter(
   return new LlmRouter(providers, deriveRoutes(cfg.providers), keysOf);
 }
 
-// ---- provider 名单：settings 表是事实来源（面板管理），config.json 仅作首次种子 ----
+// ---- provider 名单：settings 表是唯一信源（面板 LLM 卡片管理）----
 
 const LLM_PROVIDERS_SETTING = 'llm_providers';
-
-/** 仅当 settings 里没有 llm_providers 且 config 提供了名单时种子导入；返回导入数 */
-export function seedLlmProvidersIfEmpty(db: Db, providers: LlmProviderConfig[]): number {
-  if (db.getSetting(LLM_PROVIDERS_SETTING) !== null || providers.length === 0) return 0;
-  db.setSetting(LLM_PROVIDERS_SETTING, JSON.stringify(providers));
-  return providers.length;
-}
 
 export function listLlmProviders(db: Db): LlmProviderConfig[] {
   const raw = db.getSetting(LLM_PROVIDERS_SETTING);
@@ -481,15 +440,12 @@ export function saveLlmProviders(db: Db, providers: LlmProviderConfig[]): void {
   db.setSetting(LLM_PROVIDERS_SETTING, JSON.stringify(providers));
 }
 
-// ---- LLM 总开关：settings 表覆盖（'1'/'0'）> config.json 默认值 ----
+// ---- LLM 总开关：settings 表（'1'/'0'），缺省 = 关 ----
 
 const LLM_ENABLED_SETTING = 'llm_enabled';
 
-export function isLlmEnabled(db: Db, cfg: { enabled: boolean }): boolean {
-  const v = db.getSetting(LLM_ENABLED_SETTING);
-  if (v === '1') return true;
-  if (v === '0') return false;
-  return cfg.enabled;
+export function isLlmEnabled(db: Db): boolean {
+  return db.getSetting(LLM_ENABLED_SETTING) === '1';
 }
 
 export function setLlmEnabled(db: Db, on: boolean): void {

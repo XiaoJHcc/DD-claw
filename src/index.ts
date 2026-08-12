@@ -7,12 +7,12 @@ import { Pipeline } from './core/pipeline.js';
 import { toLiveEvent } from './core/types.js';
 import { AnalysisQueue } from './analysis/queue.js';
 import { RulesClassifier } from './analysis/classifier.js';
-import { createLlmRouter, seedLlmProvidersIfEmpty, listLlmProviders, saveLlmProviders, isLlmEnabled, dbKeysOf, migrateLiteralKeys } from './analysis/providers.js';
+import { createLlmRouter, listLlmProviders, saveLlmProviders, isLlmEnabled, dbKeysOf } from './analysis/providers.js';
 import { OncePerSessionRule } from './rules/once-per-session.js';
 import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
 import {
-  NapcatWatchdog, readOnebotEndpoint, probeNapCat, getNapcatConfig, saveNapcatConfig, seedNapcatConfigIfUnset,
+  NapcatWatchdog, readOnebotEndpoint, probeNapCat, getNapcatConfig, saveNapcatConfig,
   ensureNapcatEntry,
   isNapcatTaskRegistered, setupNapcatTask, launchNapcatViaTask, stopNapcatViaTask, NAPCAT_TASK_NAME,
 } from './notify/napcat.js';
@@ -31,12 +31,9 @@ import { loadWeiboCookies, weiboCookieHeader, type WeiboSelfInfo } from './sourc
 import { WeiboFeedSource } from './sources/weibo/feed.js';
 import type { NewPushChannel } from './core/push.js';
 import { shouldRunListen } from './core/listen.js';
-import {
-  getRuntimeConfig, seedRuntimeConfigIfUnset, withRuntimeConfig,
-} from './core/runtime-config.js';
+import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
-import type { Source } from './sources/types.js';
 
 const log = makeLogger('main');
 
@@ -68,7 +65,7 @@ function parseArgs(argv: string[]): Args {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const { app, secrets, legacyKeys } = loadConfig();
+  const { app, secrets } = loadConfig();
 
   // --napcat-setup 一次性提权设置：创建「最高权限」计划任务（弹一次 UAC），
   // 之后看门狗用 schtasks /run 静默拉起 NapCat。做完即退出，不启动主流程。
@@ -77,9 +74,8 @@ async function main(): Promise<void> {
       log.error('--napcat-setup 目前仅支持 Windows');
       process.exit(1);
     }
-    // 生效配置在 settings 表（面板 NapCat 卡片）；config napcat 段仅首次种子
+    // 生效配置在 settings 表（面板 NapCat 卡片）
     const setupDb = new Db(secrets.dbPath);
-    seedNapcatConfigIfUnset(setupDb, app.napcat);
     const nc = getNapcatConfig(setupDb);
     if (!nc.enabled || !nc.dir || !/^\d+$/.test(nc.uin)) {
       log.error('NapCat 未配置：请在面板 NapCat 卡片启用并填写一键包目录与机器人 QQ');
@@ -137,12 +133,9 @@ async function main(): Promise<void> {
   // --probe-llm 验证 LLM 接线：列出 provider 状态 + 向 text 路由发一个 ping。
   // vision 路由只报可用性（没有真实图就不消耗多模态额度），填了 key 后跑这个确认链路
   if (args.probeLlm) {
-    // 口径与主流程一致：开库读面板覆盖（provider 名单 / 总开关 / key / 超时熔断参数）
+    // 口径与主流程一致：开库读面板配置（provider 名单 / 总开关 / key / 超时熔断参数）
     const probeDb = new Db(secrets.dbPath);
-    seedLlmProvidersIfEmpty(probeDb, app.llm.providers);
-    migrateLiteralKeys(probeDb);
-    seedRuntimeConfigIfUnset(probeDb, app);
-    if (!isLlmEnabled(probeDb, app.llm)) {
+    if (!isLlmEnabled(probeDb)) {
       log.error('LLM 未启用：在控制面板的 LLM 卡片打开总开关');
       process.exit(1);
     }
@@ -182,29 +175,17 @@ async function main(): Promise<void> {
 
   const db = new Db(secrets.dbPath);
 
-  // LLM：provider 名单事实来源是 settings 表（面板增删改），config 仅作首次种子；
-  // 路由由名单自动推导（顺序 = 优先级）。key 优先级：面板填写 > .env。
+  // LLM：provider 名单与 key 的唯一信源是 settings 表（面板 LLM 卡片管理）；
+  // 路由由名单自动推导（顺序 = 优先级）。超时/熔断参数读 settings（高级设置卡）。
   // 面板改名单 → onProvidersChanged 重建 router；改 key → refreshKeys。均免重启。
-  // 分析任务（scene-classify 等）后续从 llmDep.router 取
-  const seededLlm = seedLlmProvidersIfEmpty(db, app.llm.providers);
-  if (seededLlm > 0) {
-    log.info(`已从 config.json 种子导入 ${seededLlm} 个 LLM provider 到 settings 表，之后由面板管理`);
-  }
-  // 早期面板误把 key 值填进 keyEnvs（变量名）字段的，挪进只写不读的 key 存储（一次性，值不进日志）
-  const migratedKeys = migrateLiteralKeys(db);
-  if (migratedKeys > 0) {
-    log.info(`已把 ${migratedKeys} 个 provider 误填的 key 迁移到 key 存储（不再明文展示）`);
-  }
   const llmKeysOf = dbKeysOf(db);
   const llmDep: NonNullable<PanelDeps['llm']> = {
-    config: app.llm,
     store: {
       list: () => listLlmProviders(db),
       save: (ps) => saveLlmProviders(db, ps),
     },
   };
   llmDep.onProvidersChanged = () => {
-    // 超时/熔断参数也是 settings 信源（高级设置卡），重建时取最新生效值
     llmDep.router = createLlmRouter(
       { ...withRuntimeConfig(app, getRuntimeConfig(db)).llm, providers: listLlmProviders(db) },
       llmKeysOf,
@@ -212,67 +193,26 @@ async function main(): Promise<void> {
   };
   llmDep.onProvidersChanged();
 
-  // 监听名单事实来源是 streamers 表；config.json 的 subscriptions 仅作首次种子
-  const seeded = db.seedStreamersIfEmpty(app.subscriptions);
-  if (seeded > 0) log.info(`已从 config.json 种子导入 ${seeded} 个主播到 streamers 表，之后由面板管理`);
-
-  // 推送渠道事实来源是 push_channels 表；config 的 notify 目标仅作首次种子
-  // （config 的 onebot.targets 另作 --test-notify 验证目标，zod 校验不变）
-  const channelSeeds: NewPushChannel[] = [];
-  if (app.notify.onebot.enabled) {
-    for (const t of app.notify.onebot.targets) {
-      if (!t.enabled) continue;
-      channelSeeds.push({
-        name: `${t.type === 'group' ? 'QQ群' : 'QQ私聊'} ${t.id}`,
-        notifier: 'onebot', targetType: t.type, targetId: t.id, enabled: true,
-      });
-    }
-  }
-  if (app.notify.toast.enabled) {
-    channelSeeds.push({ name: '系统通知', notifier: 'toast', targetType: null, targetId: null, enabled: true });
-  }
-  const seededChannels = db.seedPushChannelsIfEmpty(channelSeeds);
-  if (seededChannels > 0) log.info(`已从 config 种子导入 ${seededChannels} 个推送渠道到 push_channels 表，之后由面板管理`);
-
-  // NapCat 生效配置：settings 表唯一信源；config.json napcat 段仅首次启动种子导入
-  seedNapcatConfigIfUnset(db, app.napcat);
-
   // 运行时参数（轮询间隔/告警阈值/冷启动推送/LLM 超时熔断/通道开关）：
-  // settings 表唯一信源（面板高级设置卡），config 同名字段仅首次种子；
-  // eff = config 叠加 settings 后的生效配置，sources/router/装配闸门都消费它
-  seedRuntimeConfigIfUnset(db, app);
+  // settings 表唯一信源（面板高级设置卡）；
+  // eff = 代码默认值叠加 settings 后的生效配置，sources/router/装配闸门都消费它
   let eff = withRuntimeConfig(app, getRuntimeConfig(db));
 
-  // config.json 里 panel 以外的字段都是遗留迁移来源：上面的种子已按
-  //「库空/未配置才导」处理过，之后以 settings/库表为准——提示用户删掉，不留
-  //「改了不生效」的陷阱
-  if (legacyKeys.length > 0) {
-    log.warn(
-      `config.json 含遗留字段（${legacyKeys.join(', ')}）：其值已按迁移规则入库（仅库空/未配置时生效）。` +
-      '这些字段已不再是配置入口，改 config.json 不会生效，请删除（panel 段可保留）',
-    );
-  }
-
   // 通道装配：开关在 settings（高级设置卡），热切换走 reconcileRuntime。
-  // onebot 端点：napcat enabled 时走 dd-claw 专属条目（缺了自动创建、被占自动换），
-  // .env NAPCAT_BASE_URL 降为兜底；都不可得 = 降级不装配（没配 QQ 是正常状态），不阻塞主流程
+  // onebot 端点只读跟随 NapCat 自己的 onebot11 配置（dd-claw 专属条目，缺了自动创建、
+  // 被占自动换）；发现失败 = 降级不装配（没配 QQ 是正常状态），不阻塞主流程
   let onebotNotifier: OneBotNotifier | null = null;
   const buildOnebot = async (): Promise<OneBotNotifier | null> => {
     const nc = getNapcatConfig(db);
     const discovered = nc.enabled && process.platform === 'win32'
       ? (readOnebotEndpoint(nc.dir, nc.uin) ?? await ensureNapcatEntry(nc.dir, nc.uin))
       : null;
-    if (nc.enabled && process.platform === 'win32' && !discovered) {
-      log.warn(`napcat.enabled=true 但未能从 ${nc.dir} 发现/创建 OneBot 端点，退回 .env NAPCAT_BASE_URL`);
-    }
-    const baseUrl = discovered?.baseUrl ?? secrets.napcatBaseUrl;
-    const token = discovered?.token ?? secrets.napcatToken;
-    if (!baseUrl) {
-      log.error('QQ 通道已启用但无可用端点（面板 NapCat 卡片未配置且 .env 无 NAPCAT_BASE_URL），QQ 推送暂不装配');
+    if (!discovered) {
+      log.error('QQ 通道已启用但未能从 NapCat 配置发现端点（面板 NapCat 卡片未配置？），QQ 推送暂不装配');
       return null;
     }
-    if (discovered) log.info(`onebot 端点跟随 NapCat 配置: ${baseUrl}`);
-    return new OneBotNotifier(baseUrl, token);
+    log.info(`onebot 端点跟随 NapCat 配置: ${discovered.baseUrl}`);
+    return new OneBotNotifier(discovered.baseUrl, discovered.token);
   };
   let toastAumid: string | undefined; // ensureToastAumid 幂等，热切换复用
   const buildToast = async (): Promise<ToastNotifier> => {
@@ -309,24 +249,24 @@ async function main(): Promise<void> {
       keyframe: 'https://i0.hdslb.com/bfs/live-key-frame/keyframe08052341000000080397it5906.jpg',
       face: 'https://i2.hdslb.com/bfs/face/bd4253b0eb80684a86efa0097935004527bcc773.jpg',
     }, '测试'));
-    // onebot 常规发送只看 msg.targets（渠道路由之外的兼容路径）：拿 config 的启用目标当测试目标
-    fake.targets = app.notify.onebot.targets
-      .filter((t) => t.enabled)
-      .map((t) => ({ type: t.type, id: t.id }));
+    // onebot 常规发送只看 msg.targets：测试目标取 push_channels 表里的启用 QQ 渠道
+    fake.targets = db.listPushChannels()
+      .filter((c) => c.notifier === 'onebot' && c.enabled && c.targetType && c.targetId)
+      .map((c) => ({ type: c.targetType!, id: c.targetId! }));
     await dispatcher.broadcast(fake);
     db.close();
     return;
   }
 
   // 装配：bus → pipeline（编排唯一入口）→ sources（只产信号）
-  // 分类器：router 用 getter 每轮取最新（面板改名单热重建），LLM 总开关读 settings 覆盖
+  // 分类器：router 用 getter 每轮取最新（面板改名单热重建），LLM 总开关读 settings
   const bus = new Bus();
   const pipeline = new Pipeline({
     bus,
     db,
     config: eff,
     queue: new AnalysisQueue(
-      new RulesClassifier(db, () => llmDep.router ?? null, () => isLlmEnabled(db, app.llm)), 2,
+      new RulesClassifier(db, () => llmDep.router ?? null, () => isLlmEnabled(db)), 2,
     ),
     rule: new OncePerSessionRule(db),
     dispatcher,

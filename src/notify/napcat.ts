@@ -15,8 +15,7 @@ export interface NapcatConfig {
 }
 
 /**
- * 生效配置：settings 表是唯一信源（webui 管理，用户不会手改 config.json）。
- * config.json 的 napcat 段仅首次启动经 seedNapcatConfigIfUnset 种子导入，之后不再读取。
+ * 生效配置：settings 表是唯一信源（webui 管理）。
  * settings 键：napcat_enabled '1'/'0'、napcat_dir、napcat_uin；缺省 = 未配置。
  */
 export function getNapcatConfig(db: Db): NapcatConfig {
@@ -25,17 +24,6 @@ export function getNapcatConfig(db: Db): NapcatConfig {
     dir: db.getSetting('napcat_dir') ?? '',
     uin: db.getSetting('napcat_uin') ?? '',
   };
-}
-
-/**
- * 首次启动种子：napcat_enabled 不存在（从未在面板配置过）才把 config.json 的
- * napcat 段导入 settings；之后 settings 是唯一信源，config 改动不再生效。
- */
-export function seedNapcatConfigIfUnset(db: Db, seed: NapcatConfig): void {
-  if (db.getSetting('napcat_enabled') !== null) return;
-  db.setSetting('napcat_enabled', seed.enabled ? '1' : '0');
-  if (seed.dir) db.setSetting('napcat_dir', seed.dir);
-  if (seed.uin) db.setSetting('napcat_uin', seed.uin);
 }
 
 /**

@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from '../core/db.js';
 import { createPanelServer, type PanelDeps, type PanelStatus } from './server.js';
-import { createLlmRouter, seedLlmProvidersIfEmpty, listLlmProviders, saveLlmProviders, dbKeysOf, type LlmRouter, type FetchLike } from '../analysis/providers.js';
+import { createLlmRouter, listLlmProviders, saveLlmProviders, setLlmEnabled, dbKeysOf, type LlmRouter, type FetchLike } from '../analysis/providers.js';
+import type { LlmProviderConfig } from '../config/schema.js';
 import { saveNapcatConfig } from '../notify/napcat.js';
 
 interface Fixture {
@@ -25,7 +26,16 @@ async function setup(
   t: import('node:test').TestContext,
   opts: {
     auth?: PanelDeps['auth']; weiboAuth?: PanelDeps['weiboAuth'];
-    weiboResolver?: PanelDeps['weiboResolver']; llm?: PanelDeps['llm'];
+    weiboResolver?: PanelDeps['weiboResolver'];
+    llm?: {
+      config: {
+        enabled?: boolean;
+        requestTimeoutMs: number;
+        circuitThreshold: number;
+        circuitCooldownMs: number;
+        providers: LlmProviderConfig[];
+      };
+    };
     llmFetch?: FetchLike;
     /** 注入 listen dep；缺省不注入（/api/listen* 404） */
     listen?: { bili?: boolean; weibo?: boolean };
@@ -48,17 +58,22 @@ async function setup(
       { key: 'weibo', name: '微博', state: 'reserved' },
     ],
   };
-  // llm dep：按生产装配方式建（种子 config providers → settings；store 落库；
-  // onProvidersChanged 重建 router；key resolver = 面板 settings 覆盖 > process.env）
+  // llm dep：按生产装配方式建（providers/开关直接落 settings——唯一信源；
+  // onProvidersChanged 重建 router；key resolver = 面板 settings）
   let llm: PanelDeps['llm'];
   if (opts.llm) {
-    seedLlmProvidersIfEmpty(db, opts.llm.config.providers);
+    saveLlmProviders(db, opts.llm.config.providers);
+    setLlmEnabled(db, opts.llm.config.enabled ?? true);
     const dep: PanelDeps['llm'] = {
-      config: opts.llm.config,
       store: { list: () => listLlmProviders(db), save: (ps) => saveLlmProviders(db, ps) },
     };
     const build = () => createLlmRouter(
-      { ...opts.llm!.config, providers: listLlmProviders(db) },
+      {
+        requestTimeoutMs: opts.llm!.config.requestTimeoutMs,
+        circuitThreshold: opts.llm!.config.circuitThreshold,
+        circuitCooldownMs: opts.llm!.config.circuitCooldownMs,
+        providers: listLlmProviders(db),
+      },
       dbKeysOf(db),
       opts.llmFetch ? { fetchFn: opts.llmFetch } : undefined,
     );
@@ -1040,13 +1055,13 @@ test('无 weiboAuth dep 时微博扫码路由 404', async (t) => {
 
 // ---- LLM key 管理 ----
 
-const LLM_CFG: NonNullable<PanelDeps['llm']>['config'] = {
+const LLM_CFG = {
   enabled: true, requestTimeoutMs: 5000, circuitThreshold: 2, circuitCooldownMs: 60_000,
   providers: [{
     name: 'ds', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
-    vision: false, keyEnvs: ['TEST_PANEL_DS_KEY'], enabled: true, structuredOutput: 'schema',
+    vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema',
     api: 'chat-completions',
-  }],
+  }] as LlmProviderConfig[],
 };
 
 test('GET /api/llm：provider 与 key 状态（本机面板，key 值明文回显）', async (t) => {
@@ -1060,7 +1075,7 @@ test('GET /api/llm：provider 与 key 状态（本机面板，key 值明文回�
   assert.deepEqual(p.key, { source: 'unset', count: 0, value: null });
 });
 
-test('PUT /api/llm/keys：保存 → source=panel + router 热更新 + GET 回显；清除 → 回退', async (t) => {
+test('PUT /api/llm/keys：保存 → source=panel + router 热更新 + GET 回显；清除 → unset', async (t) => {
   const { base, llmRouter } = await setup(t, { llm: { config: LLM_CFG } });
   assert.match(llmRouter!.describe()[0]!.status, /缺 key/, '初始缺 key');
 

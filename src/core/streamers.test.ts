@@ -11,37 +11,6 @@ function memDb(t: import('node:test').TestContext): Db {
 
 // ---- streamers ----
 
-test('seedStreamersIfEmpty：enabled/mode 兼容映射为 watch/notify，返回导入条数', (t) => {
-  const db = memDb(t);
-  const n = db.seedStreamersIfEmpty([
-    { uid: '1', alias: '阿梓', enabled: true },
-    { uid: '2', alias: '小可', enabled: false },
-    { uid: '3', alias: '旧silent', enabled: true, mode: 'silent' },
-  ]);
-  assert.equal(n, 3);
-  const s1 = db.getStreamer('1')!;
-  assert.equal(s1.watch, true);
-  assert.equal(s1.notify, true);
-  assert.equal(s1.analyze, false);
-  assert.equal(s1.alias, '阿梓');
-  assert.equal(s1.source, 'manual');
-  assert.equal(db.getStreamer('2')?.watch, false, 'enabled=false → watch=false');
-  const s3 = db.getStreamer('3')!;
-  assert.equal(s3.watch, true, '旧 mode=silent → 仍监听');
-  assert.equal(s3.notify, false, '旧 mode=silent → notify=false');
-});
-
-test('seedStreamersIfEmpty 幂等：表非空时第二次不重复导', (t) => {
-  const db = memDb(t);
-  db.seedStreamersIfEmpty([{ uid: '1', alias: '阿梓', enabled: true }]);
-  const n = db.seedStreamersIfEmpty([
-    { uid: '2', alias: '小可', enabled: true },
-    { uid: '3', alias: '学妹', enabled: true },
-  ]);
-  assert.equal(n, 0, '非空时不得导入');
-  assert.equal(db.listStreamers().length, 1, '表内容不变');
-});
-
 test('listWatchedUids 只保留 watch=true 且纯数字 uid', (t) => {
   const db = memDb(t);
   db.upsertStreamer({ uid: '1', watch: true });

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   readOnebotEndpoint, probeNapCat, NapcatWatchdog, WATCHDOG_DEFAULTS,
-  getNapcatConfig, saveNapcatConfig, seedNapcatConfigIfUnset, setupNapcatTask, NAPCAT_TASK_NAME, NAPCAT_STOP_TASK_NAME,
+  getNapcatConfig, saveNapcatConfig, setupNapcatTask, NAPCAT_TASK_NAME, NAPCAT_STOP_TASK_NAME,
   ensureNapcatEntry, NAPCAT_ENTRY_NAME,
   type NapcatEndpoint, type ProbeResult, type RunResult,
 } from './napcat.js';
@@ -138,40 +138,24 @@ test('setupNapcatTask 失败时把 setup 日志尾部带进错误', async () => 
   });
 });
 
-// ---------- getNapcatConfig / saveNapcatConfig / seedNapcatConfigIfUnset（settings 唯一信源） ----------
+// ---------- getNapcatConfig / saveNapcatConfig（settings 唯一信源） ----------
 
-const seedCfg = { enabled: true, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774' };
-
-test('napcat 生效配置：settings 缺省 = 未配置；种子从 config 导入一次', () => {
+test('napcat 生效配置：settings 缺省 = 未配置；保存即生效；传空串 = 清空字段', () => {
   const db = new Db(':memory:');
   try {
     assert.deepEqual(getNapcatConfig(db), { enabled: false, dir: '', uin: '' }, '缺省 = 未配置');
 
-    seedNapcatConfigIfUnset(db, seedCfg);
-    assert.deepEqual(getNapcatConfig(db), seedCfg, '首次启动从 config 种子导入');
-
-    seedNapcatConfigIfUnset(db, { enabled: false, dir: 'X:/other', uin: '1' });
-    assert.deepEqual(getNapcatConfig(db), seedCfg, '已有 settings 后 config 不再生效');
-  } finally {
-    db.close();
-  }
-});
-
-test('napcat 生效配置：面板保存即生效；传空串 = 清空字段（无 config 回落）', () => {
-  const db = new Db(':memory:');
-  try {
-    seedNapcatConfigIfUnset(db, seedCfg);
-    saveNapcatConfig(db, { enabled: false, dir: 'E:/NC', uin: '111' });
-    assert.deepEqual(getNapcatConfig(db), { enabled: false, dir: 'E:/NC', uin: '111' });
+    saveNapcatConfig(db, { enabled: true, dir: 'E:/NC', uin: '111' });
+    assert.deepEqual(getNapcatConfig(db), { enabled: true, dir: 'E:/NC', uin: '111' });
 
     saveNapcatConfig(db, { dir: '', uin: '' });
     const cfg = getNapcatConfig(db);
-    assert.equal(cfg.dir, '', '空串 = 清空字段，config 不参与');
+    assert.equal(cfg.dir, '', '空串 = 清空字段');
     assert.equal(cfg.uin, '');
-    assert.equal(cfg.enabled, false, '未传字段保留');
+    assert.equal(cfg.enabled, true, '未传字段保留');
 
-    saveNapcatConfig(db, { enabled: true });
-    assert.equal(getNapcatConfig(db).enabled, true);
+    saveNapcatConfig(db, { enabled: false });
+    assert.equal(getNapcatConfig(db).enabled, false);
   } finally {
     db.close();
   }

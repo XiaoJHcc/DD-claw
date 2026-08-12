@@ -1,9 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { Db } from './db.js';
 import {
   isPushEnabled, setPushEnabled,
@@ -73,23 +69,6 @@ test('push_channels CRUD：建行 / 部分更新保留原值 / 删除', (t) => {
   assert.equal(db.deletePushChannel(id), true);
   assert.equal(db.deletePushChannel(id), false, '重复删除返回 false');
   assert.equal(db.listPushChannels().length, 1);
-});
-
-test('seedPushChannelsIfEmpty：onebot targets + toast → 渠道行，幂等', (t) => {
-  const db = memDb(t);
-  const n = db.seedPushChannelsIfEmpty([
-    channel({ name: 'QQ群 111', targetId: '111' }),
-    channel({ name: 'QQ私聊 222', targetType: 'private', targetId: '222' }),
-    channel({ name: '系统通知', notifier: 'toast', targetType: null, targetId: null }),
-  ]);
-  assert.equal(n, 3);
-  assert.deepEqual(
-    db.listPushChannels().map((c) => [c.name, c.notifier]),
-    [['QQ群 111', 'onebot'], ['QQ私聊 222', 'onebot'], ['系统通知', 'toast']],
-  );
-
-  assert.equal(db.seedPushChannelsIfEmpty([channel({ name: '再来一个' })]), 0, '非空时不得导入');
-  assert.equal(db.listPushChannels().length, 3, '表内容不变');
 });
 
 // ---- categories ----
@@ -252,47 +231,4 @@ test('渠道拖拽排序：reorderPushChannels 重写顺序，新渠道排末尾
   assert.deepEqual(db.listPushChannels().map((x) => x.name), ['b', 'a']);
   const c = db.upsertPushChannel(channel({ name: 'c' }));
   assert.deepEqual(db.listPushChannels().map((x) => x.name), ['b', 'a', 'c'], '新渠道排末尾');
-});
-
-// ---- preference_clauses 迁移 ----
-
-test('preference_clauses 表存在即 DROP，二次打开幂等', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-push-'));
-  const path = join(dir, 'mig.db');
-  let db: Db | undefined;
-  t.after(() => {
-    db?.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  // 手工建一个带 preference_clauses 的旧库
-  const raw = new Database(path);
-  raw.exec(`
-    CREATE TABLE preference_clauses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL, scenes TEXT,
-      min_confidence REAL, title_keywords TEXT,
-      priority TEXT NOT NULL DEFAULT 'normal', message_template TEXT NOT NULL DEFAULT '',
-      targets TEXT, enabled INTEGER NOT NULL DEFAULT 1,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    INSERT INTO preference_clauses (uid, created_at, updated_at) VALUES ('1', 1, 1);
-  `);
-  raw.close();
-
-  const tableExists = () => {
-    const r = new Database(path, { readonly: true });
-    const row = r
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='preference_clauses'")
-      .get();
-    r.close();
-    return row !== undefined;
-  };
-
-  db = new Db(path);
-  assert.equal(tableExists(), false, 'preference_clauses 应被 DROP');
-
-  db.close();
-  db = new Db(path);
-  assert.equal(tableExists(), false, '二次打开幂等不报错');
-  assert.ok(db.listPushRules().length === 0 && db.listPushChannels().length === 0, '新表正常可用');
 });

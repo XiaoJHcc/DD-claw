@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Db } from './db.js';
 import {
-  getRuntimeConfig, saveRuntimeConfig, seedRuntimeConfigIfUnset, withRuntimeConfig,
+  getRuntimeConfig, saveRuntimeConfig, withRuntimeConfig,
   isNotifyOnFirstRun, isNotifyOnNewSubscription,
-  NUM_SPECS, BOOL_SPECS, type RuntimeConfig,
+  NUM_SPECS, BOOL_SPECS,
 } from './runtime-config.js';
-import { configSchema } from '../config/schema.js';
+import { defaultAppConfig } from '../config/schema.js';
 
 function memDb(t: import('node:test').TestContext): Db {
   const db = new Db(':memory:');
@@ -19,27 +19,6 @@ test('无 settings 时返回全部默认值', (t) => {
   const rc = getRuntimeConfig(db);
   for (const s of NUM_SPECS) assert.equal(rc[s.field], s.def, s.key);
   for (const s of BOOL_SPECS) assert.equal(rc[s.field], s.def, s.key);
-});
-
-test('种子：settings 缺省从 config 导入一次；已有值不被覆盖', (t) => {
-  const db = memDb(t);
-  const app = configSchema.parse({
-    pollIntervalSec: 60,
-    follows: { syncIntervalSec: 900 },
-    notify: { onebot: { enabled: true }, toast: { enabled: true } },
-  });
-  seedRuntimeConfigIfUnset(db, app);
-  let rc = getRuntimeConfig(db);
-  assert.equal(rc.pollIntervalSec, 60, 'config 自定义值种子导入');
-  assert.equal(rc.followsSyncIntervalSec, 900);
-  assert.equal(rc.notifierOnebotEnabled, true);
-  assert.equal(rc.dynamicIntervalSec, 300, '未指定的用默认');
-
-  // 面板改过之后，再次种子（如下次启动）不得覆盖
-  saveRuntimeConfig(db, { pollIntervalSec: 120 });
-  seedRuntimeConfigIfUnset(db, configSchema.parse({ pollIntervalSec: 30 }));
-  rc = getRuntimeConfig(db);
-  assert.equal(rc.pollIntervalSec, 120, 'settings 是唯一信源，config 不再生效');
 });
 
 test('save/get 往返；库存越界值回落默认', (t) => {
@@ -58,7 +37,7 @@ test('save/get 往返；库存越界值回落默认', (t) => {
 
 test('withRuntimeConfig：运行时参数覆盖回 AppConfig', (t) => {
   const db = memDb(t);
-  const app = configSchema.parse({});
+  const app = defaultAppConfig();
   saveRuntimeConfig(db, {
     pollIntervalSec: 99, dynamicIntervalSec: 200,
     llmRequestTimeoutMs: 5000, notifierOnebotEnabled: true,
