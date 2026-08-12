@@ -4,6 +4,7 @@ import { fetchLiveStatus } from './live-status.js';
 import { PeriodicTask } from '../../core/scheduler.js';
 import { diffRoom, toPrevState, type PrevState } from '../../core/state.js';
 import { STREAK_QQ_ALERT_AFTER_SEC, type Signal } from '../../core/types.js';
+import type { KeyframeCache } from '../media/keyframe.js';
 import type { Source, SourceContext } from '../types.js';
 import type { RoomStatus } from './types.js';
 
@@ -16,6 +17,8 @@ export interface LiveStatusSourceOpts {
   /** 只监听这些 uid（--force-uid 用），为空则读数据库 streamers 表 */
   forceUids?: string[];
   fetcher?: StatusFetcher;
+  /** 在播关键帧定时缓存（可选）：每轮把在播场次的 {roomId, liveTime, keyframe} 喂给它 */
+  keyframeCache?: KeyframeCache;
 }
 
 /**
@@ -158,11 +161,12 @@ export class LiveStatusSource implements Source {
     ctx.db.saveRoomStates(stateWrites);
     // 在播场次的存活打点：last_seen 每轮刷新（近似下播时间锚点，崩溃恢复也有近似终点）
     // + 非空 keyframe 快照覆盖。room_state.keyframe 会被新一场覆盖，场次表的是历史留痕
-    ctx.db.touchLiveSessions(
-      stateWrites
-        .filter((w) => w.state.isLive)
-        .map((w) => ({ roomId: w.state.roomId, liveTime: w.state.liveTime, keyframe: w.state.keyframe })),
-    );
+    const liveNow = stateWrites
+      .filter((w) => w.state.isLive)
+      .map((w) => ({ roomId: w.state.roomId, liveTime: w.state.liveTime, keyframe: w.state.keyframe }));
+    ctx.db.touchLiveSessions(liveNow);
+    // 关键帧定时缓存：复用同一份在播数据，consider 不阻塞轮询（内部异步下载落盘）
+    this.opts.keyframeCache?.consider(liveNow);
     for (const s of signals) ctx.bus.emit(s);
     return true;
   }

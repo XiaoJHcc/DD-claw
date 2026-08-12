@@ -362,3 +362,19 @@ test('listTimeline 在播判定：last_seen 新鲜 = endTs null（在播）；�
   const legacy = entries.find((e) => e.roomId === 'ro')!;
   assert.equal(legacy.endTs, legacy.startTs, '无打点 legacy 场终点 = first_seen（零长）');
 });
+
+test('nearestSnapshot：取距 ts 最近一帧；无缓存 null', (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+
+  assert.equal(db.nearestSnapshot('r1', 100, 5000), null, '空表 null');
+
+  db.insertSnapshot({ roomId: 'r1', liveTime: 100, ts: 1000, path: '/kf/r1/100/1000.jpg', bytes: 10 });
+  db.insertSnapshot({ roomId: 'r1', liveTime: 100, ts: 2000, path: '/kf/r1/100/2000.jpg', bytes: 10 });
+  db.insertSnapshot({ roomId: 'r1', liveTime: 200, ts: 1500, path: '/kf/r1/200/1500.jpg', bytes: 10 }); // 另一场
+
+  assert.equal(db.nearestSnapshot('r1', 100, 1100)!.path, '/kf/r1/100/1000.jpg', '靠近第一帧');
+  assert.equal(db.nearestSnapshot('r1', 100, 1800)!.path, '/kf/r1/100/2000.jpg', '靠近第二帧');
+  assert.equal(db.nearestSnapshot('r1', 200, 1400)!.path, '/kf/r1/200/1500.jpg', '按场次隔离');
+  assert.equal(db.nearestSnapshot('rX', 100, 1100), null, '别的房间 null');
+});

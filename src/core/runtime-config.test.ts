@@ -41,6 +41,7 @@ test('withRuntimeConfig：运行时参数覆盖回 AppConfig', (t) => {
   saveRuntimeConfig(db, {
     pollIntervalSec: 99, dynamicIntervalSec: 200,
     llmRequestTimeoutMs: 5000, notifierOnebotEnabled: true,
+    keyframeIntervalSec: 120, keyframeEnabled: false,
   });
   const eff = withRuntimeConfig(app, getRuntimeConfig(db));
   assert.equal(eff.pollIntervalSec, 99);
@@ -48,6 +49,23 @@ test('withRuntimeConfig：运行时参数覆盖回 AppConfig', (t) => {
   assert.equal(eff.llm.requestTimeoutMs, 5000);
   assert.equal(eff.notify.onebot.enabled, true);
   assert.equal(eff.notify.toast.enabled, true, '默认开');
+  assert.deepEqual(eff.keyframe, { enabled: false, intervalSec: 120 }, 'keyframe 段叠加进 eff');
+});
+
+test('关键帧缓存参数：默认值、落库回读、越界回落', (t) => {
+  const db = memDb(t);
+  let rc = getRuntimeConfig(db);
+  assert.equal(rc.keyframeEnabled, true);
+  assert.equal(rc.keyframeIntervalSec, 300);
+
+  saveRuntimeConfig(db, { keyframeEnabled: false, keyframeIntervalSec: 600 });
+  rc = getRuntimeConfig(db);
+  assert.equal(rc.keyframeEnabled, false);
+  assert.equal(rc.keyframeIntervalSec, 600);
+
+  db.setSetting('keyframe_interval_sec', '30'); // 低于下限 60
+  rc = getRuntimeConfig(db);
+  assert.equal(rc.keyframeIntervalSec, 300, '越界值回落默认');
 });
 
 test('冷启动推送开关 helper：默认与显式设置', (t) => {

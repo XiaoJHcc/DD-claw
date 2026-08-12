@@ -4,6 +4,8 @@
  * 扫码登录路由仅在装配处注入 auth dep 时挂载；cookie 值不出现在任何响应/日志里。
  */
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
@@ -112,6 +114,10 @@ export interface PanelDeps {
    */
   advanced?: {
     onChanged: () => void;
+  };
+  /** 关键帧缓存目录（/api/snapshot 按鼠标时间点取最近帧）；不注入则 /api/snapshot 一律 404 */
+  snapshots?: {
+    dir: string;
   };
   /**
    * NapCat 托管（面板 NapCat 卡片）；不注入则 /api/napcat* 一律 404。
@@ -237,6 +243,36 @@ async function handle(
     saveRuntimeConfig(db, patch as Partial<RuntimeConfig>);
     deps.advanced?.onChanged();
     sendJson(res, 200, { ok: true, ...getRuntimeConfig(db) });
+    return;
+  }
+
+  // ---- 缓存关键帧（snapshots dep 存在才挂）：取距 ts 最近的一帧，hover 缩略图用 ----
+  if (method === 'GET' && path === '/api/snapshot') {
+    if (!deps.snapshots) throw new HttpError(404, '未装配关键帧缓存目录');
+    const room = url.searchParams.get('room') ?? '';
+    const lt = Number(url.searchParams.get('lt'));
+    const ts = Number(url.searchParams.get('ts'));
+    if (!/^\d+$/.test(room) || !Number.isInteger(lt) || !Number.isInteger(ts) || lt <= 0 || ts <= 0) {
+      throw new HttpError(400, 'room/lt/ts 必须是正整数');
+    }
+    const row = deps.db.nearestSnapshot(room, lt, ts);
+    if (!row) throw new HttpError(404, '该场次没有缓存关键帧');
+    // 路径安全：库里的 path resolve 后必须落在注入的缓存目录内（防库被写脏后路径穿越）
+    const root = resolve(deps.snapshots.dir);
+    const file = resolve(row.path);
+    if (file !== root && !file.startsWith(root + sep)) throw new HttpError(404, '缓存文件不在受信目录内');
+    let data: Buffer;
+    try {
+      data = readFileSync(file);
+    } catch {
+      throw new HttpError(404, '缓存文件读不到');
+    }
+    res.writeHead(200, {
+      // nearest 会随新帧落地而变化，禁缓存
+      'content-type': file.endsWith('.png') ? 'image/png' : 'image/jpeg',
+      'cache-control': 'no-store',
+    });
+    res.end(data);
     return;
   }
 

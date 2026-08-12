@@ -82,7 +82,9 @@ export const PANEL_PAGE = `<!doctype html>
 
 <section class="card" id="card-advanced">
 <div class="card-head"><h2>高级设置</h2></div>
-<div id="advanced-rows">加载中…</div>
+<div class="card-actions">
+<button class="btn" data-action="open-advanced"><span data-icon="gear"></span>更多高级设置</button>
+</div>
 </section>
 </div>
 

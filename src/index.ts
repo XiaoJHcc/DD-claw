@@ -21,6 +21,7 @@ import { ensureToastAumid } from './notify/aumid.js';
 import { liveEventToMessage } from './notify/message.js';
 import { LiveStatusSource } from './sources/bili/live-status-source.js';
 import { fetchLiveStatus } from './sources/bili/live-status.js';
+import { KeyframeCache } from './sources/media/keyframe.js';
 import { PeriodicTask } from './core/scheduler.js';
 import { loadCookies, cookieHeader, type SelfInfo } from './sources/bili/auth.js';
 import { FollowsSource } from './sources/bili/follows.js';
@@ -319,13 +320,22 @@ async function main(): Promise<void> {
   reconcileNapcat();
 
   // live-status source 单独持有：轮询参数热更新时整体重启（restore 从库恢复状态，不丢轨迹）
-  let liveSrc = new LiveStatusSource({ forceUids: args.forceUids });
+  // 在播关键帧定时缓存：目录跟随 data 约定（与 toast 缓存同法拼）；开关/间隔事实来源
+  // 是 settings（RuntimeConfig，面板高级设置卡），初始与热更新都走 configure；
+  // 实例总是创建并跨 liveSrc 重启复用（source 重建不丢间隔/去重记忆）
+  const keyframeDir = join(dirname(secrets.dbPath), 'cache', 'keyframes');
+  const keyframeCache = new KeyframeCache(db, {
+    dir: keyframeDir,
+    intervalMs: eff.keyframe.intervalSec * 1000,
+  });
+  keyframeCache.configure({ enabled: eff.keyframe.enabled, intervalMs: eff.keyframe.intervalSec * 1000 });
+  let liveSrc = new LiveStatusSource({ forceUids: args.forceUids, keyframeCache });
   const startLiveStatus = (): void => {
     liveSrc.start({ bus, db, config: eff });
   };
   const restartLiveStatus = (): void => {
     liveSrc.stop();
-    liveSrc = new LiveStatusSource({ forceUids: args.forceUids });
+    liveSrc = new LiveStatusSource({ forceUids: args.forceUids, keyframeCache });
     startLiveStatus();
   };
 
@@ -397,11 +407,19 @@ async function main(): Promise<void> {
   };
 
   // 高级设置热生效（面板 /api/advanced 保存后回调）：间隔/阈值变化重启对应源，
-  // LLM 超时熔断变化重建 router，通道开关变化重装 notifiers。开关类（冷启动推送）
-  // 由 pipeline 直读 settings，无需这里处理
+  // LLM 超时熔断变化重建 router，通道开关变化重装 notifiers，关键帧开关/间隔
+  // 走 configure。开关类（冷启动推送）由 pipeline 直读 settings，无需这里处理
   const reconcileRuntime = (): void => {
     const prev = eff;
     eff = withRuntimeConfig(app, getRuntimeConfig(db));
+    if (prev.keyframe.enabled !== eff.keyframe.enabled
+      || prev.keyframe.intervalSec !== eff.keyframe.intervalSec) {
+      keyframeCache.configure({
+        enabled: eff.keyframe.enabled,
+        intervalMs: eff.keyframe.intervalSec * 1000,
+      });
+      log.info(`关键帧缓存参数已热更新（${eff.keyframe.enabled ? '开' : '关'}，间隔 ${eff.keyframe.intervalSec}s）`);
+    }
     const thresholdChanged = prev.healthAlertAfterFailures !== eff.healthAlertAfterFailures;
     if (prev.pollIntervalSec !== eff.pollIntervalSec || prev.pollJitterSec !== eff.pollJitterSec || thresholdChanged) {
       log.info(`直播轮询参数已热更新（间隔 ${eff.pollIntervalSec}s + 抖动 ${eff.pollJitterSec}s，阈值 ${eff.healthAlertAfterFailures}）`);
@@ -518,6 +536,7 @@ async function main(): Promise<void> {
       advanced: {
         onChanged: () => reconcileRuntime(),
       },
+      snapshots: { dir: keyframeDir },
       napcat: {
         effective: () => getNapcatConfig(db),
         source: () => ({

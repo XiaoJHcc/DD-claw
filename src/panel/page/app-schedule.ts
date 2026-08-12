@@ -415,6 +415,7 @@ function renderSchedBody() {
         barsHtml +=
           '<div class="sched-seg' + (bar.cont ? ' cont' : '') + '"' +
           ' data-d="' + bar.di + '" data-e="' + bar.ei + '" data-s="' + bar.si + '"' +
+          ' data-bs="' + bar.start + '" data-be="' + bar.end + '"' +
           ' style="left:' + left + '%;width:' + width + '%;background:' + bg + '">' +
           '<span class="sched-seg-text">' + esc(e.name + ' · ' + cat + ' · ' + (seg.title || '')) + '</span>' +
           '</div>';
@@ -436,9 +437,47 @@ function renderSchedBody() {
 }
 
 // ---- hover 弹层（跟随鼠标，离开段即关；全部 esc；缩略行无 .sched-seg 不触发）----
+// 缩略图 = 鼠标在条内横向位置对应时间点的「最近缓存关键帧」优先（/api/snapshot，
+// 按 60s 分桶，桶变才换图，鼠标静止不换）；API 404 回退远程 e.keyframe || e.cover
+//（旧行为），并记 schedSnapFail——本场 hover 不再试 API（防移动时 404 轰炸）；
+// 远程图也挂（或没有远程图）则移除 img，防 onerror 循环
+var schedPopEl = null;      // 当前弹层归属的 .sched-seg
+var schedPopBucket = -1;    // 当前已请求的 60s 桶（-1 = 本次 hover 还未取图）
+var schedSnapFail = {};     // 'roomId:liveTime' → true（该场 hover 已 404）
+
 function schedHidePop() {
+  schedPopEl = null;
   var p = document.getElementById('sched-pop');
   if (p) p.classList.add('hidden');
+}
+
+/** 鼠标在条内的横向位置 → 时间点（clamp 0..1），按 60s 分桶 */
+function schedBucketOf(el, clientX) {
+  var bs = Number(el.getAttribute('data-bs'));
+  var be = Number(el.getAttribute('data-be'));
+  var r = el.getBoundingClientRect();
+  var f = r.width > 0 ? (clientX - r.left) / r.width : 0;
+  if (f < 0) f = 0;
+  if (f > 1) f = 1;
+  return Math.floor((bs + f * (be - bs)) / 60) * 60;
+}
+
+/** 桶变了才换图：缓存关键帧优先，该场已 404 直接用远程兜底 */
+function schedPopImg(el, clientX) {
+  var p = document.getElementById('sched-pop');
+  var img = p.querySelector('img');
+  if (!img) return;
+  var bucket = schedBucketOf(el, clientX);
+  if (bucket === schedPopBucket) return;
+  schedPopBucket = bucket;
+  var e = schedDays[Number(el.getAttribute('data-d'))].entries[Number(el.getAttribute('data-e'))];
+  if (!schedSnapFail[e.roomId + ':' + e.liveTime]) {
+    img.src = '/api/snapshot?room=' + encodeURIComponent(e.roomId) +
+      '&lt=' + e.liveTime + '&ts=' + bucket;
+  } else {
+    var remote = e.keyframe || e.cover;
+    if (remote) img.src = remote;
+  }
 }
 
 function schedShowPop(el, evt) {
@@ -451,7 +490,6 @@ function schedShowPop(el, evt) {
   if (!seg) return;
   var p = document.getElementById('sched-pop');
   var now = Math.floor(Date.now() / 1000);
-  var img = e.keyframe || e.cover; // 段不带 keyframe（API 形状），用场次快照兜底
   var area = [seg.parentAreaName, seg.areaName].filter(Boolean).join(' / ');
   var time = schedFmtHm(seg.startTs) + ' – ' +
     (seg.endTs ? schedFmtHm(seg.endTs) : schedFmtHm(now) + '（直播中）');
@@ -466,9 +504,23 @@ function schedShowPop(el, evt) {
   p.innerHTML =
     '<div class="sched-pop-title">' + esc(seg.title || '(无标题)') + '</div>' +
     (area ? '<div class="sched-pop-meta">' + esc(area) + '</div>' : '') +
-    (img ? '<img referrerpolicy="no-referrer" src="' + esc(img) + '" alt="">' : '') +
+    '<img referrerpolicy="no-referrer" alt="">' + // src 由 schedPopImg 按鼠标时间点填
     '<div class="sched-pop-meta">' + esc(e.name) + ' · ' + esc(time) + '</div>' + vs;
   p.classList.remove('hidden');
+  schedPopEl = el;
+  schedPopBucket = -1; // 强制按当前鼠标位置取一次
+  // 回退链挂在 img 上（JS 赋值非内联，事件委托惯例不冲突）
+  var img = p.querySelector('img');
+  var failKey = e.roomId + ':' + e.liveTime;
+  img.onerror = function () {
+    if (!schedSnapFail[failKey]) {
+      schedSnapFail[failKey] = true;
+      var remote = e.keyframe || e.cover;
+      if (remote) { img.src = remote; return; }
+    }
+    img.onerror = null; // 防循环
+    if (img.parentNode) img.parentNode.removeChild(img);
+  };
   schedMovePop(evt);
 }
 
@@ -480,6 +532,7 @@ function schedMovePop(evt) {
   if (y + r.height > window.innerHeight - 8) y = evt.clientY - r.height - 14;
   p.style.left = Math.max(8, x) + 'px';
   p.style.top = Math.max(8, y) + 'px';
+  if (schedPopEl) schedPopImg(schedPopEl, evt.clientX);
 }
 
 // ---- 初始化 ----

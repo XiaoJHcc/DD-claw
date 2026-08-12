@@ -26,6 +26,8 @@ export interface RuntimeConfig {
   notifyOnNewSubscription: boolean;
   notifierOnebotEnabled: boolean;
   notifierToastEnabled: boolean;
+  keyframeIntervalSec: number;
+  keyframeEnabled: boolean;
 }
 
 interface NumSpec {
@@ -48,6 +50,7 @@ export const NUM_SPECS: NumSpec[] = [
   { key: 'llm_request_timeout_ms', field: 'llmRequestTimeoutMs', label: 'LLM 请求超时', def: 60_000, min: 1000, max: 600_000 },
   { key: 'llm_circuit_threshold', field: 'llmCircuitThreshold', label: 'LLM 熔断阈值', def: 3, min: 1, max: 20 },
   { key: 'llm_circuit_cooldown_ms', field: 'llmCircuitCooldownMs', label: 'LLM 熔断冷却', def: 600_000, min: 10_000, max: 3_600_000 },
+  { key: 'keyframe_interval_sec', field: 'keyframeIntervalSec', label: '关键帧缓存间隔', def: 300, min: 60, max: 3600 },
 ];
 
 interface BoolSpec {
@@ -62,6 +65,7 @@ export const BOOL_SPECS: BoolSpec[] = [
   { key: 'notify_on_new_subscription', field: 'notifyOnNewSubscription', label: '新增订阅在播即推送', def: true },
   { key: 'notifier_onebot_enabled', field: 'notifierOnebotEnabled', label: 'QQ 通道', def: true },
   { key: 'notifier_toast_enabled', field: 'notifierToastEnabled', label: '系统通知通道', def: true },
+  { key: 'keyframe_enabled', field: 'keyframeEnabled', label: '关键帧缓存', def: true },
 ];
 
 export function getRuntimeConfig(db: Db): RuntimeConfig {
@@ -116,6 +120,7 @@ export function withRuntimeConfig(app: AppConfig, rc: RuntimeConfig): AppConfig 
     follows: { syncIntervalSec: rc.followsSyncIntervalSec },
     dynamic: { intervalSec: rc.dynamicIntervalSec },
     weibo: { intervalSec: rc.weiboIntervalSec },
+    keyframe: { enabled: rc.keyframeEnabled, intervalSec: rc.keyframeIntervalSec },
     llm: {
       ...app.llm,
       requestTimeoutMs: rc.llmRequestTimeoutMs,

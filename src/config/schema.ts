@@ -55,6 +55,8 @@ export interface AppConfig {
   follows: { syncIntervalSec: number };
   dynamic: { intervalSec: number };
   weibo: { intervalSec: number };
+  /** 在播关键帧定时本地缓存（media/keyframe.ts）；此处只是底形，生效值一律 = RuntimeConfig 叠加（settings 唯一信源，面板高级设置卡，configure 热生效） */
+  keyframe: { enabled: boolean; intervalSec: number };
   panel: { enabled: boolean; port: number };
   llm: {
     requestTimeoutMs: number;
@@ -78,6 +80,7 @@ export function defaultAppConfig(): AppConfig {
     follows: { syncIntervalSec: 1800 },
     dynamic: { intervalSec: 300 },
     weibo: { intervalSec: 300 },
+    keyframe: { enabled: true, intervalSec: 300 },
     panel: { enabled: true, port: 8787 },
     llm: {
       requestTimeoutMs: 60_000,

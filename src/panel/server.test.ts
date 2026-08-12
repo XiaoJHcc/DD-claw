@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from '../core/db.js';
@@ -43,6 +43,8 @@ async function setup(
     napcat?: PanelDeps['napcat'];
     /** 注入 advanced dep（onChanged 热生效回调）；缺省则保存只落库 */
     advanced?: PanelDeps['advanced'];
+    /** 注入 snapshots dep（/api/snapshot 缓存关键帧）；缺省不注入（404） */
+    snapshots?: PanelDeps['snapshots'];
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -94,6 +96,7 @@ async function setup(
     llm,
     napcat: opts.napcat,
     advanced: opts.advanced,
+    snapshots: opts.snapshots,
     ...(opts.listen
       ? {
           listen: {
@@ -1470,4 +1473,87 @@ test('/api/schedule 参数校验：坏格式 / from 晚于 to / 跨度超 62 天
   assert.equal((await api(base, '/api/schedule?from=2026-08-10&to=2026-08-09')).status, 400, 'from 晚于 to');
   assert.equal((await api(base, '/api/schedule?from=2026-08-01&to=2026-10-10')).status, 400, '跨度 70 天');
   assert.equal((await api(base, '/api/schedule?from=2026-08-01&to=2026-10-02')).status, 200, '62 天整放行');
+});
+
+// ---- /api/snapshot 缓存关键帧 ----
+
+/** 二进制 GET（api() 助手固定解析 JSON，图片字节用它读不了）；带同款重试 */
+async function rawGet(base: string, path: string): Promise<{ status: number; body: Buffer; headers: Headers }> {
+  let res: Response | null = null;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 5 && res === null; attempt++) {
+    try {
+      res = await fetch(base + path, { headers: { connection: 'close' } });
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 30));
+    }
+  }
+  if (res === null) throw lastErr;
+  return { status: res.status, body: Buffer.from(await res.arrayBuffer()), headers: res.headers };
+}
+
+test('/api/snapshot：200 字节与 content-type 正确（jpg/png）、no-store', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-snap-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { base, db } = await setup(t, { snapshots: { dir } });
+
+  const jpgDir = join(dir, '80397', '1000');
+  mkdirSync(jpgDir, { recursive: true });
+  const jpgData = Buffer.from('fake-jpeg-bytes');
+  writeFileSync(join(jpgDir, '1800000000.jpg'), jpgData);
+  db.insertSnapshot({ roomId: '80397', liveTime: 1000, ts: 1800000000, path: join(jpgDir, '1800000000.jpg'), bytes: jpgData.length });
+  const pngData = Buffer.from('fake-png-bytes');
+  writeFileSync(join(jpgDir, '1800000300.png'), pngData);
+  db.insertSnapshot({ roomId: '80397', liveTime: 1000, ts: 1800000300, path: join(jpgDir, '1800000300.png'), bytes: pngData.length });
+
+  const r1 = await rawGet(base, '/api/snapshot?room=80397&lt=1000&ts=1800000100');
+  assert.equal(r1.status, 200);
+  assert.deepEqual(r1.body, jpgData, '取最近一帧（jpg）');
+  assert.equal(r1.headers.get('content-type'), 'image/jpeg');
+  assert.equal(r1.headers.get('cache-control'), 'no-store');
+
+  const r2 = await rawGet(base, '/api/snapshot?room=80397&lt=1000&ts=1800000290');
+  assert.equal(r2.status, 200);
+  assert.deepEqual(r2.body, pngData, '取最近一帧（png）');
+  assert.equal(r2.headers.get('content-type'), 'image/png');
+});
+
+test('/api/snapshot：无匹配行 404、坏参 400、无 dep 404', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-snap-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { base } = await setup(t, { snapshots: { dir } });
+
+  assert.equal((await rawGet(base, '/api/snapshot?room=80397&lt=1000&ts=100')).status, 404, '无行 404');
+  assert.equal((await rawGet(base, '/api/snapshot?room=&lt=1000&ts=100')).status, 400, 'room 空 400');
+  assert.equal((await rawGet(base, '/api/snapshot?room=abc&lt=1000&ts=100')).status, 400, 'room 非数字 400');
+  assert.equal((await rawGet(base, '/api/snapshot?room=80397&lt=x&ts=100')).status, 400, 'lt 非数字 400');
+  assert.equal((await rawGet(base, '/api/snapshot?room=80397&lt=1000')).status, 400, '缺 ts 400');
+
+  const bare = await setup(t);
+  assert.equal((await rawGet(bare.base, '/api/snapshot?room=80397&lt=1000&ts=100')).status, 404, '无 dep 404');
+});
+
+test('/api/snapshot：路径穿越 404（库里的 path 必须落在注入目录内）', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-snap-'));
+  const outside = mkdtempSync(join(tmpdir(), 'ddclaw-snap-out-'));
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+  const { base, db } = await setup(t, { snapshots: { dir } });
+
+  const secret = join(outside, 'secret.jpg');
+  writeFileSync(secret, 'should-never-serve');
+  db.insertSnapshot({ roomId: '80397', liveTime: 1000, ts: 100, path: secret, bytes: 18 });
+
+  assert.equal((await rawGet(base, '/api/snapshot?room=80397&lt=1000&ts=100')).status, 404, '目录外文件 404');
+});
+
+test('/api/snapshot：库里有行但文件读不到 404', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-snap-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { base, db } = await setup(t, { snapshots: { dir } });
+  db.insertSnapshot({ roomId: '80397', liveTime: 1000, ts: 100, path: join(dir, 'gone.jpg'), bytes: 10 });
+  assert.equal((await rawGet(base, '/api/snapshot?room=80397&lt=1000&ts=100')).status, 404);
 });

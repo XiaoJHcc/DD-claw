@@ -154,6 +154,15 @@ CREATE TABLE IF NOT EXISTS live_segments (
   created_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_live_segments_room ON live_segments (room_id, live_time);
+CREATE TABLE IF NOT EXISTS snapshots (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id    TEXT    NOT NULL,
+  live_time  INTEGER NOT NULL,
+  ts         INTEGER NOT NULL,
+  path       TEXT    NOT NULL,
+  bytes      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_room ON snapshots (room_id, live_time, ts);
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -401,6 +410,25 @@ export class Db {
       for (const e of rows) stmt.run(t, e.keyframe ?? '', e.keyframe ?? null, e.roomId, e.liveTime);
     });
     tx(entries);
+  }
+
+  /**
+   * 关键帧缓存落盘一行（sources/media/keyframe.ts 每 interval 一帧）。
+   * (room_id, live_time) 是一场直播的身份；path 为本地文件路径，bytes 供体积统计。
+   * 只写不查：素材先积累，检索后续做。
+   */
+  insertSnapshot(p: { roomId: string; liveTime: number; ts: number; path: string; bytes: number }): void {
+    this.db
+      .prepare('INSERT INTO snapshots (room_id, live_time, ts, path, bytes) VALUES (?, ?, ?, ?, ?)')
+      .run(p.roomId, p.liveTime, p.ts, p.path, p.bytes);
+  }
+
+  /** 一场直播里距 ts 最近的一帧缓存关键帧（面板 hover 缩略图用）；无缓存返回 null */
+  nearestSnapshot(roomId: string, liveTime: number, ts: number): { path: string } | null {
+    const row = this.db
+      .prepare('SELECT path FROM snapshots WHERE room_id = ? AND live_time = ? ORDER BY ABS(ts - ?) LIMIT 1')
+      .get(roomId, liveTime, ts) as { path: string } | undefined;
+    return row ?? null;
   }
 
   /**
