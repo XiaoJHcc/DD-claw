@@ -42,12 +42,13 @@ test('seedStreamersIfEmpty 幂等：表非空时第二次不重复导', (t) => {
   assert.equal(db.listStreamers().length, 1, '表内容不变');
 });
 
-test('listWatchedUids 只保留 watch=true', (t) => {
+test('listWatchedUids 只保留 watch=true 且纯数字 uid', (t) => {
   const db = memDb(t);
   db.upsertStreamer({ uid: '1', watch: true });
   db.upsertStreamer({ uid: '2', watch: true, notify: false });
   db.upsertStreamer({ uid: '3', watch: false });
-  assert.deepEqual(db.listWatchedUids().sort(), ['1', '2']);
+  db.upsertStreamer({ uid: 'demo1001', watch: true });
+  assert.deepEqual(db.listWatchedUids().sort(), ['1', '2'], '非数字 uid（演示数据）不进轮询');
 });
 
 test('upsertStreamer 部分更新保留原值，三开关可独立改写', (t) => {

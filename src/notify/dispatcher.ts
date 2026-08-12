@@ -14,13 +14,18 @@ export interface BroadcastOutcome {
 
 export class NotifyDispatcher {
   constructor(
-    private readonly notifiers: Notifier[],
+    private notifiers: Notifier[],
     private readonly db: Db,
     private readonly dryRun = false,
   ) {}
 
   get channels(): string[] {
     return this.notifiers.map((n) => n.name);
+  }
+
+  /** 通道级开关热切换（高级设置卡）：整体替换 notifiers 列表，pipeline 引用不变 */
+  setNotifiers(notifiers: Notifier[]): void {
+    this.notifiers = notifiers;
   }
 
   /**
@@ -97,10 +102,29 @@ export class NotifyDispatcher {
     return { anySuccess: succeeded > 0, total, succeeded };
   }
 
-  /** 监听自身出问题时的告警。逐通道尽力发，不抛异常。 */
-  async alertAll(title: string, body: string): Promise<void> {
-    await Promise.allSettled(
-      this.notifiers.filter((n) => n.alert).map((n) => n.alert!(title, body)),
-    );
+  /**
+   * 监听自身出问题时的健康告警。本机告警只派发给实现了 alert 的通道——当前仅
+   * toast；onebot 不实现 alert，次数阈值类告警从不发 QQ。
+   * qqTarget（pipeline 按政策判定后传入的告警 QQ，私聊）存在时另走 onebot.send
+   * 点对点发出。逐通道尽力发，不抛异常。
+   */
+  async alertAll(title: string, body: string, qqTarget?: string): Promise<void> {
+    const jobs: Array<Promise<unknown>> = this.notifiers
+      .filter((n) => n.alert)
+      .map((n) => n.alert!(title, body));
+    if (qqTarget) {
+      const onebot = this.notifiers.find((n) => n.name === 'onebot');
+      if (onebot) {
+        jobs.push(onebot.send({
+          title: `【告警】${title}`,
+          body,
+          priority: 'high',
+          targets: [{ type: 'private', id: qqTarget }],
+        }));
+      } else {
+        log.warn('配置了告警 QQ 但 onebot 通道不可用，QQ 告警未发出');
+      }
+    }
+    await Promise.allSettled(jobs);
   }
 }

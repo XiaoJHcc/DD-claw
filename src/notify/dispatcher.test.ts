@@ -8,6 +8,7 @@ import type { Notifier } from './types.js';
 class FakeNotifier implements Notifier {
   readonly capabilities = { image: true, clickThrough: false };
   sent: PushMessage[] = [];
+  alert?: (title: string, body: string) => Promise<void>;
   constructor(readonly name: string) {}
   async send(msg: PushMessage) {
     this.sent.push(msg);
@@ -77,4 +78,19 @@ test('channels 路由：onebot 渠道被删/不存在时该组为空则跳过', 
   await disp.broadcast(msg({ channels: ['2'] }));
   assert.equal(onebot.sent.length, 0);
   assert.equal(toast.sent.length, 0);
+});
+
+test('alertAll：本机告警只派发到实现 alert 的通道；带 qqTarget 时另走 onebot 私聊', async (t) => {
+  const { toast, onebot, disp } = harness(t);
+  toast.alert = async (title, body) => { toast.sent.push(msg({ title, body })); };
+
+  await disp.alertAll('标题', '正文');
+  assert.equal(toast.sent.length, 1, 'toast 收到本机告警');
+  assert.equal(onebot.sent.length, 0, '不带 qqTarget 时 onebot 不收告警');
+
+  await disp.alertAll('标题', '正文', '12345');
+  assert.equal(toast.sent.length, 2);
+  assert.equal(onebot.sent.length, 1, '带 qqTarget 时另走 onebot');
+  assert.deepEqual(onebot.sent[0]!.targets, [{ type: 'private', id: '12345' }]);
+  assert.match(onebot.sent[0]!.title, /【告警】标题/);
 });

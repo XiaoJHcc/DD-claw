@@ -271,7 +271,7 @@ test('登录失效：跳过整轮不抓不写库，告警一次；恢复复位�
   const alerts = h.signals.filter((s) => s.kind === 'health_alert');
   assert.equal(alerts.length, 1, '失效告警一次');
   assert.equal(alerts[0]!.source, 'weibo/feed');
-  assert.match((alerts[0]!.payload as { message: string }).message, /微博登录态失效/);
+  assert.match((alerts[0]!.payload as { message: string }).message, /微博登录态运行中失效/);
   assert.equal(fetches, 1, '失效轮不抓取');
   assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 1, '不写库，旧数据保留');
 
@@ -285,6 +285,21 @@ test('登录失效：跳过整轮不抓不写库，告警一次；恢复复位�
   loggedIn = false;
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 2, '恢复后失效重新告警');
+});
+
+test('从未成功登录：跳过抓取，只上报登录态，不告警', async (t) => {
+  let fetches = 0;
+  const h = harness({
+    fetcher: async () => { fetches++; return [MBLOG]; },
+    selfFetcher: async () => ({ loggedIn: false, uid: null }),
+  });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  await h.src.pollOnce();
+  assert.equal(fetches, 0, '未登录不抓取');
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '本来就没登录不发告警');
+  assert.deepEqual(h.loginStates.at(-1), { loggedIn: false, uid: null }, '未登录也上报登录态');
 });
 
 test('心跳本身抛异常：跳过本轮不告警', async (t) => {
@@ -334,4 +349,24 @@ test('单 uid 拉取失败：保留旧数据、阈值告警一次、恢复复位
   await h.src.pollOnce();
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 2, '恢复后故障重新告警');
+});
+
+test('单 uid 连续失败持续满 10 分钟再发 durationAlert 告警（QQ 路由依据）', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  const h = harness({
+    fetcher: async () => { throw new Error('微博 mymblog HTTP 500'); },
+  });
+  t.after(h.cleanup);
+
+  const isDur = (s: Signal) => (s.payload as { durationAlert?: boolean } | undefined)?.durationAlert === true;
+
+  await h.src.pollOnce(); // 第 1 次失败，计起点
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await h.src.pollOnce(); // 达次数阈值（2），只持续 1 分钟
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '次数阈值告警');
+  assert.equal(h.signals.filter(isDur).length, 0, '未到 10 分钟不发持续告警');
+
+  t.mock.timers.setTime(Date.now() + 600_000);
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter(isDur).length, 1, '持续满 10 分钟应再报一次');
 });

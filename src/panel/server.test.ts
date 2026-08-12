@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { Db } from '../core/db.js';
 import { createPanelServer, type PanelDeps, type PanelStatus } from './server.js';
 import { createLlmRouter, seedLlmProvidersIfEmpty, listLlmProviders, saveLlmProviders, dbKeysOf, type LlmRouter, type FetchLike } from '../analysis/providers.js';
+import { saveNapcatConfig } from '../notify/napcat.js';
 
 interface Fixture {
   db: Db;
@@ -27,9 +28,11 @@ async function setup(
     weiboResolver?: PanelDeps['weiboResolver']; llm?: PanelDeps['llm'];
     llmFetch?: FetchLike;
     /** 注入 listen dep；缺省不注入（/api/listen* 404） */
-    listen?: { bili?: boolean; weibo?: boolean; dynamicEnabled?: boolean; weiboEnabled?: boolean };
+    listen?: { bili?: boolean; weibo?: boolean };
     /** 注入 napcat dep；缺省不注入（/api/napcat* 404） */
     napcat?: PanelDeps['napcat'];
+    /** 注入 advanced dep（onChanged 热生效回调）；缺省则保存只落库 */
+    advanced?: PanelDeps['advanced'];
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -75,13 +78,10 @@ async function setup(
     weiboAuth: opts.weiboAuth,
     llm,
     napcat: opts.napcat,
+    advanced: opts.advanced,
     ...(opts.listen
       ? {
           listen: {
-            config: {
-              dynamic: { enabled: opts.listen.dynamicEnabled ?? true, intervalSec: 300 },
-              weibo: { enabled: opts.listen.weiboEnabled ?? true, intervalSec: 300 },
-            },
             login: () => ({ bili: opts.listen!.bili ?? false, weibo: opts.listen!.weibo ?? false }),
             onChanged: () => { listenChangedCount++; },
           },
@@ -823,12 +823,11 @@ test('PUT /api/listen/:feature：手动关闭粘住；与 auto 一致则回 auto
   assert.equal(on.json['setting'], null, '与 auto 一致 → 回 auto 模式');
 });
 
-test('PUT /api/listen/:feature：config 停用时开关禁用；坏体 400', async (t) => {
-  const { base } = await setup(t, { listen: { bili: true, weibo: false, dynamicEnabled: false } });
+test('PUT /api/listen/:feature：坏体 400；未知 feature 404', async (t) => {
+  const { base } = await setup(t, { listen: { bili: true, weibo: false } });
   const r = await api(base, '/api/listen');
   const dyn = (r.json['rows'] as Record<string, any>)['dynamic'];
-  assert.equal(dyn.configEnabled, false);
-  assert.equal(dyn.enabled, false, 'config 停用 → 有效关');
+  assert.equal(dyn.enabled, true, '登录态决定 auto 有效态（无 config 闸门）');
 
   const bad = await api(base, '/api/listen/weibo', 'PUT', { enabled: 'yes' });
   assert.equal(bad.status, 400);
@@ -1249,7 +1248,7 @@ test('GET /api/napcat：生效配置 + source + 状态；无 dep 404', async (t)
   const r = await api(base, '/api/napcat');
   assert.equal(r.status, 200);
   assert.deepEqual(r.json, {
-    enabled: true, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774',
+    enabled: true, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774', alertQq: '',
     source: { enabled: 'config', dir: 'config', uin: 'config' },
     endpoint: 'http://127.0.0.1:3000',
     probe: { state: 'ok', loggedIn: true },
@@ -1269,8 +1268,36 @@ test('PUT /api/napcat：保存生效；uin 非纯数字 400', async (t) => {
 
   const ok = await api(base, '/api/napcat', 'PUT', { dir: 'E:/NC', uin: '111', enabled: false });
   assert.equal(ok.status, 200);
-  assert.deepEqual(ok.json, { ok: true, enabled: false, dir: 'E:/NC', uin: '111' });
+  assert.deepEqual(ok.json, { ok: true, enabled: false, dir: 'E:/NC', uin: '111', alertQq: '' });
   assert.deepEqual(dep.saved, [{ dir: 'E:/NC', uin: '111', enabled: false }]);
+});
+
+test('PUT /api/napcat alertQq：纯数字校验、落 settings、留空清除', async (t) => {
+  const db = new Db(':memory:');
+  const dep = fakeNapcatDep();
+  const realSave = saveNapcatConfig;
+  dep.save = (patch) => {
+    dep.saved.push(patch as Record<string, unknown>);
+    realSave(db, patch);
+  };
+  const { base } = await setup(t, { napcat: dep, db });
+
+  const bad = await api(base, '/api/napcat', 'PUT', { alertQq: 'abc' });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.error!, /纯数字/);
+  assert.equal(dep.saved.length, 0, '校验失败不落库');
+
+  const ok = await api(base, '/api/napcat', 'PUT', { alertQq: '12345' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.alertQq, '12345');
+  assert.equal(db.getSetting('napcat_alert_qq'), '12345');
+
+  const g = await api(base, '/api/napcat');
+  assert.equal(g.json.alertQq, '12345', 'GET 回读告警 QQ');
+
+  const clr = await api(base, '/api/napcat', 'PUT', { alertQq: '' });
+  assert.equal(clr.json.alertQq, '');
+  assert.equal(db.getSetting('napcat_alert_qq'), null, '留空删 key');
 });
 
 test('POST /api/napcat/launch：失败信息透传为 400', async (t) => {
@@ -1295,6 +1322,30 @@ test('POST /api/napcat/setup：创建失败为 500 且含原因', async (t) => {
 
   dep.setupTask = async () => {};
   assert.equal((await api(base, '/api/napcat/setup', 'POST')).status, 200);
+});
+
+// ---- 高级设置 /api/advanced ----
+
+test('/api/advanced：GET 默认值；PUT 校验、落库、触发 onChanged', async (t) => {
+  let changed = 0;
+  const { base, db } = await setup(t, { advanced: { onChanged: () => { changed++; } } });
+
+  const g = await api(base, '/api/advanced');
+  assert.equal(g.status, 200);
+  assert.equal(g.json['pollIntervalSec'], 45);
+  assert.equal(g.json['notifierToastEnabled'], true);
+
+  assert.equal((await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 10 })).status, 400, '越界 400');
+  assert.equal((await api(base, '/api/advanced', 'PUT', { notifyOnFirstRun: 'yes' })).status, 400, '布尔类型错 400');
+  assert.equal((await api(base, '/api/advanced', 'PUT', {})).status, 400, '空 patch 400');
+  assert.equal(changed, 0, '校验失败不触发热生效');
+
+  const ok = await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 120, notifyOnFirstRun: true });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json['pollIntervalSec'], 120);
+  assert.equal(db.getSetting('poll_interval_sec'), '120');
+  assert.equal(db.getSetting('notify_on_first_run'), '1');
+  assert.equal(changed, 1, '保存成功触发热生效回调');
 });
 
 // ---- 时间表 /api/schedule ----

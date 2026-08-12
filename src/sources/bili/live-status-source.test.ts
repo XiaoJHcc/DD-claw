@@ -108,6 +108,41 @@ test('拉取失败达到阈值 emit 一次 health_alert，恢复后计数复位'
   assert.equal(h.src.failureCount, 0, '成功后计数应重置');
 });
 
+test('连续失败持续满 10 分钟再发一次 durationAlert 告警（QQ 路由依据），恢复复位', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  let fail = true;
+  const h = harness(['1'], async () => {
+    if (fail) throw new Error('boom');
+    return new Map([['1', room('1')]]);
+  });
+  t.after(h.cleanup);
+
+  const isDur = (s: Signal) => (s.payload as { durationAlert?: boolean } | undefined)?.durationAlert === true;
+
+  await h.src.pollOnce(); // t0：第 1 次失败，计起点
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await h.src.pollOnce(); // 达次数阈值（2 次），但只持续 1 分钟
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '次数阈值告警');
+  assert.equal(h.signals.filter(isDur).length, 0, '未到 10 分钟不发持续告警');
+
+  t.mock.timers.setTime(Date.now() + 600_000);
+  await h.src.pollOnce(); // 已持续约 11 分钟
+  const dur = h.signals.filter(isDur);
+  assert.equal(dur.length, 1, '持续满 10 分钟应再报一次');
+  assert.equal((dur[0]!.payload as { alertKind?: string }).alertKind, 'streak');
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter(isDur).length, 1, '持续告警同轮故障不重复');
+
+  // 恢复复位后，新一轮故障持续超阈值会重新告警
+  fail = false;
+  await h.src.pollOnce();
+  fail = true;
+  await h.src.pollOnce();
+  t.mock.timers.setTime(Date.now() + 601_000);
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter(isDur).length, 2, '恢复后故障重新告警');
+});
+
 // ---- 缺 key = 未开播 ----
 
 test('返回缺 key = 未开播，不影响其他主播的状态', async (t) => {

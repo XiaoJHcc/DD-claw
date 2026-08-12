@@ -26,9 +26,7 @@ test('msg.targets 覆盖配置的默认目标，无效 id 记日志跳过', asyn
   const posted: Posted[] = [];
   const restore = stubFetch(posted);
   try {
-    const n = new OneBotNotifier('http://napcat:3000', '', [
-      { type: 'group', id: '11111', enabled: true },
-    ]);
+    const n = new OneBotNotifier('http://napcat:3000', '');
     const results = await n.send(msg({
       targets: [
         { type: 'group', id: 'abc' },      // 无效 → 跳过且不抛错
@@ -46,13 +44,11 @@ test('msg.targets 覆盖配置的默认目标，无效 id 记日志跳过', asyn
   }
 });
 
-test('msg.targets 缺省/空数组 = 不发（配置目标只用于 alert）', async () => {
+test('msg.targets 缺省/空数组 = 不发（config 目标仅作渠道种子与测试目标）', async () => {
   const posted: Posted[] = [];
   const restore = stubFetch(posted);
   try {
-    const n = new OneBotNotifier('http://napcat:3000', '', [
-      { type: 'group', id: '11111', enabled: true },
-    ]);
+    const n = new OneBotNotifier('http://napcat:3000', '');
     const results = await n.send(msg());
     assert.equal(posted.length, 0, '常规 send 不看配置的默认目标');
     assert.deepEqual(results, []);
@@ -65,7 +61,7 @@ test('attribution 拼进正文第三行，缺省不拼', async () => {
   const posted: Posted[] = [];
   const restore = stubFetch(posted);
   try {
-    const n = new OneBotNotifier('http://napcat:3000', '', []);
+    const n = new OneBotNotifier('http://napcat:3000', '');
     await n.send(msg({
       targets: [{ type: 'private', id: '22222' }],
       attribution: '网游 / CS2  ·  21:31 开播',
@@ -79,28 +75,11 @@ test('attribution 拼进正文第三行，缺省不拼', async () => {
   }
 });
 
-test('alert 仍用构造参数的目标（跳过 disabled）', async () => {
-  const posted: Posted[] = [];
-  const restore = stubFetch(posted);
-  try {
-    const n = new OneBotNotifier('http://napcat:3000', '', [
-      { type: 'group', id: '11111', enabled: true },
-      { type: 'private', id: '22222', enabled: false },
-    ]);
-    await n.alert('标题', '正文');
-    assert.equal(posted.length, 1, 'disabled 的告警目标不发');
-    assert.ok(posted[0]!.url.endsWith('/send_group_msg'));
-    assert.equal(posted[0]!.body['group_id'], 11111);
-  } finally {
-    restore();
-  }
-});
-
 test('updateEndpoint 热更新 baseUrl（去尾斜杠），后续请求走新端点', async () => {
   const posted: Posted[] = [];
   const restore = stubFetch(posted);
   try {
-    const n = new OneBotNotifier('http://napcat:3000', '', []);
+    const n = new OneBotNotifier('http://napcat:3000', '');
     n.updateEndpoint('http://napcat:41234/', 'tk');
     await n.send(msg({ targets: [{ type: 'private', id: '22222' }] }));
     assert.ok(posted[0]!.url.startsWith('http://napcat:41234/'));

@@ -1,7 +1,8 @@
 /**
- * 面板前端 · 卡片 NapCat 托管：总开关（右上角）+ 状态行 / 路径 / 机器人QQ 三行 +
- * 底部「手动拉起 / 计划任务」按钮。路径与 QQ 号的编辑走 sheet（留空 = 清除面板填写，
- * 回落 config.json napcat 段）。状态每 30s 重取（GET 是一次真实探测）。
+ * 面板前端 · 卡片 NapCat 托管：总开关（右上角）+ 状态行 / 路径 / 机器人QQ /
+ * 超时失败告警QQ号 四行 + 底部「手动拉起 / 计划任务」按钮。编辑走 sheet
+ *（留空 = 清空该字段，settings 表是唯一信源，无 config 回落）。状态每 30s 重取
+ *（GET 是一次真实探测）。
  * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 icons / app-core 段。
  */
 export const APP_NAPCAT = `
@@ -36,6 +37,10 @@ function loadNapcat() {
       '<span class="row-title">机器人 QQ</span>' +
       '<span class="row-end"><span class="row-sub">' + esc(j.uin || '未设置') + '</span>' +
       icon('chevron-right') + '</span></div>' +
+      '<div class="row row-click" data-action="edit-napcat">' +
+      '<span class="row-title">超时失败告警 QQ 号</span>' +
+      '<span class="row-end"><span class="row-sub">' + esc(j.alertQq || '不告警') + '</span>' +
+      icon('chevron-right') + '</span></div>' +
       (j.taskRegistered ? '' :
         '<div class="hint">计划任务未创建：点下方「计划任务」一次性设置（主机弹一次 UAC），否则自动拉起不可用</div>');
   }).catch(function (e) { toast(e.message, true); });
@@ -55,7 +60,8 @@ ACTIONS['edit-napcat'] = function () {
       '" placeholder="如 D:\\\\CLI\\\\NapCat.Shell">') +
     field('机器人 QQ 号', '<input id="nc-uin" value="' + esc(ncCache.uin || '') +
       '" placeholder="快速登录的 QQ 号">') +
-    '<div class="hint">留空 = 清除面板填写，回落 config.json 的 napcat 段；保存后看门狗立即生效</div>' +
+    field('超时失败告警 QQ 号', '<input id="nc-alert-qq" value="' + esc(ncCache.alertQq || '') +
+      '" placeholder="留空 = 不向 QQ 告警">') +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     '<button class="btn btn-primary" data-action="save-napcat">保存</button></div>');
 };
@@ -64,6 +70,7 @@ ACTIONS['save-napcat'] = function () {
   api('/api/napcat', 'PUT', {
     dir: document.getElementById('nc-dir').value.trim(),
     uin: document.getElementById('nc-uin').value.trim(),
+    alertQq: document.getElementById('nc-alert-qq').value.trim(),
   }).then(function () {
     closeSheet(1);
     toast('已保存');

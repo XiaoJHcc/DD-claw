@@ -627,7 +627,9 @@ export class Db {
     const rows = this.db
       .prepare('SELECT uid FROM streamers WHERE watch = 1')
       .all() as Array<{ uid: string }>;
-    return rows.map((r) => r.uid);
+    // 防御非数字 uid（如手工种入的演示数据）：B站接口只接受数字 uid，
+    // 混入会导致批量接口 65530 route_exception、单 uid 拉取必败
+    return rows.map((r) => r.uid).filter((uid) => /^\d+$/.test(uid));
   }
 
   /**

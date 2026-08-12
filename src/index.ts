@@ -12,7 +12,7 @@ import { OncePerSessionRule } from './rules/once-per-session.js';
 import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
 import {
-  NapcatWatchdog, readOnebotEndpoint, probeNapCat, getNapcatConfig, saveNapcatConfig,
+  NapcatWatchdog, readOnebotEndpoint, probeNapCat, getNapcatConfig, saveNapcatConfig, seedNapcatConfigIfUnset,
   ensureNapcatEntry,
   isNapcatTaskRegistered, setupNapcatTask, launchNapcatViaTask, stopNapcatViaTask, NAPCAT_TASK_NAME,
 } from './notify/napcat.js';
@@ -31,6 +31,9 @@ import { loadWeiboCookies, weiboCookieHeader, type WeiboSelfInfo } from './sourc
 import { WeiboFeedSource } from './sources/weibo/feed.js';
 import type { NewPushChannel } from './core/push.js';
 import { shouldRunListen } from './core/listen.js';
+import {
+  getRuntimeConfig, seedRuntimeConfigIfUnset, withRuntimeConfig,
+} from './core/runtime-config.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 import type { Source } from './sources/types.js';
@@ -65,7 +68,7 @@ function parseArgs(argv: string[]): Args {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const { app, secrets } = loadConfig();
+  const { app, secrets, legacyKeys } = loadConfig();
 
   // --napcat-setup 一次性提权设置：创建「最高权限」计划任务（弹一次 UAC），
   // 之后看门狗用 schtasks /run 静默拉起 NapCat。做完即退出，不启动主流程。
@@ -74,20 +77,24 @@ async function main(): Promise<void> {
       log.error('--napcat-setup 目前仅支持 Windows');
       process.exit(1);
     }
-    if (!app.napcat.enabled) {
-      log.error('config.json 未启用 napcat 段（enabled/dir/uin），请先配置');
+    // 生效配置在 settings 表（面板 NapCat 卡片）；config napcat 段仅首次种子
+    const setupDb = new Db(secrets.dbPath);
+    seedNapcatConfigIfUnset(setupDb, app.napcat);
+    const nc = getNapcatConfig(setupDb);
+    if (!nc.enabled || !nc.dir || !/^\d+$/.test(nc.uin)) {
+      log.error('NapCat 未配置：请在面板 NapCat 卡片启用并填写一键包目录与机器人 QQ');
       process.exit(1);
     }
-    const ep = await ensureNapcatEntry(app.napcat.dir, app.napcat.uin);
+    const ep = await ensureNapcatEntry(nc.dir, nc.uin);
     if (ep) {
       log.info(`dd-claw 专属条目就绪: ${ep.baseUrl}（自动管理端口，其他服务条目不受影响）`);
     } else {
-      log.warn(`无法在 ${app.napcat.dir} 读取/创建 onebot11 配置，请检查 NapCat 路径`);
+      log.warn(`无法在 ${nc.dir} 读取/创建 onebot11 配置，请检查 NapCat 路径`);
     }
     if (await isNapcatTaskRegistered()) {
       log.info(`计划任务 "${NAPCAT_TASK_NAME}" 已存在，将重建以更新路径/uin`);
     }
-    await setupNapcatTask(app.napcat.dir, app.napcat.uin, join(projectRoot, 'data'));
+    await setupNapcatTask(nc.dir, nc.uin, join(projectRoot, 'data'));
     log.info(`计划任务 "${NAPCAT_TASK_NAME}" 创建成功（UAC 只弹这一次，之后自动拉起静默）`);
     // 试拉验证：当前不在线就触发一次
     const probe = ep ? await probeNapCat(ep) : null;
@@ -99,6 +106,7 @@ async function main(): Promise<void> {
     } else if (probe?.state === 'conflict' && ep) {
       log.warn(`端口 ${new URL(ep.baseUrl).port} 被其他程序占用，请在 NapCat webui 改端口（DD-claw 会自动跟随）`);
     }
+    setupDb.close();
     return;
   }
 
@@ -129,16 +137,17 @@ async function main(): Promise<void> {
   // --probe-llm 验证 LLM 接线：列出 provider 状态 + 向 text 路由发一个 ping。
   // vision 路由只报可用性（没有真实图就不消耗多模态额度），填了 key 后跑这个确认链路
   if (args.probeLlm) {
-    // 口径与主流程一致：开库读面板覆盖（provider 名单 / 总开关 / key）
+    // 口径与主流程一致：开库读面板覆盖（provider 名单 / 总开关 / key / 超时熔断参数）
     const probeDb = new Db(secrets.dbPath);
     seedLlmProvidersIfEmpty(probeDb, app.llm.providers);
     migrateLiteralKeys(probeDb);
+    seedRuntimeConfigIfUnset(probeDb, app);
     if (!isLlmEnabled(probeDb, app.llm)) {
-      log.error('LLM 未启用：在控制面板的 LLM 卡片打开总开关（或 config.json llm.enabled=true）');
+      log.error('LLM 未启用：在控制面板的 LLM 卡片打开总开关');
       process.exit(1);
     }
     const router = createLlmRouter(
-      { ...app.llm, providers: listLlmProviders(probeDb) },
+      { ...withRuntimeConfig(app, getRuntimeConfig(probeDb)).llm, providers: listLlmProviders(probeDb) },
       dbKeysOf(probeDb),
     );
     probeDb.close();
@@ -195,7 +204,11 @@ async function main(): Promise<void> {
     },
   };
   llmDep.onProvidersChanged = () => {
-    llmDep.router = createLlmRouter({ ...app.llm, providers: listLlmProviders(db) }, llmKeysOf);
+    // 超时/熔断参数也是 settings 信源（高级设置卡），重建时取最新生效值
+    llmDep.router = createLlmRouter(
+      { ...withRuntimeConfig(app, getRuntimeConfig(db)).llm, providers: listLlmProviders(db) },
+      llmKeysOf,
+    );
   };
   llmDep.onProvidersChanged();
 
@@ -204,7 +217,7 @@ async function main(): Promise<void> {
   if (seeded > 0) log.info(`已从 config.json 种子导入 ${seeded} 个主播到 streamers 表，之后由面板管理`);
 
   // 推送渠道事实来源是 push_channels 表；config 的 notify 目标仅作首次种子
-  // （config 的 onebot.targets 之后仍作 alert 告警目标，zod 校验不变）
+  // （config 的 onebot.targets 另作 --test-notify 验证目标，zod 校验不变）
   const channelSeeds: NewPushChannel[] = [];
   if (app.notify.onebot.enabled) {
     for (const t of app.notify.onebot.targets) {
@@ -221,13 +234,31 @@ async function main(): Promise<void> {
   const seededChannels = db.seedPushChannelsIfEmpty(channelSeeds);
   if (seededChannels > 0) log.info(`已从 config 种子导入 ${seededChannels} 个推送渠道到 push_channels 表，之后由面板管理`);
 
-  const notifiers: Notifier[] = [];
+  // NapCat 生效配置：settings 表唯一信源；config.json napcat 段仅首次启动种子导入
+  seedNapcatConfigIfUnset(db, app.napcat);
+
+  // 运行时参数（轮询间隔/告警阈值/冷启动推送/LLM 超时熔断/通道开关）：
+  // settings 表唯一信源（面板高级设置卡），config 同名字段仅首次种子；
+  // eff = config 叠加 settings 后的生效配置，sources/router/装配闸门都消费它
+  seedRuntimeConfigIfUnset(db, app);
+  let eff = withRuntimeConfig(app, getRuntimeConfig(db));
+
+  // config.json 里 panel 以外的字段都是遗留迁移来源：上面的种子已按
+  //「库空/未配置才导」处理过，之后以 settings/库表为准——提示用户删掉，不留
+  //「改了不生效」的陷阱
+  if (legacyKeys.length > 0) {
+    log.warn(
+      `config.json 含遗留字段（${legacyKeys.join(', ')}）：其值已按迁移规则入库（仅库空/未配置时生效）。` +
+      '这些字段已不再是配置入口，改 config.json 不会生效，请删除（panel 段可保留）',
+    );
+  }
+
+  // 通道装配：开关在 settings（高级设置卡），热切换走 reconcileRuntime。
+  // onebot 端点：napcat enabled 时走 dd-claw 专属条目（缺了自动创建、被占自动换），
+  // .env NAPCAT_BASE_URL 降为兜底；都不可得 = 降级不装配（没配 QQ 是正常状态），不阻塞主流程
   let onebotNotifier: OneBotNotifier | null = null;
-  if (app.notify.onebot.enabled) {
-    // onebot 端点：napcat 生效配置（settings 面板覆盖 > config）enabled 时走 dd-claw
-    // 专属条目（name=dd-claw，缺了启动时自动创建、端口被占自动换），
-    // .env NAPCAT_BASE_URL 降为兜底
-    const nc = getNapcatConfig(db, app.napcat);
+  const buildOnebot = async (): Promise<OneBotNotifier | null> => {
+    const nc = getNapcatConfig(db);
     const discovered = nc.enabled && process.platform === 'win32'
       ? (readOnebotEndpoint(nc.dir, nc.uin) ?? await ensureNapcatEntry(nc.dir, nc.uin))
       : null;
@@ -237,21 +268,32 @@ async function main(): Promise<void> {
     const baseUrl = discovered?.baseUrl ?? secrets.napcatBaseUrl;
     const token = discovered?.token ?? secrets.napcatToken;
     if (!baseUrl) {
-      throw new ConfigError('onebot 已启用，但 NapCat 端点发现失败且 .env 没有 NAPCAT_BASE_URL');
+      log.error('QQ 通道已启用但无可用端点（面板 NapCat 卡片未配置且 .env 无 NAPCAT_BASE_URL），QQ 推送暂不装配');
+      return null;
     }
     if (discovered) log.info(`onebot 端点跟随 NapCat 配置: ${baseUrl}`);
-    onebotNotifier = new OneBotNotifier(baseUrl, token, app.notify.onebot.targets);
-    notifiers.push(onebotNotifier);
-  }
-  if (app.notify.toast.enabled) {
-    // Win32 AUMID 注册是幂等的，仅首次会调 PowerShell；失败回落系统默认身份
-    const toastAumid = await ensureToastAumid();
-    notifiers.push(new ToastNotifier(toastAumid, join(dirname(secrets.dbPath), 'cache', 'toast')));
-  }
+    return new OneBotNotifier(baseUrl, token);
+  };
+  let toastAumid: string | undefined; // ensureToastAumid 幂等，热切换复用
+  const buildToast = async (): Promise<ToastNotifier> => {
+    toastAumid ??= await ensureToastAumid();
+    return new ToastNotifier(toastAumid, join(dirname(secrets.dbPath), 'cache', 'toast'));
+  };
+  const buildNotifiers = async (): Promise<Notifier[]> => {
+    const list: Notifier[] = [];
+    if (eff.notify.onebot.enabled) {
+      onebotNotifier = await buildOnebot();
+      if (onebotNotifier) list.push(onebotNotifier);
+    } else {
+      onebotNotifier = null;
+    }
+    if (eff.notify.toast.enabled) list.push(await buildToast());
+    return list;
+  };
 
+  const notifiers = await buildNotifiers();
   if (notifiers.length === 0) {
-    log.error('没有启用任何推送通道，退出');
-    process.exit(1);
+    log.warn('当前没有任何推送通道可用（面板高级设置卡可开关通道）；追踪与分析照常');
   }
 
   const dispatcher = new NotifyDispatcher(notifiers, db, args.dryRun);
@@ -282,7 +324,7 @@ async function main(): Promise<void> {
   const pipeline = new Pipeline({
     bus,
     db,
-    config: app,
+    config: eff,
     queue: new AnalysisQueue(
       new RulesClassifier(db, () => llmDep.router ?? null, () => isLlmEnabled(db, app.llm)), 2,
     ),
@@ -291,21 +333,21 @@ async function main(): Promise<void> {
   });
   pipeline.attach();
 
-  // NapCat 看门狗：生效配置（settings 面板覆盖 > config）enabled 时周期探测（60s），
+  // NapCat 看门狗：生效配置（settings 唯一信源）enabled 时周期探测（60s），
   // 不在线经计划任务自动拉起 + 快速登录；dir/uin 每 tick 重取（面板改了热生效）；
   // 端点热跟随 NapCat 自己的 onebot11 配置。告警走 bus health_alert →
-  // alertAll（onebot 挂了自然由 toast 送达）
+  // alertAll（toast 本机通知；登录掉线/持续失败超 10 分钟另报告警 QQ）
   let napcatTask: PeriodicTask | undefined;
   let napcatWatchdog: NapcatWatchdog | undefined;
   const reconcileNapcat = (): void => {
-    const nc = getNapcatConfig(db, app.napcat);
-    const shouldRun = nc.enabled && app.notify.onebot.enabled && onebotNotifier !== null
+    const nc = getNapcatConfig(db);
+    const shouldRun = nc.enabled && eff.notify.onebot.enabled && onebotNotifier !== null
       && process.platform === 'win32';
     if (shouldRun === (napcatTask !== undefined)) return;
     if (shouldRun) {
       napcatWatchdog ??= new NapcatWatchdog({
         target: () => {
-          const c = getNapcatConfig(db, app.napcat);
+          const c = getNapcatConfig(db);
           return { dir: c.dir, uin: c.uin };
         },
         onEndpoint: (ep) => onebotNotifier!.updateEndpoint(ep.baseUrl, ep.token),
@@ -331,14 +373,21 @@ async function main(): Promise<void> {
       log.info('NapCat 看门狗已停止（面板关闭 / onebot 停用）');
     }
   };
-  if (getNapcatConfig(db, app.napcat).enabled && process.platform !== 'win32') {
+  if (getNapcatConfig(db).enabled && process.platform !== 'win32') {
     log.warn('napcat.enabled 目前仅支持 Windows，看门狗未启动');
   }
   reconcileNapcat();
 
-  const sources: Source[] = [
-    new LiveStatusSource({ forceUids: args.forceUids }),
-  ];
+  // live-status source 单独持有：轮询参数热更新时整体重启（restore 从库恢复状态，不丢轨迹）
+  let liveSrc = new LiveStatusSource({ forceUids: args.forceUids });
+  const startLiveStatus = (): void => {
+    liveSrc.start({ bus, db, config: eff });
+  };
+  const restartLiveStatus = (): void => {
+    liveSrc.stop();
+    liveSrc = new LiveStatusSource({ forceUids: args.forceUids });
+    startLiveStatus();
+  };
 
   // follows / dynamic source 单独持有（不放 sources 数组）：扫码登录后要热重启，
   // shutdown 时 stop 的必须是最新实例
@@ -353,16 +402,16 @@ async function main(): Promise<void> {
       cookie: cookieHdr,
       onLoginState: (s) => { biliLogin = s; },
     });
-    followsSrc.start({ bus, db, config: app });
+    followsSrc.start({ bus, db, config: eff });
   };
   const startDynamic = (cookieHdr: string): void => {
     dynamicSrc?.stop();
-    // 登录态心跳在 DynamicSource 内部：follows.enabled=false 时这是 B站登录态唯一来源
+    // 登录态心跳在 DynamicSource 内部：关注同步未运行时这是 B站登录态来源之一
     dynamicSrc = new DynamicSource({
       cookie: cookieHdr,
       onLoginState: (s) => { biliLogin = s; },
     });
-    dynamicSrc.start({ bus, db, config: app });
+    dynamicSrc.start({ bus, db, config: eff });
   };
   const stopDynamic = (): void => { dynamicSrc?.stop(); dynamicSrc = null; };
   // 有 cookie 未心跳先按已登录（源会自校正），心跳后按真实值
@@ -379,31 +428,70 @@ async function main(): Promise<void> {
       cookie: cookieHdr,
       onLoginState: (s) => { weiboLogin = s; },
     });
-    weiboFeedSrc.start({ bus, db, config: app });
+    weiboFeedSrc.start({ bus, db, config: eff });
   };
   const stopWeiboFeed = (): void => { weiboFeedSrc?.stop(); weiboFeedSrc = null; };
   const weiboLoggedIn = (): boolean =>
     weiboCookieImported && (weiboLogin === null ? true : weiboLogin.loggedIn);
 
-  // 动态 / 微博 两个源的启停唯一入口：面板开关 + config 开关 + cookie 存在共同决定
+  // 动态 / 微博 两个源的启停唯一入口：面板监听开关 + cookie 存在共同决定
   const reconcileListen = (): void => {
-    if (shouldRunListen(db, 'dynamic', biliCookieHdr !== null, app.dynamic.enabled)) {
+    if (shouldRunListen(db, 'dynamic', biliCookieHdr !== null)) {
       if (!dynamicSrc) {
-        log.info(`动态轮询：${db.listWatchedUids().length} 个监听对象，间隔 ${app.dynamic.intervalSec}s`);
+        log.info(`动态轮询：${db.listWatchedUids().length} 个监听对象，间隔 ${eff.dynamic.intervalSec}s`);
         startDynamic(biliCookieHdr!);
       }
     } else if (dynamicSrc) {
-      log.info('动态轮询已停止（面板开关关闭 / config 停用 / 无 cookie）');
+      log.info('动态轮询已停止（面板开关关闭 / 无 cookie）');
       stopDynamic();
     }
-    if (shouldRunListen(db, 'weibo', weiboCookieHdr !== null, app.weibo.enabled)) {
+    if (shouldRunListen(db, 'weibo', weiboCookieHdr !== null)) {
       if (!weiboFeedSrc) {
-        log.info(`微博时间线：间隔 ${app.weibo.intervalSec}s`);
+        log.info(`微博时间线：间隔 ${eff.weibo.intervalSec}s`);
         startWeiboFeed(weiboCookieHdr!);
       }
     } else if (weiboFeedSrc) {
-      log.info('微博时间线已停止（面板开关关闭 / config 停用 / 无 cookie）');
+      log.info('微博时间线已停止（面板开关关闭 / 无 cookie）');
       stopWeiboFeed();
+    }
+  };
+
+  // 高级设置热生效（面板 /api/advanced 保存后回调）：间隔/阈值变化重启对应源，
+  // LLM 超时熔断变化重建 router，通道开关变化重装 notifiers。开关类（冷启动推送）
+  // 由 pipeline 直读 settings，无需这里处理
+  const reconcileRuntime = (): void => {
+    const prev = eff;
+    eff = withRuntimeConfig(app, getRuntimeConfig(db));
+    const thresholdChanged = prev.healthAlertAfterFailures !== eff.healthAlertAfterFailures;
+    if (prev.pollIntervalSec !== eff.pollIntervalSec || prev.pollJitterSec !== eff.pollJitterSec || thresholdChanged) {
+      log.info(`直播轮询参数已热更新（间隔 ${eff.pollIntervalSec}s + 抖动 ${eff.pollJitterSec}s，阈值 ${eff.healthAlertAfterFailures}）`);
+      restartLiveStatus();
+    }
+    if (prev.follows.syncIntervalSec !== eff.follows.syncIntervalSec && followsSrc && biliCookieHdr) {
+      log.info(`关注列表同步间隔已热更新（${eff.follows.syncIntervalSec}s）`);
+      startFollows(biliCookieHdr);
+    }
+    if ((prev.dynamic.intervalSec !== eff.dynamic.intervalSec || thresholdChanged) && dynamicSrc) {
+      log.info(`动态轮询参数已热更新（间隔 ${eff.dynamic.intervalSec}s）`);
+      startDynamic(biliCookieHdr!);
+    }
+    if ((prev.weibo.intervalSec !== eff.weibo.intervalSec || thresholdChanged) && weiboFeedSrc) {
+      log.info(`微博轮询参数已热更新（间隔 ${eff.weibo.intervalSec}s）`);
+      startWeiboFeed(weiboCookieHdr!);
+    }
+    if (prev.llm.requestTimeoutMs !== eff.llm.requestTimeoutMs
+      || prev.llm.circuitThreshold !== eff.llm.circuitThreshold
+      || prev.llm.circuitCooldownMs !== eff.llm.circuitCooldownMs) {
+      llmDep.onProvidersChanged!();
+      log.info('LLM 超时/熔断参数已热更新（router 已重建）');
+    }
+    if (prev.notify.onebot.enabled !== eff.notify.onebot.enabled
+      || prev.notify.toast.enabled !== eff.notify.toast.enabled) {
+      void buildNotifiers().then((list) => {
+        dispatcher.setNotifiers(list);
+        reconcileNapcat();
+        log.info(`推送通道已热更新：${dispatcher.channels.join('/') || '无'}`);
+      });
     }
   };
 
@@ -416,11 +504,7 @@ async function main(): Promise<void> {
   } else {
     const cookieHdr = cookieHeader(cookies);
     biliCookieHdr = cookieHdr;
-    if (app.follows.enabled) {
-      startFollows(cookieHdr);
-    } else {
-      log.info('cookies.json 存在，但 config 里 follows.enabled=false，跳过关注列表同步');
-    }
+    startFollows(cookieHdr); // 有 cookie 即跑（无单独开关；间隔在高级设置卡）
   }
 
   // 微博凭据：weibo-cookies.json 不存在 → 停用并说明（不阻塞启动）；
@@ -431,12 +515,9 @@ async function main(): Promise<void> {
     log.info('未导入 weibo-cookies.json，微博时间线停用（可在面板扫码登录生成，其他功能不受影响）');
   } else {
     weiboCookieHdr = weiboCookieHeader(weiboCookies);
-    if (!app.weibo.enabled) {
-      log.info('weibo-cookies.json 存在，但 config 里 weibo.enabled=false，跳过微博时间线');
-    }
   }
 
-  for (const s of sources) s.start({ bus, db, config: app });
+  startLiveStatus();
   reconcileListen();
 
   // 控制面板：辅助设施。EADDRINUSE 等错误走 'error' 事件，只记日志不影响主流程
@@ -474,10 +555,8 @@ async function main(): Promise<void> {
           cookieImported = true;
           biliLogin = null; // 新 cookie 还没心跳，先按 imported 展示
           biliCookieHdr = cookieHdr;
-          if (app.follows.enabled) {
-            log.info('扫码登录成功，热重启关注列表同步');
-            startFollows(cookieHdr);
-          }
+          log.info('扫码登录成功，热重启关注列表同步');
+          startFollows(cookieHdr);
           // 动态源由 reconcileListen 统一启停（startDynamic 内部会先停旧实例）
           reconcileListen();
         },
@@ -493,12 +572,14 @@ async function main(): Promise<void> {
         },
       },
       listen: {
-        config: { dynamic: app.dynamic, weibo: app.weibo },
         login: () => ({ bili: biliLoggedIn(), weibo: weiboLoggedIn() }),
         onChanged: () => reconcileListen(),
       },
+      advanced: {
+        onChanged: () => reconcileRuntime(),
+      },
       napcat: {
-        effective: () => getNapcatConfig(db, app.napcat),
+        effective: () => getNapcatConfig(db),
         source: () => ({
           enabled: db.getSetting('napcat_enabled') !== null ? 'panel' as const : 'config' as const,
           dir: db.getSetting('napcat_dir') !== null ? 'panel' as const : 'config' as const,
@@ -511,7 +592,7 @@ async function main(): Promise<void> {
           void napcatWatchdog?.tick();
         },
         state: async () => {
-          const nc = getNapcatConfig(db, app.napcat);
+          const nc = getNapcatConfig(db);
           const ep = nc.dir ? readOnebotEndpoint(nc.dir, nc.uin) : null;
           const [probeResult, taskRegistered] = await Promise.all([
             ep ? probeNapCat(ep) : Promise.resolve(null),
@@ -520,7 +601,7 @@ async function main(): Promise<void> {
           return { endpoint: ep?.baseUrl ?? null, probe: probeResult, taskRegistered };
         },
         launch: async () => {
-          const nc = getNapcatConfig(db, app.napcat);
+          const nc = getNapcatConfig(db);
           const ep = await ensureNapcatEntry(nc.dir, nc.uin);
           if (ep) onebotNotifier?.updateEndpoint(ep.baseUrl, ep.token);
           // 旧实例可能还在旧配置上跑（高权限进程只能经任务杀），先停再拉起让新配置生效
@@ -531,7 +612,7 @@ async function main(): Promise<void> {
           void napcatWatchdog?.tick();
         },
         setupTask: async () => {
-          const nc = getNapcatConfig(db, app.napcat);
+          const nc = getNapcatConfig(db);
           if (!nc.dir || !nc.uin) throw new Error('先填好路径与机器人 QQ 号');
           const ep = await ensureNapcatEntry(nc.dir, nc.uin);
           if (!ep) throw new Error('onebot11 配置读取/创建失败，请检查 NapCat 路径');
@@ -554,7 +635,7 @@ async function main(): Promise<void> {
   const shutdown = (sig: string) => {
     log.info(`收到 ${sig}，停止中`);
     napcatTask?.stop();
-    for (const s of sources) s.stop();
+    liveSrc.stop();
     followsSrc?.stop();
     dynamicSrc?.stop();
     weiboFeedSrc?.stop();

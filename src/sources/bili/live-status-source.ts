@@ -3,7 +3,7 @@ import { BiliApiError } from './client.js';
 import { fetchLiveStatus } from './live-status.js';
 import { PeriodicTask } from '../../core/scheduler.js';
 import { diffRoom, toPrevState, type PrevState } from '../../core/state.js';
-import type { Signal } from '../../core/types.js';
+import { STREAK_QQ_ALERT_AFTER_SEC, type Signal } from '../../core/types.js';
 import type { Source, SourceContext } from '../types.js';
 import type { RoomStatus } from './types.js';
 
@@ -35,6 +35,10 @@ export class LiveStatusSource implements Source {
   private firstRound = true;
   private consecutiveFailures = 0;
   private alerted = false;
+  /** 本轮连续失败的起点（秒）；0 = 不在失败中。用于「持续失败超阈值再报一次」 */
+  private firstFailureTs = 0;
+  /** 持续失败告警（durationAlert）本轮故障只发一次，恢复后复位 */
+  private durationAlerted = false;
 
   private readonly fetcher: StatusFetcher;
 
@@ -169,25 +173,43 @@ export class LiveStatusSource implements Source {
     }
     this.consecutiveFailures = 0;
     this.alerted = false;
+    this.firstFailureTs = 0;
+    this.durationAlerted = false;
   }
 
   private onPollFailure(err: unknown): void {
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (this.consecutiveFailures === 0) this.firstFailureTs = nowSec;
     this.consecutiveFailures++;
+    const durationSec = nowSec - this.firstFailureTs;
     const threshold = this.ctx!.config.healthAlertAfterFailures;
     if (this.consecutiveFailures >= threshold && !this.alerted) {
       this.alerted = true; // 同一轮故障只告警一次，恢复后才复位
-      this.ctx!.bus.emit({
-        source: this.name,
-        kind: 'health_alert',
-        uid: '',
-        roomId: '',
-        ts: Math.floor(Date.now() / 1000),
-        payload: {
-          failures: this.consecutiveFailures,
-          subscriptions: this.uids.length,
-          lastError: String(err),
-        },
+      this.emitAlert({ failures: this.consecutiveFailures, durationSec, lastError: String(err) });
+    }
+    // 次数阈值之外再按持续时间报一次（网络波动通常几分钟内恢复，
+    // 持续失败说明是真故障）——pipeline 据此路由到告警 QQ
+    if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.durationAlerted) {
+      this.durationAlerted = true;
+      this.emitAlert({
+        failures: this.consecutiveFailures, durationSec, lastError: String(err),
+        durationAlert: true,
       });
     }
+  }
+
+  private emitAlert(extra: Record<string, unknown>): void {
+    this.ctx!.bus.emit({
+      source: this.name,
+      kind: 'health_alert',
+      uid: '',
+      roomId: '',
+      ts: Math.floor(Date.now() / 1000),
+      payload: {
+        alertKind: 'streak',
+        subscriptions: this.uids.length,
+        ...extra,
+      },
+    });
   }
 }

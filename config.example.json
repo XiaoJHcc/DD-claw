@@ -1,91 +1,12 @@
 {
-  "pollIntervalSec": 45,
-  "pollJitterSec": 8,
+  // DD-claw 可以完全不带 config.json 启动。所有配置都在控制面板
+  //（http://127.0.0.1:8787）完成，settings 表/数据库是唯一信源。
+  //
+  // 本文件唯一活字段是 panel 段（面板改不了自己）。其余任何顶层字段
+  //（subscriptions / notify / napcat / llm / 各种间隔开关）都是遗留迁移来源：
+  // 启动时若库空/未配置会把值导入数据库一次并打日志提示，之后改这里不再生效，
+  // 老配置升级后建议删除。
 
-  // 首次运行时，已在直播的主播是否推送。默认关，避免启动即刷屏
-  "notifyOnFirstRun": false,
-  // 之后新增订阅时，该主播若正在直播是否推送。默认开 ——
-  // 关掉意味着新加的主播当时那场直播永远收不到通知
-  "notifyOnNewSubscription": true,
-
-  "healthAlertAfterFailures": 5,
-
-  // 关注列表同步（需项目根 cookies.json，见 docs/research/auth-cookie.md）。
-  // 无 cookies.json 时自动停用，不影响匿名开播监听
-  "follows": {
-    "enabled": true,
-    "syncIntervalSec": 1800
-  },
-
-  // 空间动态轮询（同样需 cookies.json，无 cookie 时自动跳过）。
-  // 下限 120 秒；预告一天就几条，3-10 分钟足够，更频繁只增风控压力
-  "dynamic": {
-    "enabled": true,
-    "intervalSec": 300
-  },
-
-  // 微博时间线轮询（需项目根 weibo-cookies.json，可在面板扫码登录生成）。
-  // 无 cookie 时自动跳过；下限 120 秒，单账号 3-10 分钟足够
-  "weibo": {
-    "enabled": true,
-    "intervalSec": 300
-  },
-
-  // 控制面板（localhost WebUI，只绑 127.0.0.1）：管理监听名单与偏好子句。
-  // 改库即生效，无需重启；启动失败（如端口被占）只记日志，不影响主流程
-  "panel": {
-    "enabled": true,
-    "port": 8787
-  },
-
-  // LLM 接入（OpenAI 兼容，可选）。全部管理都在控制面板的 LLM 卡片：
-  // provider 增删/启停、key 填写、总开关。这里只提供默认值/首次种子——
-  // enabled 只是默认开关（面板可覆盖），providers 仅空库时种子导入一次。
-  // 配好后用 npm run probe-llm 验证接线
-  "llm": {
-    "enabled": false,
-    "providers": [
-      // 便宜纯文本模型打头
-      // { "name": "deepseek", "baseURL": "https://api.deepseek.com/v1", "model": "deepseek-chat", "vision": false, "keyEnvs": ["DEEPSEEK_API_KEY"] },
-      // 多模态，接含图任务
-      // { "name": "minimax", "baseURL": "https://api.minimaxi.com/v1", "model": "MiniMax-M3", "vision": true, "keyEnvs": ["MINIMAX_API_KEY"] },
-      // 本地 LM Studio：无 keyEnvs = 不带 Authorization；
-      // 小模型结构化输出不可靠时把 structuredOutput 改成 "none"（解析时剥代码围栏兜底）
-      // { "name": "local-vl", "baseURL": "http://127.0.0.1:1234/v1", "model": "qwen3-vl-8b", "vision": true, "structuredOutput": "none" }
-    ]
-  },
-
-  // 可选，仅作为首次启动种子（streamers 表为空时导入一次）；
-  // 之后监听名单以数据库为准，由面板管理。整段可省略
-  "subscriptions": [
-    { "uid": "7706705", "alias": "阿梓从小就很可爱", "enabled": true }
-  ],
-
-  "notify": {
-    // NapCat 起来、QQ 号填好后把这里和下面某个 target 的 enabled 一起改成 true
-    "onebot": {
-      "enabled": false,
-      // 填好 id 后再把对应的 enabled 改成 true。
-      // schema 只校验 enabled 的目标，所以占位符可以先留着
-      "targets": [
-        { "type": "private", "id": "REPLACE_ME_你的主号QQ号", "enabled": false },
-        { "type": "group", "id": "REPLACE_ME_群号", "enabled": false }
-      ]
-    },
-    "toast": {
-      "enabled": true
-    }
-  },
-
-  // NapCat 托管（Windows，可选但推荐）：配置后不再需要 .env 的 NAPCAT_BASE_URL ——
-  // DD-claw 在 NapCat 的 onebot11_<uin>.json 里自建自管 name=dd-claw 的专属 HTTP 条目
-  //（自动选高位空闲端口、被占自动换，其他服务条目不受影响；你不用手动改 NapCat 配置）。
-  // 看门狗周期探测，NapCat 不在线/配置未生效时经计划任务自动停止旧实例 + 拉起快速登录 uin。
-  // 一次性设置：配好本段后跑 npm run napcat-setup（或面板 NapCat 卡片点「计划任务」，
-  // 弹一次 UAC 创建拉起/停止双任务，之后全静默）
-  "napcat": {
-    "enabled": false,
-    "dir": "D:\\CLI\\NapCat.Shell",
-    "uin": "REPLACE_ME_机器人QQ号"
-  }
+  // 面板自举：开关与端口（只绑 127.0.0.1）
+  "panel": { "enabled": true, "port": 8787 }
 }

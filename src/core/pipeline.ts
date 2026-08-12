@@ -3,6 +3,8 @@ import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './ty
 import { liveEventToMessage } from '../notify/message.js';
 import { matchPushRules, renderTemplate } from '../analysis/matcher.js';
 import { isPushEnabled } from './push.js';
+import { getNapcatAlertQq } from '../notify/napcat.js';
+import { isNotifyOnFirstRun, isNotifyOnNewSubscription } from './runtime-config.js';
 import type { Bus } from './bus.js';
 import type { Db } from './db.js';
 import type { AppConfig } from '../config/schema.js';
@@ -28,6 +30,12 @@ interface HealthAlertPayload {
   failures?: number;
   subscriptions?: number;
   lastError?: string;
+  /** 'login_drop' = 运行中登录态意外失效（立即报 QQ）；'streak' = 连续拉取失败 */
+  alertKind?: string;
+  /** 连续失败持续满 STREAK_QQ_ALERT_AFTER_SEC 后的二次告警（报 QQ） */
+  durationAlert?: boolean;
+  /** 本轮连续失败已持续的秒数 */
+  durationSec?: number;
   /** source 自定义的完整告警文案；缺省用 live-status 拉取失败的默认文案 */
   message?: string;
 }
@@ -85,7 +93,7 @@ export class Pipeline {
       return;
     }
 
-    const { db, config, queue, rule, dispatcher } = this.deps;
+    const { db, queue, rule, dispatcher } = this.deps;
     const event = toLiveEvent(signal.status, this.aliasOf(signal.uid));
 
     // 归档分派：在抑制检查之前（冷启动/静音场次照样归档），且在信号的同步前缀里
@@ -108,17 +116,18 @@ export class Pipeline {
 
     // 冷启动抑制（政策在这层，diffRoom 只如实产信号、source 只打标记）：
     // 跳过通知，但上面 live_start 的 recordSession 等归档照做。
-    if (signal.coldStart === 'first_run' && !config.notifyOnFirstRun) {
+    // 开关读 settings（面板高级设置卡，热生效）
+    if (signal.coldStart === 'first_run' && !isNotifyOnFirstRun(db)) {
       log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 首次运行已在播，按配置不推送`);
       return;
     }
     // 重启恢复：上次下播、本次启动前开播的主播，无法得知真实开播时间，
     // 与 first_run 同属「启动时已在播」，共用 notifyOnFirstRun 这一个开关。
-    if (signal.coldStart === 'restart_recovery' && !config.notifyOnFirstRun) {
+    if (signal.coldStart === 'restart_recovery' && !isNotifyOnFirstRun(db)) {
       log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 停机期间开播（启动时已在播），按配置不推送`);
       return;
     }
-    if (signal.coldStart === 'new_subscription' && !config.notifyOnNewSubscription) {
+    if (signal.coldStart === 'new_subscription' && !isNotifyOnNewSubscription(db)) {
       log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 新增订阅正在直播，按配置不推送`);
       return;
     }
@@ -199,12 +208,18 @@ export class Pipeline {
 
   private async handleHealthAlert(signal: Signal): Promise<void> {
     const p = signal.payload as HealthAlertPayload | undefined;
+    // QQ 告警政策：登录掉线立即报；连续失败满 10 分钟的二次告警（durationAlert）才报
+    // ——次数阈值的告警通常是网络波动，只发本机 toast。告警 QQ 留空 = 全不发。
+    const toQq = p?.alertKind === 'login_drop' || p?.durationAlert === true;
+    const qqTarget = toQq ? getNapcatAlertQq(this.deps.db) : '';
     await this.deps.dispatcher.alertAll(
       'DD-claw 监听异常',
       p?.message ??
         `连续 ${p?.failures ?? 0} 次拉取B站接口失败。\n` +
         `这是批量接口，**全部 ${p?.subscriptions ?? 0} 个订阅都收不到开播通知**。\n` +
+        (p?.durationSec ? `已持续失败约 ${Math.round(p.durationSec / 60)} 分钟。\n` : '') +
         `最后错误: ${p?.lastError ?? '(未知)'}`,
+      qqTarget || undefined,
     );
   }
 }

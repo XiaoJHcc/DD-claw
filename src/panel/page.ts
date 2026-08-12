@@ -16,6 +16,7 @@ import { APP_PUSH } from './page/app-push.js';
 import { APP_LLM } from './page/app-llm.js';
 import { APP_CATEGORIES } from './page/app-categories.js';
 import { APP_NAPCAT } from './page/app-napcat.js';
+import { APP_ADVANCED } from './page/app-advanced.js';
 import { APP_FOLLOWS } from './page/app-follows.js';
 import { APP_SCHEDULE } from './page/app-schedule.js';
 
@@ -78,6 +79,11 @@ export const PANEL_PAGE = `<!doctype html>
 <button class="btn" data-action="napcat-setup"><span data-icon="gear"></span>计划任务</button>
 </div>
 </section>
+
+<section class="card" id="card-advanced">
+<div class="card-head"><h2>高级设置</h2></div>
+<div id="advanced-rows">加载中…</div>
+</section>
 </div>
 
 <section class="card" id="card-schedule">
@@ -111,6 +117,7 @@ ${APP_PUSH}
 ${APP_LLM}
 ${APP_CATEGORIES}
 ${APP_NAPCAT}
+${APP_ADVANCED}
 ${APP_FOLLOWS}
 ${APP_SCHEDULE}
 </script>

@@ -40,7 +40,7 @@ function loginRow(name, plat, key) {
 function featureRow(name, f) {
   return '<div class="row"><span class="row-title">' + name + '</span>' +
     '<span class="row-end">' +
-    switchHtml('data-change="toggle-listen" data-feature="' + f.feature + '"', f.enabled, f.configEnabled === false) +
+    switchHtml('data-change="toggle-listen" data-feature="' + f.feature + '"', f.enabled) +
     '</span></div>';
 }
 

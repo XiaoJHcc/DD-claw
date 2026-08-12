@@ -17,6 +17,6 @@ export interface Notifier {
     clickThrough: boolean;
   };
   send(msg: PushMessage): Promise<NotifyResult[]>;
-  /** 监听自身失效时的告警通道。Toast 靠它在 NapCat 挂掉时通知用户 */
+  /** 监听自身健康告警通道（可选实现；当前仅 toast 实现——健康告警只发本机系统通知，不发 QQ） */
   alert?(title: string, body: string): Promise<void>;
 }

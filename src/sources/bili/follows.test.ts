@@ -187,28 +187,34 @@ test('取关标记：本轮消失的 uid 标 is_followed=0，新增的加入', a
   assert.equal(h.db.getStreamer('3'), undefined, '新关注不自动入监听');
 });
 
-test('isLogin=false：发一次 health_alert 且不同步，连续失效不重复告警', async (t) => {
+test('isLogin=false：本来就没登录不告警；运行中意外失效才告警一次，恢复复位', async (t) => {
   let self: SelfInfo = { isLogin: false, mid: null };
   let listCalls = 0;
   const h = harness(async () => self, async () => { listCalls++; return [f('1')]; });
   t.after(h.cleanup);
 
+  // 从未成功登录过：只跳过，不告警
   assert.equal(await h.src.syncOnce(), false);
   assert.equal(await h.src.syncOnce(), false);
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '本来就没登录不发告警');
+  assert.equal(listCalls, 0, '未登录不得拉关注列表');
+  assert.equal(h.db.listFollows().length, 0, '未登录不得写库');
 
+  // 成功登录一轮后失效：告警一次
+  self = LOGGED_IN;
+  assert.equal(await h.src.syncOnce(), true);
+  assert.equal(listCalls, 1);
+  self = { isLogin: false, mid: null };
+  await h.src.syncOnce();
+  await h.src.syncOnce();
   const alerts = h.signals.filter((s) => s.kind === 'health_alert');
   assert.equal(alerts.length, 1, '同一轮失效只告警一次');
   assert.equal(alerts[0]!.source, 'bili/follows');
   assert.match(String((alerts[0]!.payload as { message: string }).message), /cookie/);
-  assert.equal(listCalls, 0, '未登录不得拉关注列表');
-  assert.equal(h.db.listFollows().length, 0, '未登录不得写库');
 
-  // 恢复后复位，并正常同步
+  // 恢复后复位，再次失效重新告警
   self = LOGGED_IN;
   assert.equal(await h.src.syncOnce(), true);
-  assert.equal(listCalls, 1);
-
-  // 再次失效会重新告警（复位生效）
   self = { isLogin: false, mid: null };
   await h.src.syncOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 2);

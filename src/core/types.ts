@@ -53,6 +53,14 @@ export interface Signal {
   payload?: unknown;
 }
 
+/**
+ * health_alert 的 QQ 告警政策（pipeline 判定，见 core/pipeline）：
+ * - payload.alertKind === 'login_drop'：运行中登录态意外失效 → 立即向告警 QQ 报
+ * - payload.durationAlert === true：连续失败持续满本阈值后 source 再发一次 → 向告警 QQ 报
+ * 其余 health_alert（次数阈值、看门狗）只发本机 toast。告警 QQ 为空 = 全不发。
+ */
+export const STREAK_QQ_ALERT_AFTER_SEC = 600;
+
 /** 推送用的事件载荷。live_start 信号的 classifications 由分析队列填充（其余信号恒空）。 */
 export interface LiveEvent {
   platform: 'bilibili';

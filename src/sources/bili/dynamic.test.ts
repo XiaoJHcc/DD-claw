@@ -275,6 +275,28 @@ test('412 HTML（非 JSON）/ -352 / 网络异常：本轮跳过、旧数据不�
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 2, '恢复后故障重新告警');
 });
 
+test('单 uid 连续失败持续满 10 分钟再发 durationAlert 告警（QQ 路由依据）', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  const h = harness(async () => { throw new BiliApiError(-352, '风控'); });
+  t.after(h.cleanup);
+
+  const isDur = (s: Signal) => (s.payload as { durationAlert?: boolean } | undefined)?.durationAlert === true;
+
+  await h.src.pollOnce(); // 第 1 次失败，计起点
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await h.src.pollOnce(); // 达次数阈值（2），只持续 1 分钟
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '次数阈值告警');
+  assert.equal(h.signals.filter(isDur).length, 0, '未到 10 分钟不发持续告警');
+
+  t.mock.timers.setTime(Date.now() + 600_000);
+  await h.src.pollOnce();
+  const dur = h.signals.filter(isDur);
+  assert.equal(dur.length, 1, '持续满 10 分钟应再报一次');
+  assert.match((dur[0]!.payload as { message: string }).message, /已持续失败约 11 分钟/);
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter(isDur).length, 1, '持续告警同轮故障不重复');
+});
+
 test('单 uid 失败不影响其他 uid 本轮归档', async (t) => {
   const h = harness(async (_c, uid) => {
     if (uid === '1') throw new BiliApiError(-352, '风控校验失败');
@@ -301,7 +323,7 @@ test('每轮心跳上报登录态（onLoginState），供面板展示', async (t
   ], '每轮上报一次（无论 isLogin 真假）');
 });
 
-test('登录失效：发一次 health_alert 并跳过本轮，恢复后复位并重新归档', async (t) => {
+test('登录失效：本来就没登录不告警；运行中意外失效才告警一次，恢复后复位并重新归档', async (t) => {
   let loggedIn = false;
   let fetched = 0;
   const h = harness(
@@ -311,24 +333,29 @@ test('登录失效：发一次 health_alert 并跳过本轮，恢复后复位并
   );
   t.after(h.cleanup);
 
-  // 未登录：跳过抓取 + 告警一次
+  // 从未成功登录过：跳过抓取，不告警
   await h.src.pollOnce();
   assert.equal(fetched, 0, '未登录不抓动态');
   assert.equal(h.db.listRecentPosts(['1'], 10).get('1'), undefined);
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1);
-  const alert = h.signals.find((s) => s.kind === 'health_alert')!;
-  assert.equal(alert.source, 'bili/dynamic');
-  assert.match((alert.payload as { message: string }).message, /cookie 已失效/);
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '本来就没登录不发告警');
   assert.deepEqual(h.loginStates.at(-1), { isLogin: false, mid: null }, '失效也上报登录态');
 
-  // 同一轮失效不重复告警
+  // 成功登录一轮后失效：告警一次，同一轮失效不重复
+  loggedIn = true;
   await h.src.pollOnce();
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1);
+  assert.equal(fetched, 1);
+  loggedIn = false;
+  await h.src.pollOnce();
+  await h.src.pollOnce();
+  const alerts = h.signals.filter((s) => s.kind === 'health_alert');
+  assert.equal(alerts.length, 1, '运行中失效告警一次');
+  assert.equal(alerts[0]!.source, 'bili/dynamic');
+  assert.match((alerts[0]!.payload as { message: string }).message, /cookie 运行中失效/);
 
   // 恢复：复位后继续抓取归档
   loggedIn = true;
   await h.src.pollOnce();
-  assert.equal(fetched, 1, '恢复后继续抓取');
+  assert.equal(fetched, 2, '恢复后继续抓取');
   assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 1);
 
   // 复位后再次失效会重新告警

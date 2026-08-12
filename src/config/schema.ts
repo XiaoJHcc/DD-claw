@@ -56,38 +56,31 @@ export const llmProviderSchema = z.object({
 });
 
 export const configSchema = z.object({
+  // —— 以下字段全部是遗留迁移来源（老版本 config 升级时一次性入库，
+  //    库空/未配置才导；之后以 settings/库表为准，改 config 不再生效）。
+  //    config.json 里唯一的活配置是末尾的 panel 段（面板自举） ——
   pollIntervalSec: z.number().int().min(20, '轮询间隔不要低于 20 秒').max(3600).default(45),
   pollJitterSec: z.number().int().min(0).max(120).default(8),
-  /**
-   * 启动时已在直播的主播是否推送：首次运行（库空）与重启恢复（停机期间开播）
-   * 共用此开关。默认关，避免启动即刷屏 —— 启动只追轨迹，只有运行期实时开播才推。
-   */
+  /** 种子：启动时已在播是否推送（默认关，避免启动即刷屏） */
   notifyOnFirstRun: z.boolean().default(false),
-  /**
-   * 后续新增订阅时，该主播若正在直播是否推送。默认开 ——
-   * 关掉意味着「新加的主播当时那场直播永远收不到通知」，
-   * 这个失败模式比启动多一条通知更糟。
-   */
+  /** 种子：新增订阅时在播是否推送（默认开） */
   notifyOnNewSubscription: z.boolean().default(true),
   healthAlertAfterFailures: z.number().int().min(1).max(100).default(5),
 
-  /** 关注列表同步（需 cookies.json）。间隔下限 300s，低频即可，降低风控压力 */
+  /** 种子：关注列表同步间隔（下限 300s，低频即可，降低风控压力）。有 cookie 即运行 */
   follows: z.object({
-    enabled: z.boolean().default(true),
     syncIntervalSec: z.number().int().min(300, '关注列表同步间隔不低于 300 秒').max(86400).default(1800),
-  }).default({ enabled: true, syncIntervalSec: 1800 }),
+  }).default({ syncIntervalSec: 1800 }),
 
-  /** 空间动态轮询（需 cookies.json；无 cookie 时自动跳过）。下限 120s，预告一天就几条，低频即可 */
+  /** 种子：空间动态轮询间隔（下限 120s）。启停由面板监听开关管，这里只有间隔 */
   dynamic: z.object({
-    enabled: z.boolean().default(true),
     intervalSec: z.number().int().min(120, '动态轮询间隔不低于 120 秒').max(86400).default(300),
-  }).default({ enabled: true, intervalSec: 300 }),
+  }).default({ intervalSec: 300 }),
 
-  /** 微博时间线轮询（需 weibo-cookies.json；无 cookie 时自动跳过）。下限 120s，单账号低频即可 */
+  /** 种子：微博时间线轮询间隔（下限 120s）。启停由面板监听开关管 */
   weibo: z.object({
-    enabled: z.boolean().default(true),
     intervalSec: z.number().int().min(120, '微博轮询间隔不低于 120 秒').max(86400).default(300),
-  }).default({ enabled: true, intervalSec: 300 }),
+  }).default({ intervalSec: 300 }),
 
   /** 控制面板（localhost WebUI，只绑 127.0.0.1）：监听名单 / 候选池 / 推送规则与渠道管理 */
   panel: z.object({
@@ -97,9 +90,8 @@ export const configSchema = z.object({
 
   /**
    * LLM 接入：provider 名单与总开关的事实来源都在 settings 表（面板管理），
-   * 这里仅提供默认值/首次种子。路由不用配：由 provider 列表自动推导
-   *（顺序 = 优先级，vision 路由只含多模态）。
-   * 未启用或名单为空时分析链路整体降级（Noop 行为），不影响推送。
+   * providers 仅空库时种子导入。超时/熔断三参数同样是 settings 信源（高级设置卡），
+   * 这里仅作首次种子。路由不用配：由 provider 列表自动推导。
    */
   llm: z.object({
     /** 默认开关；面板 LLM 卡片的总开关（settings.llm_enabled）覆盖它 */
@@ -123,20 +115,22 @@ export const configSchema = z.object({
 
   notify: z.object({
     onebot: z.object({
-      enabled: z.boolean().default(true),
+      /** 种子：QQ 通道开关（settings notifier_onebot_enabled）。默认关，裸配置不装配 QQ */
+      enabled: z.boolean().default(false),
+      /** 种子：推送目标（push_channels 表为空时导入一次，之后面板管理） */
       targets: z.array(targetSchema).default([]),
-    }).default({ enabled: true, targets: [] }),
+    }).default({ enabled: false, targets: [] }),
     toast: z.object({
+      /** 种子：系统通知通道开关（settings notifier_toast_enabled） */
       enabled: z.boolean().default(true),
     }).default({ enabled: true }),
-  }),
+  }).default({ onebot: { enabled: false, targets: [] }, toast: { enabled: true } }),
 
   /**
-   * NapCat 托管（Windows）：配置后 onebot 端点只读跟随 NapCat 自己的
-   * onebot11_<uin>.json（端口/token 事实来源，.env NAPCAT_BASE_URL 降为兜底），
-   * 看门狗周期探测，NapCat 不在线时经「最高权限」计划任务自动拉起 + 快速登录 uin
-   *（一次性 npm run napcat-setup 创建计划任务，弹一次 UAC）。
-   * 端口冲突/拉起失败只告警，DD-claw 不改 NapCat 任何文件。
+   * NapCat 托管（Windows）：仅首次启动种子（settings 表是唯一信源，之后改这里不生效）。
+   * 配置后 onebot 端点只读跟随 NapCat 自己的 onebot11_<uin>.json
+   *（端口/token 事实来源，.env NAPCAT_BASE_URL 降为兜底），
+   * 看门狗周期探测，NapCat 不在线时经「最高权限」计划任务自动拉起 + 快速登录 uin。
    */
   napcat: z.object({
     enabled: z.boolean().default(false),
@@ -145,32 +139,6 @@ export const configSchema = z.object({
     /** 快速登录的机器人 QQ 号（对应 config/onebot11_<uin>.json） */
     uin: z.string().default(''),
   }).default({ enabled: false, dir: '', uin: '' }),
-}).superRefine((cfg, ctx) => {
-  if (cfg.notify.onebot.enabled && !cfg.notify.onebot.targets.some((t) => t.enabled)) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['notify', 'onebot', 'targets'],
-      message: 'onebot 已启用但没有任何 enabled 的推送目标',
-    });
-  }
-  const dupUid = cfg.subscriptions.map((s) => s.uid)
-    .find((u, i, a) => a.indexOf(u) !== i);
-  if (dupUid) {
-    ctx.addIssue({ code: 'custom', path: ['subscriptions'], message: `uid 重复: ${dupUid}` });
-  }
-  const dupProvider = cfg.llm.providers.map((p) => p.name)
-    .find((n, i, a) => a.indexOf(n) !== i);
-  if (dupProvider) {
-    ctx.addIssue({ code: 'custom', path: ['llm', 'providers'], message: `provider name 重复: ${dupProvider}` });
-  }
-  if (cfg.napcat.enabled) {
-    if (!cfg.napcat.dir) {
-      ctx.addIssue({ code: 'custom', path: ['napcat', 'dir'], message: 'napcat.enabled=true 时 dir（NapCat 一键包目录）必填' });
-    }
-    if (!/^\d+$/.test(cfg.napcat.uin)) {
-      ctx.addIssue({ code: 'custom', path: ['napcat', 'uin'], message: 'napcat.enabled=true 时 uin 必填且必须是纯数字 QQ 号' });
-    }
-  }
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

@@ -27,8 +27,12 @@ import type { AppConfig } from '../config/index.js';
 import { llmProviderSchema, type LlmProviderConfig } from '../config/schema.js';
 import { deriveRoutes, isLlmEnabled, setLlmEnabled, type LlmRouter } from '../analysis/providers.js';
 import { isListenEnabled, listenSetting, setListen, type ListenFeature } from '../core/listen.js';
+import {
+  getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS, type RuntimeConfig,
+} from '../core/runtime-config.js';
 import { isPushEnabled, setPushEnabled } from '../core/push.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
+import { getNapcatAlertQq } from '../notify/napcat.js';
 
 const log = makeLogger('panel');
 
@@ -99,21 +103,28 @@ export interface PanelDeps {
    * 动态需 B站登录、微博需微博登录，未登录默认关、登录成功自动开、手动设置为准。
    */
   listen?: {
-    config: Pick<AppConfig, 'dynamic' | 'weibo'>;
     /** 平台登录态（联动开关默认值用）：bili=动态、weibo=微博 */
     login: () => { bili: boolean; weibo: boolean };
     /** 面板改开关后回调：装配处热启停对应源 */
     onChanged: () => void;
   };
   /**
+   * 高级设置（运行时参数，settings 唯一信源）：保存后回调装配处做热生效
+   *（重启间隔变化的源 / 重建 llm router / 热切换通知通道）。不注入则保存不触发热生效。
+   */
+  advanced?: {
+    onChanged: () => void;
+  };
+  /**
    * NapCat 托管（面板 NapCat 卡片）；不注入则 /api/napcat* 一律 404。
-   * 配置事实来源是 settings 表（面板覆盖 > config 默认），保存在装配处闭包里热生效。
+   * 配置事实来源是 settings 表（唯一信源，config.json 仅首次启动种子导入），
+   * 保存在装配处闭包里热生效。
    */
   napcat?: {
     /** 生效配置与来源标注（panel/config） */
     effective: () => NapcatConfig;
     source: () => { enabled: 'panel' | 'config'; dir: 'panel' | 'config'; uin: 'panel' | 'config' };
-    save: (patch: { enabled?: boolean; dir?: string; uin?: string }) => void;
+    save: (patch: { enabled?: boolean; dir?: string; uin?: string; alertQq?: string }) => void;
     /** 实时状态：发现的端点 + 三态探测 + 计划任务是否已建 */
     state: () => Promise<{ endpoint: string | null; probe: ProbeResult | null; taskRegistered: boolean }>;
     /** 手动拉起；失败抛中文错（如计划任务未创建） */
@@ -172,12 +183,12 @@ async function handle(
   // ---- NapCat 托管（napcat dep 存在才挂）：配置（settings 覆盖 > config）+ 状态 + 手动操作 ----
   if (deps.napcat && method === 'GET' && path === '/api/napcat') {
     const st = await deps.napcat.state();
-    sendJson(res, 200, { ...deps.napcat.effective(), source: deps.napcat.source(), ...st });
+    sendJson(res, 200, { ...deps.napcat.effective(), alertQq: getNapcatAlertQq(db), source: deps.napcat.source(), ...st });
     return;
   }
   if (deps.napcat && method === 'PUT' && path === '/api/napcat') {
     const b = (await readJsonBody(req)) as Record<string, unknown>;
-    const patch: { enabled?: boolean; dir?: string; uin?: string } = {};
+    const patch: { enabled?: boolean; dir?: string; uin?: string; alertQq?: string } = {};
     if (b.enabled !== undefined) {
       if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
       patch.enabled = b.enabled;
@@ -192,10 +203,45 @@ async function handle(
       if (uin !== '' && !/^\d+$/.test(uin)) throw new HttpError(400, 'QQ号必须是纯数字');
       patch.uin = uin;
     }
+    if (b.alertQq !== undefined) {
+      if (typeof b.alertQq !== 'string') throw new HttpError(400, '告警 QQ 必须是字符串');
+      const alertQq = b.alertQq.trim();
+      if (alertQq !== '' && !/^\d+$/.test(alertQq)) throw new HttpError(400, '告警 QQ 必须是纯数字');
+      patch.alertQq = alertQq;
+    }
     deps.napcat.save(patch);
-    sendJson(res, 200, { ok: true, ...deps.napcat.effective() });
+    sendJson(res, 200, { ok: true, ...deps.napcat.effective(), alertQq: getNapcatAlertQq(db) });
     return;
   }
+  // ---- 高级设置（运行时参数；settings 唯一信源，无 dep 也挂载，onChanged 缺省则只落库） ----
+  if (method === 'GET' && path === '/api/advanced') {
+    sendJson(res, 200, getRuntimeConfig(db));
+    return;
+  }
+  if (method === 'PUT' && path === '/api/advanced') {
+    const b = (await readJsonBody(req)) as Record<string, unknown>;
+    const patch: Record<string, number | boolean> = {};
+    for (const s of NUM_SPECS) {
+      const v = b[s.field];
+      if (v === undefined) continue;
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < s.min || v > s.max) {
+        throw new HttpError(400, `${s.label}必须是 ${s.min}~${s.max} 的整数`);
+      }
+      patch[s.field] = v;
+    }
+    for (const s of BOOL_SPECS) {
+      const v = b[s.field];
+      if (v === undefined) continue;
+      if (typeof v !== 'boolean') throw new HttpError(400, `${s.label}必须是布尔值`);
+      patch[s.field] = v;
+    }
+    if (Object.keys(patch).length === 0) throw new HttpError(400, '没有可保存的字段');
+    saveRuntimeConfig(db, patch as Partial<RuntimeConfig>);
+    deps.advanced?.onChanged();
+    sendJson(res, 200, { ok: true, ...getRuntimeConfig(db) });
+    return;
+  }
+
   if (deps.napcat && method === 'POST' && path === '/api/napcat/launch') {
     try {
       await deps.napcat.launch();
@@ -731,20 +777,18 @@ async function pollWeiboQrcodeRoute(
 // ---- 监听功能开关（面板「监听」卡片）----
 function listenInfo(deps: PanelDeps): unknown {
   const login = deps.listen!.login();
-  const cfg = deps.listen!.config;
-  const row = (feature: ListenFeature, loggedIn: boolean, configEnabled: boolean) => ({
+  const row = (feature: ListenFeature, loggedIn: boolean) => ({
     feature,
     setting: listenSetting(deps.db, feature),
-    enabled: isListenEnabled(deps.db, feature, loggedIn, configEnabled),
-    configEnabled,
+    enabled: isListenEnabled(deps.db, feature, loggedIn),
   });
   return {
     biliLoggedIn: login.bili,
     weiboLoggedIn: login.weibo,
     platforms: deps.status().platforms,
     rows: {
-      dynamic: row('dynamic', login.bili, cfg.dynamic.enabled),
-      weibo: row('weibo', login.weibo, cfg.weibo.enabled),
+      dynamic: row('dynamic', login.bili),
+      weibo: row('weibo', login.weibo),
     },
   };
 }

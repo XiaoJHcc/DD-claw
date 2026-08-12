@@ -1,7 +1,6 @@
 import { makeLogger } from '../logger.js';
 import type { PushMessage, PushTarget } from '../core/types.js';
 import { type Notifier, type NotifyResult } from './types.js';
-import type { NotifyTarget } from '../config/schema.js';
 
 const log = makeLogger('notify/onebot');
 
@@ -32,7 +31,6 @@ export class OneBotNotifier implements Notifier {
   constructor(
     private baseUrl: string,
     private token: string,
-    private readonly targets: NotifyTarget[],
   ) {}
 
   /** NapCat 看门狗热跟随：webui 改了端口/token 时免重启更新端点 */
@@ -42,8 +40,9 @@ export class OneBotNotifier implements Notifier {
   }
 
   async send(msg: PushMessage): Promise<NotifyResult[]> {
-    // 常规发送只看 msg.targets（dispatcher 已按选中渠道解析好）；
-    // 构造参数 targets 只用于 alert() 告警。空数组 = 不发，返回空结果。
+    // 常规发送只看 msg.targets（dispatcher 已按选中渠道解析好），空数组 = 不发。
+    // config 的 onebot.targets 不进这里，仅由装配处用作 push_channels 种子与
+    // --test-notify 验证目标。
     const active = (msg.targets ?? [])
       .filter((t) => {
         if (/^\d+$/.test(t.id)) return true;
@@ -94,14 +93,6 @@ export class OneBotNotifier implements Notifier {
 
   private gap(): Promise<void> {
     return new Promise((r) => setTimeout(r, OneBotNotifier.MIN_GAP_MS));
-  }
-
-  async alert(title: string, body: string): Promise<void> {
-    const seg: Segment[] = [{ type: 'text', data: { text: `【告警】${title}\n${body}` } }];
-    await this.mapTargets(
-      this.targets.filter((x) => x.enabled),
-      async (t) => this.post(t, seg),
-    );
   }
 
   private buildSegments(msg: PushMessage, withImage: boolean): Segment[] {

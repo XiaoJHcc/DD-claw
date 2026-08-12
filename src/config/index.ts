@@ -15,6 +15,11 @@ export interface Secrets {
 export interface LoadedConfig {
   app: AppConfig;
   secrets: Secrets;
+  /**
+   * config.json 里出现的遗留顶层字段（panel 以外）。这些字段已不再是运行时信源：
+   * 启动时按迁移规则一次性入库（库空/未配置才导），装配处据此打日志提示用户删除。
+   */
+  legacyKeys: string[];
 }
 
 /** 极简 .env 解析。不引 dotenv：只需要 KEY=VALUE 和注释。 */
@@ -81,21 +86,25 @@ export function loadConfig(): LoadedConfig {
   if (['debug', 'info', 'warn', 'error'].includes(level)) setLogLevel(level);
 
   const cfgPath = resolve(projectRoot, 'config.json');
-  if (!existsSync(cfgPath)) {
-    throw new ConfigError(
-      `找不到 config.json。请复制 config.example.json 为 config.json 并填写。\n  期望位置: ${cfgPath}`,
-    );
+  // config.json 全程可选，且只有 panel 段是活配置（面板自举）。其余顶层字段都是
+  // 遗留迁移来源：启动时一次性入库（库空/未配置才导），之后以 settings/库表为准。
+  // 文件不存在 = 全部用默认值启动。
+  let parsedJson: unknown = {};
+  if (existsSync(cfgPath)) {
+    try {
+      // 去掉 BOM：Windows 上记事本另存、PowerShell 的 Out-File -Encoding utf8
+      // 都会写入 BOM，而 JSON.parse 不接受它
+      const raw = readFileSync(cfgPath, 'utf8').replace(/^﻿/, '');
+      parsedJson = JSON.parse(stripJsonComments(raw));
+    } catch (e) {
+      throw new ConfigError(`config.json 不是合法 JSON: ${(e as Error).message}`);
+    }
   }
 
-  let parsedJson: unknown;
-  try {
-    // 去掉 BOM：Windows 上记事本另存、PowerShell 的 Out-File -Encoding utf8
-    // 都会写入 BOM，而 JSON.parse 不接受它
-    const raw = readFileSync(cfgPath, 'utf8').replace(/^﻿/, '');
-    parsedJson = JSON.parse(stripJsonComments(raw));
-  } catch (e) {
-    throw new ConfigError(`config.json 不是合法 JSON: ${(e as Error).message}`);
-  }
+  const legacyKeys =
+    parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)
+      ? Object.keys(parsedJson).filter((k) => k !== 'panel')
+      : [];
 
   const result = configSchema.safeParse(parsedJson);
   if (!result.success) {
@@ -105,15 +114,13 @@ export function loadConfig(): LoadedConfig {
     throw new ConfigError(`config.json 校验失败:\n${lines.join('\n')}`);
   }
 
+  // onebot 端点检查在装配处（index.ts）做：napcat 生效配置（settings）发现失败
+  // 且 .env 无 NAPCAT_BASE_URL 才报错，这里不重复
   const baseUrl = (process.env.NAPCAT_BASE_URL ?? '').replace(/\/+$/, '');
-  if (result.data.notify.onebot.enabled && !baseUrl && !result.data.napcat.enabled) {
-    throw new ConfigError(
-      'onebot 已启用，但 .env 里没有 NAPCAT_BASE_URL（也可在 config.json 配置 napcat 段，由 DD-claw 从 NapCat 配置自动发现端点）',
-    );
-  }
 
   return {
     app: result.data,
+    legacyKeys,
     secrets: {
       napcatBaseUrl: baseUrl,
       napcatToken: process.env.NAPCAT_TOKEN ?? '',

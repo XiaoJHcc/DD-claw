@@ -15,28 +15,36 @@ export interface NapcatConfig {
 }
 
 /**
- * 生效配置：settings 表（面板改的事实来源）> config.json napcat 段（默认值）。
- * settings 键：napcat_enabled '1'/'0'、napcat_dir、napcat_uin；缺省 = 用 config。
+ * 生效配置：settings 表是唯一信源（webui 管理，用户不会手改 config.json）。
+ * config.json 的 napcat 段仅首次启动经 seedNapcatConfigIfUnset 种子导入，之后不再读取。
+ * settings 键：napcat_enabled '1'/'0'、napcat_dir、napcat_uin；缺省 = 未配置。
  */
-export function getNapcatConfig(
-  db: Db,
-  fallback: NapcatConfig,
-): NapcatConfig {
-  const en = db.getSetting('napcat_enabled');
+export function getNapcatConfig(db: Db): NapcatConfig {
   return {
-    enabled: en === '1' ? true : en === '0' ? false : fallback.enabled,
-    dir: db.getSetting('napcat_dir') ?? fallback.dir,
-    uin: db.getSetting('napcat_uin') ?? fallback.uin,
+    enabled: db.getSetting('napcat_enabled') === '1',
+    dir: db.getSetting('napcat_dir') ?? '',
+    uin: db.getSetting('napcat_uin') ?? '',
   };
 }
 
 /**
- * 面板保存：传空串 = 清除覆盖回落 config（删 key，与 LLM key 口径一致）。
- * 校验：uin 非空时必须纯数字；落库后由装配处 onChanged 热生效。
+ * 首次启动种子：napcat_enabled 不存在（从未在面板配置过）才把 config.json 的
+ * napcat 段导入 settings；之后 settings 是唯一信源，config 改动不再生效。
+ */
+export function seedNapcatConfigIfUnset(db: Db, seed: NapcatConfig): void {
+  if (db.getSetting('napcat_enabled') !== null) return;
+  db.setSetting('napcat_enabled', seed.enabled ? '1' : '0');
+  if (seed.dir) db.setSetting('napcat_dir', seed.dir);
+  if (seed.uin) db.setSetting('napcat_uin', seed.uin);
+}
+
+/**
+ * 面板保存：传空串 = 清空该字段（settings 是唯一信源，不存在 config 回落）。
+ * 校验：uin/alertQq 非空时必须纯数字（路由层做）；落库后由装配处 onChanged 热生效。
  */
 export function saveNapcatConfig(
   db: Db,
-  patch: { enabled?: boolean; dir?: string; uin?: string },
+  patch: { enabled?: boolean; dir?: string; uin?: string; alertQq?: string },
 ): void {
   if (patch.enabled !== undefined) db.setSetting('napcat_enabled', patch.enabled ? '1' : '0');
   if (patch.dir !== undefined) {
@@ -47,6 +55,18 @@ export function saveNapcatConfig(
     if (patch.uin === '') db.deleteSetting('napcat_uin');
     else db.setSetting('napcat_uin', patch.uin);
   }
+  if (patch.alertQq !== undefined) {
+    if (patch.alertQq === '') db.deleteSetting('napcat_alert_qq');
+    else db.setSetting('napcat_alert_qq', patch.alertQq);
+  }
+}
+
+/**
+ * 健康告警的 QQ 私聊目标（settings `napcat_alert_qq`，留空 = 不向 QQ 告警）。
+ * settings 独立读写、不进 NapcatConfig/config 段：它只是告警路由，与托管配置无关。
+ */
+export function getNapcatAlertQq(db: Db): string {
+  return db.getSetting('napcat_alert_qq') ?? '';
 }
 
 /** OneBot HTTP 端点（从 NapCat 自己的配置文件发现，DD-claw 只读跟随） */

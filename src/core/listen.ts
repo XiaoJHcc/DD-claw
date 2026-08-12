@@ -17,28 +17,25 @@ export function listenSetting(db: Db, feature: ListenFeature): '1' | '0' | null 
   return null;
 }
 
-/** UI 有效态：config 关=false；手动开=true；手动关=false；auto=跟随登录态 */
+/** UI 有效态：手动开=true；手动关=false；auto=跟随登录态 */
 export function isListenEnabled(
   db: Db,
   feature: ListenFeature,
   loggedIn: boolean,
-  configEnabled = true,
 ): boolean {
-  if (!configEnabled) return false;
   const s = listenSetting(db, feature);
   if (s === '1') return true;
   if (s === '0') return false;
   return loggedIn;
 }
 
-/** 源是否运行：config 开 && cookie 存在 &&（手动开 || auto）。auto 下登录过期不自动停，由源心跳跳过并告警。 */
+/** 源是否运行：cookie 存在 &&（手动开 || auto）。auto 下登录过期不自动停，由源心跳跳过并告警。 */
 export function shouldRunListen(
   db: Db,
   feature: ListenFeature,
   cookieExists: boolean,
-  configEnabled = true,
 ): boolean {
-  if (!configEnabled || !cookieExists) return false;
+  if (!cookieExists) return false;
   const s = listenSetting(db, feature);
   return s !== '0';
 }

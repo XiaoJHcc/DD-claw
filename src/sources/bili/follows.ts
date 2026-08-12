@@ -21,7 +21,8 @@ export interface FollowsSourceOpts {
 
 /**
  * 关注列表同步：isLogin 心跳合并进同步周期 —— 每轮先查登录态，
- * 失效则发一次 health_alert 并跳过本轮（恢复后复位）；有效才分页拉取。
+ * 运行中发现意外失效（本进程内此前成功登录过）才发一次 health_alert 并跳过本轮
+ * （恢复后复位）；本来就没登录（启动起从未成功）只记日志不告警；有效才分页拉取。
  * 整轮成功才落库：upsertFollows + markFollowsSynced。
  * 关注不再自动入监听 —— follows 表只是面板上「方便添加」的候选池，
  * 监听名单完全由用户在面板管理；同步只对已有 streamer 条目做空 face 回填。
@@ -33,6 +34,8 @@ export class FollowsSource implements Source {
   private task?: PeriodicTask;
   /** 同一轮登录失效只告警一次，恢复后才复位（同 live-status 的告警模式） */
   private alerted = false;
+  /** 本进程内是否成功登录过：没成功过 = 本来就没登录，只记日志不告警 */
+  private hadOkLogin = false;
 
   private readonly cookie: string;
   private readonly selfFetcher: SelfFetcher;
@@ -82,7 +85,7 @@ export class FollowsSource implements Source {
     this.onLoginState?.(self);
 
     if (!self.isLogin) {
-      if (!this.alerted) {
+      if (this.hadOkLogin && !this.alerted) {
         this.alerted = true;
         ctx.bus.emit({
           source: this.name,
@@ -91,14 +94,16 @@ export class FollowsSource implements Source {
           roomId: '',
           ts: Math.floor(Date.now() / 1000),
           payload: {
-            message: 'B站 cookie 已失效或未登录（isLogin=false），关注列表同步已暂停。\n' +
+            alertKind: 'login_drop',
+            message: 'B站 cookie 运行中失效（isLogin=false），关注列表同步已暂停。\n' +
               '请重新导出 cookies.json；匿名开播监听不受影响。',
           },
         });
       }
-      log.warn('cookie 失效或未登录，跳过本轮同步');
+      log.warn(this.hadOkLogin ? 'cookie 失效，跳过本轮同步' : '未登录，跳过本轮同步（不告警）');
       return false;
     }
+    this.hadOkLogin = true;
     if (!self.mid) {
       log.error('已登录但 nav 未返回 mid（接口异常？），跳过本轮同步');
       return false;

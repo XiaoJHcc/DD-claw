@@ -83,6 +83,7 @@ function classification(categoryId: number): Classification {
 class FakeDispatcher {
   sent: PushMessage[] = [];
   alerts: string[] = [];
+  alertQqTargets: Array<string | null> = [];
   concurrentPeak = 0;
   private inFlight = 0;
   constructor(private readonly delayMs = 0) {}
@@ -94,7 +95,10 @@ class FakeDispatcher {
     this.sent.push(msg);
     return { anySuccess: true, total: 1, succeeded: 1 };
   }
-  async alertAll(title: string, body: string) { this.alerts.push(`${title}|${body}`); }
+  async alertAll(title: string, body: string, qqTarget?: string) {
+    this.alerts.push(`${title}|${body}`);
+    this.alertQqTargets.push(qqTarget ?? null);
+  }
 }
 
 function config(over: Partial<AppConfig> = {}): AppConfig {
@@ -108,6 +112,14 @@ function config(over: Partial<AppConfig> = {}): AppConfig {
 function harness(over: Partial<AppConfig> = {}, dispatchDelayMs = 0, classifications: Classification[] = []) {
   const bus = new Bus();
   const db = new FakeDb();
+  // 冷启动推送开关的事实来源是 settings（面板高级设置卡）；
+  // 兼容旧测试写法：config override 里的两个开关翻译成 settings 键
+  if (over.notifyOnFirstRun !== undefined) {
+    db.settings.set('notify_on_first_run', over.notifyOnFirstRun ? '1' : '0');
+  }
+  if (over.notifyOnNewSubscription !== undefined) {
+    db.settings.set('notify_on_new_subscription', over.notifyOnNewSubscription ? '1' : '0');
+  }
   const disp = new FakeDispatcher(dispatchDelayMs);
   const classifier = new StubClassifier(classifications);
   const pipeline = new Pipeline({
@@ -388,6 +400,33 @@ test('health_alert 转 alertAll，文案带失败次数/订阅数/最后错误',
   assert.match(h.disp.alerts[0]!, /连续 5 次拉取B站接口失败/);
   assert.match(h.disp.alerts[0]!, /全部 3 个订阅/);
   assert.match(h.disp.alerts[0]!, /最后错误: Error: boom/);
+  assert.equal(h.disp.alertQqTargets[0], null, '次数阈值告警不发 QQ');
+});
+
+test('health_alert 的 QQ 路由：login_drop 与 durationAlert 报告警 QQ，留空则不报', async () => {
+  const h = harness();
+  h.db.settings.set('napcat_alert_qq', '12345');
+  const emit = (payload: Record<string, unknown>) => h.bus.emit({
+    source: 'bili/follows', kind: 'health_alert', uid: '', roomId: '', ts: 0, payload,
+  });
+
+  emit({ alertKind: 'login_drop', message: 'cookie 失效' });
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.alertQqTargets.at(-1), '12345', '登录掉线立即报告警 QQ');
+
+  emit({ alertKind: 'streak', durationAlert: true, message: '持续失败' });
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.alertQqTargets.at(-1), '12345', '持续失败二次告警报告警 QQ');
+
+  emit({ message: '看门狗告警' });
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.alertQqTargets.at(-1), null, '无标记的告警只发本机');
+
+  h.db.settings.delete('napcat_alert_qq');
+  emit({ alertKind: 'login_drop', message: 'cookie 失效' });
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.alerts.length, 4, '本机 toast 照发');
+  assert.equal(h.disp.alertQqTargets.at(-1), null, '告警 QQ 留空 = 不报');
 });
 
 // ---- 并发上限（旧 NOTIFY_CONCURRENCY 语义）----

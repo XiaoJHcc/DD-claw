@@ -14,6 +14,7 @@ import { makeLogger } from '../../logger.js';
 import { PeriodicTask } from '../../core/scheduler.js';
 import { mapLimit } from '../../core/concurrency.js';
 import type { Signal } from '../../core/types.js';
+import { STREAK_QQ_ALERT_AFTER_SEC } from '../../core/types.js';
 import type { NewPost } from '../../core/posts.js';
 import type { Source, SourceContext } from '../types.js';
 import { fetchWeiboSelf, type WeiboSelfInfo } from './auth.js';
@@ -168,8 +169,9 @@ export function parseMblog(
  * 微博时间线轮询：listStreamers → watch=1 且 weiboUid 非空 → mapLimit(2) 逐个拉
  * mymblog → 归档 posts → 新帖 emit feed_post。
  *
- * 登录态心跳折进同步周期：每轮 fetchWeiboSelf，失效发一次 health_alert 并
- * 跳过整轮抓取，恢复复位；每轮 onLoginState 上报面板（驱动微博平台状态点）。
+ * 登录态心跳折进同步周期：每轮 fetchWeiboSelf，运行中发现意外失效（本进程内此前
+ * 成功登录过）才发一次 health_alert 并跳过整轮抓取，恢复复位；本来就没登录
+ * （启动起从未成功）只记日志不告警；每轮 onLoginState 上报面板（驱动微博平台状态点）。
  * 冷启动政策：每个 uid 首轮只归档不发信号（同 dynamic 的 first round）。
  */
 export class WeiboFeedSource implements Source {
@@ -181,8 +183,14 @@ export class WeiboFeedSource implements Source {
   private polled = new Set<string>();
   private failures = new Map<string, number>();
   private uidAlerted = new Set<string>();
+  /** 各 uid 本轮连续失败的起点（秒）。用于「持续失败超阈值再报一次」 */
+  private firstFailTs = new Map<string, number>();
+  /** 持续失败告警（durationAlert）每 uid 每轮故障只发一次，恢复后复位 */
+  private durationAlerted = new Set<string>();
   /** 同一轮登录失效只告警一次，恢复后才复位（同 FollowsSource） */
   private loginAlerted = false;
+  /** 本进程内是否成功登录过：没成功过 = 本来就没登录，只记日志不告警 */
+  private hadOkLogin = false;
 
   private readonly cookie: string;
   private readonly fetcher: MblogFetcher;
@@ -234,7 +242,7 @@ export class WeiboFeedSource implements Source {
     this.onLoginState?.(self);
 
     if (!self.loggedIn) {
-      if (!this.loginAlerted) {
+      if (this.hadOkLogin && !this.loginAlerted) {
         this.loginAlerted = true;
         ctx.bus.emit({
           source: this.name,
@@ -243,14 +251,16 @@ export class WeiboFeedSource implements Source {
           roomId: '',
           ts: Math.floor(Date.now() / 1000),
           payload: {
-            message: '微博登录态失效（X-Log-Uid 缺失），微博时间线已暂停。\n' +
+            alertKind: 'login_drop',
+            message: '微博登录态运行中失效（X-Log-Uid 缺失），微博时间线已暂停。\n' +
               '请在面板重新扫码登录，或更新 weibo-cookies.json；其他功能不受影响。',
           },
         });
       }
-      log.warn('微博登录态失效，跳过本轮抓取');
+      log.warn(this.hadOkLogin ? '微博登录态失效，跳过本轮抓取' : '微博未登录，跳过本轮抓取（不告警）');
       return;
     }
+    this.hadOkLogin = true;
     if (this.loginAlerted) {
       this.loginAlerted = false;
       log.info('微博登录态已恢复，继续抓取');
@@ -321,27 +331,44 @@ export class WeiboFeedSource implements Source {
     if (n > 0) log.info(`uid=${uid} 微博时间线拉取恢复正常（此前连续失败 ${n} 次）`);
     this.failures.delete(uid);
     this.uidAlerted.delete(uid);
+    this.firstFailTs.delete(uid);
+    this.durationAlerted.delete(uid);
   }
 
   private onFailure(uid: string, err: unknown): void {
+    const nowSec = Math.floor(Date.now() / 1000);
     const n = (this.failures.get(uid) ?? 0) + 1;
+    if (n === 1) this.firstFailTs.set(uid, nowSec);
     this.failures.set(uid, n);
+    const durationSec = nowSec - (this.firstFailTs.get(uid) ?? nowSec);
     const threshold = this.ctx!.config.healthAlertAfterFailures;
     if (n >= threshold && !this.uidAlerted.has(uid)) {
       this.uidAlerted.add(uid); // 同一轮故障只告警一次，恢复后才复位
-      this.ctx!.bus.emit({
-        source: this.name,
-        kind: 'health_alert',
-        uid,
-        roomId: '',
-        ts: Math.floor(Date.now() / 1000),
-        payload: {
-          message: `微博时间线拉取连续失败 ${n} 次（uid=${uid}），该对象本轮已暂停。\n` +
-            '多为登录态失效或被风控，恢复后自动继续。',
-          failures: n,
-          lastError: String(err),
-        },
-      });
+      this.emitUidAlert(uid, n, durationSec, err, false);
     }
+    // 持续失败超阈值再报一次（网络波动通常几分钟内恢复）——pipeline 据此路由到告警 QQ
+    if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.durationAlerted.has(uid)) {
+      this.durationAlerted.add(uid);
+      this.emitUidAlert(uid, n, durationSec, err, true);
+    }
+  }
+
+  private emitUidAlert(uid: string, failures: number, durationSec: number, err: unknown, durationAlert: boolean): void {
+    this.ctx!.bus.emit({
+      source: this.name,
+      kind: 'health_alert',
+      uid,
+      roomId: '',
+      ts: Math.floor(Date.now() / 1000),
+      payload: {
+        alertKind: 'streak',
+        message: `微博时间线拉取连续失败 ${failures} 次（uid=${uid}），该对象本轮已暂停。\n` +
+          '多为登录态失效或被风控，恢复后自动继续。' +
+          (durationAlert ? `\n已持续失败约 ${Math.round(durationSec / 60)} 分钟。` : ''),
+        failures,
+        lastError: String(err),
+        ...(durationAlert ? { durationAlert: true } : {}),
+      },
+    });
   }
 }
