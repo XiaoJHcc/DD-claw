@@ -26,7 +26,7 @@ import {
   fetchWeiboSelf, loadWeiboCookies, saveWeiboCookies, weiboCookieHeader, type WeiboSelfInfo,
 } from '../sources/weibo/auth.js';
 import { llmProviderSchema, type LlmProviderConfig } from '../config/schema.js';
-import { deriveRoutes, isLlmEnabled, setLlmEnabled, type LlmRouter } from '../analysis/providers.js';
+import { deriveRoutes, isLlmEnabled, setLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
 import { isListenEnabled, listenSetting, setListen, type ListenFeature } from '../core/listen.js';
 import {
   getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS, type RuntimeConfig,
@@ -119,6 +119,11 @@ export interface PanelDeps {
   snapshots?: {
     dir: string;
   };
+  /**
+   * 头像代理 fetch 注入点（测试用）；缺省用全局 fetch。/api/avatar 恒挂载，
+   * 按 uid 反代主播头像以规避 B站图床无 CORS 导致的画布污染（颜色条取平均色用）。
+   */
+  avatar?: { fetchImpl?: FetchLike };
   /**
    * NapCat 托管（面板 NapCat 卡片）；不注入则 /api/napcat* 一律 404。
    * 配置事实来源是 settings 表（唯一信源，config.json 仅首次启动种子导入），
@@ -273,6 +278,12 @@ async function handle(
       'cache-control': 'no-store',
     });
     res.end(data);
+    return;
+  }
+
+  // ---- 头像代理（恒挂载）：按 uid 反代主播头像，规避 B站图床无 CORS 的画布污染 ----
+  if (method === 'GET' && path === '/api/avatar') {
+    await sendAvatar(deps, url, res);
     return;
   }
 
@@ -614,6 +625,65 @@ function scheduleInfo(db: Db, from: string | null, to: string | null): unknown {
     days.push({ date, entries: byDay.get(date) ?? [] });
   }
   return { days };
+}
+
+// ---- 头像代理（/api/avatar）----
+// B站图床（hdslb.com）不返回 CORS 头，前端 <img> 直接跨域读像素必然画布污染，
+// 头像平均色只能同源反代。B站图床要 UA + Referer，否则 403（同 image-cache 口径）。
+const AVATAR_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+  Referer: 'https://live.bilibili.com/',
+};
+const AVATAR_CACHE_MAX = 200;
+const avatarCache = new Map<string, { buf: Buffer; type: string }>();
+
+/** 域名白名单：只反代 B站系图床，防库被写脏后变成开放 SSRF 代理 */
+function isBiliImageHost(host: string): boolean {
+  return host === 'hdslb.com' || host.endsWith('.hdslb.com') ||
+    host === 'bilibili.com' || host.endsWith('.bilibili.com');
+}
+
+async function sendAvatar(deps: PanelDeps, url: URL, res: http.ServerResponse): Promise<void> {
+  const uid = url.searchParams.get('uid') ?? '';
+  if (!/^\d+$/.test(uid)) throw new HttpError(400, 'uid 必须是纯数字');
+  const face = deps.db.getStreamer(uid)?.face;
+  if (!face) throw new HttpError(404, '该主播没有头像');
+  let host: string;
+  try {
+    const u = new URL(face);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('bad scheme');
+    host = u.hostname;
+  } catch {
+    throw new HttpError(400, '头像地址非法');
+  }
+  if (!isBiliImageHost(host)) throw new HttpError(400, '头像地址不在白名单内');
+  let entry = avatarCache.get(face);
+  if (!entry) {
+    const fetchImpl = deps.avatar?.fetchImpl ?? fetch;
+    let resp: Response;
+    try {
+      resp = await fetchImpl(face, { headers: AVATAR_HEADERS, signal: AbortSignal.timeout(8000) });
+    } catch {
+      throw new HttpError(502, '头像拉取失败');
+    }
+    if (!resp.ok) throw new HttpError(502, '头像拉取失败');
+    const buf = Buffer.from(await resp.arrayBuffer());
+    if (buf.length === 0) throw new HttpError(502, '头像为空');
+    const ct = (resp.headers.get('content-type') ?? '').toLowerCase();
+    const type = ct.includes('png') ? 'image/png' : ct.includes('webp') ? 'image/webp'
+      : ct.includes('gif') ? 'image/gif' : 'image/jpeg';
+    if (avatarCache.size >= AVATAR_CACHE_MAX) {
+      const oldest = avatarCache.keys().next().value;
+      if (oldest !== undefined) avatarCache.delete(oldest);
+    }
+    entry = { buf, type };
+    avatarCache.set(face, entry);
+  }
+  res.writeHead(200, {
+    'content-type': entry.type,
+    'cache-control': 'private, max-age=86400',
+  });
+  res.end(entry.buf);
 }
 
 /** 渠道拖拽排序：ids 必须是现有渠道的全排列（长度一致/无重复/无增删）。 */

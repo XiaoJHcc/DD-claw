@@ -84,7 +84,7 @@ function openLlmSheet(name) {
     field('API key', '<input id="lp-key" placeholder="多个用英文逗号分隔；本地无鉴权端点留空" value="' +
       (p && p.key.value ? esc(p.key.value) : '') + '">') +
     '<div class="field-row">' +
-      field('多模态', checkboxHtml('id="lp-vision"', !!(p && p.vision), false, '可接含图任务（进 vision 路由）')) +
+      field('多模态', checkboxHtml('id="lp-vision"', !!(p && p.vision), false, '识图')) +
       field('结构化输出', '<select id="lp-so"><option value="schema">schema（默认）</option>' +
         '<option value="object">object</option>' +
         '<option value="none">none（本地小模型）</option></select>') +

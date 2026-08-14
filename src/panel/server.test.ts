@@ -45,6 +45,8 @@ async function setup(
     advanced?: PanelDeps['advanced'];
     /** 注入 snapshots dep（/api/snapshot 缓存关键帧）；缺省不注入（404） */
     snapshots?: PanelDeps['snapshots'];
+    /** 注入头像代理 fetch（/api/avatar 测试用）；缺省用全局 fetch */
+    avatar?: PanelDeps['avatar'];
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -97,6 +99,7 @@ async function setup(
     napcat: opts.napcat,
     advanced: opts.advanced,
     snapshots: opts.snapshots,
+    avatar: opts.avatar,
     ...(opts.listen
       ? {
           listen: {
@@ -1556,4 +1559,38 @@ test('/api/snapshot：库里有行但文件读不到 404', async (t) => {
   const { base, db } = await setup(t, { snapshots: { dir } });
   db.insertSnapshot({ roomId: '80397', liveTime: 1000, ts: 100, path: join(dir, 'gone.jpg'), bytes: 10 });
   assert.equal((await rawGet(base, '/api/snapshot?room=80397&lt=1000&ts=100')).status, 404);
+});
+
+// ---- /api/avatar 头像代理 ----
+
+test('/api/avatar：按 uid 反代主播头像（带 UA+Referer），内容/类型/缓存头正确', async (t) => {
+  const fakePng = Buffer.from('fake-png-bytes');
+  let seenUrl = '';
+  let seenReferer = '';
+  const fetchImpl: FetchLike = async (url, init) => {
+    seenUrl = url;
+    seenReferer = String(((init.headers ?? {}) as Record<string, string>)['Referer'] ?? '');
+    return new Response(fakePng, { status: 200, headers: { 'content-type': 'image/png' } });
+  };
+  const { base, db } = await setup(t, { avatar: { fetchImpl } });
+  db.upsertStreamer({ uid: '1001', uname: '阿梓', face: 'https://i0.hdslb.com/bfs/face/f1.png' });
+
+  const r = await rawGet(base, '/api/avatar?uid=1001');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, fakePng);
+  assert.equal(r.headers.get('content-type'), 'image/png');
+  assert.equal(r.headers.get('cache-control'), 'private, max-age=86400');
+  assert.equal(seenUrl, 'https://i0.hdslb.com/bfs/face/f1.png', '反代的是主播头像 URL');
+  assert.equal(seenReferer, 'https://live.bilibili.com/', '带 B站图床要求的 Referer');
+});
+
+test('/api/avatar：坏 uid 400 / 无该主播或无头像 404 / 非白名单 host 400', async (t) => {
+  const { base, db } = await setup(t);
+  assert.equal((await rawGet(base, '/api/avatar?uid=abc')).status, 400, 'uid 非数字 400');
+  assert.equal((await rawGet(base, '/api/avatar')).status, 400, '缺 uid 400');
+  assert.equal((await rawGet(base, '/api/avatar?uid=9999')).status, 404, '无该主播 404');
+  db.upsertStreamer({ uid: '1002', uname: '无头像' });
+  assert.equal((await rawGet(base, '/api/avatar?uid=1002')).status, 404, '无头像 404');
+  db.upsertStreamer({ uid: '1003', uname: '坏域名', face: 'https://evil.example.com/x.jpg' });
+  assert.equal((await rawGet(base, '/api/avatar?uid=1003')).status, 400, '非白名单 host 400');
 });

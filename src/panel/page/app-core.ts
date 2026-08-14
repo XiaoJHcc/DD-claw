@@ -117,7 +117,7 @@ function checkDotHtml(attrs, checked, disabled) {
 }
 function gripHtml() { return '<span class="grip" title="拖拽排序">' + icon('grip') + '</span>'; }
 function field(label, inputHtml) {
-  return '<div class="field"><label>' + esc(label) + '</label>' + inputHtml + '</div>';
+  return '<div class="field"><label class="field-label">' + esc(label) + '</label>' + inputHtml + '</div>';
 }
 // 渠道类型 → 人话标签（推送卡片与规则编辑共用）
 function chanTypeName(c) {

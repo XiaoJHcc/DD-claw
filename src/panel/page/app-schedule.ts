@@ -1,11 +1,12 @@
 /**
  * 面板前端 · 时间表：过往直播的时间轴（纵轴日期升序、横轴时间），**5 天滑动窗口制**。
- * 窗口 = 居中日 center ± 2 天（一次请求）：中间 3 天全量行（泳道装箱 / 行高自适应 /
- * 条内小字 / hover 弹层 / 今天红线），两端 2 天缩略行（同一套装箱、
- * --sched-mini-lane-h 超窄道高、条只留颜色，无文字 / hover / 红线）。
- * 点击任意非居中天 → 该天居中（带方向感滑动动画：向未来内容上移进场、向过去下移）；
- * 滚轮按天步进（preventDefault 阻止页面滚动，300ms 节流，动画期内忽略后续滚动）。
- * 无内部滚动容器，随页面整体滚动。
+ * 窗口 = 居中日 center ± 2 天（一次请求）。条颜色 = 头像平均色（经 /api/avatar 同源
+ * 反代，规避 B站图床无 CORS 的画布污染），失败回退 uid 哈希色。
+ * 三级行：center（双行字：主播名 + 直播间标题，实色不透明）> single（单行字，减淡）>
+ * mini（无字色条，更淡），由 .sched-day 的 class 驱动，条透明度 / 字层 / 道高全走
+ * CSS 过渡。点击任意非居中天 → 该天居中；滚轮按天步进（preventDefault 阻止页面滚动，
+ * 300ms 节流）。滑动时重叠天不重建 DOM，只切 level class + 原地更新条几何与文字，
+ * 颜色条在无字/单行/双行间平滑渐变（道高/透明度/字层全走 CSS 过渡）而非硬切。随页面整体滚动。
  *
  * 共享轴（偏移语义）：轴 = 相对各行归属日 06:00 的偏移秒数（offStart/offEnd，
  * 0 = 06:00；06:00 日界只用于「归属哪天」，与渲染窗口无关），按**当前可见全部
@@ -30,6 +31,7 @@ var schedColorPending = {};   // uid → true（平均色计算中，避免重�
 var schedAxis = null;         // {offStart, offEnd} 相对当天 06:00 的偏移秒数；null = 尚未算过
 var schedSeq = 0;             // 请求序号戳：连点/连滚时作废旧渲染
 var schedWheelLock = 0;       // wheel 节流时间戳
+var schedCollapsing = {};     // 日期 → true：该行正在折叠离场（滚动折返时可取消）
 
 // ---- 北京时间工具（固定 UTC+8，与服务端同口径；日界 = 凌晨 6 点，仅用于归属）----
 function bjToday() { return new Date(Date.now() + 28800000).toISOString().slice(0, 10); }
@@ -90,7 +92,6 @@ function schedPrepareColor(uid, face) {
   if (!face) { schedColors[uid] = schedHashColor(uid); return; }
   schedColorPending[uid] = true;
   var img = new Image();
-  img.crossOrigin = 'anonymous';
   img.onload = function () {
     schedColorPending[uid] = false;
     var css = schedHashColor(uid);
@@ -119,10 +120,10 @@ function schedPrepareColor(uid, face) {
   };
   img.onerror = function () {
     schedColorPending[uid] = false;
-    schedColors[uid] = schedHashColor(uid); // 图床拒跨域 → 哈希色
+    schedColors[uid] = schedHashColor(uid); // 头像拉取失败 → 哈希色
     renderSchedBody();
   };
-  img.src = face;
+  img.src = '/api/avatar?uid=' + encodeURIComponent(uid);
 }
 function schedPrepareColors(days) {
   for (var i = 0; i < days.length; i++) {
@@ -136,16 +137,15 @@ function schedFetch(from, to) {
   return api('/api/schedule?from=' + from + '&to=' + to).then(function (j) { return j.days || []; });
 }
 
-function schedLoad(center, dir) {
+function schedLoad(center) {
   var seq = ++schedSeq;
   schedFetch(schedAddDays(center, -2), schedAddDays(center, 2)).then(function (days) {
     if (seq !== schedSeq) return; // 已有更新的请求在路上，作废旧渲染
     schedCenter = center;
     schedDays = days;
     schedPrepareColors(days);
-    recomputeSchedAxis(); // center 变化时重算（按可见 5 天实际内容）
+    recomputeSchedAxis(); // center 变化时重算；轴变化只改几何（reconcile 原地更新），不整窗重画
     renderSched();
-    if (dir) playSchedAnim(dir);
   }).catch(function (e) {
     if (seq === schedSeq) toast(e.message, true);
   });
@@ -154,20 +154,13 @@ function schedLoad(center, dir) {
 ACTIONS['sched-center'] = function (el) {
   var date = el.getAttribute('data-date');
   if (!date || !schedCenter || date === schedCenter) return;
-  schedLoad(date, date > schedCenter ? 'future' : 'past');
+  schedLoad(date);
 };
 
 function schedStep(n) {
   if (!schedCenter) return;
   var next = schedAddDays(schedCenter, n);
-  schedLoad(next, n > 0 ? 'future' : 'past');
-}
-
-function playSchedAnim(dir) {
-  var body = document.getElementById('schedule-body');
-  body.classList.remove('sched-anim-up', 'sched-anim-down');
-  void body.offsetWidth; // 强制 reflow 以重启动画
-  body.classList.add(dir === 'past' ? 'sched-anim-down' : 'sched-anim-up');
+  schedLoad(next);
 }
 
 // ---- 共享轴：按当前可见全部 5 天的实际内容算定（缩略行也在视野内，同样参与）；
@@ -206,15 +199,12 @@ function schedRowHasNow(day, now) {
   return now >= base + schedAxis.offStart && now < base + schedAxis.offEnd;
 }
 
-/** now 是否落在某个全量行的窗口内（60s 定时器红线刷新用；缩略行不画红线） */
-function schedNowInFullRow() {
+/** now 是否落在某行的窗口内（60s 定时器红线刷新用；缩略行也画红线） */
+function schedNowInRow() {
   if (!schedCenter || !schedAxis) return false;
   var now = Math.floor(Date.now() / 1000);
-  var miniFrom = schedAddDays(schedCenter, -2), miniTo = schedAddDays(schedCenter, 2);
   for (var i = 0; i < schedDays.length; i++) {
-    var dd = schedDays[i].date;
-    if (dd === miniFrom || dd === miniTo) continue;
-    if (schedRowHasNow(dd, now)) return true;
+    if (schedRowHasNow(schedDays[i].date, now)) return true;
   }
   return false;
 }
@@ -309,6 +299,7 @@ function packSchedLanes(dayIdx) {
       bars.push({
         start: a, end: b,
         di: item.di, ei: item.ei, si: s, uid: e.uid,
+        rid: e.roomId, lt: e.liveTime,
         live: live,
         cont: s > 0,
       });
@@ -373,70 +364,245 @@ function renderSchedBody() {
     return;
   }
   var span = schedAxis.offEnd - schedAxis.offStart;
-  var today = bjToday();
   var now = Math.floor(Date.now() / 1000);
   var miniFrom = schedAddDays(schedCenter, -2), miniTo = schedAddDays(schedCenter, 2);
-  var html = '';
-  for (var d = 0; d < schedDays.length; d++) {
-    var day = schedDays[d];
-    var isMini = day.date === miniFrom || day.date === miniTo;
-    var winStart = schedDayStartTs(day.date) + schedAxis.offStart;
-    // 当前时间红线跟随行窗口：now 落在本行窗口内才画（相邻窗口不重叠，至多一行命中；
-    // 落在缩略行或行窗口外的空档不画）
-    var nowPct = schedRowHasNow(day.date, now) ? ((now - winStart) / span) * 100 : -1;
-    var lanes = packSchedLanes(d);
-    var lanesHtml = '';
-    for (var L = 0; L < lanes.length; L++) {
-      var barsHtml = '';
-      for (var k = 0; k < lanes[L].length; k++) {
-        var bar = lanes[L][k]; // 装箱窗口 == 绘制窗口，条已全部在轴内
-        var e = schedDays[bar.di].entries[bar.ei];
-        var seg = e.segments[bar.si];
-        var left = ((bar.start - winStart) / span) * 100;
-        var width = ((bar.end - bar.start) / span) * 100;
-        // 在播条 = 一根连续条（齐头散尾）：实色到红线 → 40% 半透平台补齐到开播满 2h
-        // → 30 分钟渐变散尾；真实下播后 endTs 非空自动失效
-        var bg = schedColorOf(bar.uid);
-        if (bar.live && bar.end > now && now > bar.start) {
-          var spanDs = bar.end - bar.start;
-          var p1 = ((now - bar.start) / spanDs) * 100;
-          var p2 = Math.min(100, ((Math.max(now, e.startTs + 7200) - bar.start) / spanDs) * 100);
-          bg = schedLiveBg(bg, p1, p2);
-        }
-        if (isMini) {
-          // 缩略行：条只留颜色，无文字 / hover（半透明延伸同样生效）
-          barsHtml += '<div class="sched-mini-seg" style="left:' + left + '%;width:' + width +
-            '%;background:' + bg + '"></div>';
-          continue;
-        }
-        var cat = e.verdicts.length
-          ? e.verdicts.map(function (v) { return v.categoryName; }).join('、')
-          : '未分类';
-        barsHtml +=
-          '<div class="sched-seg' + (bar.cont ? ' cont' : '') + '"' +
-          ' data-d="' + bar.di + '" data-e="' + bar.ei + '" data-s="' + bar.si + '"' +
-          ' data-bs="' + bar.start + '" data-be="' + bar.end + '"' +
-          ' style="left:' + left + '%;width:' + width + '%;background:' + bg + '">' +
-          '<span class="sched-seg-text">' + esc(e.name + ' · ' + cat + ' · ' + (seg.title || '')) + '</span>' +
-          '</div>';
-      }
-      lanesHtml += '<div class="sched-lane">' + barsHtml + '</div>';
-    }
-    // 无条的天 = 一条道高的空行；非居中天可点击居中
-    html += '<div class="sched-day' + (isMini ? ' mini' : '') + '"' +
-      (day.date === schedCenter ? '' : ' data-action="sched-center" data-date="' + day.date + '"') + '>' +
-      '<div class="sched-day-head' + (day.date === today ? ' today' : '') + '">' +
-      esc(schedDayLabel(day.date)) + '</div>' +
-      '<div class="sched-lanes">' + (lanesHtml || '<div class="sched-lane"></div>') +
-      (!isMini && nowPct >= 0
-        ? '<span class="sched-now" style="left:' + nowPct + '%"></span>'
-        : '') +
-      '</div></div>';
+  // 是否已有行：首载（无行）先清掉初始「加载中…」文本，且新行直接以自然高度呈现
+  var hadDays = body.querySelector('.sched-day') != null;
+  if (!hadDays) body.textContent = '';
+  // 始终走原地 reconcile：泳道/条按 key 复用、只更新几何与文字，元素不销毁 →
+  // 道高、透明度、字层的 CSS 过渡每次滚动都照常触发（不整窗重画、不硬切）
+  var targetDates = [];
+  for (var d = 0; d < schedDays.length; d++) targetDates.push(schedDays[d].date);
+  // 先折叠不在窗口内的旧行（高度过渡到 0 再移除，下方行随空间平滑移动）
+  var existing = body.querySelectorAll('.sched-day');
+  for (var i = 0; i < existing.length; i++) {
+    var ex = existing[i];
+    if (targetDates.indexOf(ex.getAttribute('data-date')) < 0 && ex.parentNode) schedCollapseDay(ex);
   }
-  body.innerHTML = html;
+  // 逐日更新 / 新建：重叠行原地不动（含折叠中的行），新进场行按日期插入到正确位置
+  for (var d2 = 0; d2 < schedDays.length; d2++) {
+    var day = schedDays[d2];
+    var isMini = day.date === miniFrom || day.date === miniTo;
+    var isCenter = day.date === schedCenter;
+    var el = body.querySelector('.sched-day[data-date="' + day.date + '"]');
+    var created = false;
+    if (!el) {
+      el = document.createElement('div');
+      el.setAttribute('data-date', day.date);
+      created = true;
+    } else if (schedCollapsing[day.date]) {
+      delete schedCollapsing[day.date]; // 折叠中又滚回来了：取消离场（updateSchedDay 已恢复自然高度）
+    }
+    updateSchedDay(el, day, d2, isMini, isCenter, span, now);
+    if (created) {
+      // 按日期找插入点（第一个日期更大的行之前；找不到 = 追加末尾），不移动既有行
+      var anchor = null;
+      var child = body.firstChild;
+      while (child) {
+        var cd = child.getAttribute ? child.getAttribute('data-date') : null;
+        if (cd && cd > day.date) { anchor = child; break; }
+        child = child.nextSibling;
+      }
+      body.insertBefore(el, anchor);
+      // 新进场行：从 0 高度展开（首载直接自然高度，滚动时才过渡）
+      if (hadDays) schedExpandDay(el);
+    }
+  }
 }
 
-// ---- hover 弹层（跟随鼠标，离开段即关；全部 esc；缩略行无 .sched-seg 不触发）----
+function updateSchedDay(el, day, d, isMini, isCenter, span, now) {
+  // 复用行清除可能残留的折叠/展开内联样式（滚动折返重新入场时恢复自然高度）
+  el.style.maxHeight = '';
+  el.style.margin = '';
+  el.style.opacity = '';
+  el.style.overflow = '';
+  var winStart = schedDayStartTs(day.date) + schedAxis.offStart;
+  // 当前时间红线跟随行窗口：now 落在本行窗口内才画（相邻窗口不重叠，至多一行命中；
+  // 行窗口外的空档不画；缩略行也画红线，今天滚到首末天时红线不消失）
+  var nowPct = schedRowHasNow(day.date, now) ? ((now - winStart) / span) * 100 : -1;
+  // 行级 class 驱动条透明度 / 字层 / 道高的 CSS 过渡
+  el.className = 'sched-day ' + (isCenter ? 'center' : (isMini ? 'mini' : 'single'));
+  if (day.date === schedCenter) el.removeAttribute('data-action');
+  else el.setAttribute('data-action', 'sched-center');
+  var head = el.querySelector('.sched-day-head');
+  if (!head) { head = document.createElement('div'); el.appendChild(head); }
+  head.className = 'sched-day-head';
+  var label = schedDayLabel(day.date);
+  if (head.textContent !== label) head.textContent = label;
+  var lanesEl = el.querySelector('.sched-lanes');
+  if (!lanesEl) { lanesEl = document.createElement('div'); lanesEl.className = 'sched-lanes'; el.appendChild(lanesEl); }
+  reconcileSchedLanes(lanesEl, d, now, winStart, span);
+  // 红线挂在 .sched-lanes 内（absolute 定位上下文），不能挂到 .sched-day 上（会飞出）
+  var nowEl = lanesEl.querySelector('.sched-now');
+  if (nowPct >= 0) {
+    if (!nowEl) { nowEl = document.createElement('span'); nowEl.className = 'sched-now'; lanesEl.appendChild(nowEl); }
+    nowEl.style.left = nowPct + '%';
+  } else if (nowEl && nowEl.parentNode) {
+    nowEl.parentNode.removeChild(nowEl);
+  }
+}
+
+/** 折叠离场：先定格当前高度，再过渡到 0（max-height + margin + opacity），结束后移除 */
+function schedCollapseDay(el) {
+  var date = el.getAttribute('data-date');
+  schedCollapsing[date] = true;
+  el.style.overflow = 'hidden'; // 折叠期裁剪内容（平时 overflow 可见，红线圆点要溢出到间距）
+  el.style.maxHeight = el.scrollHeight + 'px';
+  el.style.margin = '16px 0';
+  el.style.opacity = '1';
+  void el.offsetHeight; // 提交起始态
+  el.style.maxHeight = '0px';
+  el.style.margin = '0';
+  el.style.opacity = '0';
+  setTimeout(function () {
+    if (!schedCollapsing[date]) return; // 折叠期间又滚回来了 → 已取消
+    delete schedCollapsing[date];
+    if (el.parentNode) el.parentNode.removeChild(el);
+  }, 320);
+}
+
+/** 展开进场：从 0 高度过渡到自然高度（已在 DOM 中，先量高度 → 定格 0 → 过渡展开） */
+function schedExpandDay(el) {
+  var h = el.scrollHeight;
+  el.style.overflow = 'hidden'; // 展开期裁剪内容
+  el.style.maxHeight = '0px';
+  el.style.margin = '0';
+  el.style.opacity = '0';
+  void el.offsetHeight; // 提交折叠态
+  el.style.maxHeight = h + 'px';
+  el.style.margin = '16px 0';
+  el.style.opacity = '1';
+  setTimeout(function () {
+    el.style.maxHeight = 'none';
+    el.style.margin = '';
+    el.style.opacity = '';
+    el.style.overflow = '';
+  }, 320);
+}
+
+function schedBarKey(bar) { return bar.rid + ':' + bar.lt + ':' + bar.si; }
+
+/** 条背景（在播条含齐头散尾渐变），整窗重画与原地更新共用 */
+function schedBarBg(bar, e, now) {
+  var bg = schedColorOf(bar.uid);
+  if (bar.live && bar.end > now && now > bar.start) {
+    var spanDs = bar.end - bar.start;
+    var p1 = ((now - bar.start) / spanDs) * 100;
+    var p2 = Math.min(100, ((Math.max(now, e.startTs + 7200) - bar.start) / spanDs) * 100);
+    bg = schedLiveBg(bg, p1, p2);
+  }
+  return bg;
+}
+
+/** 单条完整 HTML（含双字层）；整窗重画与 reconcile 新建条时用 */
+function schedBarHtml(bar, d, now, winStart, span) {
+  var e = schedDays[bar.di].entries[bar.ei];
+  var seg = e.segments[bar.si];
+  var left = ((bar.start - winStart) / span) * 100;
+  var width = ((bar.end - bar.start) / span) * 100;
+  var cat = e.verdicts.length
+    ? e.verdicts.map(function (v) { return v.categoryName; }).join('、')
+    : '未分类';
+  return '<div class="sched-seg' + (bar.cont ? ' cont' : '') + '"' +
+    ' data-k="' + schedBarKey(bar) + '"' +
+    ' data-edate="' + schedDays[bar.di].date + '" data-e="' + bar.ei + '" data-s="' + bar.si + '"' +
+    ' data-bs="' + bar.start + '" data-be="' + bar.end + '"' +
+    ' style="left:' + left + '%;width:' + width + '%;background:' + schedBarBg(bar, e, now) + '">' +
+    '<span class="sched-seg-text">' + esc(e.name + ' · ' + cat + ' · ' + (seg.title || '')) + '</span>' +
+    '<span class="sched-seg-two">' +
+    '<span class="sched-seg-two-name">' + esc(e.name) + '</span>' +
+    '<span class="sched-seg-two-title">' + esc(seg.title || '') + '</span>' +
+    '</span></div>';
+}
+
+/** 复用条时原地更新几何 / 背景 / hover 数据与文字（textContent 保留字层 span，单/双行交叉淡入不被打断） */
+function schedApplyBar(segEl, bar, d, now, winStart, span) {
+  var e = schedDays[bar.di].entries[bar.ei];
+  var seg = e.segments[bar.si];
+  var left = ((bar.start - winStart) / span) * 100;
+  var width = ((bar.end - bar.start) / span) * 100;
+  segEl.setAttribute('data-edate', schedDays[bar.di].date);
+  segEl.setAttribute('data-e', bar.ei);
+  segEl.setAttribute('data-s', bar.si);
+  segEl.setAttribute('data-bs', bar.start);
+  segEl.setAttribute('data-be', bar.end);
+  segEl.style.left = left + '%';
+  segEl.style.width = width + '%';
+  segEl.style.background = schedBarBg(bar, e, now);
+  var cat = e.verdicts.length
+    ? e.verdicts.map(function (v) { return v.categoryName; }).join('、')
+    : '未分类';
+  var oneEl = segEl.querySelector('.sched-seg-text');
+  if (oneEl) {
+    var oneText = e.name + ' · ' + cat + ' · ' + (seg.title || '');
+    if (oneEl.textContent !== oneText) oneEl.textContent = oneText;
+  }
+  var twoEl = segEl.querySelector('.sched-seg-two');
+  if (twoEl) {
+    var nameEl = twoEl.querySelector('.sched-seg-two-name');
+    var titleEl = twoEl.querySelector('.sched-seg-two-title');
+    var title = seg.title || '';
+    if (nameEl && nameEl.textContent !== e.name) nameEl.textContent = e.name;
+    if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+  }
+}
+
+/** 原地 reconcile 泳道与条：泳道按下标复用、条按 key 复用，只更新几何，保留元素做过渡 */
+function reconcileSchedLanes(lanesEl, d, now, winStart, span) {
+  var lanes = packSchedLanes(d);
+  // 每天都至少 10 条泳道（不足/空天补空行），各天高度更均匀、不因空数据忽高忽低
+  var laneCount = Math.max(10, lanes.length);
+  var existing = {};
+  var oldBars = lanesEl.querySelectorAll('.sched-seg');
+  for (var i = 0; i < oldBars.length; i++) existing[oldBars[i].getAttribute('data-k')] = oldBars[i];
+  var laneEls = lanesEl.querySelectorAll('.sched-lane');
+  var used = {};
+  for (var L = 0; L < laneCount; L++) {
+    var laneEl = laneEls[L];
+    if (!laneEl) {
+      laneEl = document.createElement('div');
+      laneEl.className = 'sched-lane';
+      lanesEl.appendChild(laneEl);
+    }
+    var bars = L < lanes.length ? lanes[L] : [];
+    var targetKeys = {};
+    for (var k = 0; k < bars.length; k++) targetKeys[schedBarKey(bars[k])] = true;
+    // 清掉本泳道里已不存在的条
+    var laneBars = laneEl.querySelectorAll('.sched-seg');
+    for (var b = 0; b < laneBars.length; b++) {
+      if (!targetKeys[laneBars[b].getAttribute('data-k')]) laneEl.removeChild(laneBars[b]);
+    }
+    // 按序放置条（只移动错位的，已就位的原地不动，避免重排打断过渡）
+    var prevBar = null;
+    for (var k2 = 0; k2 < bars.length; k2++) {
+      var bar = bars[k2];
+      var key = schedBarKey(bar);
+      var segEl = existing[key] && !used[key] ? existing[key] : null;
+      if (segEl) {
+        used[key] = true;
+        schedApplyBar(segEl, bar, d, now, winStart, span);
+      } else {
+        var tmp = document.createElement('div');
+        tmp.innerHTML = schedBarHtml(bar, d, now, winStart, span);
+        segEl = tmp.firstChild;
+        used[key] = true;
+      }
+      var anchor = prevBar ? prevBar.nextElementSibling : laneEl.firstElementChild;
+      if (segEl !== anchor) laneEl.insertBefore(segEl, anchor);
+      prevBar = segEl;
+    }
+  }
+  // 删掉多余的泳道
+  for (var L2 = laneCount; L2 < laneEls.length; L2++) {
+    if (laneEls[L2] && laneEls[L2].parentNode) laneEls[L2].parentNode.removeChild(laneEls[L2]);
+  }
+  // 删掉未被复用的条
+  for (var key2 in existing) {
+    if (!used[key2] && existing[key2].parentNode) existing[key2].parentNode.removeChild(existing[key2]);
+  }
+}
+
+// ---- hover 弹层（跟随鼠标，离开段即关；全部 esc；缩略行 mini 不触发）----
 // 缩略图 = 鼠标在条内横向位置对应时间点的「最近缓存关键帧」优先（/api/snapshot，
 // 按 60s 分桶，桶变才换图，鼠标静止不换）；API 404 回退远程 e.keyframe || e.cover
 //（旧行为），并记 schedSnapFail——本场 hover 不再试 API（防移动时 404 轰炸）；
@@ -462,6 +628,22 @@ function schedBucketOf(el, clientX) {
   return Math.floor((bs + f * (be - bs)) / 60) * 60;
 }
 
+/** 按条上的稳定引用（data-edate 场次归属日 / data-e 场次下标 / data-s 段下标）取场次与段；
+   窗口滑动不改变这些值（旧 data-d 是窗口内日下标，会随滑动偏移，已弃用） */
+function schedEntryOf(el) {
+  var edate = el.getAttribute('data-edate');
+  var ei = Number(el.getAttribute('data-e'));
+  var si = Number(el.getAttribute('data-s'));
+  for (var i = 0; i < schedDays.length; i++) {
+    if (schedDays[i].date === edate) {
+      var e = schedDays[i].entries[ei];
+      if (!e) return null;
+      return { entry: e, seg: e.segments[si] || null };
+    }
+  }
+  return null;
+}
+
 /** 桶变了才换图：缓存关键帧优先，该场已 404 直接用远程兜底 */
 function schedPopImg(el, clientX) {
   var p = document.getElementById('sched-pop');
@@ -470,7 +652,9 @@ function schedPopImg(el, clientX) {
   var bucket = schedBucketOf(el, clientX);
   if (bucket === schedPopBucket) return;
   schedPopBucket = bucket;
-  var e = schedDays[Number(el.getAttribute('data-d'))].entries[Number(el.getAttribute('data-e'))];
+  var found = schedEntryOf(el);
+  var e = found && found.entry;
+  if (!e) return;
   if (!schedSnapFail[e.roomId + ':' + e.liveTime]) {
     img.src = '/api/snapshot?room=' + encodeURIComponent(e.roomId) +
       '&lt=' + e.liveTime + '&ts=' + bucket;
@@ -481,13 +665,10 @@ function schedPopImg(el, clientX) {
 }
 
 function schedShowPop(el, evt) {
-  var d = Number(el.getAttribute('data-d'));
-  var eIdx = Number(el.getAttribute('data-e'));
-  var sIdx = Number(el.getAttribute('data-s'));
-  var day = schedDays[d];
-  var e = day && day.entries[eIdx];
-  var seg = e && e.segments[sIdx];
-  if (!seg) return;
+  var found = schedEntryOf(el);
+  var e = found && found.entry;
+  var seg = found && found.seg;
+  if (!e || !seg) return;
   var p = document.getElementById('sched-pop');
   var now = Math.floor(Date.now() / 1000);
   var area = [seg.parentAreaName, seg.areaName].filter(Boolean).join(' / ');
@@ -557,7 +738,9 @@ function schedMovePop(evt) {
   body.addEventListener('mouseover', function (e) {
     if (!(e.target instanceof Element)) return;
     var el = e.target.closest('.sched-seg');
-    if (el) schedShowPop(el, e);
+    if (!el) return;
+    if (el.closest('.sched-day.mini')) return; // 缩略行（无字色条）无 hover
+    schedShowPop(el, e);
   });
   body.addEventListener('mousemove', function (e) {
     var p = document.getElementById('sched-pop');
@@ -569,14 +752,15 @@ function schedMovePop(evt) {
     if (el && !(e.relatedTarget instanceof Element && el.contains(e.relatedTarget))) schedHidePop();
   });
 
-  schedLoad(bjToday(), null);
+  schedLoad(bjToday());
 
-  // 在播条右端与当前时间红线跟随时间：轴变了整体重渲；轴没变时，
-  // 全量行内有在播场或 now 落在某全量行窗口内（红线需推进）才重画条区（省电）
+  // 在播条右端与当前时间红线跟随时间：轴变了重渲轴刻度 + 原地 reconcile 几何；
+  // 轴没变时，全量行内有在播场或 now 落在某全量行窗口内（红线需推进）才刷新条区（省电）
   setInterval(function () {
     if (!schedCenter || schedDays.length === 0 || !schedAxis) return;
-    if (recomputeSchedAxis()) { renderSched(); return; }
-    if (schedHasLive() || schedNowInFullRow()) renderSchedBody();
+    var axisChanged = recomputeSchedAxis();
+    if (axisChanged) { renderSched(); return; }
+    if (schedHasLive() || schedNowInRow()) renderSchedBody();
   }, 60000);
 })();
 `;
