@@ -1,7 +1,8 @@
 /**
  * 面板前端 · 时间表：过往直播的时间轴（纵轴日期升序、横轴时间），**5 天滑动窗口制**。
- * 窗口 = 居中日 center ± 2 天（一次请求）。条颜色 = 头像平均色（经 /api/avatar 同源
- * 反代，规避 B站图床无 CORS 的画布污染），失败回退 uid 哈希色。
+ * 窗口 = 居中日 center ± 2 天（一次请求）。条颜色 = 头像平均色取 h/s（经 /api/avatar 同源
+ * 反代，规避 B站图床无 CORS 的画布污染），亮度随主题：亮色 70% / 暗色 40%（s 开根号提饱和）。
+ * 头像获取不到才回退 uid 哈希色 hsl(h, 50%, L)，未算出颜色前一律占位灰；主题切换只改亮度重渲。
  * 三级行：center（双行字：主播名 + 直播间标题，实色不透明）> single（单行字，减淡）>
  * mini（无字色条，更淡），由 .sched-day 的 class 驱动，条透明度 / 字层 / 道高全走
  * CSS 过渡。点击任意非居中天 → 该天居中；滚轮按天步进（preventDefault 阻止页面滚动，
@@ -26,7 +27,7 @@
 export const APP_SCHEDULE = `
 var schedDays = [];           // 窗口内 5 天升序 [{date, entries:[...]}]
 var schedCenter = null;       // 居中日（日串）
-var schedColors = {};         // uid → css 颜色（头像平均色 / 哈希色回退）
+var schedColors = {};         // uid → {h, s}（头像平均色取 h/s）/ null（头像获取不到→哈希色）；undefined = 未算出→占位灰
 var schedColorPending = {};   // uid → true（平均色计算中，避免重复拉图）
 var schedAxis = null;         // {offStart, offEnd} 相对当天 06:00 的偏移秒数；null = 尚未算过
 var schedSeq = 0;             // 请求序号戳：连点/连滚时作废旧渲染
@@ -60,14 +61,32 @@ function schedDayLabel(date) {
   return Number(p[1]) + '月' + Number(p[2]) + '日 星期' + '日一二三四五六'.charAt(wd);
 }
 
-// ---- 颜色：头像平均色（canvas），失败回退 uid 哈希色；结果缓存 localStorage ----
-function schedHashColor(uid) {
+// ---- 颜色：h/s 由来源决定，亮度随主题（亮色 70% / 暗色 40%）----
+// 头像平均色取 h/s（s 开根号提饱和）；头像获取不到回退哈希色（s=50）；未算出前占位灰（s=0）。
+// 存 {h, s} 而非成品色串，主题切换只改亮度重渲，不用重算头像。
+function schedIsDark() { return !!window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }
+function schedL() { return schedIsDark() ? 40 : 70; }
+function schedHsl(h, s, l) { return 'hsl(' + h + ',' + s + '%,' + (l === undefined ? schedL() : l) + '%)'; }
+function schedHashHS(uid) {
   var h = 0;
   var s = String(uid);
   for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return 'hsl(' + (h % 360) + ', 55%, 42%)';
+  return { h: h % 360, s: 50 };
 }
-function schedColorOf(uid) { return schedColors[uid] || schedHashColor(uid); }
+/** uid → {h, s}：头像平均色 / 哈希（头像获取不到）/ 灰（未算出） */
+function schedHSOf(uid) {
+  var c = schedColors[uid];
+  if (c) return { h: c.h, s: c.s };
+  if (c === null) return schedHashHS(uid); // 头像获取不到 → 哈希色
+  return { h: 0, s: 0 };                    // 未算出 → 占位灰
+}
+function schedColorOf(uid) { var hs = schedHSOf(uid); return schedHsl(hs.h, hs.s); }
+/** 暗色模式条内文字：与条同色系，亮度提到 90%（阴影由 style.ts 暗色规则去掉） */
+function schedTextColorOf(uid) { var hs = schedHSOf(uid); return schedHsl(hs.h, hs.s, 90); }
+/** 亮色模式条内文字阴影：与条同色系加深（l=20%），替代通用黑色阴影 */
+function schedTextShadowOf(uid) { var hs = schedHSOf(uid); return '0 0 3px hsl(' + hs.h + ',' + hs.s + '%,20%)'; }
+/** 同场分段间的分割线：同色系，亮度取条底与文字之间的中间档（亮/暗模式都可见） */
+function schedDividerOf(uid) { var hs = schedHSOf(uid); return 'hsl(' + hs.h + ',' + hs.s + '%,55%)'; }
 // 在播条背景（齐头散尾）：实色到 p1%（红线处）→ 同色 40% 半透平台到 p2%（开播满 2h 处）
 // → 尾端线性渐变到全透（约 30 分钟宽度）。p1 == p2 时（已播超 2h）从红线直接散尾。
 // 将来的直播预告条（只有开播时间、无下播时间）复用同款散尾样式。
@@ -85,16 +104,13 @@ function schedLiveBg(css, p1, p2) {
     ', ' + a4 + ' ' + s2 + ', ' + a0 + ' 100%)';
 }
 function schedPrepareColor(uid, face) {
-  if (!uid || schedColors[uid] || schedColorPending[uid]) return;
-  var cached = null;
-  try { cached = localStorage.getItem('dd-claw-color:' + uid); } catch (e) {}
-  if (cached) { schedColors[uid] = cached; return; }
-  if (!face) { schedColors[uid] = schedHashColor(uid); return; }
+  if (!uid || schedColors[uid] !== undefined || schedColorPending[uid]) return;
+  if (!face) { schedColors[uid] = null; return; } // 无头像 → 哈希色
   schedColorPending[uid] = true;
   var img = new Image();
   img.onload = function () {
     schedColorPending[uid] = false;
-    var css = schedHashColor(uid);
+    var h = 0, sat = 0, ok = false;
     try {
       var cv = document.createElement('canvas');
       cv.width = 8; cv.height = 8;
@@ -103,24 +119,28 @@ function schedPrepareColor(uid, face) {
       var data = g.getImageData(0, 0, 8, 8).data;
       var r = 0, gg = 0, b = 0, n = 0;
       for (var i = 0; i < data.length; i += 4) { r += data[i]; gg += data[i + 1]; b += data[i + 2]; n++; }
-      r = Math.round(r / n); gg = Math.round(gg / n); b = Math.round(b / n);
-      // 亮度压到白字可读区间（过亮压暗、过暗提亮）
-      var lum = 0.299 * r + 0.587 * gg + 0.114 * b;
-      var f = 1;
-      if (lum > 170) f = 170 / lum;
-      else if (lum < 55) f = 55 / Math.max(lum, 1);
-      r = Math.min(255, Math.round(r * f));
-      gg = Math.min(255, Math.round(gg * f));
-      b = Math.min(255, Math.round(b * f));
-      css = 'rgb(' + r + ',' + gg + ',' + b + ')';
+      r = r / n; gg = gg / n; b = b / n;
+      // h/s 都取自己算出的平均色；s 开根号提饱和；平均色无彩度（灰）s=0 原样输出
+      var mx = Math.max(r, gg, b), mn = Math.min(r, gg, b), dd = mx - mn;
+      if (dd > 0) {
+        if (mx === r) h = ((gg - b) / dd) % 6;
+        else if (mx === gg) h = ((b - r) / dd) + 2;
+        else h = ((r - gg) / dd) + 4;
+        h = Math.round(h * 60);
+        if (h < 0) h += 360;
+        // 标准 HSL 饱和度（按平均色的实际亮度折算），开根号提饱和（0.25→0.5、0.49→0.7）
+        if ((mx + mn) / 510 <= 0.5) sat = dd / (mx + mn);
+        else sat = dd / (510 - mx - mn);
+        sat = Math.round(Math.sqrt(sat) * 100);
+      }
+      ok = true;
     } catch (e) { /* CORS 污染画布等 → 哈希色 */ }
-    schedColors[uid] = css;
-    try { localStorage.setItem('dd-claw-color:' + uid, css); } catch (e2) {}
+    schedColors[uid] = ok ? { h: h, s: sat } : null;
     renderSchedBody();
   };
   img.onerror = function () {
     schedColorPending[uid] = false;
-    schedColors[uid] = schedHashColor(uid); // 头像拉取失败 → 哈希色
+    schedColors[uid] = null; // 头像拉取失败 → 哈希色
     renderSchedBody();
   };
   img.src = '/api/avatar?uid=' + encodeURIComponent(uid);
@@ -265,11 +285,13 @@ function renderSchedAxis() {
  * 装箱窗口 == 绘制窗口 = 当天 06:00 + [offStart, offEnd]（可延伸到次日白天）。
  * 末段在播的绘制终点带「假定 2h + 30min 散尾」假设（schedEffEnd，纯绘制层）；
  * 非末段缺 endTs 不至于发生，兜底 e.endTs ?? now。
- * 装箱按 **uid 分组整体放置**（同主播当天多场 + 其前一天溢出段同组，永远同泳道；
- * 这会故意增加泳道数，是明确选择）：组按最早 bar.start 排序，逐组放入第一条
- * 「该组所有 bar 与泳道已有 bar 全不相交」的泳道，都冲突才开新泳道。
- * 防御：组内 bar 互相重叠（数据异常）时该组退化为逐 bar 独立装箱。
- * 返回泳道数组（元素 = 条数组，道内按 start 排序）。
+ * 先按段生成 bar，再把**同场相邻分段（同 rid+lt 且首尾相接）合并为一个视觉组**
+ * （schedMergeSegments：整场画成单个圆角矩形，组内 parts 只负责分割线与文字，
+ * 首/末段再窄也不破坏圆角）。装箱按 **uid 分组整体放置**（同主播当天多场 +
+ * 其前一天溢出段同组，永远同泳道；这会故意增加泳道数，是明确选择）：组按最早
+ * start 排序，逐组放入第一条「该组所有 bar 与泳道已有 bar 全不相交」的泳道，
+ * 都冲突才开新泳道。防御：同主播不同场重叠（数据异常）退化为逐段独立装箱。
+ * 返回泳道数组（元素 = 组数组，道内按 start 排序）。
  */
 function packSchedLanes(dayIdx) {
   var day = schedDays[dayIdx];
@@ -301,7 +323,6 @@ function packSchedLanes(dayIdx) {
         di: item.di, ei: item.ei, si: s, uid: e.uid,
         rid: e.roomId, lt: e.liveTime,
         live: live,
-        cont: s > 0,
       });
     }
   }
@@ -315,15 +336,29 @@ function packSchedLanes(dayIdx) {
   var units = [];
   for (var key in groupByUid) {
     var grp = groupByUid[key];
-    // 防御：组内 bar 互相重叠（数据异常）→ 退化为逐 bar 独立装箱
+    var groups = schedMergeSegments(grp);
+    // 防御：同主播不同场重叠（数据异常）→ 退化为逐段独立装箱（各段自成一个单段组）
     var bad = false;
-    for (var m = 0; m < grp.length && !bad; m++) {
-      for (var n = m + 1; n < grp.length; n++) {
-        if (grp[m].start < grp[n].end && grp[n].start < grp[m].end) { bad = true; break; }
+    for (var m = 0; m < groups.length && !bad; m++) {
+      for (var n = m + 1; n < groups.length; n++) {
+        if (groups[m].start < groups[n].end && groups[n].start < groups[m].end) { bad = true; break; }
       }
     }
-    if (bad) { for (var q = 0; q < grp.length; q++) units.push([grp[q]]); }
-    else units.push(grp);
+    if (bad) {
+      for (var q = 0; q < groups.length; q++) {
+        for (var p2 = 0; p2 < groups[q].parts.length; p2++) {
+          var pt = groups[q].parts[p2];
+          units.push([{
+            start: pt.start, end: pt.end,
+            di: groups[q].di, ei: groups[q].ei, uid: groups[q].uid,
+            rid: groups[q].rid, lt: groups[q].lt, live: pt.live,
+            parts: [pt],
+          }]);
+        }
+      }
+    } else {
+      units.push(groups);
+    }
   }
   units.sort(function (x, y) { return x[0].start - y[0].start || x[0].end - y[0].end; });
   // 逐组放入第一条「组内所有 bar 与泳道已有 bar 全不相交」的泳道，都冲突开新泳道
@@ -344,6 +379,33 @@ function packSchedLanes(dayIdx) {
     lanes[r].sort(function (x, y) { return x.start - y.start || x.end - y.end; });
   }
   return lanes;
+}
+
+/** 同场相邻分段（同 rid+lt 且首尾相接）合并为一个视觉组；parts 为组内分段（保持 start 升序）。
+ * 不同场穿插时按「该场最近一个组」续接（lastBySession），不依赖数组相邻。 */
+function schedMergeSegments(bars) {
+  var groups = [];
+  var lastBySession = {}; // rid:lt → 该场最近一个组的下标
+  for (var i = 0; i < bars.length; i++) {
+    var b = bars[i];
+    var skey = b.rid + ':' + b.lt;
+    var gi = lastBySession[skey];
+    var prev = gi !== undefined ? groups[gi] : null;
+    if (prev && prev.end === b.start) {
+      prev.parts.push({ si: b.si, start: b.start, end: b.end, live: b.live });
+      prev.end = b.end;
+      if (b.live) prev.live = true;
+    } else {
+      groups.push({
+        start: b.start, end: b.end,
+        di: b.di, ei: b.ei, uid: b.uid, rid: b.rid, lt: b.lt,
+        live: b.live,
+        parts: [{ si: b.si, start: b.start, end: b.end, live: b.live }],
+      });
+      lastBySession[skey] = groups.length - 1;
+    }
+  }
+  return groups;
 }
 
 /** 一组 bar 是否与泳道内已有 bar 全不相交（区间相交 = a.start < b.end && b.start < a.end） */
@@ -480,7 +542,7 @@ function schedExpandDay(el) {
   }, 320);
 }
 
-function schedBarKey(bar) { return bar.rid + ':' + bar.lt + ':' + bar.si; }
+function schedBarKey(bar) { return bar.rid + ':' + bar.lt; }
 
 /** 条背景（在播条含齐头散尾渐变），整窗重画与原地更新共用 */
 function schedBarBg(bar, e, now) {
@@ -494,56 +556,115 @@ function schedBarBg(bar, e, now) {
   return bg;
 }
 
-/** 单条完整 HTML（含双字层）；整窗重画与 reconcile 新建条时用 */
-function schedBarHtml(bar, d, now, winStart, span) {
+/** 单场视觉组完整 HTML：外层 .sched-seg 是一个完整圆角矩形（单背景），
+ * 内层 .sched-part 按段划分，只负责分割线 + 文字，不背背景——首/末段再窄也不破坏圆角。 */
+function schedGroupHtml(bar, d, now, winStart, span) {
   var e = schedDays[bar.di].entries[bar.ei];
-  var seg = e.segments[bar.si];
   var left = ((bar.start - winStart) / span) * 100;
   var width = ((bar.end - bar.start) / span) * 100;
-  var cat = e.verdicts.length
-    ? e.verdicts.map(function (v) { return v.categoryName; }).join('、')
-    : '未分类';
-  return '<div class="sched-seg' + (bar.cont ? ' cont' : '') + '"' +
+  var segStyle = 'left:' + left + '%;width:' + width + '%;background:' + schedBarBg(bar, e, now);
+  if (schedIsDark()) segStyle += ';color:' + schedTextColorOf(bar.uid); // 暗色文字同色系提亮
+  var partsHtml = '';
+  for (var i = 0; i < bar.parts.length; i++) partsHtml += schedPartHtml(bar, bar.parts[i], e, i === 0);
+  return '<div class="sched-seg"' +
     ' data-k="' + schedBarKey(bar) + '"' +
-    ' data-edate="' + schedDays[bar.di].date + '" data-e="' + bar.ei + '" data-s="' + bar.si + '"' +
+    ' data-edate="' + schedDays[bar.di].date + '" data-e="' + bar.ei + '"' +
     ' data-bs="' + bar.start + '" data-be="' + bar.end + '"' +
-    ' style="left:' + left + '%;width:' + width + '%;background:' + schedBarBg(bar, e, now) + '">' +
-    '<span class="sched-seg-text">' + esc(e.name + ' · ' + cat + ' · ' + (seg.title || '')) + '</span>' +
-    '<span class="sched-seg-two">' +
-    '<span class="sched-seg-two-name">' + esc(e.name) + '</span>' +
-    '<span class="sched-seg-two-title">' + esc(seg.title || '') + '</span>' +
+    ' style="' + segStyle + '">' + partsHtml + '</div>';
+}
+
+/** 组内一段：双行（.sched-part-two，center 显示）与单行（.sched-part-one，single 显示）两套字层。
+ * 首段：主播名（双行第 1 行）+ 标题（第 2 行），单行 = 主播名 · 标题；后续段仅标题，
+ * 主播名保留占位隐藏（visibility）保证双行标题仍停在第二行；首段名不截断、自然顺延。 */
+function schedPartHtml(bar, part, e, isFirst) {
+  var seg = e.segments[part.si];
+  var gspan = bar.end - bar.start;
+  var left = ((part.start - bar.start) / gspan) * 100;
+  var width = ((part.end - part.start) / gspan) * 100;
+  var partStyle = 'left:' + left + '%;width:' + width + '%';
+  if (!isFirst) partStyle += ';border-left:1px solid ' + schedDividerOf(bar.uid); // 段间分割线
+  var txtShadow = '';
+  if (!schedIsDark()) txtShadow = ' style="text-shadow:' + schedTextShadowOf(bar.uid) + '"'; // 亮色同色系阴影
+  var oneText = isFirst ? e.name + ' · ' + (seg.title || '') : (seg.title || '');
+  var nameHidden = isFirst ? '' : ' style="visibility:hidden"';
+  return '<div class="sched-part"' +
+    ' data-edate="' + schedDays[bar.di].date + '" data-e="' + bar.ei + '" data-s="' + part.si + '"' +
+    ' data-bs="' + part.start + '" data-be="' + part.end + '"' +
+    ' style="' + partStyle + '">' +
+    '<span class="sched-part-one"' + txtShadow + '>' + esc(oneText) + '</span>' +
+    '<span class="sched-part-two"' + txtShadow + '>' +
+    '<span class="sched-part-name"' + nameHidden + '>' + esc(e.name) + '</span>' +
+    '<span class="sched-part-title">' + esc(seg.title || '') + '</span>' +
     '</span></div>';
 }
 
-/** 复用条时原地更新几何 / 背景 / hover 数据与文字（textContent 保留字层 span，单/双行交叉淡入不被打断） */
-function schedApplyBar(segEl, bar, d, now, winStart, span) {
+/** 复用段时原地更新几何 / 分割线 / hover 数据与文字（textContent 保留字层 span） */
+function schedApplyPart(partEl, bar, part, e, isFirst) {
+  var seg = e.segments[part.si];
+  var gspan = bar.end - bar.start;
+  var left = ((part.start - bar.start) / gspan) * 100;
+  var width = ((part.end - part.start) / gspan) * 100;
+  partEl.style.left = left + '%';
+  partEl.style.width = width + '%';
+  partEl.style.borderLeft = isFirst ? '' : '1px solid ' + schedDividerOf(bar.uid);
+  partEl.setAttribute('data-edate', schedDays[bar.di].date);
+  partEl.setAttribute('data-e', bar.ei);
+  partEl.setAttribute('data-s', part.si);
+  partEl.setAttribute('data-bs', part.start);
+  partEl.setAttribute('data-be', part.end);
+  var dark = schedIsDark();
+  var oneEl = partEl.querySelector('.sched-part-one');
+  if (oneEl) {
+    oneEl.style.textShadow = dark ? 'none' : schedTextShadowOf(bar.uid);
+    var oneText = isFirst ? e.name + ' · ' + (seg.title || '') : (seg.title || '');
+    if (oneEl.textContent !== oneText) oneEl.textContent = oneText;
+  }
+  var twoEl = partEl.querySelector('.sched-part-two');
+  if (twoEl) {
+    twoEl.style.textShadow = dark ? 'none' : schedTextShadowOf(bar.uid);
+    var nameEl = twoEl.querySelector('.sched-part-name');
+    var titleEl = twoEl.querySelector('.sched-part-title');
+    var title = seg.title || '';
+    if (nameEl) {
+      nameEl.style.visibility = isFirst ? '' : 'hidden'; // 非首段隐藏但保留占位（标题停在第二行）
+      if (nameEl.textContent !== e.name) nameEl.textContent = e.name;
+    }
+    if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+  }
+}
+
+/** 复用视觉组时原地更新：组几何/背景/颜色 + reconcile 内部分段（按 data-s 复用） */
+function schedApplyGroup(segEl, bar, d, now, winStart, span) {
   var e = schedDays[bar.di].entries[bar.ei];
-  var seg = e.segments[bar.si];
   var left = ((bar.start - winStart) / span) * 100;
   var width = ((bar.end - bar.start) / span) * 100;
   segEl.setAttribute('data-edate', schedDays[bar.di].date);
   segEl.setAttribute('data-e', bar.ei);
-  segEl.setAttribute('data-s', bar.si);
   segEl.setAttribute('data-bs', bar.start);
   segEl.setAttribute('data-be', bar.end);
   segEl.style.left = left + '%';
   segEl.style.width = width + '%';
   segEl.style.background = schedBarBg(bar, e, now);
-  var cat = e.verdicts.length
-    ? e.verdicts.map(function (v) { return v.categoryName; }).join('、')
-    : '未分类';
-  var oneEl = segEl.querySelector('.sched-seg-text');
-  if (oneEl) {
-    var oneText = e.name + ' · ' + cat + ' · ' + (seg.title || '');
-    if (oneEl.textContent !== oneText) oneEl.textContent = oneText;
+  segEl.style.color = schedIsDark() ? schedTextColorOf(bar.uid) : ''; // 暗色文字同色系提亮，亮色回落白字
+  var existing = {};
+  var oldParts = segEl.querySelectorAll('.sched-part');
+  for (var i = 0; i < oldParts.length; i++) existing[oldParts[i].getAttribute('data-s')] = oldParts[i];
+  var used = {};
+  for (var p = 0; p < bar.parts.length; p++) {
+    var part = bar.parts[p];
+    var si = String(part.si);
+    var partEl = existing[si] && !used[si] ? existing[si] : null;
+    if (!partEl) {
+      var tmp = document.createElement('div');
+      tmp.innerHTML = schedPartHtml(bar, part, e, p === 0);
+      partEl = tmp.firstChild;
+    }
+    used[si] = true;
+    schedApplyPart(partEl, bar, part, e, p === 0);
+    segEl.appendChild(partEl); // 按组内顺序排（appendChild 会移动复用的）
   }
-  var twoEl = segEl.querySelector('.sched-seg-two');
-  if (twoEl) {
-    var nameEl = twoEl.querySelector('.sched-seg-two-name');
-    var titleEl = twoEl.querySelector('.sched-seg-two-title');
-    var title = seg.title || '';
-    if (nameEl && nameEl.textContent !== e.name) nameEl.textContent = e.name;
-    if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+  for (var k2 in existing) {
+    if (!used[k2] && existing[k2].parentNode) existing[k2].parentNode.removeChild(existing[k2]);
   }
 }
 
@@ -580,10 +701,10 @@ function reconcileSchedLanes(lanesEl, d, now, winStart, span) {
       var segEl = existing[key] && !used[key] ? existing[key] : null;
       if (segEl) {
         used[key] = true;
-        schedApplyBar(segEl, bar, d, now, winStart, span);
+        schedApplyGroup(segEl, bar, d, now, winStart, span);
       } else {
         var tmp = document.createElement('div');
-        tmp.innerHTML = schedBarHtml(bar, d, now, winStart, span);
+        tmp.innerHTML = schedGroupHtml(bar, d, now, winStart, span);
         segEl = tmp.firstChild;
         used[key] = true;
       }
@@ -737,7 +858,7 @@ function schedMovePop(evt) {
 
   body.addEventListener('mouseover', function (e) {
     if (!(e.target instanceof Element)) return;
-    var el = e.target.closest('.sched-seg');
+    var el = e.target.closest('.sched-part'); // 组内分段各自响应 hover（标题/快照按段）
     if (!el) return;
     if (el.closest('.sched-day.mini')) return; // 缩略行（无字色条）无 hover
     schedShowPop(el, e);
@@ -748,11 +869,19 @@ function schedMovePop(evt) {
   });
   body.addEventListener('mouseout', function (e) {
     if (!(e.target instanceof Element)) return;
-    var el = e.target.closest('.sched-seg');
+    var el = e.target.closest('.sched-part');
     if (el && !(e.relatedTarget instanceof Element && el.contains(e.relatedTarget))) schedHidePop();
   });
 
   schedLoad(bjToday());
+
+  // 主题切换（亮/暗）→ 重渲条区：亮度随主题（70/40），h/s 不变，无需重算头像
+  if (window.matchMedia) {
+    var schedMQ = window.matchMedia('(prefers-color-scheme: dark)');
+    function schedOnSchemeChange() { if (schedCenter && schedDays.length) renderSchedBody(); }
+    if (schedMQ.addEventListener) schedMQ.addEventListener('change', schedOnSchemeChange);
+    else if (schedMQ.addListener) schedMQ.addListener(schedOnSchemeChange);
+  }
 
   // 在播条右端与当前时间红线跟随时间：轴变了重渲轴刻度 + 原地 reconcile 几何；
   // 轴没变时，全量行内有在播场或 now 落在某全量行窗口内（红线需推进）才刷新条区（省电）

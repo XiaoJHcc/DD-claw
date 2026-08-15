@@ -254,30 +254,34 @@ a.post:hover{background:var(--hover)}
 .sched-day.mini .sched-lane{height:var(--sched-mini-lane-h)}
 .sched-day.mini .sched-lanes{gap:1px}
 .sched-day.mini .sched-day-head{padding-top:0;font-size:10px}
-/* 色条：三级透明度（center 1 / single .62 / mini .34）；字层绝对定位居中，
-   双行/单行交叉淡入淡出。文字允许向右溢出条范围（不截断），阴影保证条外可读 */
+/* 色条：三级透明度（center 1 / single .62 / mini .34）。一场直播画成一个完整的
+   圆角矩形（.sched-seg，单背景），内部分段 .sched-part 只负责分割线与文字——
+   首/末段再窄也不破坏圆角。字层绝对定位居中，双行/单行交叉淡入淡出；
+   文字允许向右溢出条范围（不截断）——z-index:1 让字层画在后续条背景之上，
+   主播名自然顺延不截断；红线上层（z-index:2）仍盖住文字 */
 .sched-seg{position:absolute;top:1px;bottom:1px;border-radius:var(--r-sm);overflow:visible;
   color:#fff;font-size:11px;line-height:1.2;white-space:nowrap;opacity:1;
   transition:opacity .28s ease,left .28s ease,width .28s ease}
-.sched-seg.cont{border-left:2px solid rgba(255,255,255,.55)}
-.sched-seg-text{position:absolute;left:6px;top:0;bottom:0;display:flex;align-items:center;
-  white-space:nowrap;text-shadow:0 0 3px rgba(0,0,0,.45);opacity:0;transition:opacity .28s ease}
-.sched-seg-two{position:absolute;left:6px;top:0;bottom:0;display:flex;flex-direction:column;
+.sched-part{position:absolute;top:0;bottom:0}
+.sched-part-one{position:absolute;left:6px;top:0;bottom:0;display:flex;align-items:center;
+  white-space:nowrap;text-shadow:0 0 3px rgba(0,0,0,.45);opacity:0;transition:opacity .28s ease;
+  z-index:1}
+.sched-part-two{position:absolute;left:6px;top:0;bottom:0;display:flex;flex-direction:column;
   align-items:flex-start;justify-content:center;text-shadow:0 0 3px rgba(0,0,0,.45);
-  opacity:1;transition:opacity .28s ease}
-.sched-seg-two-name{font-weight:600;white-space:nowrap}
-.sched-seg-two-title{white-space:nowrap;opacity:.92}
-/* center：双行字，实色不透明 */
-.sched-day.center .sched-seg-text{opacity:0}
-.sched-day.center .sched-seg-two{opacity:1}
+  opacity:1;transition:opacity .28s ease;z-index:1}
+.sched-part-name{font-weight:600;white-space:nowrap}
+.sched-part-title{white-space:nowrap;opacity:.92}
+/* center：双行字（首段主播名 + 标题，后续段标题仍在第二行），实色不透明 */
+.sched-day.center .sched-part-one{opacity:0}
+.sched-day.center .sched-part-two{opacity:1}
 /* single：单行字，整体减淡 */
 .sched-day.single .sched-seg{opacity:.62}
-.sched-day.single .sched-seg-text{opacity:1}
-.sched-day.single .sched-seg-two{opacity:0}
+.sched-day.single .sched-part-one{opacity:1}
+.sched-day.single .sched-part-two{opacity:0}
 /* mini：无字色条，更淡 */
 .sched-day.mini .sched-seg{opacity:.34}
-.sched-day.mini .sched-seg-text{opacity:0}
-.sched-day.mini .sched-seg-two{opacity:0}
+.sched-day.mini .sched-part-one{opacity:0}
+.sched-day.mini .sched-part-two{opacity:0}
 /* 当前时间红线（macOS 日历样式：细线 + 顶端圆点），在色条之上、不拦截鼠标 */
 .sched-now{position:absolute;top:-2px;bottom:0;width:2px;margin-left:-1px;background:var(--red);
   z-index:2;pointer-events:none;transition:left .28s ease}
@@ -287,6 +291,8 @@ a.post:hover{background:var(--hover)}
   background:var(--card-bg);border-radius:var(--r-md);box-shadow:0 8px 28px rgba(0,0,0,.25);
   pointer-events:none}
 @media (prefers-color-scheme: dark){.sched-pop{border:0.5px solid var(--separator)}}
+/* 暗色：条内文字用同色系提亮（hsl(h,s,90%)，app-schedule 内联），阴影去掉 */
+@media (prefers-color-scheme: dark){.sched-part-one,.sched-part-two{text-shadow:none}}
 .sched-pop img{display:block;width:100%;border-radius:var(--r-sm);margin:6px 0;background:var(--fill)}
 .sched-pop-title{font-size:13px;margin-bottom:2px}
 .sched-pop-meta{color:var(--text-secondary);margin:2px 0}

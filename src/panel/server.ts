@@ -681,7 +681,9 @@ async function sendAvatar(deps: PanelDeps, url: URL, res: http.ServerResponse): 
   }
   res.writeHead(200, {
     'content-type': entry.type,
-    'cache-control': 'private, max-age=86400',
+    // 头像可能随时变更（主播换头像），浏览器不缓存；服务端 avatarCache 已按 face 去重，
+    // 换头像 = 新 face URL → 新拉取，未换则内存直出，成本可控
+    'cache-control': 'private, no-cache',
   });
   res.end(entry.buf);
 }

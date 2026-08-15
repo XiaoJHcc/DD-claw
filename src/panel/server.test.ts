@@ -1579,7 +1579,7 @@ test('/api/avatar：按 uid 反代主播头像（带 UA+Referer），内容/类�
   assert.equal(r.status, 200);
   assert.deepEqual(r.body, fakePng);
   assert.equal(r.headers.get('content-type'), 'image/png');
-  assert.equal(r.headers.get('cache-control'), 'private, max-age=86400');
+  assert.equal(r.headers.get('cache-control'), 'private, no-cache');
   assert.equal(seenUrl, 'https://i0.hdslb.com/bfs/face/f1.png', '反代的是主播头像 URL');
   assert.equal(seenReferer, 'https://live.bilibili.com/', '带 B站图床要求的 Referer');
 });
