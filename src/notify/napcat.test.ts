@@ -9,6 +9,8 @@ import {
   getNapcatConfig, saveNapcatConfig, setupNapcatTask, NAPCAT_TASK_NAME, NAPCAT_STOP_TASK_NAME,
   ensureNapcatEntry, NAPCAT_ENTRY_NAME, defaultNapcatDir, effectiveNapcatDir,
   readWebuiInfo, loginWebui, reloadOnebotConfig,
+  napcatRelaunchDriver, launchMacNapcat, stopMacNapcat, macNapcatInstalled, MAC_QQ_PATH,
+  removeNapcatTask,
   type NapcatEndpoint, type ProbeResult, type RunResult,
 } from './napcat.js';
 import { Db } from '../core/db.js';
@@ -167,10 +169,10 @@ test('setupNapcatTask 失败时把 setup 日志尾部带进错误', async () => 
 test('napcat 生效配置：settings 缺省 = 未配置；保存即生效；传空串 = 清空字段', () => {
   const db = new Db(':memory:');
   try {
-    assert.deepEqual(getNapcatConfig(db), { enabled: false, dir: '', uin: '' }, '缺省 = 未配置');
+    assert.deepEqual(getNapcatConfig(db), { enabled: false, autorestart: false, dir: '', uin: '' }, '缺省 = 未配置');
 
     saveNapcatConfig(db, { enabled: true, dir: 'E:/NC', uin: '111' });
-    assert.deepEqual(getNapcatConfig(db), { enabled: true, dir: 'E:/NC', uin: '111' });
+    assert.deepEqual(getNapcatConfig(db), { enabled: true, autorestart: false, dir: 'E:/NC', uin: '111' });
 
     saveNapcatConfig(db, { dir: '', uin: '' });
     const cfg = getNapcatConfig(db);
@@ -180,6 +182,9 @@ test('napcat 生效配置：settings 缺省 = 未配置；保存即生效；传�
 
     saveNapcatConfig(db, { enabled: false });
     assert.equal(getNapcatConfig(db).enabled, false);
+
+    saveNapcatConfig(db, { autorestart: true });
+    assert.equal(getNapcatConfig(db).autorestart, true, '自动拉起独立开关');
   } finally {
     db.close();
   }
@@ -405,6 +410,8 @@ interface Harness {
   setProbe: (r: ProbeResult) => void;
   setProbeFn: (f: (ep: NapcatEndpoint) => ProbeResult) => void;
   setEnsure: (ep: NapcatEndpoint | null) => void;
+  setAutoRestart: (v: boolean) => void;
+  setAvailable: (v: boolean) => void;
   advance: (ms: number) => void;
 }
 
@@ -412,6 +419,8 @@ function harness(dir: string, initial: ProbeResult, ensureResult: NapcatEndpoint
   let probeResult = initial;
   let probeFn: ((ep: NapcatEndpoint) => ProbeResult) | null = null;
   let ensureEp = ensureResult;
+  let autoRestart = true;
+  let available = true;
   let t = 1_000_000; // 假时钟起点（避开 0 哨兵）
   const h: Harness = {
     relaunches: 0,
@@ -423,11 +432,15 @@ function harness(dir: string, initial: ProbeResult, ensureResult: NapcatEndpoint
     setProbe: (r) => { probeResult = r; probeFn = null; },
     setProbeFn: (f) => { probeFn = f; },
     setEnsure: (ep) => { ensureEp = ep; },
+    setAutoRestart: (v) => { autoRestart = v; },
+    setAvailable: (v) => { available = v; },
     advance: (ms) => { t += ms; },
     wd: null as unknown as NapcatWatchdog,
   };
   h.wd = new NapcatWatchdog({
     target: () => ({ dir, uin: '12345' }),
+    autoRestart: () => autoRestart,
+    available: async () => available,
     probe: async (ep) => (probeFn ? probeFn(ep) : probeResult),
     ensure: async () => { h.ensureCalls++; return ensureEp; },
     relaunch: async () => { h.relaunches++; return true; },
@@ -606,6 +619,120 @@ test('看门狗：配置变了但旧实例还在旧端口跑（陈旧实例）�
     assert.equal(h.stops, 1, '旧实例已停不再重复 stop');
     assert.equal(h.relaunches, 1, '冷却内不重复拉起');
   });
+});
+
+// ---------- 自动拉起开关 / 拉起能力闸门 ----------
+
+test('看门狗：自动拉起关 → 只探测不拉起；重新开启后复位计数可再拉起', async () => {
+  await withTmpDirAsync(async (dir) => {
+    writeOnebot(dir, 'onebot11_12345.json', enabledCfg);
+    const h = harness(dir, { state: 'down' });
+    h.setAutoRestart(false);
+
+    await h.wd.tick();
+    assert.equal(h.relaunches, 0, '自动拉起关不拉起');
+    assert.equal(h.alerts.length, 0);
+
+    // 之前放弃过也应在关闭时复位：模拟已放弃状态
+    h.setAutoRestart(true);
+    h.setProbe({ state: 'down' });
+    await h.wd.tick();
+    assert.equal(h.relaunches, 1, '重新开启后立即拉起');
+  });
+});
+
+test('看门狗：拉起能力不可用（任务被移除）→ 告警一次不拉起；能力恢复即拉起', async () => {
+  await withTmpDirAsync(async (dir) => {
+    writeOnebot(dir, 'onebot11_12345.json', enabledCfg);
+    const h = harness(dir, { state: 'down' });
+    h.setAvailable(false);
+
+    await h.wd.tick();
+    assert.equal(h.relaunches, 0, '能力不可用不拉起');
+    assert.equal(h.alerts.length, 1, '告警一次');
+    assert.match(h.alerts[0]!, /自动拉起能力不可用/);
+
+    await h.wd.tick();
+    assert.equal(h.alerts.length, 1, '不可用告警只发一次');
+
+    h.setAvailable(true);
+    await h.wd.tick();
+    assert.equal(h.relaunches, 1, '能力恢复即拉起');
+  });
+});
+
+test('看门狗：自动拉起关时陈旧实例也不停不拉（不重启生效）', async () => {
+  await withTmpDirAsync(async (dir) => {
+    writeOnebot(dir, 'onebot11_12345.json', enabledCfg);
+    const h = harness(dir, { state: 'ok', loggedIn: true });
+    await h.wd.tick(); // ok，lastOkEndpoint = 3000
+
+    writeOnebot(dir, 'onebot11_12345.json', {
+      network: { httpServers: [{ name: 'dd-claw', enable: true, host: '127.0.0.1', port: 41234, token: '' }] },
+    });
+    h.setProbeFn((ep) => ep.baseUrl.includes('41234')
+      ? { state: 'down' }
+      : { state: 'ok', loggedIn: true });
+    h.setAutoRestart(false);
+
+    await h.wd.tick();
+    assert.equal(h.stops, 0, '自动拉起关不停止旧实例');
+    assert.equal(h.relaunches, 0, '自动拉起关不拉起');
+  });
+});
+
+// ---------- 拉起能力驱动（平台装配） ----------
+
+test('napcatRelaunchDriver：win32 = schtasks（setup 建任务 / remove 删任务 / launch 用 /run）', async () => {
+  await withTmpDirAsync(async (workDir) => {
+    const calls: string[] = [];
+    const rec = async (cmd: string, args: string[]): Promise<RunResult> => {
+      calls.push(`${cmd} ${args.join(' ')}`);
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const d = napcatRelaunchDriver('win32', rec);
+    await d.setup('D:/NC', '111', workDir);
+    await d.launch('111');
+    await d.remove();
+    assert.ok(calls.some((c) => c.startsWith('powershell.exe')), 'setup 经 powershell 提权建任务');
+    assert.ok(calls.some((c) => c.includes('schtasks /run /tn ' + NAPCAT_TASK_NAME)), 'launch 触发任务');
+    assert.ok(calls.some((c) => c.includes('schtasks /delete /tn ' + NAPCAT_TASK_NAME)), 'remove 删除任务');
+    assert.ok(calls.some((c) => c.includes('schtasks /delete /tn ' + NAPCAT_STOP_TASK_NAME)), 'remove 同时删停止任务');
+  });
+});
+
+test('napcatRelaunchDriver：darwin = open QQ（setup/remove 为 no-op，launch 带 --qq 快速登录）', async () => {
+  const calls: string[] = [];
+  const rec = async (cmd: string, args: string[]): Promise<RunResult> => {
+    calls.push(`${cmd} ${args.join(' ')}`);
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const d = napcatRelaunchDriver('darwin', rec);
+  await d.setup('/unused', '111', '/tmp');
+  await d.launch('111');
+  await d.remove(); // no-op
+  assert.ok(calls.length >= 1, 'darwin 只有 launch 真正执行命令');
+  assert.ok(calls.some((c) => c === 'open -a QQ --args --no-sandbox --qq 111'), 'launch 用 open + --no-sandbox + --qq 快速登录');
+  assert.ok(calls.every((c) => !c.startsWith('schtasks')), 'darwin 不碰 schtasks');
+});
+
+test('launchMacNapcat 命令 = open -a QQ --args --no-sandbox --qq <uin>；stopMacNapcat = osascript quit', async () => {
+  const calls: string[] = [];
+  const rec = async (cmd: string, args: string[]): Promise<RunResult> => {
+    calls.push(`${cmd} ${args.join(' ')}`);
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  assert.equal(await launchMacNapcat('2954481774', rec), true);
+  assert.deepEqual(calls, ['open -a QQ --args --no-sandbox --qq 2954481774']);
+
+  calls.length = 0;
+  assert.equal(await stopMacNapcat(rec), true);
+  assert.deepEqual(calls, ['osascript -e tell application "QQ" to quit']);
+});
+
+test('macNapcatInstalled：QQ.app 存在即就绪（MAC_QQ_PATH 恒为 /Applications/QQ.app/...）', () => {
+  assert.equal(MAC_QQ_PATH, '/Applications/QQ.app/Contents/MacOS/QQ');
+  assert.equal(typeof macNapcatInstalled(), 'boolean');
 });
 
 /** withTmpDir 的 async 变体 */

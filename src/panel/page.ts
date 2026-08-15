@@ -92,7 +92,6 @@ export const PANEL_PAGE = `<!doctype html>
 <div id="napcat-rows">加载中…</div>
 <div class="card-actions" id="napcat-actions">
 <button class="btn" data-action="napcat-launch"><span data-icon="bolt"></span>手动拉起</button>
-<button class="btn" data-action="napcat-setup"><span data-icon="clock"></span><span id="napcat-setup-label">添加自动拉起任务</span></button>
 </div>
 </section>
 </div>

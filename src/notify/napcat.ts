@@ -9,20 +9,27 @@ import type { Db } from '../core/db.js';
 
 const log = makeLogger('notify/napcat');
 
-/** NapCat 托管配置（dir = 一键包目录，uin = 快速登录的机器人 QQ 号） */
+/**
+ * NapCat 通道配置（dir = 一键包/QQ 容器目录，uin = 快速登录的机器人 QQ 号）。
+ * `enabled` = 「使用 NapCat 通道」开关；`autorestart` = 「失活自动拉起」开关，
+ * 两者独立：通道关 = 完全不装配 onebot；自动拉起关 = 通道照常、但不在失活时拉起。
+ */
 export interface NapcatConfig {
   enabled: boolean;
+  autorestart: boolean;
   dir: string;
   uin: string;
 }
 
 /**
  * 生效配置：settings 表是唯一信源（webui 管理）。
- * settings 键：napcat_enabled '1'/'0'、napcat_dir、napcat_uin；缺省 = 未配置。
+ * settings 键：napcat_enabled '1'/'0'、napcat_autorestart '1'/'0'（缺省关）、
+ * napcat_dir、napcat_uin；缺省 = 未配置。
  */
 export function getNapcatConfig(db: Db): NapcatConfig {
   return {
     enabled: db.getSetting('napcat_enabled') === '1',
+    autorestart: db.getSetting('napcat_autorestart') === '1',
     dir: db.getSetting('napcat_dir') ?? '',
     uin: db.getSetting('napcat_uin') ?? '',
   };
@@ -51,9 +58,10 @@ export function effectiveNapcatDir(db: Db, platform: NodeJS.Platform = process.p
  */
 export function saveNapcatConfig(
   db: Db,
-  patch: { enabled?: boolean; dir?: string; uin?: string; alertQq?: string },
+  patch: { enabled?: boolean; autorestart?: boolean; dir?: string; uin?: string; alertQq?: string },
 ): void {
   if (patch.enabled !== undefined) db.setSetting('napcat_enabled', patch.enabled ? '1' : '0');
+  if (patch.autorestart !== undefined) db.setSetting('napcat_autorestart', patch.autorestart ? '1' : '0');
   if (patch.dir !== undefined) {
     if (patch.dir === '') db.deleteSetting('napcat_dir');
     else db.setSetting('napcat_dir', patch.dir);
@@ -478,18 +486,98 @@ export async function stopNapcatViaTask(run: Runner = defaultRunner): Promise<bo
   return r.code === 0;
 }
 
+/** 彻底移除拉起任务（关闭「自动拉起」开关时调用）；/f 忽略「任务不存在」 */
+export async function removeNapcatTask(run: Runner = defaultRunner): Promise<void> {
+  await run('schtasks', ['/delete', '/tn', NAPCAT_TASK_NAME, '/f']);
+  await run('schtasks', ['/delete', '/tn', NAPCAT_STOP_TASK_NAME, '/f']);
+}
+
+// ---------- macOS 拉起（无需提权：NapCat-Mac-Installer 已改 QQ，拉起只是 open） ----------
+
+/** macOS 版 QQ 可执行文件（NapCat-Mac-Installer 改过 package.json 的版本） */
+export const MAC_QQ_PATH = '/Applications/QQ.app/Contents/MacOS/QQ';
+
+/** macOS 拉起能力就绪 = QQ.app 存在（安装器已注入 NapCat，无需 DD-claw 建任务） */
+export function macNapcatInstalled(): boolean {
+  return existsSync(MAC_QQ_PATH);
+}
+
+/**
+ * macOS 拉起 NapCat（含快速登录）：`open -a QQ --args --no-sandbox --qq <uin>`。
+ * --no-sandbox 是安装器要求；--qq 进 QQ 主进程 process.argv，由 NapCat shell/base.ts
+ * 读取做快速登录（等价 Windows 的 launcher.bat <uin>）。经 open 走 LaunchServices，
+ * QQ 获得正常 GUI 会话上下文。
+ */
+export async function launchMacNapcat(uin: string, run: Runner = defaultRunner): Promise<boolean> {
+  const r = await run('open', ['-a', 'QQ', '--args', '--no-sandbox', '--qq', uin]);
+  return r.code === 0;
+}
+
+/** macOS 停止 NapCat（配置变更需重启时用）：优雅退出 QQ */
+export async function stopMacNapcat(run: Runner = defaultRunner): Promise<boolean> {
+  const r = await run('osascript', ['-e', 'tell application "QQ" to quit']);
+  return r.code === 0;
+}
+
+// ---------- 拉起能力抽象（Windows 计划任务 / macOS open QQ） ----------
+
+export interface NapcatRelaunchDriver {
+  platform: NodeJS.Platform;
+  /** 拉起能力是否就绪：Windows = 计划任务已创建；macOS = QQ.app 存在（无持久任务） */
+  available: () => Promise<boolean>;
+  /** 一次性创建拉起能力：Windows = 弹一次 UAC 建计划任务；macOS = no-op（安装器已处理） */
+  setup: (dir: string, uin: string, workDir: string) => Promise<void>;
+  /** 彻底移除拉起能力：Windows = schtasks /delete；macOS = no-op（无持久任务） */
+  remove: () => Promise<void>;
+  /** 拉起（返回 false = 命令失败） */
+  launch: (uin: string) => Promise<boolean>;
+  /** 停止实例（配置变更需重启时用；返回 false = 命令失败/未运行） */
+  stop: () => Promise<boolean>;
+}
+
+/** 按平台装配拉起能力：win32 = schtasks（一次 UAC 提权）；darwin = open QQ（无需提权） */
+export function napcatRelaunchDriver(
+  platform: NodeJS.Platform = process.platform,
+  run: Runner = defaultRunner,
+): NapcatRelaunchDriver {
+  if (platform === 'win32') {
+    return {
+      platform: 'win32',
+      available: () => isNapcatTaskRegistered(run),
+      setup: (dir, uin, workDir) => setupNapcatTask(dir, uin, workDir, run),
+      remove: () => removeNapcatTask(run),
+      launch: () => launchNapcatViaTask(run),
+      stop: () => stopNapcatViaTask(run),
+    };
+  }
+  return {
+    platform,
+    available: async () => macNapcatInstalled(),
+    setup: async () => {},
+    remove: async () => {},
+    launch: (uin) => launchMacNapcat(uin, run),
+    stop: () => stopMacNapcat(run),
+  };
+}
+
 // ---------- 看门狗 ----------
 
 export interface NapcatWatchdogDeps {
   /** 生效的 dir/uin（每 tick 取一次：面板改了热生效） */
   target: () => { dir: string; uin: string };
+  /** 「失活自动拉起」开关（每 tick 取，热生效）；缺省关 = 只探测/告警不拉起 */
+  autoRestart?: () => boolean;
+  /** 拉起能力驱动（平台装配）；缺省按 process.platform 装配 */
+  driver?: NapcatRelaunchDriver;
   /** 探测（可注入假实现） */
   probe?: (endpoint: NapcatEndpoint) => Promise<ProbeResult>;
   /** 自建/修复 dd-claw 条目（可注入假实现）；缺省 = ensureNapcatEntry */
   ensure?: (dir: string, uin: string) => Promise<NapcatEndpoint | null>;
-  /** 拉起（可注入假实现）；返回 false = 拉起命令本身失败（如计划任务不存在） */
-  relaunch?: () => Promise<boolean>;
-  /** 停止旧实例（可注入假实现）；配置变更需要重启生效时用。缺省 = stopNapcatViaTask */
+  /** 拉起能力是否就绪（可注入假实现）；缺省 = driver.available() */
+  available?: () => Promise<boolean>;
+  /** 拉起（可注入假实现）；返回 false = 拉起命令本身失败（如计划任务不存在）。缺省 = driver.launch(uin) */
+  relaunch?: (uin: string) => Promise<boolean>;
+  /** 停止旧实例（可注入假实现）；配置变更需要重启生效时用。缺省 = driver.stop() */
   stop?: () => Promise<boolean>;
   /** 等待（可注入假实现，测试免真实 sleep）。缺省 = setTimeout */
   wait?: (ms: number) => Promise<void>;
@@ -502,8 +590,10 @@ export interface NapcatWatchdogDeps {
 
 /**
  * NapCat 看门狗状态机。每 tick 一轮（由 PeriodicTask 驱动）：
- * 读 dd-claw 专属条目（缺了自建）→ 探测 → ok 复位 / down 冷却内拉起 /
- * conflict 自动换端口再拉起 / ok 但长时间未登录提示扫码。
+ * 读 dd-claw 专属条目（缺了自建）→ 探测 → ok 复位 / down（自动拉起开且能力就绪时
+ * 冷却内拉起）/ conflict 自动换端口再拉起 / ok 但长时间未登录提示扫码。
+ * 双平台共用：拉起能力由 driver 装配（Windows 计划任务 / macOS open QQ），
+ * 自动拉起开关独立于「使用 NapCat 通道」——关 = 只探测/告警/热跟随，绝不拉起。
  */
 export class NapcatWatchdog {
   private lastEndpointKey = '';
@@ -514,10 +604,15 @@ export class NapcatWatchdog {
   private notLoggedInSince = 0;
   private loginAlerted = false;
   private configAlerted = false;
+  private unavailableAlerted = false;
   /** 最近一次 ok 的端点：配置变更后旧实例仍在新配置端口 down、旧端口 ok 时识别「陈旧实例」 */
   private lastOkEndpoint: NapcatEndpoint | null = null;
 
-  constructor(private readonly deps: NapcatWatchdogDeps) {}
+  private readonly driver: NapcatRelaunchDriver;
+
+  constructor(private readonly deps: NapcatWatchdogDeps) {
+    this.driver = this.deps.driver ?? napcatRelaunchDriver();
+  }
 
   private readonly probe = (ep: NapcatEndpoint): Promise<ProbeResult> =>
     this.deps.probe ? this.deps.probe(ep) : probeNapCat(ep);
@@ -529,6 +624,17 @@ export class NapcatWatchdog {
     this.deps.wait ? this.deps.wait(ms) : new Promise((r) => setTimeout(r, ms));
 
   private readonly now = (): number => (this.deps.now ? this.deps.now() : Date.now());
+
+  private readonly autoRestart = (): boolean => this.deps.autoRestart ? this.deps.autoRestart() : false;
+
+  private readonly available = (): Promise<boolean> =>
+    this.deps.available ? this.deps.available() : this.driver.available();
+
+  private readonly relaunchCmd = (uin: string): Promise<boolean> =>
+    this.deps.relaunch ? this.deps.relaunch(uin) : this.driver.launch(uin);
+
+  private readonly stopCmd = (): Promise<boolean> =>
+    this.deps.stop ? this.deps.stop() : this.driver.stop();
 
   private alert(message: string): void {
     log.warn(message);
@@ -547,12 +653,12 @@ export class NapcatWatchdog {
   private async relaunch(): Promise<void> {
     this.lastLaunchAt = this.now();
     this.failCount++;
-    const relaunch = this.deps.relaunch ?? (() => launchNapcatViaTask());
-    const fired = await relaunch();
+    const { uin } = this.deps.target();
+    const fired = await this.relaunchCmd(uin);
     if (fired) {
-      log.info(`NapCat 不在线，已通过计划任务拉起（第 ${this.failCount} 次）`);
+      log.info(`NapCat 不在线，已拉起（第 ${this.failCount} 次）`);
     } else {
-      log.warn('NapCat 拉起命令失败（计划任务不存在？跑 npm run napcat-setup）');
+      log.warn('NapCat 拉起命令失败（拉起能力不可用？）');
     }
     if (this.failCount >= WATCHDOG_DEFAULTS.giveUpAfter) {
       this.gaveUp = true;
@@ -620,8 +726,27 @@ export class NapcatWatchdog {
       return;
     }
 
-    // down：冷却内拉起，连续失败到阈值放弃并告警（保持探测，恢复自动复位）
+    // down：自动拉起开且能力就绪时，冷却内拉起，连续失败到阈值放弃并告警（保持探测，恢复自动复位）
     this.lastState = 'down';
+
+    // 自动拉起关闭：只探测/告警/热跟随，绝不拉起；顺带复位计数（下次重开即全新起点）
+    if (!this.autoRestart()) {
+      this.gaveUp = false;
+      this.failCount = 0;
+      this.lastLaunchAt = -Infinity;
+      return;
+    }
+
+    // 拉起能力不可用（计划任务被删 / macOS 上 QQ 不存在）：告警一次，不拉起
+    if (!(await this.available())) {
+      if (!this.unavailableAlerted) {
+        this.unavailableAlerted = true;
+        this.alert('NapCat 不在线且自动拉起能力不可用（拉起任务被移除？请重新开启「失活自动拉起」重建）。');
+      }
+      return;
+    }
+    this.unavailableAlerted = false;
+
     if (this.gaveUp) return;
 
     // 配置已变更但旧实例还在旧端口上跑（陈旧实例）→ 先停再拉起让新配置生效；
@@ -630,8 +755,7 @@ export class NapcatWatchdog {
     if (staleEp && staleEp.baseUrl !== ep.baseUrl && (await this.probe(staleEp)).state === 'ok') {
       this.lastOkEndpoint = null;
       log.info(`NapCat 还在旧配置（${staleEp.baseUrl}）上运行，停止后重启以生效 ${ep.baseUrl}`);
-      const stop = this.deps.stop ?? (() => stopNapcatViaTask());
-      if (!(await stop())) log.warn('停止旧 NapCat 实例失败（停止任务缺失？直接拉起）');
+      if (!(await this.stopCmd())) log.warn('停止旧 NapCat 实例失败，直接拉起');
       await this.wait(3_000);
       return this.relaunch();
     }

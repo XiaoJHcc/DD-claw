@@ -13,9 +13,9 @@ import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
 import {
   NapcatWatchdog, readOnebotEndpoint, probeNapCat, getNapcatConfig, saveNapcatConfig,
-  effectiveNapcatDir, defaultNapcatDir,
+  effectiveNapcatDir,
   ensureNapcatEntry,
-  isNapcatTaskRegistered, setupNapcatTask, launchNapcatViaTask, stopNapcatViaTask, NAPCAT_TASK_NAME,
+  napcatRelaunchDriver, isNapcatTaskRegistered, setupNapcatTask, launchNapcatViaTask, NAPCAT_TASK_NAME,
 } from './notify/napcat.js';
 import { ToastNotifier } from './notify/toast.js';
 import { ensureToastAumid } from './notify/aumid.js';
@@ -71,10 +71,11 @@ async function main(): Promise<void> {
   const { app, secrets } = loadConfig();
 
   // --napcat-setup 一次性提权设置：创建「最高权限」计划任务（弹一次 UAC），
-  // 之后看门狗用 schtasks /run 静默拉起 NapCat。做完即退出，不启动主流程。
+  // 之后看门狗用 schtasks /run 静默拉起 NapCat。与面板「失活自动拉起」开关等效
+  // （会一并把 napcat_autorestart 置 1）。做完即退出，不启动主流程。
   if (args.napcatSetup) {
     if (process.platform !== 'win32') {
-      log.error('--napcat-setup 目前仅支持 Windows');
+      log.error('--napcat-setup 目前仅支持 Windows（macOS 无需提权任务，直接开「失活自动拉起」即可）');
       process.exit(1);
     }
     // 生效配置在 settings 表（面板 NapCat 卡片）
@@ -94,7 +95,8 @@ async function main(): Promise<void> {
       log.info(`计划任务 "${NAPCAT_TASK_NAME}" 已存在，将重建以更新路径/uin`);
     }
     await setupNapcatTask(nc.dir, nc.uin, join(projectRoot, 'data'));
-    log.info(`计划任务 "${NAPCAT_TASK_NAME}" 创建成功（UAC 只弹这一次，之后自动拉起静默）`);
+    saveNapcatConfig(setupDb, { autorestart: true });
+    log.info(`计划任务 "${NAPCAT_TASK_NAME}" 创建成功，失活自动拉起已开启（UAC 只弹这一次）`);
     // 试拉验证：当前不在线就触发一次
     const probe = ep ? await probeNapCat(ep) : null;
     if (probe?.state === 'ok') {
@@ -210,8 +212,8 @@ async function main(): Promise<void> {
     const nc = getNapcatConfig(db);
     const dir = effectiveNapcatDir(db);
     // 端点只读跟随 NapCat 自己的 onebot11 配置（dd-claw 专属条目，缺了自动创建）；
-    // macOS 与 Windows 共用同一套发现逻辑（NapCat Mac 版配置结构一致），
-    // 差别只在 macOS 没有看门狗拉起——写配置后需手动重启 QQ/NapCat 生效
+    // macOS 与 Windows 共用同一套发现逻辑（NapCat Mac 版配置结构一致）。
+    // 看门狗双平台运行（热跟随 + 探测 + 自动拉起由「失活自动拉起」开关与 driver 决定）
     const discovered = nc.enabled && dir && nc.uin
       ? (readOnebotEndpoint(dir, nc.uin) ?? await ensureNapcatEntry(dir, nc.uin))
       : null;
@@ -288,15 +290,17 @@ async function main(): Promise<void> {
   });
   pipeline.attach();
 
-  // NapCat 看门狗：生效配置（settings 唯一信源）enabled 时周期探测（60s），
-  // 不在线经计划任务自动拉起 + 快速登录；dir/uin 每 tick 重取（面板改了热生效）；
-  // 端点热跟随 NapCat 自己的 onebot11 配置。告警走 bus health_alert →
-  // alertAll（toast 本机通知；登录掉线/持续失败超 10 分钟另报告警 QQ）
+  // NapCat 看门狗：双平台运行（Windows 计划任务 / macOS open QQ）。生效配置
+  // （settings 唯一信源）「使用 NapCat 通道」开时周期探测（60s）；「失活自动拉起」
+  // 开关每 tick 重取（面板改了热生效），关 = 只探测/告警/热跟随绝不拉起。
+  // dir/uin 每 tick 重取；端点热跟随 NapCat 自己的 onebot11 配置。告警走 bus
+  // health_alert → alertAll（toast 本机通知；登录掉线/持续失败超 10 分钟另报告警 QQ）
   let napcatTask: PeriodicTask | undefined;
   let napcatWatchdog: NapcatWatchdog | undefined;
+  const napcatDriver = napcatRelaunchDriver();
   const reconcileNapcat = (): void => {
     const nc = getNapcatConfig(db);
-    const shouldRun = nc.enabled && onebotNotifier !== null && process.platform === 'win32';
+    const shouldRun = nc.enabled && onebotNotifier !== null;
     if (shouldRun === (napcatTask !== undefined)) return;
     if (shouldRun) {
       napcatWatchdog ??= new NapcatWatchdog({
@@ -304,6 +308,8 @@ async function main(): Promise<void> {
           const c = getNapcatConfig(db);
           return { dir: c.dir, uin: c.uin };
         },
+        autoRestart: () => getNapcatConfig(db).autorestart,
+        driver: napcatDriver,
         onEndpoint: (ep) => onebotNotifier!.updateEndpoint(ep.baseUrl, ep.token),
         alert: (message) => bus.emit({
           source: 'napcat', kind: 'health_alert', uid: '', roomId: '',
@@ -315,21 +321,16 @@ async function main(): Promise<void> {
         run: () => napcatWatchdog!.tick(),
       });
       napcatTask.start();
-      log.info(`NapCat 看门狗已启动（${nc.dir}，快速登录 ${nc.uin}）`);
-      void isNapcatTaskRegistered().then((ok) => {
-        if (!ok) {
-          log.warn('NapCat 计划任务未创建，自动拉起不可用：面板 NapCat 卡片点「添加自动拉起任务」或跑 npm run napcat-setup 一次性设置');
-        }
-      });
+      log.info(
+        `NapCat 看门狗已启动（${nc.dir}，快速登录 ${nc.uin}，` +
+        `自动拉起 ${nc.autorestart ? '开' : '关'}）`,
+      );
     } else {
       napcatTask?.stop();
       napcatTask = undefined;
-      log.info('NapCat 看门狗已停止（面板关闭 / onebot 停用）');
+      log.info('NapCat 看门狗已停止（「使用 NapCat 通道」关闭 / onebot 停用）');
     }
   };
-  if (getNapcatConfig(db).enabled && process.platform !== 'win32') {
-    log.warn('NapCat 看门狗（计划任务自动拉起）仅支持 Windows；onebot 通道照常装配，但配置变更后需手动重启 QQ/NapCat 生效');
-  }
   reconcileNapcat();
 
   // live-status source 单独持有：轮询参数热更新时整体重启（restore 从库恢复状态，不丢轨迹）
@@ -555,11 +556,24 @@ async function main(): Promise<void> {
         platform: process.platform,
         source: () => ({
           enabled: db.getSetting('napcat_enabled') !== null ? 'panel' as const : 'config' as const,
+          autorestart: db.getSetting('napcat_autorestart') !== null ? 'panel' as const : 'config' as const,
           dir: db.getSetting('napcat_dir') !== null ? 'panel' as const : (process.platform === 'darwin' ? 'default' as const : 'config' as const),
           uin: db.getSetting('napcat_uin') !== null ? 'panel' as const : 'config' as const,
         }),
-        save: (patch) => {
+        save: async (patch) => {
+          const prev = getNapcatConfig(db);
+          // 「失活自动拉起」开关：开启先建拉起能力（Windows 弹 UAC，macOS no-op），
+          // 失败不落开关；关闭先落开关再彻底移除拉起任务。
+          if (patch.autorestart === true && prev.autorestart !== true) {
+            const dir = effectiveNapcatDir(db);
+            const uin = patch.uin !== undefined && patch.uin !== '' ? patch.uin : prev.uin;
+            if (!dir || !/^\d+$/.test(uin)) throw new Error('先填好路径与机器人 QQ 号再开启自动拉起');
+            await napcatDriver.setup(dir, uin, join(projectRoot, 'data'));
+          }
           saveNapcatConfig(db, patch);
+          if (patch.autorestart === false && prev.autorestart !== false) {
+            await napcatDriver.remove();
+          }
           // 配置变了重装配一次：开 NapCat 才建的 onebot notifier 立即生效，
           // 关掉则移除（通道启停不再有独立开关）
           void rebuildNotifiers();
@@ -571,32 +585,29 @@ async function main(): Promise<void> {
           const ep = dir && nc.uin ? readOnebotEndpoint(dir, nc.uin) : null;
           const [probeResult, taskRegistered] = await Promise.all([
             ep ? probeNapCat(ep) : Promise.resolve(null),
-            process.platform === 'win32' ? isNapcatTaskRegistered() : Promise.resolve(false),
+            napcatDriver.available(),
           ]);
           return { endpoint: ep?.baseUrl ?? null, probe: probeResult, taskRegistered };
         },
         launch: async () => {
-          if (process.platform !== 'win32') throw new Error('手动拉起仅支持 Windows（计划任务）');
-          const nc = getNapcatConfig(db);
-          const dir = effectiveNapcatDir(db);
-          const ep = await ensureNapcatEntry(dir, nc.uin);
-          if (ep) onebotNotifier?.updateEndpoint(ep.baseUrl, ep.token);
-          // 旧实例可能还在旧配置上跑（高权限进程只能经任务杀），先停再拉起让新配置生效
-          await stopNapcatViaTask();
-          await new Promise((r) => setTimeout(r, 3_000));
-          const ok = await launchNapcatViaTask();
-          if (!ok) throw new Error('拉起失败：计划任务未创建（先点「添加自动拉起任务」一次性设置）');
-          void napcatWatchdog?.tick();
-        },
-        setupTask: async () => {
-          if (process.platform !== 'win32') throw new Error('计划任务自动拉起仅支持 Windows');
           const nc = getNapcatConfig(db);
           const dir = effectiveNapcatDir(db);
           if (!dir || !nc.uin) throw new Error('先填好路径与机器人 QQ 号');
           const ep = await ensureNapcatEntry(dir, nc.uin);
-          if (!ep) throw new Error('onebot11 配置读取/创建失败，请检查 NapCat 路径');
-          onebotNotifier?.updateEndpoint(ep.baseUrl, ep.token);
-          await setupNapcatTask(dir, nc.uin, join(projectRoot, 'data'));
+          if (ep) onebotNotifier?.updateEndpoint(ep.baseUrl, ep.token);
+          // Windows：旧实例可能还在旧配置上跑（高权限进程只能经任务杀），先停再拉起；
+          // macOS：open 拉起（QQ 已在跑则只是聚焦，无副作用）
+          if (napcatDriver.platform === 'win32') {
+            await napcatDriver.stop();
+            await new Promise((r) => setTimeout(r, 3_000));
+          }
+          const ok = await napcatDriver.launch(nc.uin);
+          if (!ok) {
+            throw new Error(napcatDriver.platform === 'win32'
+              ? '拉起失败：拉起任务未创建（开启「失活自动拉起」一次性创建，或跑 npm run napcat-setup）'
+              : '拉起失败：open QQ 未成功（确认 /Applications/QQ.app 存在）');
+          }
+          void napcatWatchdog?.tick();
         },
       },
     });

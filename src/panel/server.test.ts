@@ -1251,18 +1251,19 @@ test('PUT 启停影响路由推导；DELETE 移除；onProvidersChanged 重建 r
 
 // ---- NapCat 托管 ----
 
-/** 假 napcat dep：生效配置内存可变，state/launch/setup 可注入 */
+/** 假 napcat dep：生效配置内存可变，state/launch/save 可注入 */
 function fakeNapcatDep(): NonNullable<PanelDeps['napcat']> & { saved: Array<Record<string, unknown>> } {
-  const cfg = { enabled: true, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774' };
+  const cfg = { enabled: true, autorestart: false, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774' };
   const saved: Array<Record<string, unknown>> = [];
   return {
     saved,
     effective: () => ({ ...cfg }),
     platform: 'win32',
-    source: () => ({ enabled: 'config', dir: 'config', uin: 'config' }),
-    save: (patch) => {
+    source: () => ({ enabled: 'config', autorestart: 'config', dir: 'config', uin: 'config' }),
+    save: async (patch) => {
       saved.push(patch as Record<string, unknown>);
       if (patch.enabled !== undefined) cfg.enabled = patch.enabled;
+      if (patch.autorestart !== undefined) cfg.autorestart = patch.autorestart;
       if (patch.dir !== undefined) cfg.dir = patch.dir;
       if (patch.uin !== undefined) cfg.uin = patch.uin;
     },
@@ -1272,7 +1273,6 @@ function fakeNapcatDep(): NonNullable<PanelDeps['napcat']> & { saved: Array<Reco
       taskRegistered: true,
     }),
     launch: async () => {},
-    setupTask: async () => {},
   };
 }
 
@@ -1287,16 +1287,16 @@ test('GET /api/napcat：生效配置 + source + 状态；无 dep 404', async (t)
   const r = await api(base, '/api/napcat');
   assert.equal(r.status, 200);
   assert.deepEqual(r.json, {
-    enabled: true, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774', alertQq: '',
+    enabled: true, autorestart: false, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774', alertQq: '',
     platform: 'win32',
-    source: { enabled: 'config', dir: 'config', uin: 'config' },
+    source: { enabled: 'config', autorestart: 'config', dir: 'config', uin: 'config' },
     endpoint: 'http://127.0.0.1:3000',
     probe: { state: 'ok', loggedIn: true },
     taskRegistered: true,
   });
 });
 
-test('PUT /api/napcat：保存生效；uin 非纯数字 400', async (t) => {
+test('PUT /api/napcat：保存生效；uin/autorestart 非纯数字/非布尔 400', async (t) => {
   const dep = fakeNapcatDep();
   const { base } = await setup(t, { napcat: dep });
 
@@ -1304,19 +1304,20 @@ test('PUT /api/napcat：保存生效；uin 非纯数字 400', async (t) => {
   assert.equal(bad.status, 400);
   assert.match(bad.json.error!, /纯数字/);
   assert.equal((await api(base, '/api/napcat', 'PUT', { enabled: 'yes' })).status, 400);
+  assert.equal((await api(base, '/api/napcat', 'PUT', { autorestart: 'yes' })).status, 400);
   assert.equal(dep.saved.length, 0, '校验失败不落库');
 
-  const ok = await api(base, '/api/napcat', 'PUT', { dir: 'E:/NC', uin: '111', enabled: false });
+  const ok = await api(base, '/api/napcat', 'PUT', { dir: 'E:/NC', uin: '111', enabled: false, autorestart: true });
   assert.equal(ok.status, 200);
-  assert.deepEqual(ok.json, { ok: true, enabled: false, dir: 'E:/NC', uin: '111', alertQq: '' });
-  assert.deepEqual(dep.saved, [{ dir: 'E:/NC', uin: '111', enabled: false }]);
+  assert.deepEqual(ok.json, { ok: true, enabled: false, autorestart: true, dir: 'E:/NC', uin: '111', alertQq: '' });
+  assert.deepEqual(dep.saved, [{ dir: 'E:/NC', uin: '111', enabled: false, autorestart: true }]);
 });
 
 test('PUT /api/napcat alertQq：纯数字校验、落 settings、留空清除', async (t) => {
   const db = new Db(':memory:');
   const dep = fakeNapcatDep();
   const realSave = saveNapcatConfig;
-  dep.save = (patch) => {
+  dep.save = async (patch) => {
     dep.saved.push(patch as Record<string, unknown>);
     realSave(db, patch);
   };
@@ -1352,16 +1353,18 @@ test('POST /api/napcat/launch：失败信息透传为 400', async (t) => {
   assert.equal((await api(base, '/api/napcat/launch', 'POST')).status, 200);
 });
 
-test('POST /api/napcat/setup：创建失败为 500 且含原因', async (t) => {
+test('PUT /api/napcat autorestart：save 抛错（如建任务失败）透传为 400', async (t) => {
   const dep = fakeNapcatDep();
-  dep.setupTask = async () => { throw new Error('创建计划任务失败（UAC 被拒绝？）exit=1'); };
+  dep.save = async (patch) => {
+    if (patch.autorestart === true) throw new Error('先填好路径与机器人 QQ 号再开启自动拉起');
+  };
   const { base } = await setup(t, { napcat: dep });
-  const r = await api(base, '/api/napcat/setup', 'POST');
-  assert.equal(r.status, 500);
-  assert.match(r.json.error!, /UAC/);
+  const r = await api(base, '/api/napcat', 'PUT', { autorestart: true });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error!, /先填好路径/);
 
-  dep.setupTask = async () => {};
-  assert.equal((await api(base, '/api/napcat/setup', 'POST')).status, 200);
+  dep.save = async () => {};
+  assert.equal((await api(base, '/api/napcat', 'PUT', { autorestart: true })).status, 200);
 });
 
 // ---- 高级设置 /api/advanced ----

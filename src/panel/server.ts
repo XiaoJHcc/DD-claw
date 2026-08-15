@@ -134,16 +134,26 @@ export interface PanelDeps {
   napcat?: {
     /** 生效配置（dir 已解析默认值） */
     effective: () => NapcatConfig;
-    /** 运行平台（前端据它隐藏 Windows 专属的拉起/计划任务按钮） */
+    /** 运行平台（前端据它区分 Windows 计划任务 / macOS open 拉起） */
     platform: NodeJS.Platform;
-    source: () => { enabled: 'panel' | 'config'; dir: 'panel' | 'config' | 'default'; uin: 'panel' | 'config' };
-    save: (patch: { enabled?: boolean; dir?: string; uin?: string; alertQq?: string }) => void;
-    /** 实时状态：发现的端点 + 三态探测 + 计划任务是否已建 */
+    source: () => {
+      enabled: 'panel' | 'config';
+      autorestart: 'panel' | 'config';
+      dir: 'panel' | 'config' | 'default';
+      uin: 'panel' | 'config';
+    };
+    /** 保存配置；「失活自动拉起」开 = 建拉起任务（失败抛中文错不落开关）、关 = 移除任务 */
+    save: (patch: {
+      enabled?: boolean;
+      autorestart?: boolean;
+      dir?: string;
+      uin?: string;
+      alertQq?: string;
+    }) => Promise<void>;
+    /** 实时状态：发现的端点 + 三态探测 + 拉起能力是否就绪 */
     state: () => Promise<{ endpoint: string | null; probe: ProbeResult | null; taskRegistered: boolean }>;
-    /** 手动拉起；失败抛中文错（如计划任务未创建） */
+    /** 手动拉起（双平台）；失败抛中文错 */
     launch: () => Promise<void>;
-    /** 一次性创建「最高权限」计划任务（主机弹一次 UAC） */
-    setupTask: () => Promise<void>;
   };
 }
 
@@ -201,10 +211,14 @@ async function handle(
   }
   if (deps.napcat && method === 'PUT' && path === '/api/napcat') {
     const b = (await readJsonBody(req)) as Record<string, unknown>;
-    const patch: { enabled?: boolean; dir?: string; uin?: string; alertQq?: string } = {};
+    const patch: { enabled?: boolean; autorestart?: boolean; dir?: string; uin?: string; alertQq?: string } = {};
     if (b.enabled !== undefined) {
       if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
       patch.enabled = b.enabled;
+    }
+    if (b.autorestart !== undefined) {
+      if (typeof b.autorestart !== 'boolean') throw new HttpError(400, 'autorestart 必须是布尔值');
+      patch.autorestart = b.autorestart;
     }
     if (b.dir !== undefined) {
       if (typeof b.dir !== 'string') throw new HttpError(400, '路径必须是字符串');
@@ -222,7 +236,12 @@ async function handle(
       if (alertQq !== '' && !/^\d+$/.test(alertQq)) throw new HttpError(400, '告警 QQ 必须是纯数字');
       patch.alertQq = alertQq;
     }
-    deps.napcat.save(patch);
+    try {
+      await deps.napcat.save(patch);
+    } catch (e) {
+      // 自动拉起建任务失败（UAC 被拒 / 未填路径）等业务错，统一 400 透传
+      throw new HttpError(400, (e as Error).message);
+    }
     sendJson(res, 200, { ok: true, ...deps.napcat.effective(), alertQq: getNapcatAlertQq(db) });
     return;
   }
@@ -299,15 +318,6 @@ async function handle(
       await deps.napcat.launch();
     } catch (e) {
       throw new HttpError(400, (e as Error).message);
-    }
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-  if (deps.napcat && method === 'POST' && path === '/api/napcat/setup') {
-    try {
-      await deps.napcat.setupTask();
-    } catch (e) {
-      throw new HttpError(500, (e as Error).message);
     }
     sendJson(res, 200, { ok: true });
     return;
