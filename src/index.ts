@@ -13,11 +13,13 @@ import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
 import {
   NapcatWatchdog, readOnebotEndpoint, probeNapCat, getNapcatConfig, saveNapcatConfig,
+  effectiveNapcatDir, defaultNapcatDir,
   ensureNapcatEntry,
   isNapcatTaskRegistered, setupNapcatTask, launchNapcatViaTask, stopNapcatViaTask, NAPCAT_TASK_NAME,
 } from './notify/napcat.js';
 import { ToastNotifier } from './notify/toast.js';
 import { ensureToastAumid } from './notify/aumid.js';
+import { ensureMacNotifier } from './notify/mac-notifier.js';
 import { liveEventToMessage } from './notify/message.js';
 import { LiveStatusSource } from './sources/bili/live-status-source.js';
 import { fetchLiveStatus } from './sources/bili/live-status.js';
@@ -206,8 +208,12 @@ async function main(): Promise<void> {
   let onebotNotifier: OneBotNotifier | null = null;
   const buildOnebot = async (): Promise<OneBotNotifier | null> => {
     const nc = getNapcatConfig(db);
-    const discovered = nc.enabled && process.platform === 'win32'
-      ? (readOnebotEndpoint(nc.dir, nc.uin) ?? await ensureNapcatEntry(nc.dir, nc.uin))
+    const dir = effectiveNapcatDir(db);
+    // 端点只读跟随 NapCat 自己的 onebot11 配置（dd-claw 专属条目，缺了自动创建）；
+    // macOS 与 Windows 共用同一套发现逻辑（NapCat Mac 版配置结构一致），
+    // 差别只在 macOS 没有看门狗拉起——写配置后需手动重启 QQ/NapCat 生效
+    const discovered = nc.enabled && dir && nc.uin
+      ? (readOnebotEndpoint(dir, nc.uin) ?? await ensureNapcatEntry(dir, nc.uin))
       : null;
     if (!discovered) {
       log.error('未能从 NapCat 配置发现端点（面板 NapCat 卡片未配置？），QQ 推送暂不装配');
@@ -217,9 +223,14 @@ async function main(): Promise<void> {
     return new OneBotNotifier(discovered.baseUrl, discovered.token);
   };
   let toastAumid: string | undefined; // ensureToastAumid 幂等，热切换复用
+  const macNotifierDir = join(dirname(secrets.dbPath), 'cache', 'mac-notify');
+  let macHelper: string | null | undefined; // undefined = 尚未尝试编译
   const buildToast = async (): Promise<ToastNotifier> => {
     toastAumid ??= await ensureToastAumid();
-    return new ToastNotifier(toastAumid, join(dirname(secrets.dbPath), 'cache', 'toast'));
+    if (macHelper === undefined) {
+      macHelper = process.platform === 'darwin' ? await ensureMacNotifier(macNotifierDir) : null;
+    }
+    return new ToastNotifier(toastAumid, join(dirname(secrets.dbPath), 'cache', 'toast'), { macHelper });
   };
   const buildNotifiers = async (): Promise<Notifier[]> => {
     const list: Notifier[] = [];
@@ -237,8 +248,8 @@ async function main(): Promise<void> {
   const dispatcher = new NotifyDispatcher(notifiers, db, args.dryRun);
   log.info(`推送通道: ${dispatcher.channels.join(', ')}${args.dryRun ? '  [dry-run]' : ''}`);
 
-  // --test-notify 用一条假消息走完整推送链路，验证 NapCat 配置与消息格式
-  if (args.testNotify) {
+  // 测试推送：假消息走完整推送链路（--test-notify 与面板「测试推送渠道」共用）
+  const sendTestPush = async (): Promise<{ total: number; succeeded: number }> => {
     const fake = liveEventToMessage(toLiveEvent({
       uid: '7706705', roomId: '80397', uname: '阿梓从小就很可爱',
       title: '[DD-claw 测试] 这是一条测试通知', isLive: true,
@@ -251,7 +262,13 @@ async function main(): Promise<void> {
     fake.targets = db.listPushChannels()
       .filter((c) => c.notifier === 'onebot' && c.enabled && c.targetType && c.targetId)
       .map((c) => ({ type: c.targetType!, id: c.targetId! }));
-    await dispatcher.broadcast(fake);
+    const r = await dispatcher.broadcast(fake);
+    return { total: r.total, succeeded: r.succeeded };
+  };
+
+  // --test-notify 用一条假消息走完整推送链路，验证 NapCat 配置与消息格式
+  if (args.testNotify) {
+    await sendTestPush();
     db.close();
     return;
   }
@@ -311,7 +328,7 @@ async function main(): Promise<void> {
     }
   };
   if (getNapcatConfig(db).enabled && process.platform !== 'win32') {
-    log.warn('napcat.enabled 目前仅支持 Windows，看门狗未启动');
+    log.warn('NapCat 看门狗（计划任务自动拉起）仅支持 Windows；onebot 通道照常装配，但配置变更后需手动重启 QQ/NapCat 生效');
   }
   reconcileNapcat();
 
@@ -453,7 +470,7 @@ async function main(): Promise<void> {
   const cookies = loadCookies(resolve(projectRoot, 'cookies.json'));
   cookieImported = cookies != null;
   if (!cookies) {
-    log.info('未导入 cookies.json，关注列表同步 / 动态轮询等凭据功能停用（匿名开播监听不受影响）');
+    log.info('未登录 B站，关注列表同步 / 动态轮询等凭据功能停用（匿名开播监听不受影响）');
   } else {
     const cookieHdr = cookieHeader(cookies);
     biliCookieHdr = cookieHdr;
@@ -465,7 +482,7 @@ async function main(): Promise<void> {
   const weiboCookies = loadWeiboCookies(resolve(projectRoot, 'weibo-cookies.json'));
   weiboCookieImported = weiboCookies != null;
   if (!weiboCookies) {
-    log.info('未导入 weibo-cookies.json，微博时间线停用（可在面板扫码登录生成，其他功能不受影响）');
+    log.info('未登录微博，微博时间线停用（可在面板扫码登录，其他功能不受影响）');
   } else {
     weiboCookieHdr = weiboCookieHeader(weiboCookies);
   }
@@ -532,11 +549,13 @@ async function main(): Promise<void> {
         onChanged: () => reconcileRuntime(),
       },
       snapshots: { dir: keyframeDir },
+      testPush: () => sendTestPush(),
       napcat: {
-        effective: () => getNapcatConfig(db),
+        effective: () => ({ ...getNapcatConfig(db), dir: effectiveNapcatDir(db) }),
+        platform: process.platform,
         source: () => ({
           enabled: db.getSetting('napcat_enabled') !== null ? 'panel' as const : 'config' as const,
-          dir: db.getSetting('napcat_dir') !== null ? 'panel' as const : 'config' as const,
+          dir: db.getSetting('napcat_dir') !== null ? 'panel' as const : (process.platform === 'darwin' ? 'default' as const : 'config' as const),
           uin: db.getSetting('napcat_uin') !== null ? 'panel' as const : 'config' as const,
         }),
         save: (patch) => {
@@ -548,16 +567,19 @@ async function main(): Promise<void> {
         },
         state: async () => {
           const nc = getNapcatConfig(db);
-          const ep = nc.dir ? readOnebotEndpoint(nc.dir, nc.uin) : null;
+          const dir = effectiveNapcatDir(db);
+          const ep = dir && nc.uin ? readOnebotEndpoint(dir, nc.uin) : null;
           const [probeResult, taskRegistered] = await Promise.all([
             ep ? probeNapCat(ep) : Promise.resolve(null),
-            isNapcatTaskRegistered(),
+            process.platform === 'win32' ? isNapcatTaskRegistered() : Promise.resolve(false),
           ]);
           return { endpoint: ep?.baseUrl ?? null, probe: probeResult, taskRegistered };
         },
         launch: async () => {
+          if (process.platform !== 'win32') throw new Error('手动拉起仅支持 Windows（计划任务）');
           const nc = getNapcatConfig(db);
-          const ep = await ensureNapcatEntry(nc.dir, nc.uin);
+          const dir = effectiveNapcatDir(db);
+          const ep = await ensureNapcatEntry(dir, nc.uin);
           if (ep) onebotNotifier?.updateEndpoint(ep.baseUrl, ep.token);
           // 旧实例可能还在旧配置上跑（高权限进程只能经任务杀），先停再拉起让新配置生效
           await stopNapcatViaTask();
@@ -567,12 +589,14 @@ async function main(): Promise<void> {
           void napcatWatchdog?.tick();
         },
         setupTask: async () => {
+          if (process.platform !== 'win32') throw new Error('计划任务自动拉起仅支持 Windows');
           const nc = getNapcatConfig(db);
-          if (!nc.dir || !nc.uin) throw new Error('先填好路径与机器人 QQ 号');
-          const ep = await ensureNapcatEntry(nc.dir, nc.uin);
+          const dir = effectiveNapcatDir(db);
+          if (!dir || !nc.uin) throw new Error('先填好路径与机器人 QQ 号');
+          const ep = await ensureNapcatEntry(dir, nc.uin);
           if (!ep) throw new Error('onebot11 配置读取/创建失败，请检查 NapCat 路径');
           onebotNotifier?.updateEndpoint(ep.baseUrl, ep.token);
-          await setupNapcatTask(nc.dir, nc.uin, join(projectRoot, 'data'));
+          await setupNapcatTask(dir, nc.uin, join(projectRoot, 'data'));
         },
       },
     });

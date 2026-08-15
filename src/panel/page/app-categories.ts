@@ -39,10 +39,7 @@ function categoryRowHtml(c) {
 function loadCategories() {
   return api('/api/categories').then(function (j) {
     catCache = j.categories || [];
-    document.getElementById('category-list').innerHTML =
-      catCache.map(categoryRowHtml).join('') +
-      '<div class="add-row"><button class="btn btn-block" data-action="add-category">' +
-      icon('plus') + ' 新增分类</button></div>';
+    document.getElementById('category-list').innerHTML = catCache.map(categoryRowHtml).join('');
   }).catch(function (e) { toast(e.message, true); });
 }
 

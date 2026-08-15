@@ -53,10 +53,7 @@ function loadPush() {
     document.getElementById('channel-list').innerHTML = chCache.map(channelRowHtml).join('');
     ruleCache = rs[2].rules || [];
     ruleCats = rs[3].categories || [];
-    document.getElementById('rule-list').innerHTML =
-      ruleCache.map(ruleRowHtml).join('') +
-      '<div class="add-row"><button class="btn btn-block" data-action="add-push-rule">' +
-      icon('plus') + ' 添加规则</button></div>';
+    document.getElementById('rule-list').innerHTML = ruleCache.map(ruleRowHtml).join('');
   }).catch(function (e) { toast(e.message, true); });
 }
 
@@ -284,9 +281,21 @@ ACTIONS['open-push-settings'] = function () {
     openSheet('推送设置',
       pushBoolRow('ps-b-first', '启动时已在播也推送', j.notifyOnFirstRun) +
       pushBoolRow('ps-b-newsub', '新增订阅在播即推送', j.notifyOnNewSubscription) +
+      '<div class="add-row"><button class="btn btn-block" data-action="test-push">' +
+      icon('bolt') + ' 测试推送渠道</button></div>' +
       '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
       '<button class="btn btn-primary" data-action="save-push-settings">保存</button></div>');
   }).catch(function (e) { toast(e.message, true); });
+};
+
+ACTIONS['test-push'] = function () {
+  if (!confirm('向全部启用的渠道发送一条测试推送？')) return;
+  api('/api/push/test', 'POST')
+    .then(function (j) {
+      if (j.total === 0) toast('没有可用的推送渠道：先在渠道列表添加并启用', true);
+      else toast('测试推送完成：' + j.succeeded + '/' + j.total + ' 成功');
+    })
+    .catch(function (e) { toast(e.message, true); });
 };
 
 ACTIONS['save-push-settings'] = function () {

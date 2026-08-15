@@ -5,8 +5,8 @@
  */
 export const APP_LISTEN = `
 var PLAT_STATE = {
-  ok: ['green', '已登录'], imported: ['green', '已导入'],
-  expired: ['red', '已失效'], none: ['gray', '未导入'], reserved: ['gray', '预留'],
+  ok: ['green', '已登录'], imported: ['green', '已登录'],
+  expired: ['red', '已失效'], none: ['gray', '未登录'], reserved: ['gray', '预留'],
 };
 var listenState = null;
 
@@ -29,7 +29,7 @@ function loadListen() {
 }
 
 function loginRow(name, plat, key) {
-  var st = (plat && PLAT_STATE[plat.state]) || ['gray', '未导入'];
+  var st = (plat && PLAT_STATE[plat.state]) || ['gray', '未登录'];
   return '<div class="row row-click" data-action="open-login" data-platform="' + key + '">' +
     '<span class="dot ' + st[0] + '"></span>' +
     '<span class="row-title">' + name + '</span>' +
@@ -57,7 +57,6 @@ CHANGES['toggle-listen'] = function (el) {
 var LOGIN_PLATFORMS = {
   bili: {
     title: 'B站 登录态', idLabel: 'mid', scanHint: '请使用 B站 App 扫码',
-    foot: '也可手动放置 cookies.json 后重启',
     generate: function () {
       return api('/api/auth/bili/qrcode', 'POST').then(function (j) {
         var qr = qrcode(0, 'M');
@@ -72,7 +71,6 @@ var LOGIN_PLATFORMS = {
   },
   weibo: {
     title: '微博 登录态', idLabel: 'uid', scanHint: '请使用微博 App 扫码',
-    foot: '也可手动放置 weibo-cookies.json 后重启',
     generate: function () {
       return api('/api/auth/weibo/qrcode', 'POST').then(function (j) {
         return {
@@ -103,8 +101,7 @@ ACTIONS['open-login'] = function (el) {
     '<div class="qr-box" id="qr-box"><div class="qr-empty">' + icon('qrcode') +
       '<span class="hint">点击下方按钮生成二维码</span></div></div>' +
     '<div id="qr-msg" class="hint qr-msg"></div>' +
-    '<div class="sheet-foot"><button class="btn btn-primary" data-action="start-qr">扫码登录</button></div>' +
-    '<div class="mfoot">' + conf.foot + '</div>');
+    '<div class="sheet-foot"><button class="btn btn-primary" data-action="start-qr">扫码登录</button></div>');
   sheetCleanups[1] = stopLoginPoll;
 };
 

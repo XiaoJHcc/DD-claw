@@ -23,15 +23,27 @@ function napcatStateHtml(j) {
 function loadNapcat() {
   return api('/api/napcat').then(function (j) {
     ncCache = j;
-    document.getElementById('napcat-enabled').checked = !!j.enabled;
+    var isWin = j.platform === 'win32';
+    var hasUin = !!j.uin;
+    var ncSwitch = document.getElementById('napcat-enabled');
+    // 没填机器人 QQ 号 = 无法装配 onebot（端点配置文件名含 uin），开关禁用并显示关闭
+    ncSwitch.checked = hasUin && !!j.enabled;
+    ncSwitch.disabled = !hasUin;
     var st = napcatStateHtml(j);
+    // 未显式设置路径时 macOS 显示简短文案，显式路径靠 row-sub 的 ellipsis 截断
+    var dirText = (j.source && j.source.dir === 'panel') ? j.dir : (isWin ? '未设置' : '自动检测');
+    // 开关左侧提示「需要填写机器人QQ号」，填了号就隐藏
+    var needUinEl = document.getElementById('napcat-need-uin');
+    if (needUinEl) needUinEl.style.display = hasUin ? 'none' : '';
+    var setupLabel = document.getElementById('napcat-setup-label');
+    if (setupLabel) setupLabel.textContent = j.taskRegistered ? '重新添加自动拉起' : '添加自动拉起任务';
     document.getElementById('napcat-rows').innerHTML =
       '<div class="row"><span class="dot ' + st.cls + '"></span>' +
       '<span class="row-title">' + st.text + '</span>' +
-      '<span class="row-end"><span class="row-sub">' + esc(j.endpoint || '') + '</span></span></div>' +
+      '<span class="row-end"><span class="row-sub" title="' + esc(j.endpoint || '') + '">' + esc(j.endpoint || '') + '</span></span></div>' +
       '<div class="row row-click" data-action="edit-napcat">' +
       '<span class="row-title">路径</span>' +
-      '<span class="row-end"><span class="row-sub">' + esc(j.dir || '未设置') + '</span>' +
+      '<span class="row-end"><span class="row-sub" title="' + esc(j.dir || '') + '">' + esc(dirText) + '</span>' +
       icon('chevron-right') + '</span></div>' +
       '<div class="row row-click" data-action="edit-napcat">' +
       '<span class="row-title">机器人 QQ</span>' +
@@ -40,9 +52,9 @@ function loadNapcat() {
       '<div class="row row-click" data-action="edit-napcat">' +
       '<span class="row-title">超时失败告警 QQ 号</span>' +
       '<span class="row-end"><span class="row-sub">' + esc(j.alertQq || '不告警') + '</span>' +
-      icon('chevron-right') + '</span></div>' +
-      (j.taskRegistered ? '' :
-        '<div class="hint">计划任务未创建：点下方「添加自动拉起任务」一次性设置（主机弹一次 UAC），否则自动拉起不可用</div>');
+      icon('chevron-right') + '</span></div>';
+    var actions = document.getElementById('napcat-actions');
+    if (actions) actions.style.display = isWin ? '' : 'none';
   }).catch(function (e) { toast(e.message, true); });
 }
 
@@ -55,12 +67,16 @@ CHANGES['toggle-napcat'] = function (el) {
 
 ACTIONS['edit-napcat'] = function () {
   if (!ncCache) { toast('状态未加载', true); return; }
+  var isWin = ncCache.platform === 'win32';
+  // 只有显式在面板填过的 dir 才回显；darwin 未填 = 自动检测（placeholder 里带出完整路径）
+  var dirValue = (ncCache.source && ncCache.source.dir === 'panel') ? ncCache.dir : '';
+  var dirPlaceholder = isWin ? '如 D:\\\\CLI\\\\NapCat.Shell' : '自动检测（' + ncCache.dir + '）';
   openSheet('NapCat 配置',
-    field('一键包目录', '<input id="nc-dir" value="' + esc(ncCache.dir || '') +
-      '" placeholder="如 D:\\\\CLI\\\\NapCat.Shell">') +
-    field('机器人 QQ 号', '<input id="nc-uin" value="' + esc(ncCache.uin || '') +
-      '" placeholder="快速登录的 QQ 号">') +
-    field('超时失败告警 QQ 号', '<input id="nc-alert-qq" value="' + esc(ncCache.alertQq || '') +
+    field('目录', '<input id="nc-dir" autocomplete="off" value="' + esc(dirValue) +
+      '" placeholder="' + esc(dirPlaceholder) + '">') +
+    field('机器人 QQ 号', '<input id="nc-uin" autocomplete="off" value="' + esc(ncCache.uin || '') +
+      '" placeholder="' + (isWin ? '快速登录的 QQ 号' : '扫码登录的 QQ 号') + '">') +
+    field('超时失败告警 QQ 号', '<input id="nc-alert-qq" autocomplete="off" value="' + esc(ncCache.alertQq || '') +
       '" placeholder="留空 = 不向 QQ 告警">') +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     '<button class="btn btn-primary" data-action="save-napcat">保存</button></div>');

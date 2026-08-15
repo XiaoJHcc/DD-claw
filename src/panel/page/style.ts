@@ -40,11 +40,15 @@ h2{font-size:17px;font-weight:600;margin:0}
 .card{background:var(--card-bg);border-radius:var(--r-lg);padding:20px;margin-bottom:20px;box-shadow:var(--shadow)}
 @media (prefers-color-scheme: dark){.card{border:0.5px solid var(--separator)}}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;min-height:24px}
+.card-head-end{display:flex;align-items:center;gap:8px;min-width:0}
 .card-sub{font-size:12px;color:var(--text-secondary)}
 /* 顶部小卡片区（监听 / LLM 分析 / 推送 / NapCat，可增至 5-6 张）：
    响应式换行，宽屏一行最多三张，中等宽度两张，窄屏一张 */
 .row-top{display:flex;gap:20px;align-items:stretch;margin-bottom:20px;flex-wrap:wrap}
-.row-top .card{flex:1 1 calc((100% - 40px)/3);min-width:0;margin-bottom:0;max-width:calc((100% - 40px)/3)}
+/* 小卡内部纵向 flex：标题 → 列表（flex:1 撑开）→ 底部按钮，让「新增/设置」按钮贴底对齐 */
+.row-top .card{flex:1 1 calc((100% - 40px)/3);min-width:0;margin-bottom:0;max-width:calc((100% - 40px)/3);
+  display:flex;flex-direction:column}
+.row-top .card > div[id]:not(.card-actions){flex:1;min-height:0}
 @media (max-width:1100px){.row-top .card{flex-basis:calc(50% - 10px);max-width:calc(50% - 10px)}}
 @media (max-width:720px){.row-top .card{flex-basis:100%;max-width:100%}}
 .card-actions{display:flex;gap:10px;margin-top:14px}
@@ -55,9 +59,9 @@ h2{font-size:17px;font-weight:600;margin:0}
 .row-click{cursor:pointer}
 .row-click:hover{background:var(--hover)}
 .row-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.row-sub{font-size:12px;color:var(--text-secondary)}
-.row-end{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--text-secondary);flex:none}
-.row-end svg{width:16px;height:16px}
+.row-sub{font-size:12px;color:var(--text-secondary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-end{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--text-secondary);flex:0 1 auto;min-width:0}
+.row-end svg{width:16px;height:16px;flex:none}
 .row.dragging{opacity:.4}
 .grip{display:inline-flex;cursor:grab;color:var(--text-secondary);opacity:.55;user-select:none;flex:none}
 .grip svg{width:14px;height:14px}

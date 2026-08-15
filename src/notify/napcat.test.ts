@@ -1,15 +1,39 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   readOnebotEndpoint, probeNapCat, NapcatWatchdog, WATCHDOG_DEFAULTS,
   getNapcatConfig, saveNapcatConfig, setupNapcatTask, NAPCAT_TASK_NAME, NAPCAT_STOP_TASK_NAME,
-  ensureNapcatEntry, NAPCAT_ENTRY_NAME,
+  ensureNapcatEntry, NAPCAT_ENTRY_NAME, defaultNapcatDir, effectiveNapcatDir,
+  readWebuiInfo, loginWebui, reloadOnebotConfig,
   type NapcatEndpoint, type ProbeResult, type RunResult,
 } from './napcat.js';
 import { Db } from '../core/db.js';
+
+// ---------- defaultNapcatDir / effectiveNapcatDir（macOS 默认容器路径） ----------
+
+test('defaultNapcatDir：darwin 回落 QQ 沙盒容器 workdir，其他平台为空', () => {
+  assert.ok(defaultNapcatDir('darwin').endsWith('Library/Application Support/QQ/NapCat'));
+  assert.ok(defaultNapcatDir('darwin').includes('com.tencent.qq'));
+  assert.equal(defaultNapcatDir('win32'), '');
+  assert.equal(defaultNapcatDir('linux'), '');
+});
+
+test('effectiveNapcatDir：settings 填了优先，darwin 空回落默认，其他平台空 = 未配置', () => {
+  const db = new Db(':memory:');
+  try {
+    assert.equal(effectiveNapcatDir(db, 'win32'), '', 'win 未填 = 空');
+    assert.ok(effectiveNapcatDir(db, 'darwin').endsWith('NapCat'), 'darwin 未填 = 默认容器路径');
+    db.setSetting('napcat_dir', '/custom/napcat');
+    assert.equal(effectiveNapcatDir(db, 'darwin'), '/custom/napcat', 'settings 优先');
+    assert.equal(effectiveNapcatDir(db, 'win32'), '/custom/napcat');
+  } finally {
+    db.close();
+  }
+});
 
 // ---------- ensureNapcatEntry（dd-claw 专属条目自建自管） ----------
 
@@ -238,6 +262,88 @@ test('readOnebotEndpoint 无启用 HTTP 服务 / 缺文件 / 坏 JSON 都返回 
     mkdirSync(join(dir, 'config'), { recursive: true });
     writeFileSync(join(dir, 'config', 'onebot11_12345.json'), '{oops');
     assert.equal(readOnebotEndpoint(dir, '12345'), null, '坏 JSON');
+  });
+});
+
+// ---------- webui API（readWebuiInfo / loginWebui / reloadOnebotConfig） ----------
+
+function writeWebui(dir: string, cfg: unknown): void {
+  mkdirSync(join(dir, 'config'), { recursive: true });
+  writeFileSync(join(dir, 'config', 'webui.json'), JSON.stringify(cfg));
+}
+
+test('readWebuiInfo：读 webui.json 拿 baseUrl + token，::/0.0.0.0 归一化回环，缺 port 回落 6099', () => {
+  withTmpDir((dir) => {
+    assert.equal(readWebuiInfo(dir), null, '无 webui.json');
+    writeWebui(dir, { host: '::', port: 6099, token: 'tk123' });
+    assert.deepEqual(readWebuiInfo(dir), { baseUrl: 'http://127.0.0.1:6099', token: 'tk123' });
+    writeWebui(dir, { host: '0.0.0.0', port: 7000, token: '' });
+    assert.deepEqual(readWebuiInfo(dir), { baseUrl: 'http://127.0.0.1:7000', token: '' });
+    writeWebui(dir, { host: '192.168.1.5', port: 6099, token: 't' });
+    assert.deepEqual(readWebuiInfo(dir), { baseUrl: 'http://192.168.1.5:6099', token: 't' });
+    writeWebui(dir, { host: '::', token: 't' });
+    assert.deepEqual(readWebuiInfo(dir), { baseUrl: 'http://127.0.0.1:6099', token: 't' });
+  });
+});
+
+test('loginWebui：hash = SHA256(token+".napcat")，成功返回 Credential', async () => {
+  let captured: { url: string; body: unknown } | null = null;
+  const fetchImpl = (async (url: string, init: RequestInit) => {
+    captured = { url, body: JSON.parse(init.body as string) };
+    return new Response(JSON.stringify({ code: 0, data: { Credential: 'creds' } }));
+  }) as typeof fetch;
+  assert.equal(await loginWebui('http://127.0.0.1:6099', 'tk123', fetchImpl), 'creds');
+  assert.equal(captured!.url, 'http://127.0.0.1:6099/api/auth/login');
+  assert.deepEqual(captured!.body, { hash: createHash('sha256').update('tk123.napcat').digest('hex') });
+});
+
+test('loginWebui：code != 0 / 网络异常 → null，不抛异常', async () => {
+  const bad = fakeFetch(async () => new Response(JSON.stringify({ code: -1, message: 'bad' })));
+  assert.equal(await loginWebui('http://x', 't', bad), null);
+  const boom = (async () => { throw new Error('net'); }) as unknown as typeof fetch;
+  assert.equal(await loginWebui('http://x', 't', boom), null);
+});
+
+test('reloadOnebotConfig：登录 + SetConfig 推盘上配置，成功返回 true', async () => {
+  await withTmpDirAsync(async (dir) => {
+    writeWebui(dir, { host: '::', port: 6099, token: 'tk' });
+    writeOnebot(dir, 'onebot11_12345.json', { network: { httpServers: [{ name: 'dd-claw', enable: true, port: 41990 }] } });
+    const urls: string[] = [];
+    let setBody: unknown = null;
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      urls.push(url);
+      if (url.endsWith('/api/auth/login')) return new Response(JSON.stringify({ code: 0, data: { Credential: 'c' } }));
+      setBody = JSON.parse(init!.body as string);
+      return new Response(JSON.stringify({ code: 0 }));
+    }) as typeof fetch;
+    assert.equal(await reloadOnebotConfig(dir, '12345', fetchImpl), true);
+    assert.ok(urls.some((u) => u.endsWith('/api/auth/login')));
+    assert.ok(urls.some((u) => u.endsWith('/api/OB11Config/SetConfig')));
+    const cfg = JSON.parse((setBody as { config: string }).config);
+    assert.equal(cfg.network.httpServers[0].name, 'dd-claw');
+  });
+});
+
+test('reloadOnebotConfig：无 webui.json / 登录失败 → false，不抛异常', async () => {
+  await withTmpDirAsync(async (dir) => {
+    assert.equal(await reloadOnebotConfig(dir, '12345'), false, '无 webui.json');
+    writeWebui(dir, { host: '::', port: 6099, token: 'tk' });
+    writeOnebot(dir, 'onebot11_12345.json', { network: { httpServers: [] } });
+    const badLogin = fakeFetch(async () => new Response(JSON.stringify({ code: -1 })));
+    assert.equal(await reloadOnebotConfig(dir, '12345', badLogin), false, '登录失败');
+  });
+});
+
+test('ensureNapcatEntry 写文件后触发 reload；条目已正确时不触发', async () => {
+  await withTmpDirAsync(async (dir) => {
+    mkdirSync(join(dir, 'config'), { recursive: true }); // config 目录须已存在（NapCat 会建）
+    let reloads = 0;
+    const reload = async () => { reloads++; return true; };
+    const ep = await ensureNapcatEntry(dir, '12345', probeDown, reload);
+    assert.ok(ep, '应返回端点');
+    assert.equal(reloads, 1, '首次建条目应 reload 一次');
+    await ensureNapcatEntry(dir, '12345', probeDown, reload);
+    assert.equal(reloads, 1, '条目已正确不再 reload');
   });
 });
 

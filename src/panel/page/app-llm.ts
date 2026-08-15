@@ -58,7 +58,7 @@ ACTIONS['test-llm'] = function (el) {
 
 ACTIONS['del-llm'] = function (el) {
   var name = el.closest('.row').getAttribute('data-sid');
-  if (!confirm('删除 provider「' + name + '」？它的 key 设置会保留。')) return;
+  if (!confirm('删除供应商「' + name + '」？它的 key 设置会保留。')) return;
   api('/api/llm/providers/' + encodeURIComponent(name), 'DELETE')
     .then(function () { toast('已删除'); loadLlm(); })
     .catch(function (e) { toast(e.message, true); });
@@ -70,8 +70,8 @@ ACTIONS['edit-llm'] = function (el) { openLlmSheet(el.closest('.row').getAttribu
 // ---- 新增 / 编辑弹窗（同一个表单；name 是路径标识，编辑时不可改） ----
 function openLlmSheet(name) {
   var p = name === null ? null : llmByName(name);
-  if (name !== null && !p) { toast('provider 数据未加载', true); return; }
-  openSheet(p ? '编辑 provider' : '新增 provider',
+  if (name !== null && !p) { toast('供应商数据未加载', true); return; }
+  openSheet(p ? '编辑供应商' : '新增供应商',
     field('名称', '<input id="lp-name" placeholder="如 deepseek" value="' +
       (p ? esc(p.name) : '') + '"' + (p ? ' disabled' : '') + '>') +
     field('baseURL', '<input id="lp-base" placeholder="如 https://api.deepseek.com/v1" value="' +

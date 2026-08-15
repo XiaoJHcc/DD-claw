@@ -47,6 +47,8 @@ async function setup(
     snapshots?: PanelDeps['snapshots'];
     /** 注入头像代理 fetch（/api/avatar 测试用）；缺省用全局 fetch */
     avatar?: PanelDeps['avatar'];
+    /** 注入 testPush dep（/api/push/test）；缺省不注入（404） */
+    testPush?: PanelDeps['testPush'];
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -100,6 +102,7 @@ async function setup(
     advanced: opts.advanced,
     snapshots: opts.snapshots,
     avatar: opts.avatar,
+    testPush: opts.testPush,
     ...(opts.listen
       ? {
           listen: {
@@ -480,6 +483,20 @@ test('推送总开关：GET 缺省开，PUT 改后生效', async (t) => {
   assert.equal((await api(base, '/api/push')).json['enabled'], false);
 
   assert.equal((await api(base, '/api/push/enabled', 'PUT', { enabled: 'x' })).status, 400);
+});
+
+test('POST /api/push/test：注入 testPush 才挂，透传结果；无 dep 404', async (t) => {
+  const noDep = await setup(t);
+  assert.equal((await api(noDep.base, '/api/push/test', 'POST')).status, 404);
+
+  let calls = 0;
+  const { base } = await setup(t, {
+    testPush: async () => { calls++; return { total: 2, succeeded: 2 }; },
+  });
+  const r = await api(base, '/api/push/test', 'POST');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { ok: true, total: 2, succeeded: 2 });
+  assert.equal(calls, 1);
 });
 
 test('channel 校验：notifier 枚举 / onebot 必填纯数字 targetId / name 非空 / toast 无目标', async (t) => {
@@ -1241,6 +1258,7 @@ function fakeNapcatDep(): NonNullable<PanelDeps['napcat']> & { saved: Array<Reco
   return {
     saved,
     effective: () => ({ ...cfg }),
+    platform: 'win32',
     source: () => ({ enabled: 'config', dir: 'config', uin: 'config' }),
     save: (patch) => {
       saved.push(patch as Record<string, unknown>);
@@ -1270,6 +1288,7 @@ test('GET /api/napcat：生效配置 + source + 状态；无 dep 404', async (t)
   assert.equal(r.status, 200);
   assert.deepEqual(r.json, {
     enabled: true, dir: 'D:/CLI/NapCat.Shell', uin: '2954481774', alertQq: '',
+    platform: 'win32',
     source: { enabled: 'config', dir: 'config', uin: 'config' },
     endpoint: 'http://127.0.0.1:3000',
     probe: { state: 'ok', loggedIn: true },

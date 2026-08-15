@@ -50,7 +50,7 @@ export const PANEL_PAGE = `<!doctype html>
 </div>
 <div id="llm-list">加载中…</div>
 <div class="card-actions">
-<button class="btn" data-action="add-llm"><span data-icon="plus"></span>新增 provider</button>
+<button class="btn" data-action="add-llm"><span data-icon="plus"></span>新增供应商</button>
 <button class="btn" data-action="open-llm-advanced"><span data-icon="sliders"></span>高级</button>
 </div>
 </section>
@@ -58,6 +58,9 @@ export const PANEL_PAGE = `<!doctype html>
 <section class="card" id="card-categories">
 <div class="card-head"><h2>分类规则</h2></div>
 <div id="category-list">加载中…</div>
+<div class="card-actions">
+<button class="btn" data-action="add-category"><span data-icon="plus"></span>新增分类</button>
+</div>
 </section>
 
 <section class="card" id="card-push">
@@ -74,16 +77,22 @@ export const PANEL_PAGE = `<!doctype html>
 <section class="card" id="card-rules">
 <div class="card-head"><h2>推送规则</h2></div>
 <div id="rule-list">加载中…</div>
+<div class="card-actions">
+<button class="btn" data-action="add-push-rule"><span data-icon="plus"></span>添加规则</button>
+</div>
 </section>
 
 <section class="card" id="card-napcat">
 <div class="card-head"><h2>NapCat</h2>
+<div class="card-head-end">
+<span id="napcat-need-uin" class="row-sub" style="display:none">需要填写机器人QQ号</span>
 <label class="switch"><input type="checkbox" id="napcat-enabled" data-change="toggle-napcat"><span class="knob"></span></label>
 </div>
+</div>
 <div id="napcat-rows">加载中…</div>
-<div class="card-actions">
+<div class="card-actions" id="napcat-actions">
 <button class="btn" data-action="napcat-launch"><span data-icon="bolt"></span>手动拉起</button>
-<button class="btn" data-action="napcat-setup"><span data-icon="clock"></span>添加自动拉起任务</button>
+<button class="btn" data-action="napcat-setup"><span data-icon="clock"></span><span id="napcat-setup-label">添加自动拉起任务</span></button>
 </div>
 </section>
 </div>

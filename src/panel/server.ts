@@ -119,6 +119,8 @@ export interface PanelDeps {
   snapshots?: {
     dir: string;
   };
+  /** 测试推送（假消息走完整推送链路）；不注入则 POST /api/push/test 一律 404 */
+  testPush?: () => Promise<{ total: number; succeeded: number }>;
   /**
    * 头像代理 fetch 注入点（测试用）；缺省用全局 fetch。/api/avatar 恒挂载，
    * 按 uid 反代主播头像以规避 B站图床无 CORS 导致的画布污染（颜色条取平均色用）。
@@ -130,9 +132,11 @@ export interface PanelDeps {
    * 保存在装配处闭包里热生效。
    */
   napcat?: {
-    /** 生效配置与来源标注（panel/config） */
+    /** 生效配置（dir 已解析默认值） */
     effective: () => NapcatConfig;
-    source: () => { enabled: 'panel' | 'config'; dir: 'panel' | 'config'; uin: 'panel' | 'config' };
+    /** 运行平台（前端据它隐藏 Windows 专属的拉起/计划任务按钮） */
+    platform: NodeJS.Platform;
+    source: () => { enabled: 'panel' | 'config'; dir: 'panel' | 'config' | 'default'; uin: 'panel' | 'config' };
     save: (patch: { enabled?: boolean; dir?: string; uin?: string; alertQq?: string }) => void;
     /** 实时状态：发现的端点 + 三态探测 + 计划任务是否已建 */
     state: () => Promise<{ endpoint: string | null; probe: ProbeResult | null; taskRegistered: boolean }>;
@@ -192,7 +196,7 @@ async function handle(
   // ---- NapCat 托管（napcat dep 存在才挂）：配置（settings 覆盖 > config）+ 状态 + 手动操作 ----
   if (deps.napcat && method === 'GET' && path === '/api/napcat') {
     const st = await deps.napcat.state();
-    sendJson(res, 200, { ...deps.napcat.effective(), alertQq: getNapcatAlertQq(db), source: deps.napcat.source(), ...st });
+    sendJson(res, 200, { ...deps.napcat.effective(), platform: deps.napcat.platform, alertQq: getNapcatAlertQq(db), source: deps.napcat.source(), ...st });
     return;
   }
   if (deps.napcat && method === 'PUT' && path === '/api/napcat') {
@@ -345,6 +349,12 @@ async function handle(
     if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
     setPushEnabled(db, b.enabled);
     sendJson(res, 200, { ok: true, enabled: b.enabled });
+    return;
+  }
+  // 测试推送：假消息走完整链路（面板「推送设置」弹窗里触发）
+  if (deps.testPush && method === 'POST' && path === '/api/push/test') {
+    const r = await deps.testPush();
+    sendJson(res, 200, { ok: true, ...r });
     return;
   }
   // ---- 时间表（过往直播统计；GET-only，无 dep）----

@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
 import { makeLogger } from '../logger.js';
@@ -24,6 +26,23 @@ export function getNapcatConfig(db: Db): NapcatConfig {
     dir: db.getSetting('napcat_dir') ?? '',
     uin: db.getSetting('napcat_uin') ?? '',
   };
+}
+
+/**
+ * macOS 版 NapCat 的默认 workdir：NapCat 代码里 darwin 的配置目录固定为
+ * `~/Library/Application Support/QQ/NapCat`，而 QQ 是沙盒 app，真实落盘在
+ * `~/Library/Containers/com.tencent.qq/Data/...` 容器路径下。onebot11 配置
+ * 在该目录的 config/ 下生成（非沙盒进程只能读容器真实路径）。
+ */
+export function defaultNapcatDir(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'darwin'
+    ? join(homedir(), 'Library', 'Containers', 'com.tencent.qq', 'Data', 'Library', 'Application Support', 'QQ', 'NapCat')
+    : '';
+}
+
+/** 生效目录：settings 填了用它；macOS 上没填回落默认容器 workdir；其他平台空 = 未配置 */
+export function effectiveNapcatDir(db: Db, platform: NodeJS.Platform = process.platform): string {
+  return db.getSetting('napcat_dir') ?? defaultNapcatDir(platform);
 }
 
 /**
@@ -161,18 +180,100 @@ async function findFreePort(): Promise<number | null> {
   return null;
 }
 
+// ---------- webui API（读 onebot 配置 + SetConfig 热重载） ----------
+
+/** NapCat webui 的访问信息（baseUrl + 登录 token），来自 <configDir>/webui.json */
+export interface WebuiInfo { baseUrl: string; token: string }
+
+/**
+ * 读 webui.json 拿 webui 地址与 token。webui.json 在 NapCat 的 configPath 下
+ * （与 onebot11 配置同目录），host/port 为 webui 监听地址（`::`/0.0.0.0 归一化回环）。
+ */
+export function readWebuiInfo(dir: string): WebuiInfo | null {
+  const file = join(dir, 'config', 'webui.json');
+  if (!existsSync(file)) return null;
+  try {
+    const j = JSON.parse(readFileSync(file, 'utf8')) as { host?: string; port?: number; token?: string };
+    const host = !j.host || j.host === '::' || j.host === '0.0.0.0' ? '127.0.0.1' : j.host;
+    return { baseUrl: `http://${host}:${j.port ?? 6099}`, token: j.token ?? '' };
+  } catch (e) {
+    log.warn(`webui.json 解析失败: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+/** 登录 NapCat webui：hash = SHA256(token + ".napcat")，成功返回 Credential（Bearer token） */
+export async function loginWebui(
+  baseUrl: string,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+  const hash = createHash('sha256').update(token + '.napcat').digest('hex');
+  try {
+    const res = await fetchImpl(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hash }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    const j = (await res.json()) as { code?: number; data?: { Credential?: string } };
+    return j.code === 0 && j.data?.Credential ? j.data.Credential : null;
+  } catch (e) {
+    log.warn(`NapCat webui 登录失败: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * 把已落盘的 onebot11_<uin>.json 内容经 webui SetConfig 推给 NapCat，触发即时热重载
+ * （用户在 webui 里「关闭再打开」开关生效的原理）。返回是否重载成功；任何一步失败
+ * 都返回 false（调用方回落「重启 NapCat 加载文件」），不抛异常。
+ */
+export async function reloadOnebotConfig(
+  dir: string,
+  uin: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  const webui = readWebuiInfo(dir);
+  if (!webui) return false;
+  const cred = await loginWebui(webui.baseUrl, webui.token, fetchImpl);
+  if (!cred) return false;
+  const file = join(dir, 'config', `onebot11_${uin}.json`);
+  let cfg: unknown;
+  try {
+    cfg = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return false;
+  }
+  try {
+    const res = await fetchImpl(`${webui.baseUrl}/api/OB11Config/SetConfig`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cred}` },
+      body: JSON.stringify({ config: JSON.stringify(cfg) }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    const j = (await res.json()) as { code?: number };
+    return j.code === 0;
+  } catch (e) {
+    log.warn(`NapCat onebot 配置热重载失败: ${(e as Error).message}`);
+    return false;
+  }
+}
+
 /**
  * 确保 onebot11 配置里有 name=dd-claw 的启用条目（DD-claw 自管，用户不手动改）：
  * - 没有 → 自动选空闲高位端口创建
  * - 有但被禁用 → 启用
  * - 有但端口被别的程序占用（探测=conflict）→ 换空闲端口
- * 只动 dd-claw 这一条，其他条目原样保留。写文件后 NapCat 需重启才生效（看门狗拉起流程负责）。
+ * 只动 dd-claw 这一条，其他条目原样保留。写文件后经 webui SetConfig 热重载
+ * （NapCat 在线时免重启生效；webui 不可用时退回「重启 NapCat 加载文件」）。
  * 返回条目端点；dir 不对/配置损坏/找不到空闲端口 → null。
  */
 export async function ensureNapcatEntry(
   dir: string,
   uin: string,
   probe: (ep: NapcatEndpoint) => Promise<ProbeResult> = probeNapCat,
+  reload: (dir: string, uin: string) => Promise<boolean> = reloadOnebotConfig,
 ): Promise<NapcatEndpoint | null> {
   const configDir = join(dir, 'config');
   const file = join(configDir, `onebot11_${uin}.json`);
@@ -206,7 +307,7 @@ export async function ensureNapcatEntry(
     };
     servers.push(entry);
     changed = true;
-    log.info(`已创建 ${NAPCAT_ENTRY_NAME} 条目（端口 ${port}），NapCat 重启后生效`);
+    log.info(`已创建 ${NAPCAT_ENTRY_NAME} 条目（端口 ${port}）`);
   } else {
     if (entry.enable !== true) {
       entry.enable = true;
@@ -223,7 +324,7 @@ export async function ensureNapcatEntry(
       changed = true;
       log.info(
         oldPort
-          ? `${NAPCAT_ENTRY_NAME} 条目端口 ${oldPort} 被其他程序占用，已改到 ${port}（NapCat 重启后生效）`
+          ? `${NAPCAT_ENTRY_NAME} 条目端口 ${oldPort} 被其他程序占用，已改到 ${port}`
           : `${NAPCAT_ENTRY_NAME} 条目缺端口，已分配到 ${port}`,
       );
     }
@@ -232,6 +333,8 @@ export async function ensureNapcatEntry(
   if (changed) {
     mkdirSync(configDir, { recursive: true });
     writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+    // 写盘后经 webui SetConfig 触发热重载（NapCat 在线时免重启；失败则退回重启加载文件）
+    await reload(dir, uin);
   }
   return entryEndpoint(entry);
 }
