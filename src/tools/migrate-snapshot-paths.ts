@@ -1,15 +1,16 @@
 /**
- * 一次性迁移命令（npm run migrate:snapshots-path）：把 snapshots.path 从旧版绝对路径
- * 改写为相对 keyframe 目录的 <roomId>/<liveTime>/<ts>.ext。做完即退出，不进主流程。
+ * 一次性迁移命令（npm run migrate:snapshots-path）：把 snapshots.path 归一到
+ * 相对 keyframe 目录、正斜杠分隔的 <roomId>/<liveTime>/<ts>.ext。做完即退出，不进主流程。
  *
  * 为什么存在：旧版 keyframe.ts 落库时直接存了拼好的绝对路径（<dir>/<roomId>/<liveTime>/<ts>.ext），
- * 换机/移动 data 目录后旧盘符失效。修正后的代码只写相对路径，本命令负责把存量库一次到位。
- * 迁移幂等：已相对的行不动，可反复跑。跑完每台机器一次即可，之后无需再迁移。
+ * 换机/移动 data 目录后旧盘符失效；修正后一度用 join() 生成相对路径，Windows 下又落成
+ * 反斜杠（<room>\<liveTime>\<ts>.ext），换到 macOS 后 resolve 把反斜杠当普通字符，依然 404。
+ * 本命令把两种旧形态（绝对盘符、反斜杠相对）都改写成正斜杠相对路径，与 keyframe.ts 现行
+ * 落盘形式一致。迁移幂等：已是规范相对路径的行不动，可反复跑。跑完每台机器一次即可。
  *
  * migrateSnapshotPaths 导出供测试；入口守卫保证仅作为 CLI 运行时执行 main。
  */
 import Database from 'better-sqlite3';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../config/index.js';
 import { makeLogger } from '../logger.js';
@@ -25,12 +26,13 @@ export function migrateSnapshotPaths(db: Database.Database): number {
   let changed = 0;
   const tx = db.transaction(() => {
     for (const r of rows) {
-      // 已经是相对路径（<roomId>/<liveTime>/<ts>.ext）的行不动
-      if (!/^[A-Za-z]:[\\/]/.test(r.path) && !r.path.startsWith('/')) continue;
-      // 文件名 = 路径最后一段（兼容 / 与 \ 分隔）；相对形式按库内列重建，与 keyframe.ts 落盘一致
+      // 文件名 = 路径最后一段（兼容 / 与 \ 分隔）
       const name = r.path.split(/[\\/]/).pop() ?? '';
       if (!name) continue;
-      stmt.run(join(r.room_id, String(r.live_time), name), r.id);
+      // 规范形式 = 正斜杠相对（与 keyframe.ts 落盘一致）；已是该形式则不动
+      const canonical = `${r.room_id}/${r.live_time}/${name}`;
+      if (r.path === canonical) continue;
+      stmt.run(canonical, r.id);
       changed++;
     }
   });

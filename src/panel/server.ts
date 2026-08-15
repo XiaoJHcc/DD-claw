@@ -267,11 +267,11 @@ async function handle(
     const row = deps.db.nearestSnapshot(room, lt, ts);
     if (!row) throw new HttpError(404, '该场次没有缓存关键帧');
     // 路径安全：库里的 path resolve 后必须落在注入的缓存目录内（防库被写脏后路径穿越）。
-    // path 是相对 keyframe 目录的相对路径（keyframe.ts 落盘唯一形式；旧库绝对路径由
-    // 一次性命令 npm run migrate:snapshots-path 改写，此处顺带兼容未迁移的残留）。
-    // resolve(root, rel) = root/rel；resolve(root, 绝对路径) = 该绝对路径本身，同一套校验。
+    // path 是相对 keyframe 目录的相对路径，分隔符恒为正斜杠（keyframe.ts 落盘形式）。
+    // 历史库残留反斜杠相对/绝对路径，/ 归一化后统一按相对解析（反斜杠是 Windows join 产物，
+    // macOS 下是普通字符；残留绝对路径经归一化后天然不落在受信目录内 → 404，由迁移命令收敛）。
     const root = resolve(deps.snapshots.dir);
-    const file = resolve(root, row.path);
+    const file = resolve(root, row.path.replace(/\\/g, '/'));
     if (file !== root && !file.startsWith(root + sep)) throw new HttpError(404, '缓存文件不在受信目录内');
     let data: Buffer;
     try {

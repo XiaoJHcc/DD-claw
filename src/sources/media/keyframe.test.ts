@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from '../../core/db.js';
 import { KeyframeCache } from './keyframe.js';
-
 const INTERVAL_MS = 300_000;
 
 /** 构造假的 fetch Response（只需 ok/status/arrayBuffer/headers 四件套） */
@@ -79,9 +78,9 @@ test('首场立即缓存：文件落在 <dir>/<roomId>/<liveTime>/ 且 snapshots
   assert.equal(rows[0]!.room_id, '80397');
   assert.equal(rows[0]!.live_time, 1000);
   assert.equal(rows[0]!.ts, 1_800_000_000);
-  // 落库 path 必须是相对 keyframe 目录的相对路径（<roomId>/<liveTime>/<ts>.ext），
-  // 不能是绝对路径——绝对路径换机后失效，这正是迁移修掉的历史 bug
-  assert.equal(rows[0]!.path, join('80397', '1000', '1800000000.jpg'));
+  // 落库 path 必须是相对 keyframe 目录的相对路径（<roomId>/<liveTime>/<ts>.ext）且分隔符
+  // 恒为正斜杠——join() 在 Windows 会落反斜杠，换机后 resolve 当普通字符全 404（历史事故）
+  assert.equal(rows[0]!.path, '80397/1000/1800000000.jpg');
   assert.equal(rows[0]!.bytes, body.length);
 });
 

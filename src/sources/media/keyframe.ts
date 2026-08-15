@@ -121,8 +121,9 @@ export class KeyframeCache {
       if (this.lastHash.get(key) === hash) return; // 内容没变，直接丢弃不写盘
       const ext = (res.headers.get('content-type') ?? '').includes('png') ? '.png' : '.jpg';
       const ts = Math.floor(this.now() / 1000);
-      // 库内 path 存相对 <dir> 的路径（换机/移动目录后仍可解析），落盘拼绝对路径
-      const rel = join(e.roomId, String(e.liveTime), ts + ext);
+      // 库内 path 存相对 <dir> 的路径（换机/移动目录后仍可解析）。分隔符恒用正斜杠——
+      // join() 在 Windows 下会落反斜杠，同一份库换机后 resolve 会把它当普通字符，全 404。
+      const rel = `${e.roomId}/${e.liveTime}/${ts}${ext}`;
       const file = join(this.opts.dir, rel);
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, buf);
