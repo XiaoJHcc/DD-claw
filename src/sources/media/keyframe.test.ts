@@ -79,7 +79,9 @@ test('首场立即缓存：文件落在 <dir>/<roomId>/<liveTime>/ 且 snapshots
   assert.equal(rows[0]!.room_id, '80397');
   assert.equal(rows[0]!.live_time, 1000);
   assert.equal(rows[0]!.ts, 1_800_000_000);
-  assert.ok(rows[0]!.path.endsWith(files[0]!));
+  // 落库 path 必须是相对 keyframe 目录的相对路径（<roomId>/<liveTime>/<ts>.ext），
+  // 不能是绝对路径——绝对路径换机后失效，这正是迁移修掉的历史 bug
+  assert.equal(rows[0]!.path, join('80397', '1000', '1800000000.jpg'));
   assert.equal(rows[0]!.bytes, body.length);
 });
 

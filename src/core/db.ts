@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
-import { dirname, join, isAbsolute } from 'node:path';
+import { dirname } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { PrevState } from './state.js';
 import {
@@ -259,31 +259,7 @@ export class Db {
     this.ensureColumn('streamers', 'weibo_nick', 'weibo_nick TEXT');
     // push_channels 展示顺序（面板拖拽排序；旧库默认全 0 按 id 稳定）
     this.ensureColumn('push_channels', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
-    // snapshots.path 数据迁移：早期写绝对路径（<dir>/<roomId>/<liveTime>/<ts>.ext），
-    // 换机/移动目录后旧机器盘符失效；统一改为相对 keyframe 目录的 <roomId>/<liveTime>/<ts>.ext，
-    // 由 /api/snapshot 按注入目录解析。幂等：已是相对路径的行直接跳过。
-    this.migrateSnapshotPaths();
     log.info(`数据库就绪: ${path}`);
-  }
-
-  /** snapshots.path 绝对→相对迁移（跨机器可迁移；幂等，仅改写绝对路径行） */
-  private migrateSnapshotPaths(): void {
-    const rows = this.db.prepare('SELECT id, room_id, live_time, path FROM snapshots').all() as
-      Array<{ id: number; room_id: string; live_time: number; path: string }>;
-    if (rows.length === 0) return;
-    const stmt = this.db.prepare('UPDATE snapshots SET path = ? WHERE id = ?');
-    const tx = this.db.transaction(() => {
-      for (const r of rows) {
-        if (!isAbsolute(r.path)) continue;
-        // 文件名 = 路径最后一段（兼容 / 与 \ 分隔）；相对形式按库内列重建，与 keyframe.ts 落盘一致
-        const name = r.path.split(/[\\/]/).pop() ?? '';
-        stmt.run(join(r.room_id, String(r.live_time), name), r.id);
-      }
-    });
-    tx();
-    if (rows.some((r) => isAbsolute(r.path))) {
-      log.info(`snapshots.path 已迁移为相对路径（${rows.length} 行扫描）`);
-    }
   }
 
   /** 缺列则 ALTER TABLE 补上（旧库在线迁移；新列一律可空或带默认值，不动旧数据） */
