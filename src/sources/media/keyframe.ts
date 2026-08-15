@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { makeLogger } from '../../logger.js';
 import { mapLimit } from '../../core/concurrency.js';
 import type { Db } from '../../core/db.js';
@@ -120,13 +120,14 @@ export class KeyframeCache {
       const hash = createHash('md5').update(buf).digest('hex');
       if (this.lastHash.get(key) === hash) return; // 内容没变，直接丢弃不写盘
       const ext = (res.headers.get('content-type') ?? '').includes('png') ? '.png' : '.jpg';
-      const dir = join(this.opts.dir, e.roomId, String(e.liveTime));
-      mkdirSync(dir, { recursive: true });
       const ts = Math.floor(this.now() / 1000);
-      const file = join(dir, ts + ext);
+      // 库内 path 存相对 <dir> 的路径（换机/移动目录后仍可解析），落盘拼绝对路径
+      const rel = join(e.roomId, String(e.liveTime), ts + ext);
+      const file = join(this.opts.dir, rel);
+      mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, buf);
       this.lastHash.set(key, hash);
-      this.db.insertSnapshot({ roomId: e.roomId, liveTime: e.liveTime, ts, path: file, bytes: buf.length });
+      this.db.insertSnapshot({ roomId: e.roomId, liveTime: e.liveTime, ts, path: rel, bytes: buf.length });
     } catch (err) {
       log.debug(`关键帧缓存失败（${e.roomId}/${e.liveTime}）: ${(err as Error).message}`);
     }

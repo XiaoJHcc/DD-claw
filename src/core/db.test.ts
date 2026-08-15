@@ -378,3 +378,34 @@ test('nearestSnapshot：取距 ts 最近一帧；无缓存 null', (t) => {
   assert.equal(db.nearestSnapshot('r1', 200, 1400)!.path, '/kf/r1/200/1500.jpg', '按场次隔离');
   assert.equal(db.nearestSnapshot('rX', 100, 1100), null, '别的房间 null');
 });
+
+test('snapshots.path 绝对路径迁移：开库即改写为相对路径（换机可迁移），相对路径不动', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-snap-mig-'));
+  let migDb: Db | undefined;
+  t.after(() => {
+    migDb?.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const dbPath = join(dir, 'snap.db');
+  // 手工建库：旧版插入绝对路径 + 一条已是相对的行（幂等：相对不动）
+  const raw = new Database(dbPath);
+  raw.exec(`
+    CREATE TABLE snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      room_id TEXT NOT NULL, live_time INTEGER NOT NULL, ts INTEGER NOT NULL,
+      path TEXT NOT NULL, bytes INTEGER NOT NULL
+    );
+    INSERT INTO snapshots (room_id, live_time, ts, path, bytes) VALUES
+      ('80397', 1000, 100, 'D:\\\\DD-claw\\\\data\\\\cache\\\\keyframes\\\\80397\\\\1000\\\\100.jpg', 10),
+      ('80397', 1000, 200, 'D:\\\\DD-claw\\\\data\\\\cache\\\\keyframes\\\\80397\\\\1000\\\\200.png', 10),
+      ('80397', 1001, 300, '80397/1001/300.jpg', 10);
+  `);
+  raw.close();
+
+  const db = new Db(dbPath);
+  migDb = db;
+  // 迁移在 Db 构造时完成：旧绝对路径按库内列重建相对路径，相对行原样保留
+  assert.equal(db.nearestSnapshot('80397', 1000, 100)!.path, join('80397', '1000', '100.jpg'), 'jpg 扩展名保留');
+  assert.equal(db.nearestSnapshot('80397', 1000, 200)!.path, join('80397', '1000', '200.png'), 'png 扩展名保留');
+  assert.equal(db.nearestSnapshot('80397', 1001, 300)!.path, '80397/1001/300.jpg', '已是相对的行不动');
+});

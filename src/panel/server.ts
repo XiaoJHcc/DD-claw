@@ -5,7 +5,7 @@
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { isAbsolute, resolve, sep } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
@@ -266,9 +266,11 @@ async function handle(
     }
     const row = deps.db.nearestSnapshot(room, lt, ts);
     if (!row) throw new HttpError(404, '该场次没有缓存关键帧');
-    // 路径安全：库里的 path resolve 后必须落在注入的缓存目录内（防库被写脏后路径穿越）
+    // 路径安全：库里的 path resolve 后必须落在注入的缓存目录内（防库被写脏后路径穿越）。
+    // path 是相对 keyframe 目录的相对路径（keyframe.ts 落盘）+ 旧库绝对路径（迁移后均已相对）；
+    // 相对路径解析到 root 下，绝对路径 resolve 后按同一规则校验。
     const root = resolve(deps.snapshots.dir);
-    const file = resolve(row.path);
+    const file = isAbsolute(row.path) ? resolve(row.path) : resolve(root, row.path);
     if (file !== root && !file.startsWith(root + sep)) throw new HttpError(404, '缓存文件不在受信目录内');
     let data: Buffer;
     try {
