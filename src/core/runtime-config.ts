@@ -1,5 +1,6 @@
 /**
- * 运行时参数（settings 表唯一信源，面板「高级设置」卡管理，保存即热生效）。
+ * 运行时参数（settings 表唯一信源，面板按模块收纳：监听「抓取设置」/ LLM「高级」/
+ * 推送渠道「推送设置」，保存即热生效）。
  * 无 settings 记录时用规格表里的代码默认值——不存在任何文件侧来源。
  *
  * 消费路径：
@@ -7,7 +8,6 @@
  *   传给 SourceContext；参数变化时 reconcile 重启对应 source 刷新。
  * - 冷启动推送开关：pipeline 每次处理信号经 isNotifyOnFirstRun 等 helper 直读 settings。
  * - LLM 超时/熔断：createLlmRouter 重建时取 withRuntimeConfig 合并结果。
- * - 通道级开关：index.ts 装配 notifiers 的闸门，热切换重建 notifier。
  */
 import type { Db } from './db.js';
 import type { AppConfig } from '../config/schema.js';
@@ -24,8 +24,6 @@ export interface RuntimeConfig {
   llmCircuitCooldownMs: number;
   notifyOnFirstRun: boolean;
   notifyOnNewSubscription: boolean;
-  notifierOnebotEnabled: boolean;
-  notifierToastEnabled: boolean;
   keyframeIntervalSec: number;
   keyframeEnabled: boolean;
 }
@@ -63,8 +61,6 @@ interface BoolSpec {
 export const BOOL_SPECS: BoolSpec[] = [
   { key: 'notify_on_first_run', field: 'notifyOnFirstRun', label: '启动时已在播也推送', def: false },
   { key: 'notify_on_new_subscription', field: 'notifyOnNewSubscription', label: '新增订阅在播即推送', def: true },
-  { key: 'notifier_onebot_enabled', field: 'notifierOnebotEnabled', label: 'QQ 通道', def: true },
-  { key: 'notifier_toast_enabled', field: 'notifierToastEnabled', label: '系统通知通道', def: true },
   { key: 'keyframe_enabled', field: 'keyframeEnabled', label: '关键帧缓存', def: true },
 ];
 
@@ -126,10 +122,6 @@ export function withRuntimeConfig(app: AppConfig, rc: RuntimeConfig): AppConfig 
       requestTimeoutMs: rc.llmRequestTimeoutMs,
       circuitThreshold: rc.llmCircuitThreshold,
       circuitCooldownMs: rc.llmCircuitCooldownMs,
-    },
-    notify: {
-      onebot: { ...app.notify.onebot, enabled: rc.notifierOnebotEnabled },
-      toast: { enabled: rc.notifierToastEnabled },
     },
   };
 }

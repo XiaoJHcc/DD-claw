@@ -55,17 +55,13 @@ export interface AppConfig {
   follows: { syncIntervalSec: number };
   dynamic: { intervalSec: number };
   weibo: { intervalSec: number };
-  /** 在播关键帧定时本地缓存（media/keyframe.ts）；此处只是底形，生效值一律 = RuntimeConfig 叠加（settings 唯一信源，面板高级设置卡，configure 热生效） */
+  /** 在播关键帧定时本地缓存（media/keyframe.ts）；此处只是底形，生效值一律 = RuntimeConfig 叠加（settings 唯一信源，面板监听卡「抓取设置」，configure 热生效） */
   keyframe: { enabled: boolean; intervalSec: number };
   panel: { enabled: boolean; port: number };
   llm: {
     requestTimeoutMs: number;
     circuitThreshold: number;
     circuitCooldownMs: number;
-  };
-  notify: {
-    onebot: { enabled: boolean };
-    toast: { enabled: boolean };
   };
 }
 
@@ -86,10 +82,6 @@ export function defaultAppConfig(): AppConfig {
       requestTimeoutMs: 60_000,
       circuitThreshold: 3,
       circuitCooldownMs: 600_000,
-    },
-    notify: {
-      onebot: { enabled: false },
-      toast: { enabled: true },
     },
   };
 }

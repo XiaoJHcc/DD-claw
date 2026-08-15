@@ -1,6 +1,6 @@
 /**
  * 面板前端 · 卡片 NapCat 托管：总开关（右上角）+ 状态行 / 路径 / 机器人QQ /
- * 超时失败告警QQ号 四行 + 底部「手动拉起 / 计划任务」按钮。编辑走 sheet
+ * 超时失败告警QQ号 四行 + 底部「手动拉起 / 添加自动拉起任务」按钮。编辑走 sheet
  *（留空 = 清空该字段，settings 表是唯一信源，无 config 回落）。状态每 30s 重取
  *（GET 是一次真实探测）。
  * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 icons / app-core 段。
@@ -42,7 +42,7 @@ function loadNapcat() {
       '<span class="row-end"><span class="row-sub">' + esc(j.alertQq || '不告警') + '</span>' +
       icon('chevron-right') + '</span></div>' +
       (j.taskRegistered ? '' :
-        '<div class="hint">计划任务未创建：点下方「计划任务」一次性设置（主机弹一次 UAC），否则自动拉起不可用</div>');
+        '<div class="hint">计划任务未创建：点下方「添加自动拉起任务」一次性设置（主机弹一次 UAC），否则自动拉起不可用</div>');
   }).catch(function (e) { toast(e.message, true); });
 }
 

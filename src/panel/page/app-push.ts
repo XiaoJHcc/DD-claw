@@ -274,5 +274,30 @@ makeSortable(document.getElementById('rule-list'), {
   },
 });
 
+// ---- 推送设置（推送渠道卡底部按钮）：冷启动触发时机 2 项 ----
+function pushBoolRow(id, text, on) {
+  return checkRowHtml('id="' + id + '"', on, '<span class="row-title">' + esc(text) + '</span>');
+}
+
+ACTIONS['open-push-settings'] = function () {
+  api('/api/advanced').then(function (j) {
+    openSheet('推送设置',
+      pushBoolRow('ps-b-first', '启动时已在播也推送', j.notifyOnFirstRun) +
+      pushBoolRow('ps-b-newsub', '新增订阅在播即推送', j.notifyOnNewSubscription) +
+      '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
+      '<button class="btn btn-primary" data-action="save-push-settings">保存</button></div>');
+  }).catch(function (e) { toast(e.message, true); });
+};
+
+ACTIONS['save-push-settings'] = function () {
+  api('/api/advanced', 'PUT', {
+    notifyOnFirstRun: document.getElementById('ps-b-first').checked,
+    notifyOnNewSubscription: document.getElementById('ps-b-newsub').checked,
+  }).then(function () {
+    closeSheet(1);
+    toast('已保存并生效');
+  }).catch(function (e) { toast(e.message, true); });
+};
+
 loadPush();
 `;

@@ -135,6 +135,64 @@ function pollLoginQr() {
   }).catch(function () {});
 }
 
+// ---- 抓取设置（监听卡底部按钮）：关注列表 / 直播间轮询 / 关键帧 / 空间动态 / 微博 8 项 ----
+function advNum(id) {
+  var v = parseInt(document.getElementById(id).value, 10);
+  return isNaN(v) ? null : v;
+}
+function advGroup(text) {
+  return '<div class="adv-group">' + esc(text) + '</div>';
+}
+function advBoolRow(id, text, on) {
+  return checkRowHtml('id="' + id + '"', on, '<span class="row-title">' + esc(text) + '</span>');
+}
+
+ACTIONS['open-fetch-settings'] = function () {
+  api('/api/advanced').then(function (j) {
+    openSheet('抓取设置',
+      advGroup('关注列表') +
+      field('同步间隔（秒，≥300）', '<input id="ft-follows" value="' + j.followsSyncIntervalSec + '">') +
+      advGroup('直播间轮询') +
+      field('轮询间隔（秒，20~3600）', '<input id="ft-poll" value="' + j.pollIntervalSec + '">') +
+      field('轮询抖动（秒，0~120）', '<input id="ft-jitter" value="' + j.pollJitterSec + '">') +
+      field('连续失败多少次后告警（1~100）', '<input id="ft-threshold" value="' + j.healthAlertAfterFailures + '">') +
+      advGroup('在播关键帧缓存') +
+      advBoolRow('ft-b-keyframe', '关键帧缓存', j.keyframeEnabled) +
+      field('缓存间隔（秒，60~3600）', '<input id="ft-keyframe" value="' + j.keyframeIntervalSec + '">') +
+      advGroup('空间动态') +
+      field('抓取间隔（秒，≥120）', '<input id="ft-dynamic" value="' + j.dynamicIntervalSec + '">') +
+      advGroup('微博时间线') +
+      field('抓取间隔（秒，≥120）', '<input id="ft-weibo" value="' + j.weiboIntervalSec + '">') +
+      '<div class="sheet-foot"><span id="ft-err" class="form-err"></span>' +
+      '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
+      '<button class="btn btn-primary" data-action="save-fetch-settings">保存</button></div>');
+  }).catch(function (e) { toast(e.message, true); });
+};
+
+ACTIONS['save-fetch-settings'] = function () {
+  var errEl = document.getElementById('ft-err');
+  var ids = ['ft-poll', 'ft-jitter', 'ft-threshold', 'ft-follows', 'ft-dynamic', 'ft-weibo', 'ft-keyframe'];
+  var vals = {};
+  for (var i = 0; i < ids.length; i++) {
+    var v = advNum(ids[i]);
+    if (v === null) { errEl.textContent = '数值项请输入整数'; return; }
+    vals[ids[i]] = v;
+  }
+  api('/api/advanced', 'PUT', {
+    pollIntervalSec: vals['ft-poll'],
+    pollJitterSec: vals['ft-jitter'],
+    healthAlertAfterFailures: vals['ft-threshold'],
+    followsSyncIntervalSec: vals['ft-follows'],
+    dynamicIntervalSec: vals['ft-dynamic'],
+    weiboIntervalSec: vals['ft-weibo'],
+    keyframeIntervalSec: vals['ft-keyframe'],
+    keyframeEnabled: document.getElementById('ft-b-keyframe').checked,
+  }).then(function () {
+    closeSheet(1);
+    toast('已保存并生效');
+  }).catch(function (e) { errEl.textContent = e.message; });
+};
+
 loadListen();
 setInterval(loadListen, 60000);
 `;

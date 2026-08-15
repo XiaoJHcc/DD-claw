@@ -40,15 +40,13 @@ test('withRuntimeConfig：运行时参数覆盖回 AppConfig', (t) => {
   const app = defaultAppConfig();
   saveRuntimeConfig(db, {
     pollIntervalSec: 99, dynamicIntervalSec: 200,
-    llmRequestTimeoutMs: 5000, notifierOnebotEnabled: true,
+    llmRequestTimeoutMs: 5000,
     keyframeIntervalSec: 120, keyframeEnabled: false,
   });
   const eff = withRuntimeConfig(app, getRuntimeConfig(db));
   assert.equal(eff.pollIntervalSec, 99);
   assert.equal(eff.dynamic.intervalSec, 200);
   assert.equal(eff.llm.requestTimeoutMs, 5000);
-  assert.equal(eff.notify.onebot.enabled, true);
-  assert.equal(eff.notify.toast.enabled, true, '默认开');
   assert.deepEqual(eff.keyframe, { enabled: false, intervalSec: 120 }, 'keyframe 段叠加进 eff');
 });
 

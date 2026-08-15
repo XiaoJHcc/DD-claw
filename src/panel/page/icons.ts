@@ -16,6 +16,8 @@ var ICONS = {
   check: '<path d="M5 12.5l4.5 4.5L19 7"/>',
   bell: '<path d="M6 16v-5a6 6 0 0 1 12 0v5l1.5 2.5h-15L6 16z"/><path d="M10.3 21a1.7 1.7 0 0 0 3.4 0"/>',
   'chevron-right': '<path d="M9 6l6 6-6 6"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3.2 2"/>',
+  sliders: '<path d="M4 8h10M17.5 8H20M4 16h4M11.5 16H20"/><circle cx="15.5" cy="8" r="1.8"/><circle cx="8.5" cy="16" r="1.8"/>',
   gear: '<circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7"/>',
   link: '<path d="M10 14a5 5 0 0 0 7.1 0l1.9-1.9a5 5 0 0 0-7.1-7.1l-1 1M14 10a5 5 0 0 0-7.1 0l-1.9 1.9a5 5 0 0 0 7.1 7.1l1-1"/>',
 };

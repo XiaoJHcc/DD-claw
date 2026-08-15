@@ -23,7 +23,7 @@ export class NotifyDispatcher {
     return this.notifiers.map((n) => n.name);
   }
 
-  /** 通道级开关热切换（高级设置卡）：整体替换 notifiers 列表，pipeline 引用不变 */
+  /** 装配级替换（NapCat 配置热更新后重建 notifiers）：整体替换 notifiers 列表，pipeline 引用不变 */
   setNotifiers(notifiers: Notifier[]): void {
     this.notifiers = notifiers;
   }

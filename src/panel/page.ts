@@ -16,7 +16,6 @@ import { APP_PUSH } from './page/app-push.js';
 import { APP_LLM } from './page/app-llm.js';
 import { APP_CATEGORIES } from './page/app-categories.js';
 import { APP_NAPCAT } from './page/app-napcat.js';
-import { APP_ADVANCED } from './page/app-advanced.js';
 import { APP_FOLLOWS } from './page/app-follows.js';
 import { APP_SCHEDULE } from './page/app-schedule.js';
 
@@ -40,6 +39,9 @@ export const PANEL_PAGE = `<!doctype html>
 <section class="card" id="card-listen">
 <div class="card-head"><h2>监听</h2></div>
 <div id="listen-rows">加载中…</div>
+<div class="card-actions">
+<button class="btn" data-action="open-fetch-settings"><span data-icon="sliders"></span>抓取设置</button>
+</div>
 </section>
 
 <section class="card" id="card-llm">
@@ -47,6 +49,10 @@ export const PANEL_PAGE = `<!doctype html>
 <label class="switch"><input type="checkbox" id="llm-enabled" data-change="toggle-llm"><span class="knob"></span></label>
 </div>
 <div id="llm-list">加载中…</div>
+<div class="card-actions">
+<button class="btn" data-action="add-llm"><span data-icon="plus"></span>新增 provider</button>
+<button class="btn" data-action="open-llm-advanced"><span data-icon="sliders"></span>高级</button>
+</div>
 </section>
 
 <section class="card" id="card-categories">
@@ -61,6 +67,7 @@ export const PANEL_PAGE = `<!doctype html>
 <div id="channel-list">加载中…</div>
 <div class="card-actions">
 <button class="btn" data-action="add-channel"><span data-icon="plus"></span>新增渠道</button>
+<button class="btn" data-action="open-push-settings"><span data-icon="sliders"></span>推送设置</button>
 </div>
 </section>
 
@@ -76,14 +83,7 @@ export const PANEL_PAGE = `<!doctype html>
 <div id="napcat-rows">加载中…</div>
 <div class="card-actions">
 <button class="btn" data-action="napcat-launch"><span data-icon="bolt"></span>手动拉起</button>
-<button class="btn" data-action="napcat-setup"><span data-icon="gear"></span>计划任务</button>
-</div>
-</section>
-
-<section class="card" id="card-advanced">
-<div class="card-head"><h2>高级设置</h2></div>
-<div class="card-actions">
-<button class="btn" data-action="open-advanced"><span data-icon="gear"></span>更多高级设置</button>
+<button class="btn" data-action="napcat-setup"><span data-icon="clock"></span>添加自动拉起任务</button>
 </div>
 </section>
 </div>
@@ -119,7 +119,6 @@ ${APP_PUSH}
 ${APP_LLM}
 ${APP_CATEGORIES}
 ${APP_NAPCAT}
-${APP_ADVANCED}
 ${APP_FOLLOWS}
 ${APP_SCHEDULE}
 </script>

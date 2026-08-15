@@ -177,7 +177,7 @@ async function main(): Promise<void> {
   const db = new Db(secrets.dbPath);
 
   // LLM：provider 名单与 key 的唯一信源是 settings 表（面板 LLM 卡片管理）；
-  // 路由由名单自动推导（顺序 = 优先级）。超时/熔断参数读 settings（高级设置卡）。
+  // 路由由名单自动推导（顺序 = 优先级）。超时/熔断参数读 settings（面板 LLM 卡「高级」）。
   // 面板改名单 → onProvidersChanged 重建 router；改 key → refreshKeys。均免重启。
   const llmKeysOf = dbKeysOf(db);
   const llmDep: NonNullable<PanelDeps['llm']> = {
@@ -194,14 +194,15 @@ async function main(): Promise<void> {
   };
   llmDep.onProvidersChanged();
 
-  // 运行时参数（轮询间隔/告警阈值/冷启动推送/LLM 超时熔断/通道开关）：
-  // settings 表唯一信源（面板高级设置卡）；
+  // 运行时参数（轮询间隔/告警阈值/冷启动推送/LLM 超时熔断）：
+  // settings 表唯一信源（面板各模块卡：监听「抓取设置」/ LLM「高级」/ 推送渠道「推送设置」）；
   // eff = 代码默认值叠加 settings 后的生效配置，sources/router/装配闸门都消费它
   let eff = withRuntimeConfig(app, getRuntimeConfig(db));
 
-  // 通道装配：开关在 settings（高级设置卡），热切换走 reconcileRuntime。
-  // onebot 端点只读跟随 NapCat 自己的 onebot11 配置（dd-claw 专属条目，缺了自动创建、
-  // 被占自动换）；发现失败 = 降级不装配（没配 QQ 是正常状态），不阻塞主流程
+  // 通道装配：没有通道级开关（原 QQ/系统通知 两开关已删除——想关走推送渠道卡的
+  // 渠道启停，见 push_channels.enabled）；装配恒尝试：onebot 端点只读跟随 NapCat
+  // 自己的 onebot11 配置（dd-claw 专属条目，缺了自动创建、被占自动换），发现失败 =
+  // 降级不装配（没配 QQ 是正常状态）；toast 恒装配。不阻塞主流程
   let onebotNotifier: OneBotNotifier | null = null;
   const buildOnebot = async (): Promise<OneBotNotifier | null> => {
     const nc = getNapcatConfig(db);
@@ -209,7 +210,7 @@ async function main(): Promise<void> {
       ? (readOnebotEndpoint(nc.dir, nc.uin) ?? await ensureNapcatEntry(nc.dir, nc.uin))
       : null;
     if (!discovered) {
-      log.error('QQ 通道已启用但未能从 NapCat 配置发现端点（面板 NapCat 卡片未配置？），QQ 推送暂不装配');
+      log.error('未能从 NapCat 配置发现端点（面板 NapCat 卡片未配置？），QQ 推送暂不装配');
       return null;
     }
     log.info(`onebot 端点跟随 NapCat 配置: ${discovered.baseUrl}`);
@@ -222,19 +223,15 @@ async function main(): Promise<void> {
   };
   const buildNotifiers = async (): Promise<Notifier[]> => {
     const list: Notifier[] = [];
-    if (eff.notify.onebot.enabled) {
-      onebotNotifier = await buildOnebot();
-      if (onebotNotifier) list.push(onebotNotifier);
-    } else {
-      onebotNotifier = null;
-    }
-    if (eff.notify.toast.enabled) list.push(await buildToast());
+    onebotNotifier = await buildOnebot();
+    if (onebotNotifier) list.push(onebotNotifier);
+    list.push(await buildToast());
     return list;
   };
 
   const notifiers = await buildNotifiers();
   if (notifiers.length === 0) {
-    log.warn('当前没有任何推送通道可用（面板高级设置卡可开关通道）；追踪与分析照常');
+    log.warn('当前没有任何推送通道可用（面板推送渠道卡可配置通道）；追踪与分析照常');
   }
 
   const dispatcher = new NotifyDispatcher(notifiers, db, args.dryRun);
@@ -282,8 +279,7 @@ async function main(): Promise<void> {
   let napcatWatchdog: NapcatWatchdog | undefined;
   const reconcileNapcat = (): void => {
     const nc = getNapcatConfig(db);
-    const shouldRun = nc.enabled && eff.notify.onebot.enabled && onebotNotifier !== null
-      && process.platform === 'win32';
+    const shouldRun = nc.enabled && onebotNotifier !== null && process.platform === 'win32';
     if (shouldRun === (napcatTask !== undefined)) return;
     if (shouldRun) {
       napcatWatchdog ??= new NapcatWatchdog({
@@ -305,7 +301,7 @@ async function main(): Promise<void> {
       log.info(`NapCat 看门狗已启动（${nc.dir}，快速登录 ${nc.uin}）`);
       void isNapcatTaskRegistered().then((ok) => {
         if (!ok) {
-          log.warn('NapCat 计划任务未创建，自动拉起不可用：面板 NapCat 卡片点「计划任务」或跑 npm run napcat-setup 一次性设置');
+          log.warn('NapCat 计划任务未创建，自动拉起不可用：面板 NapCat 卡片点「添加自动拉起任务」或跑 npm run napcat-setup 一次性设置');
         }
       });
     } else {
@@ -321,7 +317,7 @@ async function main(): Promise<void> {
 
   // live-status source 单独持有：轮询参数热更新时整体重启（restore 从库恢复状态，不丢轨迹）
   // 在播关键帧定时缓存：目录跟随 data 约定（与 toast 缓存同法拼）；开关/间隔事实来源
-  // 是 settings（RuntimeConfig，面板高级设置卡），初始与热更新都走 configure；
+  // 是 settings（RuntimeConfig，面板监听卡「抓取设置」），初始与热更新都走 configure；
   // 实例总是创建并跨 liveSrc 重启复用（source 重建不丢间隔/去重记忆）
   const keyframeDir = join(dirname(secrets.dbPath), 'cache', 'keyframes');
   const keyframeCache = new KeyframeCache(db, {
@@ -407,8 +403,8 @@ async function main(): Promise<void> {
   };
 
   // 高级设置热生效（面板 /api/advanced 保存后回调）：间隔/阈值变化重启对应源，
-  // LLM 超时熔断变化重建 router，通道开关变化重装 notifiers，关键帧开关/间隔
-  // 走 configure。开关类（冷启动推送）由 pipeline 直读 settings，无需这里处理
+  // LLM 超时熔断变化重建 router，关键帧开关/间隔走 configure。开关类（冷启动推送）
+  // 由 pipeline 直读 settings，无需这里处理。无通道开关——装配恒定，通道启停走渠道卡
   const reconcileRuntime = (): void => {
     const prev = eff;
     eff = withRuntimeConfig(app, getRuntimeConfig(db));
@@ -443,15 +439,14 @@ async function main(): Promise<void> {
       llmDep.onProvidersChanged!();
       log.info('LLM 超时/熔断参数已热更新（router 已重建）');
     }
-    if (prev.notify.onebot.enabled !== eff.notify.onebot.enabled
-      || prev.notify.toast.enabled !== eff.notify.toast.enabled) {
-      void buildNotifiers().then((list) => {
-        dispatcher.setNotifiers(list);
-        reconcileNapcat();
-        log.info(`推送通道已热更新：${dispatcher.channels.join('/') || '无'}`);
-      });
-    }
   };
+
+  // 装配级重建：NapCat 配置热更新（面板保存）后重跑一次，让 onebot notifier 跟随
+  const rebuildNotifiers = (): Promise<void> => buildNotifiers().then((list) => {
+    dispatcher.setNotifiers(list);
+    reconcileNapcat();
+    log.info(`推送通道已热更新：${dispatcher.channels.join('/') || '无'}`);
+  });
 
   // 凭据功能：cookies.json 不存在 → 停用并说明；坏 JSON → loadCookies 抛
   // ConfigError，启动即失败。cookie 值绝不进日志，只传拼好的 Cookie 头。
@@ -462,7 +457,7 @@ async function main(): Promise<void> {
   } else {
     const cookieHdr = cookieHeader(cookies);
     biliCookieHdr = cookieHdr;
-    startFollows(cookieHdr); // 有 cookie 即跑（无单独开关；间隔在高级设置卡）
+    startFollows(cookieHdr); // 有 cookie 即跑（无单独开关；间隔在监听卡「抓取设置」）
   }
 
   // 微博凭据：weibo-cookies.json 不存在 → 停用并说明（不阻塞启动）；
@@ -546,8 +541,9 @@ async function main(): Promise<void> {
         }),
         save: (patch) => {
           saveNapcatConfig(db, patch);
-          reconcileNapcat();
-          // dir/uin 改了立即重探测/跟随端点，不等下个周期
+          // 配置变了重装配一次：开 NapCat 才建的 onebot notifier 立即生效，
+          // 关掉则移除（通道启停不再有独立开关）
+          void rebuildNotifiers();
           void napcatWatchdog?.tick();
         },
         state: async () => {
@@ -567,7 +563,7 @@ async function main(): Promise<void> {
           await stopNapcatViaTask();
           await new Promise((r) => setTimeout(r, 3_000));
           const ok = await launchNapcatViaTask();
-          if (!ok) throw new Error('拉起失败：计划任务未创建（先点「计划任务」一次性设置）');
+          if (!ok) throw new Error('拉起失败：计划任务未创建（先点「添加自动拉起任务」一次性设置）');
           void napcatWatchdog?.tick();
         },
         setupTask: async () => {

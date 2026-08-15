@@ -25,10 +25,7 @@ function loadLlm() {
     llmCache = j.providers || [];
     var en = document.getElementById('llm-enabled');
     if (en) en.checked = j.enabled;
-    document.getElementById('llm-list').innerHTML =
-      llmCache.map(llmRowHtml).join('') +
-      '<div class="add-row"><button class="btn btn-block" data-action="add-llm">' +
-      icon('plus') + ' 新增 provider</button></div>';
+    document.getElementById('llm-list').innerHTML = llmCache.map(llmRowHtml).join('');
   }).catch(function (e) { toast(e.message, true); });
 }
 
@@ -118,6 +115,43 @@ ACTIONS['save-llm'] = function () {
     toast(isNew ? '已新增' : '已保存');
     loadLlm();
   }).catch(function (e) { toast(e.message, true); });
+};
+
+// ---- LLM 高级（LLM 卡底部按钮）：超时 / 熔断阈值 / 熔断冷却 3 项 ----
+function llmAdvNum(id) {
+  var v = parseInt(document.getElementById(id).value, 10);
+  return isNaN(v) ? null : v;
+}
+
+ACTIONS['open-llm-advanced'] = function () {
+  api('/api/advanced').then(function (j) {
+    openSheet('LLM 高级',
+      field('请求超时（秒，1~600）', '<input id="la-timeout" value="' + Math.round(j.llmRequestTimeoutMs / 1000) + '">') +
+      field('熔断阈值（连续失败次数，1~20）', '<input id="la-threshold" value="' + j.llmCircuitThreshold + '">') +
+      field('熔断冷却（秒，10~3600）', '<input id="la-cooldown" value="' + Math.round(j.llmCircuitCooldownMs / 1000) + '">') +
+      '<div class="sheet-foot"><span id="la-err" class="form-err"></span>' +
+      '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
+      '<button class="btn btn-primary" data-action="save-llm-advanced">保存</button></div>');
+  }).catch(function (e) { toast(e.message, true); });
+};
+
+ACTIONS['save-llm-advanced'] = function () {
+  var errEl = document.getElementById('la-err');
+  var ids = ['la-timeout', 'la-threshold', 'la-cooldown'];
+  var vals = {};
+  for (var i = 0; i < ids.length; i++) {
+    var v = llmAdvNum(ids[i]);
+    if (v === null) { errEl.textContent = '数值项请输入整数'; return; }
+    vals[ids[i]] = v;
+  }
+  api('/api/advanced', 'PUT', {
+    llmRequestTimeoutMs: vals['la-timeout'] * 1000,
+    llmCircuitThreshold: vals['la-threshold'],
+    llmCircuitCooldownMs: vals['la-cooldown'] * 1000,
+  }).then(function () {
+    closeSheet(1);
+    toast('已保存并生效');
+  }).catch(function (e) { errEl.textContent = e.message; });
 };
 
 // 拖拽排序：顺序 = 调用优先级，落库后热生效

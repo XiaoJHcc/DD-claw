@@ -23,8 +23,6 @@ test('panel.port 越界仍启动即失败', () => {
 test('defaultAppConfig：运行参数代码默认值', () => {
   const app = defaultAppConfig();
   assert.equal(app.pollIntervalSec, 45);
-  assert.equal(app.notify.onebot.enabled, false, 'QQ 通道默认关（面板高级设置开）');
-  assert.equal(app.notify.toast.enabled, true);
 });
 
 test('剥掉行注释', () => {

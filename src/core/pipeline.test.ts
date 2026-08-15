@@ -112,7 +112,7 @@ function config(over: Partial<AppConfig> = {}): AppConfig {
 function harness(over: Partial<AppConfig> = {}, dispatchDelayMs = 0, classifications: Classification[] = []) {
   const bus = new Bus();
   const db = new FakeDb();
-  // 冷启动推送开关的事实来源是 settings（面板高级设置卡）；
+  // 冷启动推送开关的事实来源是 settings（面板推送渠道卡「推送设置」）；
   // 兼容旧测试写法：config override 里的两个开关翻译成 settings 键
   if (over.notifyOnFirstRun !== undefined) {
     db.settings.set('notify_on_first_run', over.notifyOnFirstRun ? '1' : '0');

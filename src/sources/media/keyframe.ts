@@ -62,7 +62,7 @@ export class KeyframeCache {
   }
 
   /**
-   * 热更新开关/间隔（面板高级设置保存回调）。关闭只是 consider no-op——
+   * 热更新开关/间隔（面板监听卡「抓取设置」保存回调）。关闭只是 consider no-op——
    * 去重/间隔记忆保留，重新开启时按既有记忆继续，不炸量补帧。
    */
   configure(o: { enabled: boolean; intervalMs: number }): void {

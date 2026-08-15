@@ -116,7 +116,7 @@ export class Pipeline {
 
     // 冷启动抑制（政策在这层，diffRoom 只如实产信号、source 只打标记）：
     // 跳过通知，但上面 live_start 的 recordSession 等归档照做。
-    // 开关读 settings（面板高级设置卡，热生效）
+    // 开关读 settings（面板推送渠道卡「推送设置」，热生效）
     if (signal.coldStart === 'first_run' && !isNotifyOnFirstRun(db)) {
       log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 首次运行已在播，按配置不推送`);
       return;

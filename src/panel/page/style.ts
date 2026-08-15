@@ -133,6 +133,9 @@ input:disabled{opacity:.5;background:var(--fill)}
 /* 字段标题：只作用于 field() 生成的 caption label，避免误伤同为 <label> 的控件
    （.checkbox / .check-row / .switch 直接放进 .field 时保持自身控件样式） */
 .field-label{display:block;font-size:12px;color:var(--text-secondary);margin-bottom:4px}
+/* 抓取设置/推送设置 sheet 里的分组标题：独立小节，上留白 */
+.adv-group{margin:18px 0 2px;font-size:13px;font-weight:600;color:var(--text)}
+.adv-group:first-child{margin-top:6px}
 .field input,.field select,.field textarea{width:100%}
 /* 关键词/分区并排 + 中间且/或切换小方钮（与输入框同高，方形 --r-md） */
 .cond-row{display:flex;gap:8px;align-items:center}

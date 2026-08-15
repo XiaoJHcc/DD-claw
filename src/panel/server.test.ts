@@ -1354,7 +1354,6 @@ test('/api/advanced：GET 默认值；PUT 校验、落库、触发 onChanged', a
   const g = await api(base, '/api/advanced');
   assert.equal(g.status, 200);
   assert.equal(g.json['pollIntervalSec'], 45);
-  assert.equal(g.json['notifierToastEnabled'], true);
 
   assert.equal((await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 10 })).status, 400, '越界 400');
   assert.equal((await api(base, '/api/advanced', 'PUT', { notifyOnFirstRun: 'yes' })).status, 400, '布尔类型错 400');
