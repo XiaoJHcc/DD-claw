@@ -183,6 +183,21 @@ function schedStep(n) {
   schedLoad(next);
 }
 
+/** 周期数据保鲜：重取当前窗口数据（在播场下播后拿到真实 endTs，纠正无限延伸的横条），
+ *  再重算轴 + 重渲。颜色按 uid 缓存复用，不重复拉头像。与 schedLoad 共用 schedSeq
+ *  作废机制：用户滚动导航时更新 seq，本刷新结果自然丢弃。 */
+function schedRefreshData() {
+  if (!schedCenter) return;
+  var seq = ++schedSeq;
+  schedFetch(schedAddDays(schedCenter, -2), schedAddDays(schedCenter, 2)).then(function (days) {
+    if (seq !== schedSeq) return; // 已有更新的请求在路上，作废本次刷新
+    schedDays = days;
+    schedPrepareColors(days);
+    recomputeSchedAxis();
+    renderSched();
+  }).catch(function () { /* 瞬时失败忽略，下个周期再试 */ });
+}
+
 // ---- 共享轴：按当前可见全部 5 天的实际内容算定（缩略行也在视野内，同样参与）；
 // 在播场终点用真实 now（2h/散尾假设只属于绘制层）；返回轴是否变化 ----
 function recomputeSchedAxis() {
@@ -890,6 +905,14 @@ function schedMovePop(evt) {
     var axisChanged = recomputeSchedAxis();
     if (axisChanged) { renderSched(); return; }
     if (schedHasLive() || schedNowInRow()) renderSchedBody();
+  }, 60000);
+
+  // 数据保鲜：schedDays 只在 schedLoad 时取一次，若某场开播时 endTs=null，之后下播了
+  // 缓存里仍是 null，在播条会一直延伸到「现在」像是没下播，必须刷新才能纠正。故周期
+  // 重取当前窗口数据（在播场结束即拿到真实 endTs），并重算轴 + 重渲。
+  setInterval(function () {
+    if (!schedCenter || schedDays.length === 0) return;
+    schedRefreshData();
   }, 60000);
 })();
 `;
