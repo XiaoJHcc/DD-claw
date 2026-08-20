@@ -35,6 +35,7 @@ import { WeiboFeedSource } from './sources/weibo/feed.js';
 import type { NewPushChannel } from './core/push.js';
 import { shouldRunListen } from './core/listen.js';
 import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
+import { seedOnboardingDefaults } from './core/onboarding.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 
@@ -179,6 +180,10 @@ async function main(): Promise<void> {
   }
 
   const db = new Db(secrets.dbPath);
+
+  // 发布后首启默认值：空表才种入分类/推送规则/「系统通知」渠道（settings 一次性闸门，
+  // 用户清空后不复活）。默认值由 npm run demo:fixtures 归一化生成。
+  seedOnboardingDefaults(db);
 
   // LLM：provider 名单与 key 的唯一信源是 settings 表（面板 LLM 卡片管理）；
   // 路由由名单自动推导（顺序 = 优先级）。超时/熔断参数读 settings（面板 LLM 卡「高级」）。

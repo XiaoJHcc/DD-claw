@@ -1,5 +1,5 @@
-/**
- * 控制面板全部 CSS，内嵌字符串（dist 只编译 TS，不拷静态文件）。
+/*
+ * 控制面板全部 CSS（真实静态文件，构建期内嵌进 dist）。
  * macOS 风格设计系统（观感对齐 macOS Sequoia 系统设置）：CSS 变量令牌 + 浅色/深色双主题
  * （prefers-color-scheme）+ 卡片式行布局（无分隔线）+ 圆角矩形控件（不用胶囊）。
  * 圆角两级 + 唯一三级例外：--r-lg 页面级（.card/.sheet）/ --r-md:8px 一级卡片内的所有元素
@@ -8,9 +8,7 @@
  * 高度两档：--ctl-h:36px 单行控件（按钮 / 输入框 / 图标按钮等只含文本或 icon 的元素）；
  * --row-h:44px 单行卡片（排序列表行 / 多选行 / 监听登录行 / 三模块开关行等 .row 级卡片）。
  * 加粗只留给标题（h1/h2/.sheet-title/.sheet-sub），其余靠字号与颜色分层。
- * 内容不得出现反引号与 ${，避免与外层模板字面量冲突。
  */
-export const PANEL_CSS = `
 *{box-sizing:border-box}
 :root{
   --bg:#f8f8fa;--card-bg:#ffffff;--row-bg:rgba(120,120,128,.055);--text:#1d1d1f;--text-secondary:#86868b;
@@ -306,4 +304,3 @@ a.post:hover{background:var(--hover)}
 .sched-pop-v{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:6px}
 .sched-pop-src{color:var(--text-secondary);font-size:11px}
 .sched-pop-ev{flex-basis:100%;color:var(--text-secondary)}
-`;

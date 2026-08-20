@@ -2,6 +2,10 @@ node_modules/
 dist/
 *.log
 
+# 构建期生成（webui/ → 内嵌资产 / 首启默认值，防漂移）
+src/panel/webui-assets.gen.ts
+src/core/onboarding-defaults.gen.ts
+
 # 凭据与本地配置 —— 绝不提交
 .env
 .env.*

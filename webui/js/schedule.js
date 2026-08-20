@@ -1,30 +1,28 @@
-/**
- * 面板前端 · 时间表：过往直播的时间轴（纵轴日期升序、横轴时间），**5 天滑动窗口制**。
- * 窗口 = 居中日 center ± 2 天（一次请求）。条颜色 = 头像平均色取 h/s（经 /api/avatar 同源
- * 反代，规避 B站图床无 CORS 的画布污染），亮度随主题：亮色 70% / 暗色 40%（s 开根号提饱和）。
- * 头像获取不到才回退 uid 哈希色 hsl(h, 50%, L)，未算出颜色前一律占位灰；主题切换只改亮度重渲。
- * 三级行：center（双行字：主播名 + 直播间标题，实色不透明）> single（单行字，减淡）>
- * mini（无字色条，更淡），由 .sched-day 的 class 驱动，条透明度 / 字层 / 道高全走
- * CSS 过渡。点击任意非居中天 → 该天居中；滚轮按天步进（preventDefault 阻止页面滚动，
- * 300ms 节流）。滑动时重叠天不重建 DOM，只切 level class + 原地更新条几何与文字，
- * 颜色条在无字/单行/双行间平滑渐变（道高/透明度/字层全走 CSS 过渡）而非硬切。随页面整体滚动。
- *
- * 共享轴（偏移语义）：轴 = 相对各行归属日 06:00 的偏移秒数（offStart/offEnd，
- * 0 = 06:00；06:00 日界只用于「归属哪天」，与渲染窗口无关），按**当前可见全部
- * 5 天**的实际内容算定（center 变化 / 60s 定时器重算）；在播场终点用真实 now——
- * 「假定播 2 小时 + 30 分钟散尾」是纯绘制层假设，绝不进轴。空窗口兜底 {0, 86400}。
- * 每天行窗口 = 当天 06:00 + [offStart, offEnd]（可延伸到次日白天，正是设计意图），
- * 跨天竖向对齐天然成立；offEnd ≤ offStart + 24h ⇒ 相邻天窗口不重叠（至多首尾相接）。
- * 红线跟随行窗口：now 落在哪行窗口就画哪行（至多一行命中；缩略行 / 空档不画）。
- *
- * 泳道候选 = 当天 entries + 前一天 entries（通宵场溢出段接续：归属日行画到该行窗口
- * 右端，次日行从其窗口左起接续，相邻窗口首尾相接故无缝）。段与行窗口求交后按
- * **uid 分组整体装箱**（同主播当天多场永远同泳道；组内条互叠的异常数据退化为
- * 逐 bar 装箱）。装箱窗口 == 绘制窗口，行高 = 泳道数 × 道高。
- *
- * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 icons / app-core 段。
- */
-export const APP_SCHEDULE = `
+// 面板前端 · 时间表：过往直播的时间轴（纵轴日期升序、横轴时间），**5 天滑动窗口制**。
+// 窗口 = 居中日 center ± 2 天（一次请求）。条颜色 = 头像平均色取 h/s（远程头像经 /api/avatar
+// 同源反代、同源头像〔demo 本地化 demo/avatars/*〕直连，规避 B站图床无 CORS 的画布污染），
+// 亮度随主题：亮色 70% / 暗色 40%（s 开根号提饱和）。
+// 头像获取不到才回退 uid 哈希色 hsl(h, 50%, L)，未算出颜色前一律占位灰；主题切换只改亮度重渲。
+// 三级行：center（双行字：主播名 + 直播间标题，实色不透明）> single（单行字，减淡）>
+// mini（无字色条，更淡），由 .sched-day 的 class 驱动，条透明度 / 字层 / 道高全走
+// CSS 过渡。点击任意非居中天 → 该天居中；滚轮按天步进（preventDefault 阻止页面滚动，
+// 300ms 节流）。滑动时重叠天不重建 DOM，只切 level class + 原地更新条几何与文字，
+// 颜色条在无字/单行/双行间平滑渐变（道高/透明度/字层全走 CSS 过渡）而非硬切。随页面整体滚动。
+//
+// 共享轴（偏移语义）：轴 = 相对各行归属日 06:00 的偏移秒数（offStart/offEnd，
+// 0 = 06:00；06:00 日界只用于「归属哪天」，与渲染窗口无关），按**当前可见全部
+// 5 天**的实际内容算定（center 变化 / 60s 定时器重算）；在播场终点用真实 now——
+// 「假定播 2 小时 + 30 分钟散尾」是纯绘制层假设，绝不进轴。空窗口兜底 {0, 86400}。
+// 每天行窗口 = 当天 06:00 + [offStart, offEnd]（可延伸到次日白天，正是设计意图），
+// 跨天竖向对齐天然成立；offEnd ≤ offStart + 24h ⇒ 相邻天窗口不重叠（至多首尾相接）。
+// 红线跟随行窗口：now 落在哪行窗口就画哪行（至多一行命中；缩略行 / 空档不画）。
+//
+// 泳道候选 = 当天 entries + 前一天 entries（通宵场溢出段接续：归属日行画到该行窗口
+// 右端，次日行从其窗口左起接续，相邻窗口首尾相接故无缝）。段与行窗口求交后按
+// **uid 分组整体装箱**（同主播当天多场永远同泳道；组内条互叠的异常数据退化为
+// 逐 bar 装箱）。装箱窗口 == 绘制窗口，行高 = 泳道数 × 道高。
+import { api, toast, ACTIONS, esc } from './core.js';
+
 var schedDays = [];           // 窗口内 5 天升序 [{date, entries:[...]}]
 var schedCenter = null;       // 居中日（日串）
 var schedColors = {};         // uid → {h, s}（头像平均色取 h/s）/ null（头像获取不到→哈希色）；undefined = 未算出→占位灰
@@ -81,7 +79,7 @@ function schedHSOf(uid) {
   return { h: 0, s: 0 };                    // 未算出 → 占位灰
 }
 function schedColorOf(uid) { var hs = schedHSOf(uid); return schedHsl(hs.h, hs.s); }
-/** 暗色模式条内文字：与条同色系，亮度提到 90%（阴影由 style.ts 暗色规则去掉） */
+/** 暗色模式条内文字：与条同色系，亮度提到 90%（阴影由 style.css 暗色规则去掉） */
 function schedTextColorOf(uid) { var hs = schedHSOf(uid); return schedHsl(hs.h, hs.s, 90); }
 /** 亮色模式条内文字阴影：与条同色系加深（l=20%），替代通用黑色阴影 */
 function schedTextShadowOf(uid) { var hs = schedHSOf(uid); return '0 0 3px hsl(' + hs.h + ',' + hs.s + '%,20%)'; }
@@ -90,8 +88,7 @@ function schedDividerOf(uid) { var hs = schedHSOf(uid); return 'hsl(' + hs.h + '
 // 在播条背景（齐头散尾）：实色到 p1%（红线处）→ 同色 40% 半透平台到 p2%（开播满 2h 处）
 // → 尾端线性渐变到全透（约 30 分钟宽度）。p1 == p2 时（已播超 2h）从红线直接散尾。
 // 将来的直播预告条（只有开播时间、无下播时间）复用同款散尾样式。
-// 注意：本文件是 TS 模板字符串，正则里的反斜杠转义会被模板静默吃掉（qr-lib 有同类坑记录），
-// 所以这里用字符串操作给 rgb()/hsl() 插 alpha 通道，不写正则。
+// 用字符串操作给 rgb()/hsl() 插 alpha 通道（生成 gradient 断点），不写正则。
 function schedLiveBg(css, p1, p2) {
   var open = css.indexOf('('), close = css.lastIndexOf(')');
   var kind = css.slice(0, 3);
@@ -143,7 +140,9 @@ function schedPrepareColor(uid, face) {
     schedColors[uid] = null; // 头像拉取失败 → 哈希色
     renderSchedBody();
   };
-  img.src = '/api/avatar?uid=' + encodeURIComponent(uid);
+  // 远程头像（B站图床无 CORS）走 /api/avatar 同源反代；同源头像（demo 夹具把头像
+  // 本地化为 demo/avatars/* 站点相对路径）直连即可，本地图不污染画布
+  img.src = /^https?:/i.test(face) ? '/api/avatar?uid=' + encodeURIComponent(uid) : face;
 }
 function schedPrepareColors(days) {
   for (var i = 0; i < days.length; i++) {
@@ -915,4 +914,3 @@ function schedMovePop(evt) {
     schedRefreshData();
   }, 60000);
 })();
-`;

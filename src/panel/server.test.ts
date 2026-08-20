@@ -165,6 +165,31 @@ test('GET / 返回内嵌页面，包含六张卡片（监听/LLM分析/推送/�
   assert.ok(html.includes('id="follow-search"'), '关注列表应有搜索框');
 });
 
+test('静态资产路由：/style.css、/js/core.js、demo 资产命中并带正确 content-type', async (t) => {
+  const { base } = await setup(t);
+  const css = await fetch(base + '/style.css', { headers: { connection: 'close' } });
+  assert.equal(css.status, 200);
+  assert.match(css.headers.get('content-type') ?? '', /text\/css/);
+  assert.equal(css.headers.get('cache-control'), 'no-store');
+  assert.ok((await css.text()).includes('--accent'), 'style.css 应含设计令牌');
+
+  const js = await fetch(base + '/js/core.js', { headers: { connection: 'close' } });
+  assert.equal(js.status, 200);
+  assert.match(js.headers.get('content-type') ?? '', /text\/javascript/);
+  assert.ok((await js.text()).includes('export function'), 'core.js 应是 ES module');
+
+  const mock = await fetch(base + '/demo/mock-data.js', { headers: { connection: 'close' } });
+  assert.equal(mock.status, 200, 'demo 资产也应内嵌（真实部署 ?demo=1 可演示）');
+});
+
+test('静态资产路由：未知路径与路径穿越尝试 404', async (t) => {
+  const { base } = await setup(t);
+  for (const p of ['/nope.css', '/js/nonexistent.js', '/../package.json', '/..%2F..%2Fpackage.json']) {
+    const res = await fetch(base + p, { headers: { connection: 'close' } });
+    assert.equal(res.status, 404, `「${p}」应 404`);
+  }
+});
+
 // ---- streamers（含 face / live / rules 摘要）----
 
 test('GET /api/streamers：enrich face / live=null / 生效规则名标签（含 disabled）', async (t) => {

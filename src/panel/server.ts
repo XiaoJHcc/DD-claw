@@ -14,7 +14,7 @@ import {
   parseNewCategory, parseNewChannel, parseNewRule, parseRulePatch,
   parseStreamerPatch, parseUid, readJsonBody, sendJson,
 } from './http-util.js';
-import { PANEL_PAGE } from './page.js';
+import { WEBUI_ASSETS } from './webui-assets.gen.js';
 import { cookieHeader, fetchSelf, loadCookies, saveCookies, type SelfInfo } from '../sources/bili/auth.js';
 import { generateQrcode, pollQrcode } from '../sources/bili/qrcode.js';
 import type { WeiboResolver } from '../sources/weibo/resolve.js';
@@ -183,9 +183,12 @@ async function handle(
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   const path = url.pathname;
 
-  if (method === 'GET' && path === '/') {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(PANEL_PAGE);
+  // ---- 静态资产（构建期内嵌快照，运行时绝不读磁盘）：纯 map 查键，无路径拼接 ----
+  // 命中则直接返回对应 content-type + no-store；未命中（含 /api/* 与穿越尝试）自然落到下面的 API/404。
+  const asset = WEBUI_ASSETS[path];
+  if (method === 'GET' && asset) {
+    res.writeHead(200, { 'content-type': asset.type, 'cache-control': 'no-store' });
+    res.end(asset.body);
     return;
   }
   if (method === 'GET' && path === '/api/status') {

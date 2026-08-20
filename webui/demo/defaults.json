@@ -1,0 +1,35 @@
+{
+  "llmProviders": [
+    {
+      "name": "DeepSeek",
+      "baseURL": "https://api.deepseek.com/v1",
+      "model": "deepseek-v4-flash",
+      "vision": false,
+      "keyEnvs": [],
+      "enabled": true,
+      "structuredOutput": "schema",
+      "api": "chat-completions"
+    }
+  ],
+  "categories": [
+    {
+      "name": "歌回",
+      "llmPrompt": "判断当前直播是否属于歌回，典型特征是：直播标题与唱歌相关，位于唱见或singer分区，直播画面中通常可见歌词或歌单，主播通常位于画面中间且有麦克风，如果画面中有弹幕区，则通常包含打call表情包，或打call词例如\"\\阿梓/\\阿梓/\\阿梓/\"。标题和分区有时不准确，以实际直播画面为主，综合判断。",
+      "keywords": ["唱", "歌", "音乐"],
+      "areas": [],
+      "condMode": "or"
+    }
+  ],
+  "rules": [
+    {
+      "name": "歌回",
+      "category": "歌回",
+      "messageTemplate": "【歌回】{alias} 正在唱歌"
+    },
+    {
+      "name": "全部",
+      "category": null,
+      "messageTemplate": null
+    }
+  ]
+}

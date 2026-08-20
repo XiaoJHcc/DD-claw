@@ -44,6 +44,16 @@ node dist/index.js
 
 开发期用 `npm run dev`（改动自动重启）。常用验证命令：`npm run probe`（测一次开播状态接口）、`npm run probe-llm`（测 LLM 接入）、`npm run test-notify`（假消息走完整推送链路）。
 
+## 控制面板 Demo（无后端、改 UI 不用重启）
+
+面板前端是一份真实 HTML/CSS/JS（`webui/`，ES modules），带浏览器内 mock 数据，既是发布后的文档示例，也是改 UI 时的零重启预览：
+
+```bash
+npm run webui:dev    # 打开 http://127.0.0.1:8788/?demo=1
+```
+
+`?demo=1` 让前端装载一份内存版 `/api/*` 路由表（与真实后端完全同构），所有卡片可交互、拖拽排序/两级弹窗/时间表都能玩；改 `webui/` 下任意文件刷新浏览器即生效。不带 demo 参数运行时，页面由构建期内嵌进 dist 的资产快照提供（`npm run build` 自动重新内嵌），与后端始终同版本，运行时绝不读磁盘静态文件。`webui/` 目录本身就是纯静态站点，推到 GitHub Pages 加 `?demo=1` 也能直接跑。
+
 ## 数据存在哪 / 迁移
 
 所有面板设置和历史数据都在项目目录里，换机器迁移带走这三样即可：

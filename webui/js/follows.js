@@ -1,12 +1,12 @@
-/**
- * 面板前端 · 卡片6 关注列表：B站关注候选池（头像网格 + 已监听标记 + 搜索过滤 + 一键加入监听）。
- * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 icons / app-core / app-streamers 段。
- */
-export const APP_FOLLOWS = `
-var followAll = [];
-var followSearch = '';
-var followShowAll = false;
-var followCap = 120;
+// 面板前端 · 卡片6 关注列表：B站关注候选池（头像网格 + 已监听标记 + 搜索过滤 + 一键加入监听）。
+import { api, toast, ACTIONS, INPUTS, esc } from './core.js';
+import { icon } from './icons.js';
+import { avatarHtml, loadStreamers } from './streamers.js';
+
+let followAll = [];
+let followSearch = '';
+let followShowAll = false;
+const followCap = 120;
 
 function loadFollows() {
   return api('/api/follows').then(function (j) {
@@ -16,24 +16,24 @@ function loadFollows() {
 }
 function followMatches(f) {
   if (!followSearch) return true;
-  var kw = followSearch.toLowerCase();
+  const kw = followSearch.toLowerCase();
   return String(f.uname || '').toLowerCase().indexOf(kw) >= 0 ||
          String(f.uid).indexOf(kw) >= 0;
 }
 function followCard(f) {
   return '<div class="follow-card">' + avatarHtml(f.face, f.uname, 'f-avatar') +
-    '<div class="f-name">' + esc(f.uname || f.uid) + '</div>' +
+    `<div class="f-name">${esc(f.uname || f.uid)}</div>` +
     (f.watched
       ? '<span class="tag">已监听</span>'
-      : '<button class="btn btn-primary btn-sm" data-action="watch" data-uid="' + esc(f.uid) + '">' +
+      : `<button class="btn btn-primary btn-sm" data-action="watch" data-uid="${esc(f.uid)}">` +
         icon('plus') + ' 监听</button>') + '</div>';
 }
 function renderFollows() {
-  var box = document.getElementById('follow-list');
+  const box = document.getElementById('follow-list');
   if (!box) return;
-  var list = followAll.filter(followMatches);
-  var shown = (followSearch || followShowAll) ? list : list.slice(0, followCap);
-  var html = shown.map(followCard).join('');
+  const list = followAll.filter(followMatches);
+  const shown = (followSearch || followShowAll) ? list : list.slice(0, followCap);
+  let html = shown.map(followCard).join('');
   if (list.length === 0) {
     html = '<p class="hint">' + (followSearch ? '没有匹配的关注' : '无（或关注同步未启用）') + '</p>';
   } else if (shown.length < list.length) {
@@ -60,4 +60,3 @@ ACTIONS['watch'] = function (el) {
 
 loadFollows();
 setInterval(loadFollows, 30000);
-`;

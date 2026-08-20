@@ -1,23 +1,23 @@
-/**
- * 面板前端 · 卡片「推送渠道」+「推送规则」两张独立小卡：
- * 渠道卡 = 总开关（卡片右上角）+ 渠道行列表（启停勾/名称/类型标签〔群号写在标签内〕/编辑/删除/拖拽把手）
- * + 底部新增渠道按钮；规则卡 = 规则行列表（启停勾/名称/分类与生效主播标签/编辑/删除/拖拽把手，
- * 全局排序 = 匹配优先级）+ 底部添加规则按钮。
- * 渠道与规则的新增/编辑都走 sheet；规则的生效主播选择是二级 sheet。
- * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 icons / app-core 段。
- */
-export const APP_PUSH = `
-var chCache = [];
-var ruleCache = [];
-var ruleCats = [];
-var ruleSheetUids = [];
+// 面板前端 · 卡片「推送渠道」+「推送规则」两张独立小卡：
+// 渠道卡 = 总开关（卡片右上角）+ 渠道行列表（启停勾/名称/类型标签〔群号写在标签内〕/编辑/删除/拖拽把手）
+// + 底部新增渠道按钮；规则卡 = 规则行列表（启停勾/名称/分类与生效主播标签/编辑/删除/拖拽把手，
+// 全局排序 = 匹配优先级）+ 底部添加规则按钮。
+// 渠道与规则的新增/编辑都走 sheet；规则的生效主播选择是二级 sheet。
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, chanTag, makeSortable, openSheet, closeSheet, sheetCleanups } from './core.js';
+import { icon } from './icons.js';
+import { loadStreamers } from './streamers.js';
+
+let chCache = [];
+let ruleCache = [];
+let ruleCats = [];
+let ruleSheetUids = [];
 
 function channelRowHtml(c) {
-  return '<div class="row" draggable="true" data-sid="' + c.id + '">' +
+  return `<div class="row" draggable="true" data-sid="${c.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-channel"', c.enabled) +
-    '<span class="row-title">' + esc(c.name) + '</span>' +
-    '<span class="tag">' + esc(chanTag(c)) + '</span>' +
+    `<span class="row-title">${esc(c.name)}</span>` +
+    `<span class="tag">${esc(chanTag(c))}</span>` +
     '<span class="row-end">' +
     iconBtn('edit-channel', 'pencil', '编辑') +
     iconBtn('del-channel', 'trash', '删除', true) +
@@ -26,28 +26,28 @@ function channelRowHtml(c) {
 
 function ruleCatName(categoryId) {
   if (categoryId == null) return '任意开播';
-  for (var i = 0; i < ruleCats.length; i++) if (ruleCats[i].id === categoryId) return ruleCats[i].name;
+  for (let i = 0; i < ruleCats.length; i++) if (ruleCats[i].id === categoryId) return ruleCats[i].name;
   return '分类已删除';
 }
 
 function ruleRowHtml(r) {
-  return '<div class="row" draggable="true" data-sid="' + r.id + '">' +
+  return `<div class="row" draggable="true" data-sid="${r.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-push-rule"', r.enabled) +
-    '<span class="row-title">' + esc(r.name) + '</span>' +
-    '<span class="tag">' + esc(ruleCatName(r.categoryId)) + '</span>' +
-    '<span class="tag">' + (r.uids.length === 0 ? '全部主播' : r.uids.length + ' 位主播') + '</span>' +
+    `<span class="row-title">${esc(r.name)}</span>` +
+    `<span class="tag">${esc(ruleCatName(r.categoryId))}</span>` +
+    `<span class="tag">${r.uids.length === 0 ? '全部主播' : r.uids.length + ' 位主播'}</span>` +
     '<span class="row-end">' +
     iconBtn('edit-push-rule', 'pencil', '编辑') +
     iconBtn('del-push-rule', 'trash', '删除', true) +
     '</span></div>';
 }
 
-function loadPush() {
+export function loadPush() {
   return Promise.all([
     api('/api/push'), api('/api/channels'), api('/api/rules'), api('/api/categories'),
   ]).then(function (rs) {
-    var en = document.getElementById('push-enabled');
+    const en = document.getElementById('push-enabled');
     if (en) en.checked = rs[0].enabled;
     chCache = rs[1].channels || [];
     document.getElementById('channel-list').innerHTML = chCache.map(channelRowHtml).join('');
@@ -58,40 +58,40 @@ function loadPush() {
 }
 
 CHANGES['toggle-push'] = function (el) {
-  var on = el.checked;
+  const on = el.checked;
   api('/api/push/enabled', 'PUT', { enabled: on })
     .then(function () { toast(on ? '推送已启用' : '推送已停用'); })
     .catch(function (e) { toast(e.message, true); loadPush(); });
 };
 
 CHANGES['toggle-channel'] = function (el) {
-  var id = el.closest('.row').getAttribute('data-sid');
-  var on = el.checked;
+  const id = el.closest('.row').getAttribute('data-sid');
+  const on = el.checked;
   api('/api/channels/' + id, 'PUT', { enabled: on })
     .then(function () { toast(on ? '已启用' : '已停用'); })
     .catch(function (e) { toast(e.message, true); loadPush(); });
 };
 
 CHANGES['toggle-push-rule'] = function (el) {
-  var id = el.closest('.row').getAttribute('data-sid');
-  var on = el.checked;
+  const id = el.closest('.row').getAttribute('data-sid');
+  const on = el.checked;
   api('/api/rules/' + id, 'PUT', { enabled: on })
     .then(function () { toast(on ? '已启用' : '已停用'); loadStreamers(); })
     .catch(function (e) { toast(e.message, true); loadPush(); });
 };
 
 function pushChannelById(id) {
-  for (var i = 0; i < chCache.length; i++) if (chCache[i].id === id) return chCache[i];
+  for (let i = 0; i < chCache.length; i++) if (chCache[i].id === id) return chCache[i];
   return null;
 }
 
 function pushRuleById(id) {
-  for (var i = 0; i < ruleCache.length; i++) if (ruleCache[i].id === id) return ruleCache[i];
+  for (let i = 0; i < ruleCache.length; i++) if (ruleCache[i].id === id) return ruleCache[i];
   return null;
 }
 
 ACTIONS['del-channel'] = function (el) {
-  var id = el.closest('.row').getAttribute('data-sid');
+  const id = el.closest('.row').getAttribute('data-sid');
   if (!confirm('删除这个渠道？勾选了它的规则会少一个推送去处。')) return;
   api('/api/channels/' + id, 'DELETE')
     .then(function () { toast('已删除'); loadPush(); })
@@ -99,7 +99,7 @@ ACTIONS['del-channel'] = function (el) {
 };
 
 ACTIONS['del-push-rule'] = function (el) {
-  var id = el.closest('.row').getAttribute('data-sid');
+  const id = el.closest('.row').getAttribute('data-sid');
   if (!confirm('删除这条规则？')) return;
   api('/api/rules/' + id, 'DELETE')
     .then(function () { toast('已删除'); loadPush(); loadStreamers(); })
@@ -113,18 +113,18 @@ ACTIONS['edit-channel'] = function (el) {
 };
 
 function openChannelSheet(id) {
-  var c = id === null ? null : pushChannelById(id);
+  const c = id === null ? null : pushChannelById(id);
   if (id !== null && !c) { toast('渠道数据未加载', true); return; }
-  var selType = c ? (c.notifier === 'toast' ? 'toast' : c.targetType) : 'toast';
+  const selType = c ? (c.notifier === 'toast' ? 'toast' : c.targetType) : 'toast';
   openSheet(c ? '编辑渠道' : '新增渠道',
-    field('名称', '<input id="cn-name" placeholder="如：粉丝群" value="' + (c ? esc(c.name) : '') + '">') +
+    field('名称', `<input id="cn-name" placeholder="如：粉丝群" value="${c ? esc(c.name) : ''}">`) +
     field('类型', '<select id="cn-type" data-change="cn-type-change">' +
       '<option value="toast">系统通知</option>' +
       '<option value="group">QQ群</option>' +
       '<option value="private">QQ私聊</option></select>') +
-    field('群号 / QQ号', '<input id="cn-target" value="' + (c && c.targetId ? esc(c.targetId) : '') + '">') +
+    field('群号 / QQ号', `<input id="cn-target" value="${c && c.targetId ? esc(c.targetId) : ''}">`) +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
-    '<button class="btn btn-primary" data-action="save-channel" data-id="' + (c ? c.id : '') + '">保存</button></div>');
+    `<button class="btn btn-primary" data-action="save-channel" data-id="${c ? c.id : ''}">保存</button></div>`);
   document.getElementById('cn-type').value = selType;
   document.getElementById('cn-target').disabled = selType === 'toast';
 }
@@ -134,9 +134,9 @@ CHANGES['cn-type-change'] = function (el) {
 };
 
 ACTIONS['save-channel'] = function (el) {
-  var idAttr = el.getAttribute('data-id');
-  var type = document.getElementById('cn-type').value;
-  var body = {
+  const idAttr = el.getAttribute('data-id');
+  const type = document.getElementById('cn-type').value;
+  const body = {
     name: document.getElementById('cn-name').value.trim(),
     notifier: type === 'toast' ? 'toast' : 'onebot',
   };
@@ -147,7 +147,7 @@ ACTIONS['save-channel'] = function (el) {
     body.targetType = type;
     body.targetId = document.getElementById('cn-target').value.trim();
   }
-  var req = idAttr
+  const req = idAttr
     ? api('/api/channels/' + idAttr, 'PUT', body)
     : api('/api/channels', 'POST', body);
   req.then(function () {
@@ -168,43 +168,43 @@ function uidsSummary(uids) {
 }
 
 function openPushRuleSheet(id) {
-  var r = id === null ? null : pushRuleById(id);
+  const r = id === null ? null : pushRuleById(id);
   if (id !== null && !r) { toast('规则数据未加载', true); return; }
   ruleSheetUids = r ? r.uids.slice() : [];
-  var catOptions = '<option value="">任意开播</option>' + ruleCats.map(function (c) {
-    return '<option value="' + c.id + '"' + (r && r.categoryId === c.id ? ' selected' : '') + '>' +
+  const catOptions = '<option value="">任意开播</option>' + ruleCats.map(function (c) {
+    return `<option value="${c.id}"${r && r.categoryId === c.id ? ' selected' : ''}>` +
       esc(c.name) + '</option>';
   }).join('');
-  var chanRows = chCache.length === 0
+  const chanRows = chCache.length === 0
     ? ''
     : chCache.map(function (c) {
-        return checkRowHtml('class="pr-ch" value="' + c.id + '"', !!(r && (r.channels || []).indexOf(c.id) >= 0),
-          '<span class="row-title">' + esc(c.name) + '</span>' +
-          '<span class="tag">' + esc(chanTypeName(c)) + '</span>');
+        return checkRowHtml(`class="pr-ch" value="${c.id}"`, !!(r && (r.channels || []).indexOf(c.id) >= 0),
+          `<span class="row-title">${esc(c.name)}</span>` +
+          `<span class="tag">${esc(chanTypeName(c))}</span>`);
       }).join('');
   openSheet(r ? '编辑规则' : '添加规则',
-    field('名称', '<input id="pr-name" placeholder="留空自动命名" value="' + (r ? esc(r.name) : '') + '">') +
+    field('名称', `<input id="pr-name" placeholder="留空自动命名" value="${r ? esc(r.name) : ''}">`) +
     field('分类', '<select id="pr-cat">' + catOptions + '</select>') +
     field('生效主播', '<div class="row" data-action="open-rule-streamers">' +
-      '<span class="row-title" id="pr-uids-summary">' + esc(uidsSummary(ruleSheetUids)) + '</span>' +
-      '<span class="row-end">' + icon('chevron-right') + '</span></div>') +
+      `<span class="row-title" id="pr-uids-summary">${esc(uidsSummary(ruleSheetUids))}</span>` +
+      `<span class="row-end">${icon('chevron-right')}</span></div>`) +
     '<div class="field"><label>渠道</label>' + (chanRows || '<span class="hint">还没有渠道</span>') + '</div>' +
-    field('推送词', '<input id="pr-tpl" placeholder="留空 = 默认推送词（{alias} 开播了）" value="' +
+    field('推送词', `<input id="pr-tpl" placeholder="留空 = 默认推送词（{alias} 开播了）" value="` +
       (r ? esc(r.messageTemplate || '') : '') + '">') +
     '<div class="sheet-foot"><span id="rule-err" class="form-err"></span>' +
     '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
-    '<button class="btn btn-primary" data-action="save-push-rule" data-id="' + (r ? r.id : '') + '">保存</button></div>');
+    `<button class="btn btn-primary" data-action="save-push-rule" data-id="${r ? r.id : ''}">保存</button></div>`);
 }
 
 // 二级 sheet：生效主播勾选（全部不勾 = 全部主播含未来新增）
 ACTIONS['open-rule-streamers'] = function () {
   api('/api/streamers').then(function (j) {
-    var list = j.streamers || [];
-    var rows = list.map(function (s) {
-      return checkRowHtml('class="pr-uid" value="' + esc(s.uid) + '"',
+    const list = j.streamers || [];
+    const rows = list.map(function (s) {
+      return checkRowHtml(`class="pr-uid" value="${esc(s.uid)}"`,
         ruleSheetUids.indexOf(String(s.uid)) >= 0,
-        '<span class="row-title">' + esc(s.alias || s.uname || s.uid) + '</span>' +
-        '<span class="meta">UID ' + esc(s.uid) + '</span>');
+        `<span class="row-title">${esc(s.alias || s.uname || s.uid)}</span>` +
+        `<span class="meta">UID ${esc(s.uid)}</span>`);
     }).join('');
     openSheet('生效主播',
       '<div class="hint">全部不勾 = 对全部主播生效（含未来新增）</div>' +
@@ -219,17 +219,17 @@ ACTIONS['open-rule-streamers'] = function () {
 function syncRuleUids() {
   ruleSheetUids = Array.prototype.slice.call(document.querySelectorAll('#sheet-mask2 .pr-uid'))
     .filter(function (x) { return x.checked; }).map(function (x) { return x.value; });
-  var el = document.getElementById('pr-uids-summary');
+  const el = document.getElementById('pr-uids-summary');
   if (el) el.textContent = uidsSummary(ruleSheetUids);
 }
 
 ACTIONS['save-push-rule'] = function (el) {
-  var err = document.getElementById('rule-err');
+  const err = document.getElementById('rule-err');
   if (err) err.textContent = '';
-  var name = document.getElementById('pr-name').value.trim();
-  var catVal = document.getElementById('pr-cat').value;
+  const name = document.getElementById('pr-name').value.trim();
+  const catVal = document.getElementById('pr-cat').value;
   // name 空则不提交该字段：POST 由后端自动补「规则 N」，PUT 保留原名（显式空串会 400）
-  var body = {
+  const body = {
     categoryId: catVal === '' ? null : Number(catVal),
     uids: ruleSheetUids,
     channels: Array.prototype.slice.call(document.querySelectorAll('#sheet-mask1 .pr-ch'))
@@ -237,8 +237,8 @@ ACTIONS['save-push-rule'] = function (el) {
     messageTemplate: document.getElementById('pr-tpl').value.trim() || null,
   };
   if (name) body.name = name;
-  var idAttr = el.getAttribute('data-id');
-  var req = idAttr
+  const idAttr = el.getAttribute('data-id');
+  const req = idAttr
     ? api('/api/rules/' + idAttr, 'PUT', body)
     : api('/api/rules', 'POST', body);
   req.then(function () {
@@ -273,7 +273,7 @@ makeSortable(document.getElementById('rule-list'), {
 
 // ---- 推送设置（推送渠道卡底部按钮）：冷启动触发时机 2 项 ----
 function pushBoolRow(id, text, on) {
-  return checkRowHtml('id="' + id + '"', on, '<span class="row-title">' + esc(text) + '</span>');
+  return checkRowHtml(`id="${id}"`, on, `<span class="row-title">${esc(text)}</span>`);
 }
 
 ACTIONS['open-push-settings'] = function () {
@@ -309,4 +309,3 @@ ACTIONS['save-push-settings'] = function () {
 };
 
 loadPush();
-`;

@@ -1,17 +1,15 @@
-/**
- * 面板前端 · 卡片2 LLM 分析：总开关（卡片右上角）+ provider 列表
- * （iOS 开关/名称/多模态标签/测试/编辑/删除/拖拽把手）+ 底部新增按钮。
- * 顺序 = 调用优先级，拖拽排序落库热生效；新增与编辑统一走 sheet 表单。
- * 内嵌进页面 <script>，内容不得出现反引号与 ${，一律字符串拼接。依赖 icons / app-core 段。
- */
-export const APP_LLM = `
-var llmCache = [];
+// 面板前端 · 卡片2 LLM 分析：总开关（卡片右上角）+ provider 列表
+// （iOS 开关/名称/多模态标签/测试/编辑/删除/拖拽把手）+ 底部新增按钮。
+// 顺序 = 调用优先级，拖拽排序落库热生效；新增与编辑统一走 sheet 表单。
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkboxHtml, makeSortable, openSheet, closeSheet } from './core.js';
+
+let llmCache = [];
 
 function llmRowHtml(p) {
-  return '<div class="row" draggable="true" data-sid="' + esc(p.name) + '">' +
+  return `<div class="row" draggable="true" data-sid="${esc(p.name)}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-llm-provider"', p.enabled) +
-    '<span class="row-title">' + esc(p.name) + '</span>' +
+    `<span class="row-title">${esc(p.name)}</span>` +
     (p.vision ? '<span class="tag">多模态</span>' : '') +
     '<span class="row-end">' +
     iconBtn('test-llm', 'bolt', '测试') +
@@ -23,41 +21,41 @@ function llmRowHtml(p) {
 function loadLlm() {
   return api('/api/llm').then(function (j) {
     llmCache = j.providers || [];
-    var en = document.getElementById('llm-enabled');
+    const en = document.getElementById('llm-enabled');
     if (en) en.checked = j.enabled;
     document.getElementById('llm-list').innerHTML = llmCache.map(llmRowHtml).join('');
   }).catch(function (e) { toast(e.message, true); });
 }
 
 CHANGES['toggle-llm'] = function (el) {
-  var on = el.checked;
+  const on = el.checked;
   api('/api/llm/enabled', 'PUT', { enabled: on })
     .then(function () { toast(on ? 'LLM 分析已启用' : 'LLM 分析已停用'); })
     .catch(function (e) { toast(e.message, true); loadLlm(); });
 };
 
 CHANGES['toggle-llm-provider'] = function (el) {
-  var name = el.closest('.row').getAttribute('data-sid');
-  var on = el.checked;
+  const name = el.closest('.row').getAttribute('data-sid');
+  const on = el.checked;
   api('/api/llm/providers/' + encodeURIComponent(name), 'PUT', { enabled: on })
     .then(function () { toast(on ? '已启用' : '已停用'); })
     .catch(function (e) { toast(e.message, true); loadLlm(); });
 };
 
 function llmByName(name) {
-  for (var i = 0; i < llmCache.length; i++) if (llmCache[i].name === name) return llmCache[i];
+  for (let i = 0; i < llmCache.length; i++) if (llmCache[i].name === name) return llmCache[i];
   return null;
 }
 
 ACTIONS['test-llm'] = function (el) {
-  var name = el.closest('.row').getAttribute('data-sid');
+  const name = el.closest('.row').getAttribute('data-sid');
   api('/api/llm/providers/' + encodeURIComponent(name) + '/test', 'POST')
     .then(function (j) { toast('可用（' + j.ms + 'ms）'); })
     .catch(function (e) { toast('不可用: ' + e.message, true); });
 };
 
 ACTIONS['del-llm'] = function (el) {
-  var name = el.closest('.row').getAttribute('data-sid');
+  const name = el.closest('.row').getAttribute('data-sid');
   if (!confirm('删除供应商「' + name + '」？它的 key 设置会保留。')) return;
   api('/api/llm/providers/' + encodeURIComponent(name), 'DELETE')
     .then(function () { toast('已删除'); loadLlm(); })
@@ -69,16 +67,16 @@ ACTIONS['edit-llm'] = function (el) { openLlmSheet(el.closest('.row').getAttribu
 
 // ---- 新增 / 编辑弹窗（同一个表单；name 是路径标识，编辑时不可改） ----
 function openLlmSheet(name) {
-  var p = name === null ? null : llmByName(name);
+  const p = name === null ? null : llmByName(name);
   if (name !== null && !p) { toast('供应商数据未加载', true); return; }
   openSheet(p ? '编辑供应商' : '新增供应商',
-    field('名称', '<input id="lp-name" placeholder="如 deepseek" value="' +
+    field('名称', `<input id="lp-name" placeholder="如 deepseek" value="` +
       (p ? esc(p.name) : '') + '"' + (p ? ' disabled' : '') + '>') +
-    field('baseURL', '<input id="lp-base" placeholder="如 https://api.deepseek.com/v1" value="' +
+    field('baseURL', `<input id="lp-base" placeholder="如 https://api.deepseek.com/v1" value="` +
       (p ? esc(p.baseURL) : '') + '">') +
-    field('模型', '<input id="lp-model" placeholder="如 deepseek-chat" value="' +
+    field('模型', `<input id="lp-model" placeholder="如 deepseek-chat" value="` +
       (p ? esc(p.model) : '') + '">') +
-    field('API key', '<input id="lp-key" placeholder="多个用英文逗号分隔；本地无鉴权端点留空" value="' +
+    field('API key', `<input id="lp-key" placeholder="多个用英文逗号分隔；本地无鉴权端点留空" value="` +
       (p && p.key.value ? esc(p.key.value) : '') + '">') +
     '<div class="field-row">' +
       field('多模态', checkboxHtml('id="lp-vision"', !!(p && p.vision), false, '识图')) +
@@ -97,9 +95,9 @@ function openLlmSheet(name) {
 }
 
 ACTIONS['save-llm'] = function () {
-  var nameEl = document.getElementById('lp-name');
-  var isNew = !nameEl.disabled;
-  var body = {
+  const nameEl = document.getElementById('lp-name');
+  const isNew = !nameEl.disabled;
+  const body = {
     baseURL: document.getElementById('lp-base').value.trim(),
     model: document.getElementById('lp-model').value.trim(),
     vision: document.getElementById('lp-vision').checked,
@@ -107,7 +105,7 @@ ACTIONS['save-llm'] = function () {
     api: document.getElementById('lp-api').value,
     key: document.getElementById('lp-key').value.trim(),
   };
-  var req = isNew
+  const req = isNew
     ? api('/api/llm/providers', 'POST', Object.assign({ name: nameEl.value.trim() }, body))
     : api('/api/llm/providers/' + encodeURIComponent(nameEl.value), 'PUT', body);
   req.then(function () {
@@ -119,16 +117,16 @@ ACTIONS['save-llm'] = function () {
 
 // ---- LLM 高级（LLM 卡底部按钮）：超时 / 熔断阈值 / 熔断冷却 3 项 ----
 function llmAdvNum(id) {
-  var v = parseInt(document.getElementById(id).value, 10);
+  const v = parseInt(document.getElementById(id).value, 10);
   return isNaN(v) ? null : v;
 }
 
 ACTIONS['open-llm-advanced'] = function () {
   api('/api/advanced').then(function (j) {
     openSheet('LLM 高级',
-      field('请求超时（秒，1~600）', '<input id="la-timeout" value="' + Math.round(j.llmRequestTimeoutMs / 1000) + '">') +
-      field('熔断阈值（连续失败次数，1~20）', '<input id="la-threshold" value="' + j.llmCircuitThreshold + '">') +
-      field('熔断冷却（秒，10~3600）', '<input id="la-cooldown" value="' + Math.round(j.llmCircuitCooldownMs / 1000) + '">') +
+      field('请求超时（秒，1~600）', `<input id="la-timeout" value="${Math.round(j.llmRequestTimeoutMs / 1000)}">`) +
+      field('熔断阈值（连续失败次数，1~20）', `<input id="la-threshold" value="${j.llmCircuitThreshold}">`) +
+      field('熔断冷却（秒，10~3600）', `<input id="la-cooldown" value="${Math.round(j.llmCircuitCooldownMs / 1000)}">`) +
       '<div class="sheet-foot"><span id="la-err" class="form-err"></span>' +
       '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
       '<button class="btn btn-primary" data-action="save-llm-advanced">保存</button></div>');
@@ -136,11 +134,11 @@ ACTIONS['open-llm-advanced'] = function () {
 };
 
 ACTIONS['save-llm-advanced'] = function () {
-  var errEl = document.getElementById('la-err');
-  var ids = ['la-timeout', 'la-threshold', 'la-cooldown'];
-  var vals = {};
-  for (var i = 0; i < ids.length; i++) {
-    var v = llmAdvNum(ids[i]);
+  const errEl = document.getElementById('la-err');
+  const ids = ['la-timeout', 'la-threshold', 'la-cooldown'];
+  const vals = {};
+  for (let i = 0; i < ids.length; i++) {
+    const v = llmAdvNum(ids[i]);
     if (v === null) { errEl.textContent = '数值项请输入整数'; return; }
     vals[ids[i]] = v;
   }
@@ -166,4 +164,3 @@ makeSortable(document.getElementById('llm-list'), {
 });
 
 loadLlm();
-`;

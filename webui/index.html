@@ -1,33 +1,10 @@
-/**
- * 控制面板的单页 HTML，以字符串内嵌（dist 只编译 TS，不拷贝静态文件）。
- * 原生 fetch 调 /api/*，无框架无 CDN，离线可用。
- * 本文件只是拼壳：样式、图标与各脚本段在 page/ 目录下拆分维护。
- * 壳里不写内联 on* 处理器：交互统一走 data-action / data-change / data-input 事件委托（app-core 段），
- * 静态图标位用 data-icon 属性由 app-core 统一填充。
- * 注意：内嵌脚本里不得出现反引号与 ${（page/qr-lib.ts 资源文件豁免），避免与外层模板字面量冲突。
- */
-import { PANEL_CSS } from './page/style.js';
-import { QR_LIB_B64 } from './page/qr-lib.js';
-import { APP_ICONS } from './page/icons.js';
-import { APP_CORE } from './page/app-core.js';
-import { APP_LISTEN } from './page/app-listen.js';
-import { APP_STREAMERS } from './page/app-streamers.js';
-import { APP_PUSH } from './page/app-push.js';
-import { APP_LLM } from './page/app-llm.js';
-import { APP_CATEGORIES } from './page/app-categories.js';
-import { APP_NAPCAT } from './page/app-napcat.js';
-import { APP_FOLLOWS } from './page/app-follows.js';
-import { APP_SCHEDULE } from './page/app-schedule.js';
-
-const QR_LIB = Buffer.from(QR_LIB_B64, 'base64').toString('utf8');
-
-export const PANEL_PAGE = `<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DD-claw 控制面板</title>
-<style>${PANEL_CSS}</style>
+<link rel="stylesheet" href="./style.css">
 </head>
 <body>
 <div id="toasts" class="toast-host"></div>
@@ -117,19 +94,6 @@ export const PANEL_PAGE = `<!doctype html>
 <div id="sheet-mask1" class="sheet-mask hidden"><div class="sheet"></div></div>
 <div id="sheet-mask2" class="sheet-mask hidden"><div class="sheet"></div></div>
 
-<script>${QR_LIB}</script>
-<script>
-${APP_ICONS}
-${APP_CORE}
-${APP_LISTEN}
-${APP_STREAMERS}
-${APP_PUSH}
-${APP_LLM}
-${APP_CATEGORIES}
-${APP_NAPCAT}
-${APP_FOLLOWS}
-${APP_SCHEDULE}
-</script>
+<script type="module" src="./js/boot.js"></script>
 </body>
 </html>
-`;

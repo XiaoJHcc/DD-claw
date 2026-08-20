@@ -1,0 +1,5028 @@
+{
+  "meta": {
+    "exportedAt": 1787158800000
+  },
+  "streamers": [
+    {
+      "uid": "7706705",
+      "uname": "阿梓从小就很可爱",
+      "alias": null,
+      "roomId": "80397",
+      "face": "demo/avatars/7706705.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": "阿梓从小就很可爱",
+      "weiboUid": "2203177060",
+      "profileNote": null,
+      "live": {
+        "isLive": false,
+        "title": "早上好！究极死士回",
+        "liveTime": 0,
+        "roomId": "80397",
+        "areaName": "CS2",
+        "parentAreaName": "网游",
+        "keyframe": "demo/keyframes/7706705.jpg",
+        "cover": "demo/keyframes/7706705.jpg",
+        "online": 0,
+        "lastLiveAt": 1787131694,
+        "polledAt": 1787162009
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "家人们周年新3D来了！[UPOWER_7706705_打call]",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/e58d129d8007a4a785d4cc218d543bd87706705.png"
+          ],
+          "pubTs": 1787137101,
+          "url": "https://t.bilibili.com/1238233492336148486"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "早上好！究极死士回",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ca9e77ac4f98c5bc578727e350f0b91352c404d3.jpg"
+          ],
+          "pubTs": 1787102835,
+          "url": "https://t.bilibili.com/1238086320951132161"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "究极死士回",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ca9e77ac4f98c5bc578727e350f0b91352c404d3.jpg"
+          ],
+          "pubTs": 1787002225,
+          "url": "https://t.bilibili.com/1237654204269461509"
+        },
+        {
+          "platform": "weibo",
+          "type": "mblog",
+          "text": "今日任务：整理房间 洗衣服 给猫梳毛 听歌学歌\n目前进度：躺着 ​​​",
+          "pics": [],
+          "pubTs": 1786974098,
+          "url": "https://weibo.com/2203177060/RdQXfv2jA"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "暗黑果赖",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ca9e77ac4f98c5bc578727e350f0b91352c404d3.jpg"
+          ],
+          "pubTs": 1786899785,
+          "url": "https://t.bilibili.com/1237214227857408000"
+        }
+      ]
+    },
+    {
+      "uid": "434334701",
+      "uname": "七海Nana7mi",
+      "alias": null,
+      "roomId": "21452505",
+      "face": "demo/avatars/434334701.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": "七海Nana7mi",
+      "weiboUid": "7198559139",
+      "profileNote": null,
+      "live": {
+        "isLive": true,
+        "title": "二次元偷偷",
+        "liveTime": 1787148001,
+        "roomId": "21452505",
+        "areaName": "主机游戏",
+        "parentAreaName": "单机游戏",
+        "keyframe": "demo/keyframes/434334701.jpg",
+        "cover": "demo/keyframes/434334701.jpg",
+        "online": 153271,
+        "lastLiveAt": 1787162009,
+        "polledAt": 1787162009
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "二次元偷偷",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ac48a8cac942a712887d3e41ed2ff890063ee950.jpg"
+          ],
+          "pubTs": 1787148604,
+          "url": "https://t.bilibili.com/1238282897314545720"
+        },
+        {
+          "platform": "weibo",
+          "type": "mblog",
+          "text": "好搞笑我刷到一条卖阔腿裤的它的卖点是可以防老登吐地上痰的防痰神裤 ​​​",
+          "pics": [],
+          "pubTs": 1787135347,
+          "url": "https://weibo.com/7198559139/Re8y6guK7"
+        },
+        {
+          "platform": "weibo",
+          "type": "mblog",
+          "text": "今天看一晚上动画片好吧[色][色]看完上周新番再看哈萨维！十点来 今天不去健身房我要爽爽的眯 ​​​",
+          "pics": [],
+          "pubTs": 1787134557,
+          "url": "https://weibo.com/7198559139/Re8sLaBWF"
+        },
+        {
+          "platform": "weibo",
+          "type": "mblog",
+          "text": "种田也没通关wow任务也没做完！ ​​​",
+          "pics": [],
+          "pubTs": 1787088944,
+          "url": "https://weibo.com/7198559139/Re3ubqYOk"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "我来啦",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ac48a8cac942a712887d3e41ed2ff890063ee950.jpg"
+          ],
+          "pubTs": 1787078645,
+          "url": "https://t.bilibili.com/1237982425695387657"
+        }
+      ]
+    },
+    {
+      "uid": "1048135385",
+      "uname": "花礼Harei",
+      "alias": null,
+      "roomId": "1820703922",
+      "face": "demo/avatars/1048135385.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": true,
+        "title": "七夕晕晕念台词^^",
+        "liveTime": 1787144356,
+        "roomId": "1820703922",
+        "areaName": "虚拟日常",
+        "parentAreaName": "虚拟主播",
+        "keyframe": "demo/keyframes/1048135385.jpg",
+        "cover": "demo/keyframes/1048135385.jpg",
+        "online": 0,
+        "lastLiveAt": 1787158800,
+        "polledAt": 1787158800
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "七夕晕晕念台词^^",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/261c3e1dab792fb1d8e4cc8832c44be4905fea82.jpg"
+          ],
+          "pubTs": 1787144899,
+          "url": "https://t.bilibili.com/1238266984441839620"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_FORWARD",
+          "text": "彩虹一直在雨后才会出现，那就祝福我们的世界全都是大太阳吧🌈\n//转发自 @Amor厭: 画出属于我们的家\n來時路的終點是和你遇見ฅ@花礼Harei",
+          "pics": [
+            "http://i0.hdslb.com/bfs/archive/4f1a228aa54a39f9c4984f284e2005d504a8620d.jpg"
+          ],
+          "pubTs": 1787142573,
+          "url": "https://t.bilibili.com/1238256994372026393"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "七夕弹唱一会儿^^",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/261c3e1dab792fb1d8e4cc8832c44be4905fea82.jpg"
+          ],
+          "pubTs": 1787119829,
+          "url": "https://t.bilibili.com/1238159309630603304"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_FORWARD",
+          "text": "刚起床嗓子有点死了，鼠14:00来弹唱吧，先开开嗓[花礼Harei收藏集表情包_还没睡]\n//转发自 @花礼Harei: 摸摸小猫头，今晚睡得着[鸣潮_祈愿]\n今天玩了鸣鸣的潮2.8[来古-注意]\n晚上猛猛聊天了，杂谈真开心吧[老鼠]\n小猫七夕节快乐哦～[拥抱]\n明天下午13:00来弹唱吧[桃源_乖巧]\n晚上来台词回，顺便喝点小饮料🍹[桃源_傲娇]\n今天就早点休息，晚安捏～啵啵小猫[白荆回廊_期待]\n",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/df31ad52744f621023775c2aa8b09dba1048135385.jpg"
+          ],
+          "pubTs": 1787114217,
+          "url": "https://t.bilibili.com/1238135206253166599"
+        }
+      ]
+    },
+    {
+      "uid": "1203217682",
+      "uname": "泽音Melody",
+      "alias": null,
+      "roomId": "1947277414",
+      "face": "demo/avatars/1203217682.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": true,
+        "title": "七夕唱唱聊聊~",
+        "liveTime": 1787140784,
+        "roomId": "1947277414",
+        "areaName": "虚拟Singer",
+        "parentAreaName": "虚拟主播",
+        "keyframe": "demo/keyframes/1203217682.jpg",
+        "cover": "demo/keyframes/1203217682.jpg",
+        "online": 165701,
+        "lastLiveAt": 1787162009,
+        "polledAt": 1787162009
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "七夕唱唱聊聊~",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/b4b7fd6c194a8bdafc012467c70ed488b87503e2.jpg"
+          ],
+          "pubTs": 1787141100,
+          "url": "https://t.bilibili.com/1238250667877859352"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "买了凤梨米酒和真香橙沙瓦~\n这次可不能再喝吐了[UPOWER_1203217682_呃呃]\n七夕一起小酌一下~[UPOWER_1203217682_在吗]",
+          "pics": [],
+          "pubTs": 1787137215,
+          "url": "https://t.bilibili.com/1238233981926768722"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "b站对音音的用户画像有点刻板印象了[UPOWER_1203217682_震惊]得努力刷点视频了[UPOWER_1203217682_呃呃]\n晚安yys！",
+          "pics": [],
+          "pubTs": 1787080585,
+          "url": "https://t.bilibili.com/1237990757965496324"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "一起拼石",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/b4b7fd6c194a8bdafc012467c70ed488b87503e2.jpg"
+          ],
+          "pubTs": 1787055094,
+          "url": "https://t.bilibili.com/1237881274918502440"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "刚从拼豆店出来……\n谁说拼豆解压的！我怎么腰酸背痛！而且还没弄完！还有好多[UPOWER_1203217682_呜呜]明天还要去[UPOWER_1203217682_呜呜][UPOWER_1203217682_呜呜][UPOWER_1203217682_呜呜]\n晚安了音悦生[UPOWER_1203217682_呜呜][UPOWER_1203217682_呜呜][UPOWER_1203217682_呜呜][UPOWER_1203217682_呜呜][UPOWER_1203217682_呜呜]",
+          "pics": [],
+          "pubTs": 1786979882,
+          "url": "https://t.bilibili.com/1237558241853964289"
+        }
+      ]
+    },
+    {
+      "uid": "1609526545",
+      "uname": "栞栞Shiori",
+      "alias": null,
+      "roomId": "26966466",
+      "face": "demo/avatars/1609526545.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": false,
+        "title": "七夕唱唱歌(*^▽^*)",
+        "liveTime": 0,
+        "roomId": "26966466",
+        "areaName": "虚拟日常",
+        "parentAreaName": "虚拟主播",
+        "keyframe": "demo/keyframes/1609526545.jpg",
+        "cover": "demo/keyframes/1609526545.jpg",
+        "online": 0,
+        "lastLiveAt": 1787155960,
+        "polledAt": 1787162009
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "七夕唱唱歌(*^▽^*)",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ead60d57d17cfb39abf654a2a981906bbae77475.jpg"
+          ],
+          "pubTs": 1787145225,
+          "url": "https://t.bilibili.com/1238268384631586819"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "七夕快乐(*^▽^*)",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ead60d57d17cfb39abf654a2a981906bbae77475.jpg"
+          ],
+          "pubTs": 1787105359,
+          "url": "https://t.bilibili.com/1238097161471655958"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "七夕快乐獭獭栞[栞栞收藏集动态表情包_喜欢][栞栞收藏集动态表情包_喜欢][栞栞收藏集动态表情包_喜欢]muamua",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/e3eb45121f8feb152d1ec88dab3977ce1609526545.gif"
+          ],
+          "pubTs": 1787072800,
+          "url": "https://t.bilibili.com/1237957321586376761"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "小栞来！！",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ead60d57d17cfb39abf654a2a981906bbae77475.jpg"
+          ],
+          "pubTs": 1787060750,
+          "url": "https://t.bilibili.com/1237905567228362758"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "早安獭獭栞！",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ead60d57d17cfb39abf654a2a981906bbae77475.jpg"
+          ],
+          "pubTs": 1787019374,
+          "url": "https://t.bilibili.com/1237727858688786457"
+        }
+      ]
+    },
+    {
+      "uid": "1789460279",
+      "uname": "弥月Mizuki",
+      "alias": null,
+      "roomId": "30655190",
+      "face": "demo/avatars/1789460279.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": true,
+        "title": "念叨几句台词⭐",
+        "liveTime": 1787144444,
+        "roomId": "30655190",
+        "areaName": "虚拟日常",
+        "parentAreaName": "虚拟主播",
+        "keyframe": "demo/keyframes/1789460279.jpg",
+        "cover": "demo/keyframes/1789460279.jpg",
+        "online": 67444,
+        "lastLiveAt": 1787162009,
+        "polledAt": 1787162009
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "念叨几句台词⭐",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/e017a813a43eb1e3a485ea5f99c9df600c8afa1d.jpg"
+          ],
+          "pubTs": 1787144761,
+          "url": "https://t.bilibili.com/1238266391767810048"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "土豆土豆压制！⭐",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/a9d9099f471e30d70790faf9ffbc41ae7782b30e.jpg"
+          ],
+          "pubTs": 1787123425,
+          "url": "https://t.bilibili.com/1238174754317271046"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "兔下午好呀！今天是七夕，啵啵你！\n今晚是七夕的台词回，我会深情念你们挑选的台词，希望我们可以度过一个美好的晚上，❤️",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/1d5be5bd87ece4fa897b8bbe9fa87b551789460279.jpg"
+          ],
+          "pubTs": 1787120739,
+          "url": "https://t.bilibili.com/1238163218038259729"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "辛苦啦刚才休息很久才缓过来捏，有点晕晕的\n这一周12点之后都会魔一会的说！！看看慢慢蠕动一下进度！！明天的健身环因为身体原因取消咯，来快乐的🥔🥔！晚上是七夕台词回啦，可以在置顶动态的图里面投稿哟，🥺来投稿陪陪小弥吧\n🎋七夕节快乐哦，晚安",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/3a7c5cd735d416519989b19e1813cab91789460279.jpg"
+          ],
+          "pubTs": 1787075674,
+          "url": "https://t.bilibili.com/1237969665345454117"
+        }
+      ]
+    },
+    {
+      "uid": "2132180406",
+      "uname": "明前奶绿",
+      "alias": null,
+      "roomId": "25034104",
+      "face": "demo/avatars/2132180406.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": true,
+        "title": "不看恐怖片看什么！",
+        "liveTime": 1787140466,
+        "roomId": "25034104",
+        "areaName": "虚拟日常",
+        "parentAreaName": "虚拟主播",
+        "keyframe": "demo/keyframes/2132180406.jpg",
+        "cover": "demo/keyframes/2132180406.jpg",
+        "online": 0,
+        "lastLiveAt": 1787158800,
+        "polledAt": 1787158800
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "不看恐怖片看什么！",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/a84b28356bc26d5d4be8410d1d6b2c6385cd8e60.jpg"
+          ],
+          "pubTs": 1787141010,
+          "url": "https://t.bilibili.com/1238250281321365508"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "我感觉我不带脑子光凭直觉判断可能比我推理靠谱点，谁同意谁反对[明前奶绿收藏集表情包_计划通]\n晚安(๑ᵕ⌓ᵕ̤)\n",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/9c64da813f51d3dee14f2845bc25fb5a2132180406.png"
+          ],
+          "pubTs": 1787075144,
+          "url": "https://t.bilibili.com/1237967389030613014"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "海猫中少话",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/a84b28356bc26d5d4be8410d1d6b2c6385cd8e60.jpg"
+          ],
+          "pubTs": 1787054754,
+          "url": "https://t.bilibili.com/1237879814651641894"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "本本本本本周日程表在这里[明前奶绿收藏集表情包_呐呐呐]\n时间改动🈶别来错时间啦[明前奶绿收藏集表情包_我来]\n一会见*͈ᴗ͈ˬᴗ͈ෆ\n",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/ddca622553ab9dbc29768254134a2d2c2132180406.png"
+          ],
+          "pubTs": 1787053918,
+          "url": "https://t.bilibili.com/1237876224024379413"
+        }
+      ]
+    },
+    {
+      "uid": "387636363",
+      "uname": "雫るる_Official",
+      "alias": null,
+      "roomId": "21013446",
+      "face": "demo/avatars/387636363.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": false,
+        "title": "看神人恋爱综艺",
+        "liveTime": 0,
+        "roomId": "21013446",
+        "areaName": "虚拟日常",
+        "parentAreaName": "虚拟主播",
+        "keyframe": "demo/keyframes/387636363.jpg",
+        "cover": "demo/keyframes/387636363.jpg",
+        "online": 0,
+        "lastLiveAt": 1787135398,
+        "polledAt": 1787162009
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "看神人恋爱综艺",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/cf3e88350ca8ede65aeebe493458fa73eadbd598.jpg"
+          ],
+          "pubTs": 1787127459,
+          "url": "https://t.bilibili.com/1238192080257286185"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "徒师赛",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/cf3e88350ca8ede65aeebe493458fa73eadbd598.jpg"
+          ],
+          "pubTs": 1787051219,
+          "url": "https://t.bilibili.com/1237864631922327591"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "看神人恋综",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/cf3e88350ca8ede65aeebe493458fa73eadbd598.jpg"
+          ],
+          "pubTs": 1787033469,
+          "url": "https://t.bilibili.com/1237788396249677847"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "看神人恋综",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/cf3e88350ca8ede65aeebe493458fa73eadbd598.jpg"
+          ],
+          "pubTs": 1786945030,
+          "url": "https://t.bilibili.com/1237408553662152713"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "看神人恋综",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/cf3e88350ca8ede65aeebe493458fa73eadbd598.jpg"
+          ],
+          "pubTs": 1786685045,
+          "url": "https://t.bilibili.com/1236291926591799317"
+        }
+      ]
+    },
+    {
+      "uid": "401315430",
+      "uname": "星瞳_Official",
+      "alias": null,
+      "roomId": "22886883",
+      "face": "demo/avatars/401315430.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": false,
+        "title": "【3D】不约会，干点别的",
+        "liveTime": 0,
+        "roomId": "22886883",
+        "areaName": "虚拟日常",
+        "parentAreaName": "虚拟主播",
+        "keyframe": "demo/keyframes/401315430.jpg",
+        "cover": "demo/keyframes/401315430.jpg",
+        "online": 0,
+        "lastLiveAt": 1787146710,
+        "polledAt": 1787162009
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "剧情纯属虚构，愿此后的每一天都是最好的一天，再次祝大家节日快乐呀～晚安～mua！\n",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/f5151af89418c7201191ebd43839dda7401315430.png"
+          ],
+          "pubTs": 1787147453,
+          "url": "https://t.bilibili.com/1238277953839693832"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "【3D】不约会，干点别的",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/ac11688c55595efc62e6ab2a3615f4cf6bb7679e.jpg"
+          ],
+          "pubTs": 1787140515,
+          "url": "https://t.bilibili.com/1238248155337719812"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "七夕快乐！[星回纪·时空轮转_是我的翅膀]我发誓我再也不当嘉欣了，四豆有没有无所谓了，820晚上来看我黑神话大结局好吗？[星回纪·时空轮转_我急了]今晚也别忘了来跟我过节。[星回纪·时空轮转_那咋啦]",
+          "pics": [],
+          "pubTs": 1787072048,
+          "url": "https://t.bilibili.com/1237954091772018691"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "【2D】黑神话鏖战第五章",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/466306bdbbaede1bd7936844430302b560bf8aa4.jpg"
+          ],
+          "pubTs": 1787056195,
+          "url": "https://t.bilibili.com/1237886003694272521"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "“[热]最爱的V要跟我一起过七夕，她心里有我！怎么后天8点才能见面？急急急！！！”\n",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/51072a56ca7dd73cdb0014f9d788bede401315430.png"
+          ],
+          "pubTs": 1786960804,
+          "url": "https://t.bilibili.com/1237476302482571315"
+        }
+      ]
+    },
+    {
+      "uid": "796556",
+      "uname": "-菫時-",
+      "alias": null,
+      "roomId": "3473884",
+      "face": "demo/avatars/796556.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": false,
+        "title": "午安",
+        "liveTime": 0,
+        "roomId": "3473884",
+        "areaName": "虚拟Singer",
+        "parentAreaName": "虚拟主播",
+        "keyframe": "demo/keyframes/796556.jpg",
+        "cover": "demo/keyframes/796556.jpg",
+        "online": 0,
+        "lastLiveAt": 1786684680,
+        "polledAt": 1787162009
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "听说这次的冰火歌会，还会有某位\"神秘嘉宾\"出演哦！\n没错就是我啦~\n\n8月23日19:00冰火歌会在1号直播间演出哦！\n预约有抽奖🎟一起中奖吧！\n",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/2dd187533bb57bad21ee89d5f6982b7e796556.png"
+          ],
+          "pubTs": 1787104599,
+          "url": "https://t.bilibili.com/1238093897249325093"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "午安",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/18cc7c52c1e9b9d20264c01300e5ab931fa1d1d4.jpg"
+          ],
+          "pubTs": 1786681240,
+          "url": "https://t.bilibili.com/1236275584246480903"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_FORWARD",
+          "text": "[杠杠表情包_捏捏脸]和弥雾同学聊聊天\n//转发自 @弥雾meow: 这次的主题是「旅行前的准备」——看看谁是准备周全的计划派，谁又会在最后一刻手忙脚乱（笑）\n\n就当作一次旅行前夜的小聚会吧。\n明晚直播间见，来陪我们一起准备出发～🧳✨\n\n本次邀请的朋友：@深水怠Darara @米汀Nagisa @小针彩 @弥月Mizuki @-菫時- @西门小昭 \n感谢大家在周五晚上抽空来猫咖玩～[弥雾meow_宝宝][弥雾meow_心动]\n",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/3fc33e1fd98d45e5383221cef1ade0673546581515111228.png"
+          ],
+          "pubTs": 1786657432,
+          "url": "https://t.bilibili.com/1236173329611620352"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_FORWARD",
+          "text": "在这种场合相遇，该说是幸运还是不幸呢？\n//转发自 @-墨绾泠晴_RinaGachi-: 啧...被发现了呢...\n真没办法...等待的时间里，就破例允许你待一会吧。\n\n……\n\n...话说你那像小狗一样的眼神是怎么回事？\n难不成，很期待我测试你的忠诚度？\n那么...\n\n……\n\n哼哼...再见了，「      」。\n这是只有你和我知道的秘密，要记住喔，“共犯”？\n@-菫時- ",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/d4e1bbabc86406f7ddc8c0d41ed45f498205473.jpg"
+          ],
+          "pubTs": 1786657327,
+          "url": "https://t.bilibili.com/1236172878677803011"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_FORWARD",
+          "text": "蓝色小女孩来了！！！\n//转发自 @-九天连箭-: @-菫時-\n\n",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/32f37713117cf700c6264a977f8555cf314866683.jpg"
+          ],
+          "pubTs": 1786309176,
+          "url": "https://t.bilibili.com/1234677581488324616"
+        }
+      ]
+    },
+    {
+      "uid": "1265680561",
+      "uname": "永雏塔菲",
+      "alias": null,
+      "roomId": "22603245",
+      "face": "demo/avatars/1265680561.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": true,
+        "title": "恐怖的植物人",
+        "liveTime": 1787147486,
+        "roomId": "22603245",
+        "areaName": "植物大战僵尸",
+        "parentAreaName": "单机游戏",
+        "keyframe": "demo/keyframes/1265680561.jpg",
+        "cover": "demo/keyframes/1265680561.jpg",
+        "online": 0,
+        "lastLiveAt": 1787158800,
+        "polledAt": 1787158800
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "织女过七夕喵",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/6ecd54d378a9aaa30971cbed44926100ce6e3558.jpg"
+          ],
+          "pubTs": 1787148015,
+          "url": "https://t.bilibili.com/1238280367591391238"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "冒险小队集合喵[仲夏集表情动态包_启动]\n马里奥红叔 / 罗太又破防了\n KL・qiqi_/永雏塔菲\n据说这个千星奇域里有恐怖元素喵[永雏塔菲叮咚集动态_看]\n期待雏草姬前来围观taffy鬼叫[仲夏集表情动态包_牛魔]教taffy解谜喵[永雏塔菲叮咚集动态_突发奇想]",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/36e60d8d3ffca60437d23e78d7de4a091265680561.jpg"
+          ],
+          "pubTs": 1787108131,
+          "url": "https://t.bilibili.com/1238109067097931782"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "原神7.0第二幕一口气打完",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/new_room_cover/6ecd54d378a9aaa30971cbed44926100ce6e3558.jpg"
+          ],
+          "pubTs": 1787061590,
+          "url": "https://t.bilibili.com/1237909175002988552"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_AV",
+          "text": "taffy只有两岁🤓taffy要吃汉堡🍔\n原创：埴安神袿姫\n【motion】白夜泠/Lac\n【MME】白夜泠/P.I.P",
+          "pics": [
+            "http://i1.hdslb.com/bfs/archive/02d0239c9e3cae59964dc3bdb25db980da457c26.jpg"
+          ],
+          "pubTs": 1787039595,
+          "url": "https://t.bilibili.com/1237814707198361622"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_AV",
+          "text": "期待周末的来临🥰\n编舞:聂是臭嘎嘎\n【motion】\n千面动捕/自制\n【Stage】\n糖斯\n【MME】\n三金络合物/そぼろ/针金p/P.I.P/RedialC/ましまし/呉石/rui",
+          "pics": [
+            "http://i0.hdslb.com/bfs/archive/534039b07779525ca4aa35939bd537b7861acdbc.jpg"
+          ],
+          "pubTs": 1786961700,
+          "url": "https://t.bilibili.com/1237480150759636994"
+        }
+      ]
+    },
+    {
+      "uid": "1298779265",
+      "uname": "灰泽满Hazel",
+      "alias": null,
+      "roomId": "1713546334",
+      "face": "demo/avatars/1298779265.jpg",
+      "watch": true,
+      "analyze": false,
+      "notify": true,
+      "weiboNick": null,
+      "weiboUid": null,
+      "profileNote": null,
+      "live": {
+        "isLive": false,
+        "title": "七七夕夕果汁回",
+        "liveTime": 0,
+        "roomId": "1713546334",
+        "areaName": "虚拟日常",
+        "parentAreaName": "虚拟主播",
+        "keyframe": "demo/keyframes/1298779265.jpg",
+        "cover": "demo/keyframes/1298779265.jpg",
+        "online": 0,
+        "lastLiveAt": 1787153605,
+        "polledAt": 1787162009
+      },
+      "posts": [
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "晚安哦晚安[UP_1298779265_眠]",
+          "pics": [],
+          "pubTs": 1787153560,
+          "url": "https://t.bilibili.com/1238304183164076065"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_LIVE_RCMD",
+          "text": "七七夕夕果汁回",
+          "pics": [
+            "https://i0.hdslb.com/bfs/live/user_cover/999beb3384db629089288e56ef1bfa270fe4133f.jpg"
+          ],
+          "pubTs": 1787142630,
+          "url": "https://t.bilibili.com/1238257239200890887"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_FORWARD",
+          "text": "不出所料 会迟到个20分钟🥺🏃马上马上…\n//转发自 @灰泽满Hazel: 祈祷在开播前能把该写的东西写完…然后安心直播",
+          "pics": [],
+          "pubTs": 1787140793,
+          "url": "https://t.bilibili.com/1238249349354356736"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_DRAW",
+          "text": "祈祷在开播前能把该写的东西写完…然后安心直播",
+          "pics": [],
+          "pubTs": 1787133933,
+          "url": "https://t.bilibili.com/1238219885850394625"
+        },
+        {
+          "platform": "bili_dynamic",
+          "type": "DYNAMIC_TYPE_FORWARD",
+          "text": "快乐快乐～\n//转发自 @雲1008: @灰泽满Hazel \n画了新衣服，满满冻冻七夕快乐💚",
+          "pics": [
+            "http://i0.hdslb.com/bfs/new_dyn/9188db6a302793b4132de3dac0c4bcc940201924.png"
+          ],
+          "pubTs": 1787130165,
+          "url": "https://t.bilibili.com/1238203702383214617"
+        }
+      ]
+    }
+  ],
+  "follows": [
+    {
+      "uid": "434334701",
+      "uname": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg"
+    },
+    {
+      "uid": "7706705",
+      "uname": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg"
+    },
+    {
+      "uid": "401315430",
+      "uname": "星瞳_Official",
+      "face": "demo/avatars/401315430.jpg"
+    },
+    {
+      "uid": "387636363",
+      "uname": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg"
+    },
+    {
+      "uid": "2132180406",
+      "uname": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg"
+    },
+    {
+      "uid": "1265680561",
+      "uname": "永雏塔菲",
+      "face": "demo/avatars/1265680561.jpg"
+    },
+    {
+      "uid": "1609526545",
+      "uname": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg"
+    },
+    {
+      "uid": "1789460279",
+      "uname": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg"
+    },
+    {
+      "uid": "1298779265",
+      "uname": "灰泽满Hazel",
+      "face": "demo/avatars/1298779265.jpg"
+    },
+    {
+      "uid": "1048135385",
+      "uname": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg"
+    },
+    {
+      "uid": "1203217682",
+      "uname": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg"
+    },
+    {
+      "uid": "796556",
+      "uname": "-菫時-",
+      "face": "demo/avatars/796556.jpg"
+    },
+    {
+      "uid": "2124647716",
+      "uname": "米汀Nagisa",
+      "face": "demo/avatars/2124647716.jpg"
+    },
+    {
+      "uid": "1954091502",
+      "uname": "岁己SUI",
+      "face": "demo/avatars/1954091502.jpg"
+    },
+    {
+      "uid": "1588646945",
+      "uname": "巴老师的小号",
+      "face": "demo/avatars/1588646945.jpg"
+    },
+    {
+      "uid": "548076",
+      "uname": "樱群不是小学生",
+      "face": "demo/avatars/548076.jpg"
+    },
+    {
+      "uid": "2030198123",
+      "uname": "三理Mit3uri",
+      "face": "demo/avatars/2030198123.jpg"
+    },
+    {
+      "uid": "2039332008",
+      "uname": "雪烛Yukisyo",
+      "face": "demo/avatars/2039332008.jpg"
+    }
+  ],
+  "schedule": [
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1785982040,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1785982054,
+      "endTs": 1785982054,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1785982054,
+          "endTs": 1785982054,
+          "title": "早安獭獭栞！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1785994728,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1785994754,
+      "endTs": 1785994754,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1785994754,
+          "endTs": 1785994754,
+          "title": "小鼠练一练lol^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1785999598,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1785999627,
+      "endTs": 1785999627,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1785999627,
+          "endTs": 1785999627,
+          "title": "【工作音】学歌⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22886883",
+      "liveTime": 1786011602,
+      "uid": "401315430",
+      "name": "星瞳_Official",
+      "face": "demo/avatars/401315430.jpg",
+      "startTs": 1786011602,
+      "endTs": 1786011602,
+      "keyframe": "demo/keyframes/401315430.jpg",
+      "cover": "demo/keyframes/401315430.jpg",
+      "segments": [
+        {
+          "startTs": 1786011602,
+          "endTs": 1786011602,
+          "title": "【2D】黑神话第四章初见",
+          "areaName": "虚拟Gamer",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786017193,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786017196,
+      "endTs": 1786017196,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786017196,
+          "endTs": 1786017196,
+          "title": "克里斯蒂娜老婆老婆老婆",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786017590,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786017611,
+      "endTs": 1786017611,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786017611,
+          "endTs": 1786017611,
+          "title": "狼之牙",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786018449,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786018448,
+      "endTs": 1786018448,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786018448,
+          "endTs": 1786018448,
+          "title": "晚上好孩梓们",
+          "areaName": "CS2",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786019194,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786019202,
+      "endTs": 1786019202,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786019202,
+          "endTs": 1786019202,
+          "title": "3",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786020751,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786020769,
+      "endTs": 1786020769,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786020769,
+          "endTs": 1786020769,
+          "title": "和臭岁己骑单车",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786021213,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786021219,
+      "endTs": 1786021219,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786021219,
+          "endTs": 1786021219,
+          "title": "小弥的虚度time⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786023031,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786023035,
+      "endTs": 1786023035,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786023035,
+          "endTs": 1786023035,
+          "title": "劳累小鼠^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786028299,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786028305,
+      "endTs": 1786028305,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786028305,
+          "endTs": 1786028305,
+          "title": "二次元的偷",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786086051,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786089342,
+      "endTs": 1786089342,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786089342,
+          "endTs": 1786089342,
+          "title": "fate联动打完！⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786096322,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786096341,
+      "endTs": 1786096341,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786096341,
+          "endTs": 1786096341,
+          "title": "晚上好孩梓们",
+          "areaName": "英雄联盟",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786096654,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786096663,
+      "endTs": 1786096663,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786096663,
+          "endTs": 1786096663,
+          "title": "chifan",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786099910,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786099915,
+      "endTs": 1786099915,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786099915,
+          "endTs": 1786099915,
+          "title": "和TTK还有臭鸟一起看vr新人！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786100076,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786100079,
+      "endTs": 1786100079,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786100079,
+          "endTs": 1786100079,
+          "title": "看下新人首播⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786100346,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786100357,
+      "endTs": 1786100357,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786100357,
+          "endTs": 1786100357,
+          "title": "和三理一起看新人首播^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786103325,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786103339,
+      "endTs": 1786103339,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786103339,
+          "endTs": 1786103339,
+          "title": "玩会天国拯救",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786104455,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786104480,
+      "endTs": 1786104480,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786104480,
+          "endTs": 1786104480,
+          "title": "fridaynight",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786112128,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786115098,
+      "endTs": 1786115098,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786115098,
+          "endTs": 1786115098,
+          "title": "KTV啊KTV",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786154940,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786154949,
+      "endTs": 1786154949,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786154949,
+          "endTs": 1786154949,
+          "title": "早安獭獭栞！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "3473884",
+      "liveTime": 1786157737,
+      "uid": "796556",
+      "name": "-菫時-",
+      "face": "demo/avatars/796556.jpg",
+      "startTs": 1786157755,
+      "endTs": 1786157755,
+      "keyframe": "demo/keyframes/796556.jpg",
+      "cover": "demo/keyframes/796556.jpg",
+      "segments": [
+        {
+          "startTs": 1786157755,
+          "endTs": 1786157755,
+          "title": "午安",
+          "areaName": "虚拟Singer",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786172374,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786172378,
+      "endTs": 1786172378,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786172378,
+          "endTs": 1786172378,
+          "title": "一起看盛典",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786172366,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786172378,
+      "endTs": 1786172378,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786172378,
+          "endTs": 1786172378,
+          "title": "唱一下唱歌⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786186491,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786186534,
+      "endTs": 1786186534,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786186534,
+          "endTs": 1786186534,
+          "title": "等待大火投稿掉落中",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786187462,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786187509,
+      "endTs": 1786187509,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786187509,
+          "endTs": 1786187509,
+          "title": "归来",
+          "areaName": "虚拟Singer",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786190352,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786190385,
+      "endTs": 1786190385,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786190385,
+          "endTs": 1786190385,
+          "title": "小鼠来噜^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786191240,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786191274,
+      "endTs": 1786191274,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786191274,
+          "endTs": 1786191274,
+          "title": "小鼠来噜^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786194033,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786194068,
+      "endTs": 1786194068,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786194068,
+          "endTs": 1786194068,
+          "title": "【水友回】糖豆人⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786197578,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786207562,
+      "endTs": 1786207562,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786207562,
+          "endTs": 1786207562,
+          "title": "种田！",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786197045,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786207562,
+      "endTs": 1786207562,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786207562,
+          "endTs": 1786207562,
+          "title": "小栞来！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22886883",
+      "liveTime": 1786251651,
+      "uid": "401315430",
+      "name": "星瞳_Official",
+      "face": "demo/avatars/401315430.jpg",
+      "startTs": 1786251683,
+      "endTs": 1786251683,
+      "keyframe": "demo/keyframes/401315430.jpg",
+      "cover": "demo/keyframes/401315430.jpg",
+      "segments": [
+        {
+          "startTs": 1786251683,
+          "endTs": 1786251683,
+          "title": "【电台】在云南，中午好！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786255263,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786255300,
+      "endTs": 1786255300,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786255300,
+          "endTs": 1786255300,
+          "title": "终末地代抽⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786255487,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786255503,
+      "endTs": 1786255503,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786255503,
+          "endTs": 1786255503,
+          "title": "小鼠来噜^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786273184,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786273209,
+      "endTs": 1786273209,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786273209,
+          "endTs": 1786273209,
+          "title": "和大家一起cs",
+          "areaName": "CS2",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786273226,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786273229,
+      "endTs": 1786273229,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786273229,
+          "endTs": 1786273229,
+          "title": "CS3 有妹",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786273783,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786273802,
+      "endTs": 1786273802,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786273802,
+          "endTs": 1786273802,
+          "title": "好久没看推理了……",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786273864,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786273869,
+      "endTs": 1786273869,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786273869,
+          "endTs": 1786273869,
+          "title": "我是新手",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786276729,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786276735,
+      "endTs": 1786276735,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786276735,
+          "endTs": 1786276735,
+          "title": "轻松一夏",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786280428,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786280447,
+      "endTs": 1786280447,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786280447,
+          "endTs": 1786280447,
+          "title": "精致歌杂环节⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786281194,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786281202,
+      "endTs": 1786281202,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786281202,
+          "endTs": 1786281202,
+          "title": "小栞来！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786292434,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786292466,
+      "endTs": 1786292466,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786292466,
+          "endTs": 1786292466,
+          "title": "！",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786365007,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786365005,
+      "endTs": 1786365005,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786365005,
+          "endTs": 1786365005,
+          "title": "CS3",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786366753,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786366778,
+      "endTs": 1786366778,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786366778,
+          "endTs": 1786366778,
+          "title": "~maybe虚度~⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786366873,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786366876,
+      "endTs": 1786366876,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786366876,
+          "endTs": 1786366876,
+          "title": "进来听一下新声卡^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786367958,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786367961,
+      "endTs": 1786367961,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786367961,
+          "endTs": 1786367961,
+          "title": "继续征战！",
+          "areaName": "CS2",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786370480,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786370479,
+      "endTs": 1786370479,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786370479,
+          "endTs": 1786370479,
+          "title": "CS3",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786371540,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786371573,
+      "endTs": 1786371573,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786371573,
+          "endTs": 1786371573,
+          "title": "CS3",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786374072,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786374091,
+      "endTs": 1786374091,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786374091,
+          "endTs": 1786374091,
+          "title": "种田！第一年秋",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786413759,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786413769,
+      "endTs": 1786413769,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786413769,
+          "endTs": 1786413769,
+          "title": "好像还是晚上...⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786414145,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786414159,
+      "endTs": 1786414159,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786414159,
+          "endTs": 1786414159,
+          "title": "早安獭獭栞！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786425762,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786425801,
+      "endTs": 1786425801,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786425801,
+          "endTs": 1786425801,
+          "title": "wuhao",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786426061,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786426092,
+      "endTs": 1786426092,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786426092,
+          "endTs": 1786426092,
+          "title": "wuhao",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786429342,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786429350,
+      "endTs": 1786429350,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786429350,
+          "endTs": 1786429350,
+          "title": "小鼠来唱会儿^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786430775,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786430796,
+      "endTs": 1786430796,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786430796,
+          "endTs": 1786430796,
+          "title": "小鼠来唱会儿^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786430877,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786430894,
+      "endTs": 1786430894,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786430894,
+          "endTs": 1786430894,
+          "title": "小鼠来唱会儿^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786431642,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786431669,
+      "endTs": 1786431669,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786431669,
+          "endTs": 1786431669,
+          "title": "米帕岁栞机械狂欢！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786431652,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786431669,
+      "endTs": 1786443117,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786431669,
+          "endTs": 1786443117,
+          "title": "唱歌哇唱歌哇⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786432041,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786432060,
+      "endTs": 1786443117,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786432060,
+          "endTs": 1786443117,
+          "title": "小鼠来唱会儿^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786437953,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786437987,
+      "endTs": 1786437987,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786437987,
+          "endTs": 1786437987,
+          "title": "wuhao",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786445260,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786445260,
+      "endTs": 1786447324,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786445260,
+          "endTs": 1786447324,
+          "title": "cs3",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786448909,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786448913,
+      "endTs": 1786467532,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786448913,
+          "endTs": 1786467532,
+          "title": "cs3",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786449483,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786449490,
+      "endTs": 1786468016,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786449490,
+          "endTs": 1786468016,
+          "title": "一起品石",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786449450,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786449490,
+      "endTs": 1786466391,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786449490,
+          "endTs": 1786466391,
+          "title": "今天没有助手我就飞了",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786453217,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786453232,
+      "endTs": 1786466339,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786453232,
+          "endTs": 1786466339,
+          "title": "晚上好休息一下吧⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786454171,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786454176,
+      "endTs": 1786468938,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786454176,
+          "endTs": 1786468938,
+          "title": "小栞来！",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786455076,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786455083,
+      "endTs": 1786468938,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786455083,
+          "endTs": 1786468938,
+          "title": "和八尺大人约会^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786460240,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786460279,
+      "endTs": 1786468938,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786460279,
+          "endTs": 1786468938,
+          "title": "种田！第一年冬",
+          "areaName": "主机游戏",
+          "parentAreaName": "单机游戏"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786479199,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786479226,
+      "endTs": 1786501193,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786479226,
+          "endTs": 1786501193,
+          "title": "种田！第一年冬",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786500359,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786500366,
+      "endTs": 1786508012,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786500366,
+          "endTs": 1786508012,
+          "title": "早安獭獭栞！",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786501825,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786501862,
+      "endTs": 1786505436,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786501862,
+          "endTs": 1786505436,
+          "title": "原神代抽小天鹅⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786512638,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786512653,
+      "endTs": 1786518743,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786512653,
+          "endTs": 1786518743,
+          "title": "看神人恋综",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786518136,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786518168,
+      "endTs": 1786529902,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786521444,
+          "endTs": 1786529902,
+          "title": "豆一会儿⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786532661,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786532697,
+      "endTs": 1786551545,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786534310,
+          "endTs": 1786534563,
+          "title": "晚上好！",
+          "areaName": "虚拟Singer",
+          "parentAreaName": "虚拟主播"
+        },
+        {
+          "startTs": 1786534563,
+          "endTs": 1786536261,
+          "title": "先唱九点半看看比赛",
+          "areaName": "虚拟Singer",
+          "parentAreaName": "虚拟主播"
+        },
+        {
+          "startTs": 1786536261,
+          "endTs": 1786547708,
+          "title": "先唱九点半看看比赛",
+          "areaName": "CS2",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786547708,
+          "endTs": 1786548831,
+          "title": "晚上好！",
+          "areaName": "CS2",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786548831,
+          "endTs": 1786548969,
+          "title": "小开一百个梦魇（老板赞助版",
+          "areaName": "CS2",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786548969,
+          "endTs": 1786551545,
+          "title": "小开一百个梦魇（粉丝赞助版",
+          "areaName": "CS2",
+          "parentAreaName": "网游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22603245",
+      "liveTime": 1786535939,
+      "uid": "1265680561",
+      "name": "永雏塔菲",
+      "face": "demo/avatars/1265680561.jpg",
+      "startTs": 1786535959,
+      "endTs": 1786558571,
+      "keyframe": "demo/keyframes/1265680561.jpg",
+      "cover": "demo/keyframes/1265680561.jpg",
+      "segments": [
+        {
+          "startTs": 1786549886,
+          "endTs": 1786558193,
+          "title": "看流星感谢时间喵",
+          "areaName": "其他单机",
+          "parentAreaName": "单机游戏"
+        },
+        {
+          "startTs": 1786558193,
+          "endTs": 1786558571,
+          "title": "4个小菲香槟生日派对/看流星",
+          "areaName": "其他单机",
+          "parentAreaName": "单机游戏"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786536209,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786536246,
+      "endTs": 1786551949,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786536246,
+          "endTs": 1786551949,
+          "title": "先玩恶校，再看解说",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786539507,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786539511,
+      "endTs": 1786556894,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786539511,
+          "endTs": 1786556894,
+          "title": "好冷吧小鼠^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786539566,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786539607,
+      "endTs": 1786542292,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786539607,
+          "endTs": 1786542292,
+          "title": "变色龙联动！⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786539723,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786539765,
+      "endTs": 1786551421,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786539765,
+          "endTs": 1786551421,
+          "title": "躲猫猫！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786542320,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786542357,
+      "endTs": 1786549101,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786542357,
+          "endTs": 1786549101,
+          "title": "变色龙联动！⭐",
+          "areaName": "超级变色龙",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786543800,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786543817,
+      "endTs": 1786552349,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786543817,
+          "endTs": 1786552349,
+          "title": "CS",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786549113,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786549125,
+      "endTs": 1786552738,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786549125,
+          "endTs": 1786552738,
+          "title": "变色龙联动！⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786550327,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786550330,
+      "endTs": 1786559866,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786550330,
+          "endTs": 1786559866,
+          "title": "种田！第二年春",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786559841,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786559866,
+      "endTs": 1786562096,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786559866,
+          "endTs": 1786562096,
+          "title": "啊",
+          "areaName": "聊天电台",
+          "parentAreaName": "电台"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786586968,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786587011,
+      "endTs": 1786594306,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786587011,
+          "endTs": 1786594306,
+          "title": "早安獭獭栞！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786597219,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786597233,
+      "endTs": 1786608334,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786597233,
+          "endTs": 1786608334,
+          "title": "来玩玩小鼠gal^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786597204,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786597233,
+      "endTs": 1786608334,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786597233,
+          "endTs": 1786608334,
+          "title": "【工作音】学歌（44-47）⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": [
+        {
+          "categoryName": "歌回",
+          "source": "rule",
+          "confidence": null,
+          "evidence": "命中关键词「歌」"
+        }
+      ]
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786598671,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786598696,
+      "endTs": 1786606898,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786598696,
+          "endTs": 1786606898,
+          "title": "一起看神人恋爱综艺",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786606975,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786607016,
+      "endTs": 1786616329,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786607016,
+          "endTs": 1786616329,
+          "title": "一起看神人恋爱综艺",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786616353,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786616382,
+      "endTs": 1786644287,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786616382,
+          "endTs": 1786644287,
+          "title": "cs",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786617092,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786617099,
+      "endTs": 1786641446,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786617099,
+          "endTs": 1786641446,
+          "title": "晚上好！",
+          "areaName": "CS2",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786622247,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786622261,
+      "endTs": 1786622261,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786622261,
+          "endTs": 1786622261,
+          "title": "玩的什么雷霆游戏",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786622330,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786622337,
+      "endTs": 1786646725,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786622337,
+          "endTs": 1786646725,
+          "title": "绣湖：湖之仆从",
+          "areaName": "虚拟Gamer",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786622331,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786622337,
+      "endTs": 1786639517,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786622337,
+          "endTs": 1786639517,
+          "title": "玩的什么雷霆游戏",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786626268,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786626276,
+      "endTs": 1786643649,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786626276,
+          "endTs": 1786643649,
+          "title": "鼠，今天好热吧^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786631243,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786631284,
+      "endTs": 1786637573,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786631284,
+          "endTs": 1786637573,
+          "title": "到家咯！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786631321,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786631337,
+      "endTs": 1786641310,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786631337,
+          "endTs": 1786641310,
+          "title": "休闲一点虚度⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786631452,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786631487,
+      "endTs": 1786647097,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786631487,
+          "endTs": 1786647097,
+          "title": "新的锈湖",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "3473884",
+      "liveTime": 1786680636,
+      "uid": "796556",
+      "name": "-菫時-",
+      "face": "demo/avatars/796556.jpg",
+      "startTs": 1786680666,
+      "endTs": 1786684803,
+      "keyframe": "demo/keyframes/796556.jpg",
+      "cover": "demo/keyframes/796556.jpg",
+      "segments": [
+        {
+          "startTs": 1786680666,
+          "endTs": 1786684803,
+          "title": "午安",
+          "areaName": "虚拟Singer",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786684027,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786684032,
+      "endTs": 1786684292,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786684032,
+          "endTs": 1786684292,
+          "title": "看神人恋综",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786684441,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786684490,
+      "endTs": 1786704295,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786684490,
+          "endTs": 1786704295,
+          "title": "看神人恋综",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786690821,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786690864,
+      "endTs": 1786702301,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786690864,
+          "endTs": 1786702301,
+          "title": "先来健身环然后豆⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786706866,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786706889,
+      "endTs": 1786722231,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786706889,
+          "endTs": 1786710986,
+          "title": "先来崩铁前瞻⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        },
+        {
+          "startTs": 1786710986,
+          "endTs": 1786722231,
+          "title": "等会跟161以撒⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786708816,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786708821,
+      "endTs": 1786729133,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786708821,
+          "endTs": 1786729133,
+          "title": "鼠，今天来唱歌^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": [
+        {
+          "categoryName": "歌回",
+          "source": "rule",
+          "confidence": null,
+          "evidence": "命中关键词「唱」"
+        }
+      ]
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786709238,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786709278,
+      "endTs": 1786729266,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786709278,
+          "endTs": 1786729266,
+          "title": "猜价大挑战：你买过的智商税商品",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786710632,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786710637,
+      "endTs": 1786728310,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786710637,
+          "endTs": 1786728310,
+          "title": "玩的什么推理游戏",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1713546334",
+      "liveTime": 1786712512,
+      "uid": "1298779265",
+      "name": "灰泽满Hazel",
+      "face": "demo/avatars/1298779265.jpg",
+      "startTs": 1786713394,
+      "endTs": 1786728585,
+      "keyframe": "demo/keyframes/1298779265.jpg",
+      "cover": "demo/keyframes/1298779265.jpg",
+      "segments": [
+        {
+          "startTs": 1786713394,
+          "endTs": 1786728585,
+          "title": "悠闲夜晚",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22603245",
+      "liveTime": 1786714533,
+      "uid": "1265680561",
+      "name": "永雏塔菲",
+      "face": "demo/avatars/1265680561.jpg",
+      "startTs": 1786714570,
+      "endTs": 1786729617,
+      "keyframe": "demo/keyframes/1265680561.jpg",
+      "cover": "demo/keyframes/1265680561.jpg",
+      "segments": [
+        {
+          "startTs": 1786725391,
+          "endTs": 1786725970,
+          "title": "锈湖湖之仆从",
+          "areaName": "其他单机",
+          "parentAreaName": "单机游戏"
+        },
+        {
+          "startTs": 1786725970,
+          "endTs": 1786726358,
+          "title": "植物人",
+          "areaName": "植物大战僵尸",
+          "parentAreaName": "单机游戏"
+        },
+        {
+          "startTs": 1786726358,
+          "endTs": 1786729493,
+          "title": "恐怖版植物人",
+          "areaName": "植物大战僵尸",
+          "parentAreaName": "单机游戏"
+        },
+        {
+          "startTs": 1786729493,
+          "endTs": 1786729617,
+          "title": "原神至冬/恐怖版植物人",
+          "areaName": "植物大战僵尸",
+          "parentAreaName": "单机游戏"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786715708,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786715735,
+      "endTs": 1786724859,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786715735,
+          "endTs": 1786724859,
+          "title": "小栞来！！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786716874,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786716875,
+      "endTs": 1786742974,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786716875,
+          "endTs": 1786742974,
+          "title": "我种我种种种",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786721193,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786721228,
+      "endTs": 1786752284,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786721228,
+          "endTs": 1786752284,
+          "title": "老吴老吴老吴老吴",
+          "areaName": "CS2",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786777407,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786777411,
+      "endTs": 1786788589,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786777637,
+          "endTs": 1786788589,
+          "title": "唱点中文歌⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786791445,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786791480,
+      "endTs": 1786811767,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786791480,
+          "endTs": 1786811767,
+          "title": "电子产品？电子宠物（x",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786793353,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786793400,
+      "endTs": 1786829622,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786802183,
+          "endTs": 1786829622,
+          "title": "老吴老吴老吴老吴",
+          "areaName": "CS2",
+          "parentAreaName": "网游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786795281,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786795286,
+      "endTs": 1786812158,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786795286,
+          "endTs": 1786812158,
+          "title": "冰淇淋歌回！",
+          "areaName": "虚拟Singer",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": [
+        {
+          "categoryName": "歌回",
+          "source": "rule",
+          "confidence": null,
+          "evidence": "命中关键词「歌」"
+        }
+      ]
+    },
+    {
+      "kind": "live",
+      "roomId": "22603245",
+      "liveTime": 1786797135,
+      "uid": "1265680561",
+      "name": "永雏塔菲",
+      "face": "demo/avatars/1265680561.jpg",
+      "startTs": 1786797138,
+      "endTs": 1786813579,
+      "keyframe": "demo/keyframes/1265680561.jpg",
+      "cover": "demo/keyframes/1265680561.jpg",
+      "segments": [
+        {
+          "startTs": 1786797138,
+          "endTs": 1786805155,
+          "title": "苍翼混沌效应",
+          "areaName": "其他单机",
+          "parentAreaName": "单机游戏"
+        },
+        {
+          "startTs": 1786805155,
+          "endTs": 1786813453,
+          "title": "原神至冬",
+          "areaName": "原神",
+          "parentAreaName": "手游"
+        },
+        {
+          "startTs": 1786813453,
+          "endTs": 1786813579,
+          "title": "苍翼：混沌效应/原神7.0（2）",
+          "areaName": "原神",
+          "parentAreaName": "手游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786798829,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786798858,
+      "endTs": 1786810488,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786798858,
+          "endTs": 1786810488,
+          "title": "虚度虚度虚度⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786799650,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786799657,
+      "endTs": 1786812434,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786799657,
+          "endTs": 1786812434,
+          "title": "小栞来！！",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786800653,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786800703,
+      "endTs": 1786817183,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786800703,
+          "endTs": 1786817183,
+          "title": "小猫的好物推荐^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22886883",
+      "liveTime": 1786803296,
+      "uid": "401315430",
+      "name": "星瞳_Official",
+      "face": "demo/avatars/401315430.jpg",
+      "startTs": 1786803319,
+      "endTs": 1786812824,
+      "keyframe": "demo/keyframes/401315430.jpg",
+      "cover": "demo/keyframes/401315430.jpg",
+      "segments": [
+        {
+          "startTs": 1786803319,
+          "endTs": 1786812824,
+          "title": "【2D】领导休假归来复建",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786805986,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786805990,
+      "endTs": 1786815491,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786805990,
+          "endTs": 1786815491,
+          "title": "我偷我偷偷偷",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786815533,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786815577,
+      "endTs": 1786826109,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786815577,
+          "endTs": 1786826109,
+          "title": "我种我种种种",
+          "areaName": "主机游戏",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1713546334",
+      "liveTime": 1786815717,
+      "uid": "1298779265",
+      "name": "灰泽满Hazel",
+      "face": "demo/avatars/1298779265.jpg",
+      "startTs": 1786815731,
+      "endTs": 1786815874,
+      "keyframe": "demo/keyframes/1298779265.jpg",
+      "cover": "demo/keyframes/1298779265.jpg",
+      "segments": [
+        {
+          "startTs": 1786815731,
+          "endTs": 1786815874,
+          "title": "半夜路灯下背书的少女竟是…",
+          "areaName": "虚拟日常",
+          "parentAreaName": ""
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1713546334",
+      "liveTime": 1786815857,
+      "uid": "1298779265",
+      "name": "灰泽满Hazel",
+      "face": "demo/avatars/1298779265.jpg",
+      "startTs": 1786815874,
+      "endTs": 1786817183,
+      "keyframe": "demo/keyframes/1298779265.jpg",
+      "cover": "demo/keyframes/1298779265.jpg",
+      "segments": [
+        {
+          "startTs": 1786815874,
+          "endTs": 1786817183,
+          "title": "半夜路灯下背书的少女竟是…",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786845778,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786845946,
+      "endTs": 1786853587,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786845946,
+          "endTs": 1786853587,
+          "title": "早安獭獭栞！",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1786862905,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1786862916,
+      "endTs": 1786898863,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1786862916,
+          "endTs": 1786863045,
+          "title": "小鼠人机解说^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        },
+        {
+          "startTs": 1786863045,
+          "endTs": 1786863437,
+          "title": "小鼠人机解说^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786863437,
+          "endTs": 1786874069,
+          "title": "小鼠人机解说:LGD vs JDG^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786874069,
+          "endTs": 1786885879,
+          "title": "小鼠人机解说:IG vs WBG^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786885879,
+          "endTs": 1786886141,
+          "title": "小鼠人机解说:TES vs EDG^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786886141,
+          "endTs": 1786891008,
+          "title": "小鼠人机解说:EDG vs TES^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786891008,
+          "endTs": 1786891398,
+          "title": "小鼠人机解说:TES vs EDG^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786891398,
+          "endTs": 1786892584,
+          "title": "小鼠人机解说:EDG vs TES^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786892584,
+          "endTs": 1786894681,
+          "title": "小鼠人机解说:TES vs EDG^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786894681,
+          "endTs": 1786898610,
+          "title": "晚安小鼠^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786898610,
+          "endTs": 1786898863,
+          "title": "小鼠解说:ig vs wbg^^",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786863574,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786863710,
+      "endTs": 1786875406,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786863710,
+          "endTs": 1786875406,
+          "title": "下午好我来了⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22886883",
+      "liveTime": 1786866649,
+      "uid": "401315430",
+      "name": "星瞳_Official",
+      "face": "demo/avatars/401315430.jpg",
+      "startTs": 1786866769,
+      "endTs": 1786889284,
+      "keyframe": "demo/keyframes/401315430.jpg",
+      "cover": "demo/keyframes/401315430.jpg",
+      "segments": [
+        {
+          "startTs": 1786866769,
+          "endTs": 1786889284,
+          "title": "【2D】独战黑神话第四章",
+          "areaName": "虚拟Gamer",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1786878081,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1786878130,
+      "endTs": 1786890610,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1786878130,
+          "endTs": 1786890610,
+          "title": "认真读书少话（？",
+          "areaName": "聊天电台",
+          "parentAreaName": "电台"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786880243,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786880377,
+      "endTs": 1786895210,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786880377,
+          "endTs": 1786892978,
+          "title": "提莫你在哪里",
+          "areaName": "英雄联盟",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786892978,
+          "endTs": 1786894308,
+          "title": "暗黑果赖",
+          "areaName": "无畏契约",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1786894308,
+          "endTs": 1786895210,
+          "title": "暗黑果赖",
+          "areaName": "CS2",
+          "parentAreaName": "网游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1786881197,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1786881294,
+      "endTs": 1786894554,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1786881294,
+          "endTs": 1786894554,
+          "title": "【音为柚你】游戏time！",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786885161,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786885214,
+      "endTs": 1786898863,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786885214,
+          "endTs": 1786898863,
+          "title": "歌杂的晚上好吗⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": [
+        {
+          "categoryName": "歌回",
+          "source": "rule",
+          "confidence": null,
+          "evidence": "命中关键词「歌」"
+        }
+      ]
+    },
+    {
+      "kind": "live",
+      "roomId": "1713546334",
+      "liveTime": 1786885960,
+      "uid": "1298779265",
+      "name": "灰泽满Hazel",
+      "face": "demo/avatars/1298779265.jpg",
+      "startTs": 1786886005,
+      "endTs": 1786901078,
+      "keyframe": "demo/keyframes/1298779265.jpg",
+      "cover": "demo/keyframes/1298779265.jpg",
+      "segments": [
+        {
+          "startTs": 1786886005,
+          "endTs": 1786901078,
+          "title": "随便聊聊",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22603245",
+      "liveTime": 1786886036,
+      "uid": "1265680561",
+      "name": "永雏塔菲",
+      "face": "demo/avatars/1265680561.jpg",
+      "startTs": 1786886141,
+      "endTs": 1786904838,
+      "keyframe": "demo/keyframes/1265680561.jpg",
+      "cover": "demo/keyframes/1265680561.jpg",
+      "segments": [
+        {
+          "startTs": 1786886141,
+          "endTs": 1786900944,
+          "title": "绣湖湖之仆从",
+          "areaName": "其他单机",
+          "parentAreaName": "单机游戏"
+        },
+        {
+          "startTs": 1786900944,
+          "endTs": 1786904838,
+          "title": "原神7.0",
+          "areaName": "原神",
+          "parentAreaName": "手游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1786887025,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1786887051,
+      "endTs": 1786897146,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1786887051,
+          "endTs": 1786897146,
+          "title": "小栞来！！",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1786899185,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1786899258,
+      "endTs": 1786908283,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1786899258,
+          "endTs": 1786908283,
+          "title": "暗黑果赖",
+          "areaName": "CS2",
+          "parentAreaName": "网游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1786944426,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1786945037,
+      "endTs": 1786970773,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1786945037,
+          "endTs": 1786970773,
+          "title": "看神人恋综",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786946441,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786946624,
+      "endTs": 1786961661,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786946624,
+          "endTs": 1786961661,
+          "title": "各种深渊乱打⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1786971675,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1786971691,
+      "endTs": 1786984711,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1786971691,
+          "endTs": 1786984711,
+          "title": "一起机械狂欢⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1786977005,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1786977053,
+      "endTs": 1787001196,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1786977053,
+          "endTs": 1787001196,
+          "title": "我来啦",
+          "areaName": "主机游戏",
+          "parentAreaName": "单机游戏"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1787001622,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1787001719,
+      "endTs": 1787035290,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1787001719,
+          "endTs": 1787006734,
+          "title": "究极死士回",
+          "areaName": "CS2",
+          "parentAreaName": "网游"
+        },
+        {
+          "startTs": 1787006734,
+          "endTs": 1787035290,
+          "title": "究极死士回",
+          "areaName": "无畏契约",
+          "parentAreaName": "网游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1787018774,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1787018782,
+      "endTs": 1787026546,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1787018782,
+          "endTs": 1787026546,
+          "title": "早安獭獭栞！",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1787032677,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1787032801,
+      "endTs": 1787047835,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1787032801,
+          "endTs": 1787032939,
+          "title": "鸣鸣的潮2.8^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        },
+        {
+          "startTs": 1787032939,
+          "endTs": 1787047835,
+          "title": "小鼠鸣鸣的潮2.8^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1787032869,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1787032939,
+      "endTs": 1787038436,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1787032939,
+          "endTs": 1787038436,
+          "title": "看神人恋综",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1787037191,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1787037261,
+      "endTs": 1787048863,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1787037261,
+          "endTs": 1787048863,
+          "title": "休闲的下午歌回⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": [
+        {
+          "categoryName": "歌回",
+          "source": "rule",
+          "confidence": null,
+          "evidence": "命中关键词「歌」"
+        }
+      ]
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1787050615,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1787050680,
+      "endTs": 1787065720,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1787050680,
+          "endTs": 1787065720,
+          "title": "徒师赛",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1787054151,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1787054272,
+      "endTs": 1787074770,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1787054272,
+          "endTs": 1787074770,
+          "title": "海猫中少话",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1787054493,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1787054535,
+      "endTs": 1787077829,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1787054535,
+          "endTs": 1787077829,
+          "title": "一起拼石",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22886883",
+      "liveTime": 1787055593,
+      "uid": "401315430",
+      "name": "星瞳_Official",
+      "face": "demo/avatars/401315430.jpg",
+      "startTs": 1787055712,
+      "endTs": 1787071776,
+      "keyframe": "demo/keyframes/401315430.jpg",
+      "cover": "demo/keyframes/401315430.jpg",
+      "segments": [
+        {
+          "startTs": 1787055712,
+          "endTs": 1787071776,
+          "title": "【2D】黑神话鏖战第五章",
+          "areaName": "虚拟Gamer",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1787058192,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1787058296,
+      "endTs": 1787076681,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1787058296,
+          "endTs": 1787076681,
+          "title": "一只小鼠^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1787058181,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1787058296,
+      "endTs": 1787064657,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1787058296,
+          "endTs": 1787064657,
+          "title": "跟氿氿一起⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1787060146,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1787060247,
+      "endTs": 1787070088,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1787060247,
+          "endTs": 1787070088,
+          "title": "小栞来！！",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22603245",
+      "liveTime": 1787060989,
+      "uid": "1265680561",
+      "name": "永雏塔菲",
+      "face": "demo/avatars/1265680561.jpg",
+      "startTs": 1787061040,
+      "endTs": 1787081283,
+      "keyframe": "demo/keyframes/1265680561.jpg",
+      "cover": "demo/keyframes/1265680561.jpg",
+      "segments": [
+        {
+          "startTs": 1787061040,
+          "endTs": 1787081029,
+          "title": "原神7.0第二幕一口气打完",
+          "areaName": "原神",
+          "parentAreaName": "手游"
+        },
+        {
+          "startTs": 1787081029,
+          "endTs": 1787081283,
+          "title": "原神7.0（4）第二幕一口气打完",
+          "areaName": "原神",
+          "parentAreaName": "手游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1787064572,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1787064657,
+      "endTs": 1787073333,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1787064657,
+          "endTs": 1787073333,
+          "title": "虚度成为每天的日常⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1787064943,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1787065048,
+      "endTs": 1787072561,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1787065048,
+          "endTs": 1787072561,
+          "title": "我来啦",
+          "areaName": "主机游戏",
+          "parentAreaName": "单机游戏"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1787072442,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1787072561,
+      "endTs": 1787078072,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1787072561,
+          "endTs": 1787078072,
+          "title": "我来啦",
+          "areaName": "主机游戏",
+          "parentAreaName": "单机游戏"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1787078041,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1787078072,
+      "endTs": 1787088942,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1787078072,
+          "endTs": 1787088942,
+          "title": "我来啦",
+          "areaName": "主机游戏",
+          "parentAreaName": "单机游戏"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "80397",
+      "liveTime": 1787102231,
+      "uid": "7706705",
+      "name": "阿梓从小就很可爱",
+      "face": "demo/avatars/7706705.jpg",
+      "startTs": 1787102350,
+      "endTs": 1787131814,
+      "keyframe": "demo/keyframes/7706705.jpg",
+      "cover": "demo/keyframes/7706705.jpg",
+      "segments": [
+        {
+          "startTs": 1787102350,
+          "endTs": 1787131814,
+          "title": "早上好！究极死士回",
+          "areaName": "CS2",
+          "parentAreaName": "网游"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1787104759,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1787104765,
+      "endTs": 1787113079,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1787104765,
+          "endTs": 1787113079,
+          "title": "七夕快乐(*^▽^*)",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1787119229,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1787119353,
+      "endTs": 1787127388,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1787119353,
+          "endTs": 1787127388,
+          "title": "七夕弹唱一会儿^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": [
+        {
+          "categoryName": "歌回",
+          "source": "rule",
+          "confidence": null,
+          "evidence": "命中关键词「唱」"
+        }
+      ]
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1787122823,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1787122855,
+      "endTs": 1787134741,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1787122855,
+          "endTs": 1787134741,
+          "title": "土豆土豆压制！⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21013446",
+      "liveTime": 1787126858,
+      "uid": "387636363",
+      "name": "雫るる_Official",
+      "face": "demo/avatars/387636363.jpg",
+      "startTs": 1787126878,
+      "endTs": 1787135521,
+      "keyframe": "demo/keyframes/387636363.jpg",
+      "cover": "demo/keyframes/387636363.jpg",
+      "segments": [
+        {
+          "startTs": 1787126878,
+          "endTs": 1787135521,
+          "title": "看神人恋爱综艺",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "22886883",
+      "liveTime": 1787140196,
+      "uid": "401315430",
+      "name": "星瞳_Official",
+      "face": "demo/avatars/401315430.jpg",
+      "startTs": 1787140207,
+      "endTs": 1787146832,
+      "keyframe": "demo/keyframes/401315430.jpg",
+      "cover": "demo/keyframes/401315430.jpg",
+      "segments": [
+        {
+          "startTs": 1787140207,
+          "endTs": 1787146832,
+          "title": "【3D】不约会，干点别的",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "25034104",
+      "liveTime": 1787140405,
+      "uid": "2132180406",
+      "name": "明前奶绿",
+      "face": "demo/avatars/2132180406.jpg",
+      "startTs": 1787140466,
+      "endTs": null,
+      "keyframe": "demo/keyframes/2132180406.jpg",
+      "cover": "demo/keyframes/2132180406.jpg",
+      "segments": [
+        {
+          "startTs": 1787140466,
+          "endTs": null,
+          "title": "不看恐怖片看什么！",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1947277414",
+      "liveTime": 1787140784,
+      "uid": "1203217682",
+      "name": "泽音Melody",
+      "face": "demo/avatars/1203217682.jpg",
+      "startTs": 1787140854,
+      "endTs": null,
+      "keyframe": "demo/keyframes/1203217682.jpg",
+      "cover": "demo/keyframes/1203217682.jpg",
+      "segments": [
+        {
+          "startTs": 1787140854,
+          "endTs": null,
+          "title": "七夕唱唱聊聊~",
+          "areaName": "虚拟Singer",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": [
+        {
+          "categoryName": "歌回",
+          "source": "rule",
+          "confidence": null,
+          "evidence": "命中关键词「唱」"
+        }
+      ]
+    },
+    {
+      "kind": "live",
+      "roomId": "1713546334",
+      "liveTime": 1787142026,
+      "uid": "1298779265",
+      "name": "灰泽满Hazel",
+      "face": "demo/avatars/1298779265.jpg",
+      "startTs": 1787142137,
+      "endTs": 1787153733,
+      "keyframe": "demo/keyframes/1298779265.jpg",
+      "cover": "demo/keyframes/1298779265.jpg",
+      "segments": [
+        {
+          "startTs": 1787142137,
+          "endTs": 1787153733,
+          "title": "七七夕夕果汁回",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "1820703922",
+      "liveTime": 1787144300,
+      "uid": "1048135385",
+      "name": "花礼Harei",
+      "face": "demo/avatars/1048135385.jpg",
+      "startTs": 1787144356,
+      "endTs": null,
+      "keyframe": "demo/keyframes/1048135385.jpg",
+      "cover": "demo/keyframes/1048135385.jpg",
+      "segments": [
+        {
+          "startTs": 1787144356,
+          "endTs": null,
+          "title": "七夕晕晕念台词^^",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "30655190",
+      "liveTime": 1787144444,
+      "uid": "1789460279",
+      "name": "弥月Mizuki",
+      "face": "demo/avatars/1789460279.jpg",
+      "startTs": 1787144480,
+      "endTs": null,
+      "keyframe": "demo/keyframes/1789460279.jpg",
+      "cover": "demo/keyframes/1789460279.jpg",
+      "segments": [
+        {
+          "startTs": 1787144480,
+          "endTs": null,
+          "title": "念叨几句台词⭐",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "26966466",
+      "liveTime": 1787144623,
+      "uid": "1609526545",
+      "name": "栞栞Shiori",
+      "face": "demo/avatars/1609526545.jpg",
+      "startTs": 1787144742,
+      "endTs": 1787156091,
+      "keyframe": "demo/keyframes/1609526545.jpg",
+      "cover": "demo/keyframes/1609526545.jpg",
+      "segments": [
+        {
+          "startTs": 1787144742,
+          "endTs": 1787156091,
+          "title": "七夕唱唱歌(*^▽^*)",
+          "areaName": "虚拟日常",
+          "parentAreaName": "虚拟主播"
+        }
+      ],
+      "verdicts": [
+        {
+          "categoryName": "歌回",
+          "source": "rule",
+          "confidence": null,
+          "evidence": "命中关键词「唱」"
+        }
+      ]
+    },
+    {
+      "kind": "live",
+      "roomId": "22603245",
+      "liveTime": 1787147413,
+      "uid": "1265680561",
+      "name": "永雏塔菲",
+      "face": "demo/avatars/1265680561.jpg",
+      "startTs": 1787147486,
+      "endTs": null,
+      "keyframe": "demo/keyframes/1265680561.jpg",
+      "cover": "demo/keyframes/1265680561.jpg",
+      "segments": [
+        {
+          "startTs": 1787147486,
+          "endTs": 1787156352,
+          "title": "织女过七夕喵",
+          "areaName": "其他单机",
+          "parentAreaName": "单机游戏"
+        },
+        {
+          "startTs": 1787156352,
+          "endTs": null,
+          "title": "恐怖的植物人",
+          "areaName": "植物大战僵尸",
+          "parentAreaName": "单机游戏"
+        }
+      ],
+      "verdicts": []
+    },
+    {
+      "kind": "live",
+      "roomId": "21452505",
+      "liveTime": 1787148001,
+      "uid": "434334701",
+      "name": "七海Nana7mi",
+      "face": "demo/avatars/434334701.jpg",
+      "startTs": 1787148020,
+      "endTs": null,
+      "keyframe": "demo/keyframes/434334701.jpg",
+      "cover": "demo/keyframes/434334701.jpg",
+      "segments": [
+        {
+          "startTs": 1787148020,
+          "endTs": null,
+          "title": "二次元偷偷",
+          "areaName": "主机游戏",
+          "parentAreaName": "单机游戏"
+        }
+      ],
+      "verdicts": []
+    }
+  ]
+}
