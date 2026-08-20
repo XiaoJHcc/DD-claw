@@ -4,10 +4,18 @@
 // 亮度随主题：亮色 70% / 暗色 40%（s 开根号提饱和）。
 // 头像获取不到才回退 uid 哈希色 hsl(h, 50%, L)，未算出颜色前一律占位灰；主题切换只改亮度重渲。
 // 三级行：center（双行字：主播名 + 直播间标题，实色不透明）> single（单行字，减淡）>
-// mini（无字色条，更淡），由 .sched-day 的 class 驱动，条透明度 / 字层 / 道高全走
+// mini（无字色条，更淡），由 .sched-day 的 class 驱动，条透明度 / 字层全走
 // CSS 过渡。点击任意非居中天 → 该天居中；滚轮按天步进（preventDefault 阻止页面滚动，
-// 300ms 节流）。滑动时重叠天不重建 DOM，只切 level class + 原地更新条几何与文字，
-// 颜色条在无字/单行/双行间平滑渐变（道高/透明度/字层全走 CSS 过渡）而非硬切。随页面整体滚动。
+// 300ms 节流；相邻 ±1 步窗口后台预取，滚动命中缓存立即渲染——动画不被数据加载延迟
+// 打断，随后后台重取纠偏，内容有变化才重渲）。滑动时重叠天不重建 DOM，只切 level class
+// + 原地更新条几何与文字，颜色条在无字/单行/双行间平滑渐变。卡片刚好一屏：行高由 JS
+// 按 0-1-2 权重解算成 flex-basis 像素值（mini 日固定 5px 窄条；single/center 日按
+// 道数 × 级权重 1/2 水装填分配余高，每道下限 16/32px，钳住后余量重分），grow/shrink
+// 恒 0——级别切换、道数变化、日进出窗口、窗口缩放全是 basis px→px 的 CSS 过渡，
+// 全程连续；日插入从 0 高展开、移除等高度到 0 才删 DOM。空间连每道下限都放不下时
+// 按步降级（schedLevelFor）：1 去掉首末两天（只显示三天）→ 2 相邻两天降 mini 条 →
+// 3 当天也降单行条；降级由 JS 按实际道数/可用高度算定，空间恢复自动升回，
+// 各级切换同样全走折叠/展开与 class 过渡。
 //
 // 共享轴（偏移语义）：轴 = 相对各行归属日 06:00 的偏移秒数（offStart/offEnd，
 // 0 = 06:00；06:00 日界只用于「归属哪天」，与渲染窗口无关），按**当前可见全部
@@ -31,6 +39,8 @@ var schedAxis = null;         // {offStart, offEnd} 相对当天 06:00 的偏移
 var schedSeq = 0;             // 请求序号戳：连点/连滚时作废旧渲染
 var schedWheelLock = 0;       // wheel 节流时间戳
 var schedCollapsing = {};     // 日期 → true：该行正在折叠离场（滚动折返时可取消）
+var schedExpanding = {};      // 日期 → true：该行正在展开进场（中途重渲不清它的内联样式）
+var schedDegrade = 0;         // 当前空间降级步数（0-3，schedLevelFor；视图隐藏 clientHeight=0 时保持上次值）
 
 // ---- 北京时间工具（固定 UTC+8，与服务端同口径；日界 = 凌晨 6 点，仅用于归属）----
 function bjToday() { return new Date(Date.now() + 28800000).toISOString().slice(0, 10); }
@@ -156,15 +166,77 @@ function schedFetch(from, to) {
   return api('/api/schedule?from=' + from + '&to=' + to).then(function (j) { return j.days || []; });
 }
 
+// ---- 相邻窗口预取缓存：当前窗口加载完成后，后台预取 ±1 步的窗口。滚动步进命中缓存时
+// 立即渲染（折叠/展开动画不被数据加载延迟打断，否则先停顿再猛地一齐动 = 跳闪），
+// 同时后台重取纠偏。缓存只留 center ±3 步内，防长期滚动无限增长 ----
+var schedWinCache = {};      // 'from_to' → days
+var schedWinFetching = {};   // key → true（预取在途去重）
+
+function schedCacheKey(from, to) { return from + '_' + to; }
+
+/** 预取一个窗口（未缓存且不在途才发请求） */
+function schedPrefetchWindow(from, to) {
+  var key = schedCacheKey(from, to);
+  if (schedWinCache[key] || schedWinFetching[key]) return;
+  schedWinFetching[key] = true;
+  schedFetch(from, to).then(function (days) {
+    schedWinFetching[key] = false;
+    schedWinCache[key] = days;
+  }).catch(function () { schedWinFetching[key] = false; }); // 预取失败静默，滚过去时正常加载
+}
+
+/** 预取 center ±1 步的两个相邻窗口 */
+function schedPrefetchAdjacent(center) {
+  schedPrefetchWindow(schedAddDays(center, -3), schedAddDays(center, 1));
+  schedPrefetchWindow(schedAddDays(center, -1), schedAddDays(center, 3));
+}
+
+/** 修剪缓存：只留当前 center ±3 步内的窗口 */
+function schedPruneCache() {
+  if (!schedCenter) return;
+  var keep = {};
+  for (var n = -3; n <= 3; n++) {
+    keep[schedCacheKey(schedAddDays(schedCenter, n - 2), schedAddDays(schedCenter, n + 2))] = true;
+  }
+  for (var k in schedWinCache) if (!keep[k]) delete schedWinCache[k];
+}
+
 function schedLoad(center) {
   var seq = ++schedSeq;
-  schedFetch(schedAddDays(center, -2), schedAddDays(center, 2)).then(function (days) {
+  var from = schedAddDays(center, -2), to = schedAddDays(center, 2);
+  var key = schedCacheKey(from, to);
+  var cached = schedWinCache[key];
+  if (cached) {
+    // 命中预取缓存：立即渲染（动画即时连贯），随后后台重取纠偏——内容有变化才重渲
+    //（新几何照旧走 CSS 过渡，不硬切）
+    schedCenter = center;
+    schedDays = cached;
+    schedPrepareColors(cached);
+    recomputeSchedAxis();
+    renderSched();
+    schedPruneCache();
+    schedPrefetchAdjacent(center);
+    schedFetch(from, to).then(function (days) {
+      if (seq !== schedSeq) return; // 用户又滚走了，纠偏结果只进缓存
+      schedWinCache[key] = days;
+      if (JSON.stringify(days) === JSON.stringify(cached)) return; // 无变化不重渲（防二次闪动）
+      schedDays = days;
+      schedPrepareColors(days);
+      recomputeSchedAxis();
+      renderSched();
+    }).catch(function () { /* 纠偏失败忽略，60s 保鲜周期再试 */ });
+    return;
+  }
+  schedFetch(from, to).then(function (days) {
     if (seq !== schedSeq) return; // 已有更新的请求在路上，作废旧渲染
     schedCenter = center;
     schedDays = days;
     schedPrepareColors(days);
     recomputeSchedAxis(); // center 变化时重算；轴变化只改几何（reconcile 原地更新），不整窗重画
     renderSched();
+    schedWinCache[key] = days;
+    schedPruneCache();
+    schedPrefetchAdjacent(center);
   }).catch(function (e) {
     if (seq === schedSeq) toast(e.message, true);
   });
@@ -188,9 +260,11 @@ function schedStep(n) {
 function schedRefreshData() {
   if (!schedCenter) return;
   var seq = ++schedSeq;
-  schedFetch(schedAddDays(schedCenter, -2), schedAddDays(schedCenter, 2)).then(function (days) {
+  var from = schedAddDays(schedCenter, -2), to = schedAddDays(schedCenter, 2);
+  schedFetch(from, to).then(function (days) {
     if (seq !== schedSeq) return; // 已有更新的请求在路上，作废本次刷新
     schedDays = days;
+    schedWinCache[schedCacheKey(from, to)] = days; // 保鲜结果同步进预取缓存，滚动回去不拿到旧数据
     schedPrepareColors(days);
     recomputeSchedAxis();
     renderSched();
@@ -270,6 +344,12 @@ function schedHasLive() {
 // ---- 渲染 ----
 function renderSched() {
   renderSchedAxis();
+  renderSchedBody();
+}
+
+/** 重新解算行高（窗口缩放 / 视图从隐藏切回时调用；几何目标没变时无副作用、无闪动） */
+export function schedRelayout() {
+  if (!schedCenter || schedDays.length === 0 || !schedAxis) return;
   renderSchedBody();
 }
 
@@ -441,25 +521,39 @@ function renderSchedBody() {
   }
   var span = schedAxis.offEnd - schedAxis.offStart;
   var now = Math.floor(Date.now() / 1000);
-  var miniFrom = schedAddDays(schedCenter, -2), miniTo = schedAddDays(schedCenter, 2);
+  // 逐日装箱一次（降级判定与泳道 reconcile 共用，不重复装箱）
+  var lanesByDay = [];
+  for (var p = 0; p < schedDays.length; p++) lanesByDay.push(packSchedLanes(p));
+  // 空间连每道下限都放不下时按步降级（schedLevelFor）；clientHeight 为 0（视图隐藏）
+  // 时保持上次降级级别——不切级别毁掉 DOM 行，切回视图时 schedRelayout 会重算
+  var availH = body.clientHeight;
+  if (availH > 0) {
+    schedDegrade = 0;
+    while (schedDegrade < 3 && !schedFits(schedDegrade, lanesByDay, availH)) schedDegrade++;
+  }
   // 是否已有行：首载（无行）先清掉初始「加载中…」文本，且新行直接以自然高度呈现
   var hadDays = body.querySelector('.sched-day') != null;
   if (!hadDays) body.textContent = '';
   // 始终走原地 reconcile：泳道/条按 key 复用、只更新几何与文字，元素不销毁 →
   // 道高、透明度、字层的 CSS 过渡每次滚动都照常触发（不整窗重画、不硬切）
   var targetDates = [];
-  for (var d = 0; d < schedDays.length; d++) targetDates.push(schedDays[d].date);
-  // 先折叠不在窗口内的旧行（高度过渡到 0 再移除，下方行随空间平滑移动）
+  for (var d = 0; d < schedDays.length; d++) {
+    if (schedLevelFor(schedDays[d].date, schedDegrade)) targetDates.push(schedDays[d].date);
+  }
+  // 先折叠不在窗口内（或被降级去掉）的旧行（高度过渡到 0 再移除，其余行随空间平滑伸缩）。
+  // 已在折叠中的行跳过——头像色异步解析 / 60s 保鲜等中途重渲会走到这里，
+  // 不跳过会每次重渲都从半途重新发起折叠（动画跳闪）
   var existing = body.querySelectorAll('.sched-day');
   for (var i = 0; i < existing.length; i++) {
     var ex = existing[i];
-    if (targetDates.indexOf(ex.getAttribute('data-date')) < 0 && ex.parentNode) schedCollapseDay(ex);
+    var exDate = ex.getAttribute('data-date');
+    if (targetDates.indexOf(exDate) < 0 && ex.parentNode && !schedCollapsing[exDate]) schedCollapseDay(ex);
   }
   // 逐日更新 / 新建：重叠行原地不动（含折叠中的行），新进场行按日期插入到正确位置
   for (var d2 = 0; d2 < schedDays.length; d2++) {
     var day = schedDays[d2];
-    var isMini = day.date === miniFrom || day.date === miniTo;
-    var isCenter = day.date === schedCenter;
+    var level = schedLevelFor(day.date, schedDegrade);
+    if (!level) continue; // 降级去掉的天：不在 targetDates 里，既有行已在上面发起折叠
     var el = body.querySelector('.sched-day[data-date="' + day.date + '"]');
     var created = false;
     if (!el) {
@@ -467,9 +561,18 @@ function renderSchedBody() {
       el.setAttribute('data-date', day.date);
       created = true;
     } else if (schedCollapsing[day.date]) {
-      delete schedCollapsing[day.date]; // 折叠中又滚回来了：取消离场（updateSchedDay 已恢复自然高度）
+      delete schedCollapsing[day.date]; // 折叠中又滚回来了：取消离场（basis px 从当前位置连续滑回目标）
+      schedExpanding[day.date] = true;  // 视为重新展开：margin/opacity 回目标，overflow 到位后才恢复可见
+      el.style.margin = '';
+      el.style.opacity = '1';
+      (function (row) {
+        setTimeout(function () {
+          delete schedExpanding[row.getAttribute('data-date')];
+          row.style.overflow = '';
+        }, 320);
+      })(el);
     }
-    updateSchedDay(el, day, d2, isMini, isCenter, span, now);
+    updateSchedDay(el, day, level, span, now, lanesByDay[d2]);
     if (created) {
       // 按日期找插入点（第一个日期更大的行之前；找不到 = 追加末尾），不移动既有行
       var anchor = null;
@@ -484,20 +587,26 @@ function renderSchedBody() {
       if (hadDays) schedExpandDay(el);
     }
   }
+  // 高度统一解算：所有行 basis px → px 过渡（含折叠中的行滑向 0、新行从 0 展开）
+  schedSolveHeights(body);
 }
 
-function updateSchedDay(el, day, d, isMini, isCenter, span, now) {
-  // 复用行清除可能残留的折叠/展开内联样式（滚动折返重新入场时恢复自然高度）
-  el.style.maxHeight = '';
-  el.style.margin = '';
-  el.style.opacity = '';
-  el.style.overflow = '';
+function updateSchedDay(el, day, level, span, now, lanes) {
+  // 复用行清除可能残留的折叠内联样式（滚动折返重新入场时恢复自然状态）。
+  // 正在展开进场的行不清（清 overflow 会让内容在中途重渲时溢出短行外 = 跳闪）
+  if (!schedExpanding[el.getAttribute('data-date')]) {
+    el.style.margin = '';
+    el.style.opacity = '';
+    el.style.overflow = '';
+  }
+  el.style.flexGrow = '0';   // 高度全由解算器出 basis 像素值，grow/shrink 恒 0
+  el.style.flexShrink = '0';
   var winStart = schedDayStartTs(day.date) + schedAxis.offStart;
   // 当前时间红线跟随行窗口：now 落在本行窗口内才画（相邻窗口不重叠，至多一行命中；
   // 行窗口外的空档不画；缩略行也画红线，今天滚到首末天时红线不消失）
   var nowPct = schedRowHasNow(day.date, now) ? ((now - winStart) / span) * 100 : -1;
-  // 行级 class 驱动条透明度 / 字层 / 道高的 CSS 过渡
-  el.className = 'sched-day ' + (isCenter ? 'center' : (isMini ? 'mini' : 'single'));
+  // 行级 class 驱动条透明度 / 字层的 CSS 过渡（不再驱动道高）
+  el.className = 'sched-day ' + level;
   if (day.date === schedCenter) el.removeAttribute('data-action');
   else el.setAttribute('data-action', 'sched-center');
   var head = el.querySelector('.sched-day-head');
@@ -507,7 +616,9 @@ function updateSchedDay(el, day, d, isMini, isCenter, span, now) {
   if (head.textContent !== label) head.textContent = label;
   var lanesEl = el.querySelector('.sched-lanes');
   if (!lanesEl) { lanesEl = document.createElement('div'); lanesEl.className = 'sched-lanes'; el.appendChild(lanesEl); }
-  reconcileSchedLanes(lanesEl, d, now, winStart, span);
+  // 级别与道数挂在元素上，供 schedSolveHeights 解算像素高度
+  el._schedLevel = level;
+  el._schedLanes = reconcileSchedLanes(lanesEl, now, winStart, span, lanes);
   // 红线挂在 .sched-lanes 内（absolute 定位上下文），不能挂到 .sched-day 上（会飞出）
   var nowEl = lanesEl.querySelector('.sched-now');
   if (nowPct >= 0) {
@@ -518,16 +629,100 @@ function updateSchedDay(el, day, d, isMini, isCenter, span, now) {
   }
 }
 
-/** 折叠离场：先定格当前高度，再过渡到 0（max-height + margin + opacity），结束后移除 */
+/** 应用一行解算出的目标高度：basis 恒为像素值（grow/shrink 恒 0），目标变化即
+ *  basis px→px 的 CSS 过渡；目标没变就不碰样式（进行中的过渡不被打断） */
+function schedApplyDayPx(el, px) {
+  px = Math.round(px);
+  if (el._schedPx === px) return;
+  el._schedPx = px;
+  el.style.flexBasis = px + 'px';
+}
+
+/** 一天的显示级别（degrade = 空间降级步数，空间不足时逐级省空间）：
+ *  0 = 原级（首末天 mini / 相邻天 single / 当天 center）
+ *  1 = 去掉首末两天（返回 null = 不显示，只留三天）
+ *  2 = 相邻两天再降为 mini 条
+ *  3 = 当天也降为单行条 */
+function schedLevelFor(date, degrade) {
+  var miniFrom = schedAddDays(schedCenter, -2), miniTo = schedAddDays(schedCenter, 2);
+  var lv = (date === miniFrom || date === miniTo) ? 'mini' : (date === schedCenter ? 'center' : 'single');
+  if (degrade >= 1 && lv === 'mini') return null;
+  if (degrade >= 2 && lv === 'single') return 'mini';
+  if (degrade >= 3 && lv === 'center') return 'single';
+  return lv;
+}
+
+/** 该降级步数下「各行每道下限 + 行间距」是否还放得下（与 schedSolveHeights 同口径：
+ *  mini 道 5px+间距 1px、single/center 每道下限 16/32px、行间距 20px、道数不足 10 补空） */
+function schedFits(degrade, lanesByDay, availH) {
+  var total = 0, count = 0;
+  for (var i = 0; i < schedDays.length; i++) {
+    var lv = schedLevelFor(schedDays[i].date, degrade);
+    if (!lv) continue;
+    count++;
+    var lc = Math.max(10, lanesByDay[i].length);
+    if (lv === 'mini') total += lc * 5 + Math.max(0, lc - 1);
+    else total += lc * (lv === 'center' ? 32 : 16);
+  }
+  return total + 20 * count <= availH;
+}
+
+/** 高度统一解算（水装填法）：mini 日固定窄条（道 5px + 间距 1px）；single/center 日按
+ * 「道数 × 级权重（1/2）」分配剩余高度，每道下限 single 16px / center 32px——低于下限
+ * 的行钳到下限、余量重分给未钳行（迭代到收敛）；极端压缩（下限总和都放不下）时全钳
+ * 下限，超出部分由 .sched-body 裁底（先经 schedLevelFor 三步降级仍放不下才到这里）。
+ * 折叠中的行目标 0 不占空间；margin 目标每行 20px。
+ * 因为 basis 恒为像素值，级别切换/道数变化/窗口缩放/日进出全是 px→px 连续过渡，
+ * 无 class 硬跳、无 min-height 瞬弹 */
+function schedSolveHeights(body) {
+  var rows = body.querySelectorAll('.sched-day');
+  var minis = [], items = [], miniPxSum = 0, visibleCount = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var el = rows[i];
+    if (schedCollapsing[el.getAttribute('data-date')]) continue; // 折叠中：目标 0
+    visibleCount++;
+    var lc = el._schedLanes || 10;
+    if (el._schedLevel === 'mini') {
+      var px = lc * 5 + Math.max(0, lc - 1);
+      minis.push({ el: el, px: px });
+      miniPxSum += px;
+    } else {
+      var center = el._schedLevel === 'center';
+      items.push({ el: el, w: lc * (center ? 2 : 1), min: lc * (center ? 32 : 16) });
+    }
+  }
+  var free = body.clientHeight - 20 * visibleCount - miniPxSum;
+  // 水装填：权重分配，低于下限的钳住并从 free 扣除，余量重分给未钳行
+  var pending = items.slice();
+  for (;;) {
+    if (pending.length === 0) break;
+    var W = 0;
+    for (var a = 0; a < pending.length; a++) W += pending[a].w;
+    if (free <= 0) { // 极端压缩：余量没了，剩余行全钳下限
+      for (var b = 0; b < pending.length; b++) pending[b].px = pending[b].min;
+      break;
+    }
+    var clamped = [];
+    for (var c = 0; c < pending.length; c++) {
+      var it = pending[c];
+      it.px = free * it.w / W;
+      if (it.px < it.min) { it.px = it.min; free -= it.min; clamped.push(it); }
+    }
+    if (clamped.length === 0) break; // 全部高于下限，分配成立
+    for (var d = 0; d < clamped.length; d++) pending.splice(pending.indexOf(clamped[d]), 1);
+  }
+  for (var m = 0; m < minis.length; m++) schedApplyDayPx(minis[m].el, minis[m].px);
+  for (var k = 0; k < items.length; k++) schedApplyDayPx(items[k].el, items[k].px);
+}
+
+/** 折叠离场：basis 已是像素值，直接过渡到 0 + margin/opacity 收起，**高度到 0 后才移除**；
+ *  其余天由解算器重新分配释放出的空间、同步伸展 */
 function schedCollapseDay(el) {
   var date = el.getAttribute('data-date');
   schedCollapsing[date] = true;
   el.style.overflow = 'hidden'; // 折叠期裁剪内容（平时 overflow 可见，红线圆点要溢出到间距）
-  el.style.maxHeight = el.scrollHeight + 'px';
-  el.style.margin = '16px 0';
-  el.style.opacity = '1';
-  void el.offsetHeight; // 提交起始态
-  el.style.maxHeight = '0px';
+  el._schedPx = 0; // 记录目标 0：折返取消时解算器才能感知差异、从当前位置连续滑回
+  el.style.flexBasis = '0px';
   el.style.margin = '0';
   el.style.opacity = '0';
   setTimeout(function () {
@@ -537,21 +732,19 @@ function schedCollapseDay(el) {
   }, 320);
 }
 
-/** 展开进场：从 0 高度过渡到自然高度（已在 DOM 中，先量高度 → 定格 0 → 过渡展开） */
+/** 展开进场：**从 0 高度开始**——先写好 0 态并强制提交（元素首帧就是 0 高，看不到满高态），
+ *  随后 renderSchedBody 末尾的解算器赋目标像素，basis 从 0 连续展开 */
 function schedExpandDay(el) {
-  var h = el.scrollHeight;
+  schedExpanding[el.getAttribute('data-date')] = true;
   el.style.overflow = 'hidden'; // 展开期裁剪内容
-  el.style.maxHeight = '0px';
+  el.style.flexBasis = '0px';
   el.style.margin = '0';
   el.style.opacity = '0';
-  void el.offsetHeight; // 提交折叠态
-  el.style.maxHeight = h + 'px';
-  el.style.margin = '16px 0';
+  void el.offsetHeight; // 提交 0 态
+  el.style.margin = '';
   el.style.opacity = '1';
   setTimeout(function () {
-    el.style.maxHeight = 'none';
-    el.style.margin = '';
-    el.style.opacity = '';
+    delete schedExpanding[el.getAttribute('data-date')];
     el.style.overflow = '';
   }, 320);
 }
@@ -572,7 +765,7 @@ function schedBarBg(bar, e, now) {
 
 /** 单场视觉组完整 HTML：外层 .sched-seg 是一个完整圆角矩形（单背景），
  * 内层 .sched-part 按段划分，只负责分割线 + 文字，不背背景——首/末段再窄也不破坏圆角。 */
-function schedGroupHtml(bar, d, now, winStart, span) {
+function schedGroupHtml(bar, now, winStart, span) {
   var e = schedDays[bar.di].entries[bar.ei];
   var left = ((bar.start - winStart) / span) * 100;
   var width = ((bar.end - bar.start) / span) * 100;
@@ -648,7 +841,7 @@ function schedApplyPart(partEl, bar, part, e, isFirst) {
 }
 
 /** 复用视觉组时原地更新：组几何/背景/颜色 + reconcile 内部分段（按 data-s 复用） */
-function schedApplyGroup(segEl, bar, d, now, winStart, span) {
+function schedApplyGroup(segEl, bar, now, winStart, span) {
   var e = schedDays[bar.di].entries[bar.ei];
   var left = ((bar.start - winStart) / span) * 100;
   var width = ((bar.end - bar.start) / span) * 100;
@@ -682,10 +875,11 @@ function schedApplyGroup(segEl, bar, d, now, winStart, span) {
   }
 }
 
-/** 原地 reconcile 泳道与条：泳道按下标复用、条按 key 复用，只更新几何，保留元素做过渡 */
-function reconcileSchedLanes(lanesEl, d, now, winStart, span) {
-  var lanes = packSchedLanes(d);
-  // 每天都至少 10 条泳道（不足/空天补空行），各天高度更均匀、不因空数据忽高忽低
+/** 原地 reconcile 泳道与条：泳道按下标复用、条按 key 复用，只更新几何，保留元素做过渡。
+ *  lanes 由调用方预先装箱（降级判定与 reconcile 共用同一份，不重复装箱）。
+ *  返回泳道数（含补空），调用方挂在元素上供 schedSolveHeights 解算像素行高 */
+function reconcileSchedLanes(lanesEl, now, winStart, span, lanes) {
+  // 每天都至少 10 条泳道（不足/空天补空行），空天也占住一份基础高度、不塌成一条缝
   var laneCount = Math.max(10, lanes.length);
   var existing = {};
   var oldBars = lanesEl.querySelectorAll('.sched-seg');
@@ -715,10 +909,10 @@ function reconcileSchedLanes(lanesEl, d, now, winStart, span) {
       var segEl = existing[key] && !used[key] ? existing[key] : null;
       if (segEl) {
         used[key] = true;
-        schedApplyGroup(segEl, bar, d, now, winStart, span);
+        schedApplyGroup(segEl, bar, now, winStart, span);
       } else {
         var tmp = document.createElement('div');
-        tmp.innerHTML = schedGroupHtml(bar, d, now, winStart, span);
+        tmp.innerHTML = schedGroupHtml(bar, now, winStart, span);
         segEl = tmp.firstChild;
         used[key] = true;
       }
@@ -735,6 +929,7 @@ function reconcileSchedLanes(lanesEl, d, now, winStart, span) {
   for (var key2 in existing) {
     if (!used[key2] && existing[key2].parentNode) existing[key2].parentNode.removeChild(existing[key2]);
   }
+  return laneCount;
 }
 
 // ---- hover 弹层（跟随鼠标，离开段即关；全部 esc；缩略行 mini 不触发）----
@@ -888,6 +1083,10 @@ function schedMovePop(evt) {
   });
 
   schedLoad(bjToday());
+
+  // 窗口缩放 → 重新解算各行像素高度（basis px→px 过渡，连续）；视图从隐藏切回时也需重排
+  //（display:none 下 clientHeight 为 0，隐藏期的渲染解算出的高度无效）
+  window.addEventListener('resize', schedRelayout);
 
   // 主题切换（亮/暗）→ 重渲条区：亮度随主题（70/40），h/s 不变，无需重算头像
   if (window.matchMedia) {

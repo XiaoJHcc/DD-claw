@@ -2,12 +2,14 @@
  * 控制面板全部 CSS（真实静态文件，构建期内嵌进 dist）。
  * macOS 风格设计系统（观感对齐 macOS Sequoia 系统设置）：CSS 变量令牌 + 浅色/深色双主题
  * （prefers-color-scheme）+ 卡片式行布局（无分隔线）+ 圆角矩形控件（不用胶囊）。
- * 圆角两级 + 唯一三级例外：--r-lg 页面级（.card/.sheet）/ --r-md:8px 一级卡片内的所有元素
+ * 壳 = 左边栏（标题 + 视图导航）+ 右内容区（视图切换：时间表 / 主播列表 / 设置），
+ * body 整屏不滚动，内容区各自滚动；时间表视图卡片刚好一屏，泳道高度按权重分配。
+ * 圆角两级 + 唯一三级例外：--r-lg 页面级（.card/.sheet/.sc-card）/ --r-md:8px 一级卡片内的所有元素
  * （行卡、分区卡、按钮、输入框同档）/ --r-sm:6px 二级元素内部（动态卡、关键帧、缩略图、tag、
  * 图标按钮、勾选框、直播中徽标）。正圆形（头像/状态点/开关/checkdot 圆环/徽标圆点）豁免。
  * 高度两档：--ctl-h:36px 单行控件（按钮 / 输入框 / 图标按钮等只含文本或 icon 的元素）；
  * --row-h:44px 单行卡片（排序列表行 / 多选行 / 监听登录行 / 三模块开关行等 .row 级卡片）。
- * 加粗只留给标题（h1/h2/.sheet-title/.sheet-sub），其余靠字号与颜色分层。
+ * 加粗只留给标题（h2/.sidenav-title/.sc-name/.sheet-title/.sheet-sub），其余靠字号与颜色分层。
  */
 *{box-sizing:border-box}
 :root{
@@ -15,7 +17,6 @@
   --separator:rgba(0,0,0,.09);--border-strong:rgba(0,0,0,.24);--accent:#007aff;--red:#ff3b30;--green:#34c759;
   --fill:rgba(120,120,128,.055);--hover:rgba(120,120,128,.08);--switch-off:rgba(120,120,128,.28);
   --r-lg:14px;--r-md:8px;--r-sm:6px;--ctl-h:36px;--row-h:44px;
-  --sched-lane-h:20px;--sched-mini-lane-h:5px;--sched-center-lane-h:34px;
   --shadow:0 1px 2px rgba(0,0,0,.05);
 }
 @media (prefers-color-scheme: dark){
@@ -27,10 +28,32 @@
   }
 }
 body{margin:0;font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
-  background:var(--bg);color:var(--text);font-size:14px;line-height:1.45}
-.page{max-width:1280px;margin:0 auto;padding:24px 32px 64px}
-.page-head{display:flex;align-items:center;margin:8px 0 20px}
-h1{font-size:22px;font-weight:600;margin:0}
+  background:var(--bg);color:var(--text);font-size:14px;line-height:1.45;
+  height:100vh;overflow:hidden}
+/* 壳：左边栏（浮动卡片，不贴边，与内容区左相邻，高度仅包内容 align-self:flex-start）+ 右内容区
+   （整屏不滚动，视图在 .view-host 内各自滚动）。边栏 + 内容区作为一个整体在窗口内居中
+   （justify-content:center），边栏紧贴内容区左缘，宽屏下两者不分离 */
+.shell{display:flex;height:100vh;justify-content:center}
+.sidenav{flex:none;align-self:flex-start;width:216px;margin:24px 0 24px 24px;padding:20px 12px;
+  background:var(--card-bg);border-radius:var(--r-lg);box-shadow:var(--shadow)}
+@media (prefers-color-scheme: dark){.sidenav{border:0.5px solid var(--separator)}}
+.sidenav-title{font-size:17px;font-weight:600;padding:6px 10px 18px}
+.sidenav-nav{display:flex;flex-direction:column;gap:2px}
+.nav-item{display:flex;align-items:center;gap:9px;width:100%;height:36px;padding:0 10px;
+  border:none;border-radius:var(--r-md);background:transparent;color:var(--text);
+  font:inherit;font-size:14px;cursor:pointer;text-align:left}
+.nav-item:hover{background:var(--hover)}
+.nav-item.active{background:var(--accent);color:#fff}
+.nav-item svg{width:16px;height:16px;flex:none}
+/* 内容区定宽 1280（与原 .page 一致）随壳居中，边栏自然贴到它的左缘；窗口不足时收缩。
+   滚动条隐藏但保留滚动（Firefox scrollbar-width / WebKit ::-webkit-scrollbar 两套写法） */
+.view-host{flex:0 1 auto;min-width:0;width:1280px;height:100vh;overflow-y:auto;scrollbar-width:none}
+.view-host::-webkit-scrollbar{display:none}
+.view{max-width:1280px;padding:24px 32px 64px}
+/* 时间表视图：卡片刚好一屏（上下各 24 留白），卡内头部/轴固定，日列表按权重填满余高 */
+#view-schedule{height:100%;padding-bottom:24px;display:flex;flex-direction:column}
+#view-schedule .card{flex:1;min-height:0;margin-bottom:0;display:flex;flex-direction:column}
+.view-head{display:flex;align-items:center;gap:10px;margin:4px 0 16px;min-height:24px}
 h2{font-size:17px;font-weight:600;margin:0}
 .hint{color:var(--text-secondary);font-size:12px}
 .hidden{display:none!important}
@@ -40,7 +63,7 @@ h2{font-size:17px;font-weight:600;margin:0}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;min-height:24px}
 .card-head-end{display:flex;align-items:center;gap:8px;min-width:0}
 .card-sub{font-size:12px;color:var(--text-secondary)}
-/* 顶部小卡片区（监听 / LLM 分析 / 推送 / NapCat，可增至 5-6 张）：
+/* 设置视图小卡片区（监听 / LLM 分析 / 推送 / NapCat，可增至 5-6 张）：
    响应式换行，宽屏一行最多三张，中等宽度两张，窄屏一张 */
 .row-top{display:flex;gap:20px;align-items:stretch;margin-bottom:20px;flex-wrap:wrap}
 /* 小卡内部纵向 flex：标题 → 列表（flex:1 撑开）→ 底部按钮，让「新增/设置」按钮贴底对齐 */
@@ -182,37 +205,38 @@ input:disabled{opacity:.5;background:var(--fill)}
 .qr-empty{display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--text-secondary)}
 .qr-empty svg{width:40px;height:40px}
 .qr-msg{text-align:center;min-height:18px}
-/* 主播卡片：三栏（基本信息 | 直播实况 | 动态时间线） */
-.sc-card{display:flex;gap:20px;background:var(--row-bg);border-radius:var(--r-md);
-  padding:16px;margin:12px 0;cursor:pointer;transition:background .15s}
-.sc-card:hover{background:var(--hover)}
-.sc-left{width:180px;flex:none;min-width:0}
-.avatar{width:56px;height:56px;border-radius:50%;object-fit:cover;display:block;background:var(--fill)}
-.avatar-ph{display:flex;align-items:center;justify-content:center;color:var(--text-secondary);font-size:22px}
-.sc-name{font-size:14px;margin:8px 0 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.meta{font-size:12px;color:var(--text-secondary);margin:2px 0;display:flex;align-items:center;gap:6px;min-width:0}
+/* 主播卡片：每个主播一张独立卡片（.card 同级圆角与底色），固定高度不被动态撑大。
+   三栏：左基本信息 | 中直播间关键帧 + 直播信息（关键帧下方）| 右动态时间线（无小标题、溢出裁剪） */
+#streamer-list{display:flex;flex-direction:column;gap:16px}
+.sc-card{display:flex;gap:20px;background:var(--card-bg);border-radius:var(--r-lg);box-shadow:var(--shadow);
+  padding:16px;height:250px;overflow:hidden;cursor:pointer}
+@media (prefers-color-scheme: dark){.sc-card{border:0.5px solid var(--separator)}}
+.sc-left{width:170px;flex:none;min-width:0;overflow:hidden}
+.avatar{width:48px;height:48px;border-radius:50%;object-fit:cover;display:block;background:var(--fill)}
+.avatar-ph{display:flex;align-items:center;justify-content:center;color:var(--text-secondary);font-size:20px}
+.sc-name{font-size:15px;font-weight:600;margin:8px 0 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.meta{font-size:12px;color:var(--text-secondary);margin:3px 0;display:flex;align-items:center;gap:6px;min-width:0}
 .sc-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sc-note.none{opacity:.6}
 .rules-row{display:flex;flex-wrap:wrap;gap:4px}
-.sc-right{flex:1;display:flex;gap:14px;min-width:0;align-items:flex-start}
+.sc-mid{width:250px;flex:none;min-width:0;display:flex;flex-direction:column;gap:8px}
 .kf-wrap{position:relative;flex:none}
-.kf{width:250px;aspect-ratio:16/9;border-radius:var(--r-sm);object-fit:cover;display:block;background:var(--fill)}
+.kf{width:100%;aspect-ratio:16/9;border-radius:var(--r-sm);object-fit:cover;display:block;background:var(--fill)}
 .kf-empty{display:flex;align-items:center;justify-content:center;color:var(--text-secondary)}
 .kf-empty svg{width:28px;height:28px}
 .sc-card.off .kf-wrap{opacity:.5}
 .live-badge{position:absolute;left:8px;top:8px;display:inline-flex;align-items:center;gap:5px;
   background:var(--accent);color:#fff;font-size:11px;border-radius:var(--r-sm);padding:2px 7px}
 .live-badge:before{content:"";width:6px;height:6px;border-radius:50%;background:#fff}
-.live-info{min-width:0}
-.live-title{font-size:14px;margin:2px 0 6px;overflow:hidden;
+.live-info{min-width:0;overflow:hidden}
+.live-title{font-size:13px;margin:0 0 4px;overflow:hidden;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-.off-dur{font-size:14px}
-/* 主播卡片第三栏：动态时间线，每条动态一张小卡片 */
-.sc-posts{width:250px;flex:none;min-width:0;padding-left:16px}
-.sc-posts-title{font-size:12px;color:var(--text-secondary);margin-bottom:4px}
+.off-dur{font-size:13px;margin-bottom:4px}
+/* 主播卡片第三栏：动态时间线，每条动态一张小卡片，卡片固定高度内溢出裁剪 */
+.sc-posts{flex:1;min-width:0;overflow:hidden;padding-left:20px}
 .post{display:flex;gap:8px;padding:8px 10px;margin:6px 0;color:inherit;text-decoration:none;
-  background:var(--card-bg);border-radius:var(--r-sm)}
-@media (prefers-color-scheme: dark){.post{background:rgba(255,255,255,.06)}}
+  background:var(--row-bg);border-radius:var(--r-sm)}
+.post:first-child{margin-top:0}
 a.post:hover{background:var(--hover)}
 .post-thumb{width:52px;height:52px;border-radius:var(--r-sm);object-fit:cover;flex:none;background:var(--fill)}
 .post-body{flex:1;min-width:0}
@@ -235,28 +259,35 @@ a.post:hover{background:var(--hover)}
 .f-more{margin:10px 0;text-align:center}
 .f-more a{color:var(--accent);cursor:pointer;text-decoration:none}
 .f-more a:hover{text-decoration:underline}
-/* 时间表：轴表头独立在滚动区之上，日列表内部滚动翻页 */
-.sched-axis{position:relative;height:22px;margin-left:118px;border-bottom:1px solid var(--separator)}
+/* 时间表：轴表头固定在卡片上部，日列表（.sched-body）按权重填满卡片余高 */
+.sched-axis{position:relative;flex:none;height:22px;margin-left:118px;border-bottom:1px solid var(--separator)}
 .sched-tick{position:absolute;top:0;bottom:0;width:1px;background:var(--separator)}
 .sched-tick-label{position:absolute;top:3px;transform:translateX(4px);font-size:10px;
   color:var(--text-secondary);white-space:nowrap}
-.sched-body{/* 5 天滑动窗口制：无内部滚动容器，随页面整体滚动 */}
+/* 下限总和超出余高（极端矮屏/超多主播）时先由 JS 按步降级（去首末天→相邻天降 mini→当天降单行），仍超出才裁底部，不顶破卡片 */
+.sched-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 /* 三级行：center（双行字·全透明）> single（单行字·减淡）> mini（无字色条·更淡）。
-   级别由 .sched-day 的 class 驱动，条透明度/字层/道高过渡全走 CSS transition；
+   级别由 .sched-day 的 class 驱动，条透明度/字层全走 CSS transition；
    滚动时重叠天不重建 DOM 只切 class，颜色条在无字/单行/双行间平滑渐变 */
 .sched-day[data-action]{cursor:pointer}
-/* 泳道高度固定（--sched-lane-h），日行走高 = 泳道数 × 道高（空天 = 一道）——
-   高峰同播几十路时行高自适应。center 行更高以容纳双行字，mini 行超窄。
-   .sched-day 自带 max-height/margin/opacity 过渡：首尾两天进出时折叠到 0 / 从 0 展开。
-   overflow:hidden 只在折叠/展开期间由 JS 内联加，平时不设，好让红线圆点溢出到间距里 */
-.sched-day{display:flex;gap:8px;margin:16px 0;
-  transition:max-height .28s ease,margin .28s ease,opacity .28s ease}
+/* 泳道高度按 0-1-2 权重分配（沿用旧三档道高 mini 5px / single 20px / center 34px 的
+   层级比例）：行高由 JS 解算成 flex-basis 像素值（grow/shrink 恒 0）——mini 日固定
+   窄条（道 5px + 间距 1px），single/center 日按「道数 × 级权重（1/2）」水装填分配
+   剩余高度，每道下限 single 16px / center 32px（低于下限钳住、余量重分，保底守 1:2，
+   极端矮屏/超多主播时不比 mini 条还窄；下限总和放不下时 JS 按三步降级——去掉首末天
+   → 相邻天降 mini → 当天降单行，仍超出才由 .sched-body 裁底）。道内
+   .sched-lane flex:1 均分。文字可用空间随屏幕高度与泳道数量变化（暂不做特殊处理）。
+   basis 恒为像素值 ⇒ 级别切换 / 道数变化 / 日进出窗口 / 降级升降级 / 窗口缩放全部是
+   basis px→px 的 CSS 过渡，全程连续，无 class 硬跳、无 min-height 瞬弹；目标没变 JS 就不
+   碰样式，进行中的过渡不被中途重渲打断。overflow:hidden 只在折叠/展开期间由 JS
+   内联加，平时不设，好让红线圆点溢出到间距里 */
+.sched-day{display:flex;gap:8px;margin:10px 0;flex:none;min-height:0;
+  transition:flex-basis .28s ease,margin .28s ease,opacity .28s ease}
 .sched-day-head{flex:none;width:110px;padding-top:3px;font-size:12px;color:var(--text-secondary)}
-.sched-lanes{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;position:relative}
-.sched-lane{position:relative;flex:none;height:var(--sched-lane-h);background:var(--row-bg);
-  border-radius:var(--r-sm);overflow:hidden;transition:height .28s ease}
-.sched-day.center .sched-lane{height:var(--sched-center-lane-h)}
-.sched-day.mini .sched-lane{height:var(--sched-mini-lane-h)}
+.sched-lanes{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:2px;position:relative}
+.sched-lane{position:relative;flex:1 1 0;min-height:0;background:var(--row-bg);
+  border-radius:var(--r-sm);overflow:hidden}
+/* mini 日：窄间距（行高由 JS flex-basis 控制，不再是 class 驱动道高） */
 .sched-day.mini .sched-lanes{gap:1px}
 .sched-day.mini .sched-day-head{padding-top:0;font-size:10px}
 /* 色条：三级透明度（center 1 / single .62 / mini .34）。一场直播画成一个完整的

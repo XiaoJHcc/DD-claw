@@ -7,6 +7,9 @@
  *
  * 纯 node fs，零依赖。每次 build/dev/test 开始前由 npm 钩子（prebuild/predev/pretest/
  * pretypecheck）执行，保证资产永远先于编译现生成。
+ * 两个生成物都「内容没变就不写盘」：tsx watch 盯着 src/，无条件写文件（哪怕内容
+ * 相同）会因 mtime 变化让 dev 服白重启；且 dev 脚本把两个 .gen.ts 列进 --ignore，
+ * 即使内容真变了也不触发重启（webui 改动只在重启时生效，调 UI 走 webui:dev）。
  */
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -71,8 +74,18 @@ for (const key of Object.keys(assets).sort((a, b) => a.length - b.length)) {
 lines.push('};');
 lines.push('');
 
-writeFileSync(OUT, lines.join('\n'), 'utf8');
-console.log(`build-webui: ${files.length} 资产 → src/panel/webui-assets.gen.ts`);
+/** 内容没变就不写盘（tsx watch 盯 src/，mtime 变化会白重启 dev 服）；返回是否写入 */
+function writeIfChanged(path, content) {
+  try {
+    if (readFileSync(path, 'utf8') === content) return false;
+  } catch { /* 文件不存在 → 写 */ }
+  writeFileSync(path, content, 'utf8');
+  return true;
+}
+
+const assetsContent = lines.join('\n');
+console.log(`build-webui: ${files.length} 资产 → src/panel/webui-assets.gen.ts` +
+  (writeIfChanged(OUT, assetsContent) ? '' : '（内容未变，跳过写入）'));
 
 // ---- 首启默认值：webui/demo/defaults.json 是 LLM provider / 分类规则 / 推送规则的
 // 唯一手工信源（demo mock 与发布后首启默认值共用），此处生成后端消费的 TS。
@@ -105,5 +118,6 @@ const defaultsLines = [
   `export const ONBOARDING_RULES: OnboardingRule[] = ${JSON.stringify(defaults.rules ?? [], null, 2)};`,
   '',
 ];
-writeFileSync(DEFAULTS_OUT, defaultsLines.join('\n'), 'utf8');
-console.log(`build-webui: defaults.json → src/core/onboarding-defaults.gen.ts（providers ${(defaults.llmProviders ?? []).length}、categories ${(defaults.categories ?? []).length}、rules ${(defaults.rules ?? []).length}）`);
+const defaultsContent = defaultsLines.join('\n');
+console.log(`build-webui: defaults.json → src/core/onboarding-defaults.gen.ts（providers ${(defaults.llmProviders ?? []).length}、categories ${(defaults.categories ?? []).length}、rules ${(defaults.rules ?? []).length}）` +
+  (writeIfChanged(DEFAULTS_OUT, defaultsContent) ? '' : '（内容未变，跳过写入）'));

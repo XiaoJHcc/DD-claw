@@ -5,7 +5,7 @@
   "type": "module",
   "description": "B站开播监听 → 内容判定 → 推送",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --ignore \"src/panel/webui-assets.gen.ts\" --ignore \"src/core/onboarding-defaults.gen.ts\" src/index.ts",
     "start": "node dist/index.js",
     "prebuild": "node scripts/build-webui.mjs",
     "predev": "node scripts/build-webui.mjs",

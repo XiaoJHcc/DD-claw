@@ -15,6 +15,8 @@ const ICONS = {
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3.2 2"/>',
   sliders: '<path d="M4 8h10M17.5 8H20M4 16h4M11.5 16H20"/><circle cx="15.5" cy="8" r="1.8"/><circle cx="8.5" cy="16" r="1.8"/>',
   gear: '<circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+  person: '<circle cx="12" cy="8" r="4"/><path d="M5 20.5c1.4-3.8 4-5.5 7-5.5s5.6 1.7 7 5.5"/>',
   link: '<path d="M10 14a5 5 0 0 0 7.1 0l1.9-1.9a5 5 0 0 0-7.1-7.1l-1 1M14 10a5 5 0 0 0-7.1 0l-1.9 1.9a5 5 0 0 0 7.1 7.1l1-1"/>',
 };
 export function icon(name) {

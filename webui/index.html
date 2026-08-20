@@ -9,9 +9,31 @@
 <body>
 <div id="toasts" class="toast-host"></div>
 
-<div class="page">
-<header class="page-head"><h1>DD-claw 控制面板</h1></header>
+<div class="shell">
+<aside class="sidenav">
+<div class="sidenav-title">DD-claw 控制面板</div>
+<nav class="sidenav-nav">
+<button class="nav-item active" data-action="nav-view" data-view="schedule"><span data-icon="calendar"></span>时间表</button>
+<button class="nav-item" data-action="nav-view" data-view="streamers"><span data-icon="person"></span>主播列表</button>
+<button class="nav-item" data-action="nav-view" data-view="settings"><span data-icon="gear"></span>设置</button>
+</nav>
+</aside>
 
+<main class="view-host">
+<div class="view" id="view-schedule">
+<section class="card" id="card-schedule">
+<div class="card-head"><h2>时间表</h2></div>
+<div id="schedule-axis" class="sched-axis"></div>
+<div id="schedule-body" class="sched-body">加载中…</div>
+</section>
+</div>
+
+<div class="view hidden" id="view-streamers">
+<div class="view-head"><h2>主播列表</h2><span class="card-sub" id="streamer-count"></span></div>
+<div id="streamer-list">加载中…</div>
+</div>
+
+<div class="view hidden" id="view-settings">
 <div class="row-top">
 <section class="card" id="card-listen">
 <div class="card-head"><h2>监听</h2></div>
@@ -73,22 +95,13 @@
 </section>
 </div>
 
-<section class="card" id="card-schedule">
-<div class="card-head"><h2>时间表</h2></div>
-<div id="schedule-axis" class="sched-axis"></div>
-<div id="schedule-body" class="sched-body">加载中…</div>
-</section>
-
-<section class="card" id="card-streamers">
-<div class="card-head"><h2>主播列表</h2><span class="card-sub" id="streamer-count"></span></div>
-<div id="streamer-list">加载中…</div>
-</section>
-
 <section class="card" id="card-follows">
 <div class="card-head"><h2>关注列表</h2></div>
 <div class="search-box"><span class="search-icon" data-icon="search"></span><input id="follow-search" data-input="follow-search" placeholder="搜索昵称 / UID"></div>
 <div id="follow-list" class="follow-grid">加载中…</div>
 </section>
+</div>
+</main>
 </div>
 
 <div id="sheet-mask1" class="sheet-mask hidden"><div class="sheet"></div></div>

@@ -1,4 +1,4 @@
-// 面板前端 · 卡片5 主播列表 + 详情弹窗（全字段编辑 + 该主播的生效推送规则视图）。
+// 面板前端 · 主播列表视图（每个主播一张独立卡片）+ 详情弹窗（全字段编辑 + 该主播的生效推送规则视图）。
 // 规则的新增/编辑/排序收编在「推送」卡片；详情弹窗只勾选「该规则是否对本主播生效」。
 import { api, toast, ACTIONS, CHANGES, esc, openSheet, sheetCleanups, checkboxHtml, field, durSpan } from './core.js';
 import { icon } from './icons.js';
@@ -49,13 +49,13 @@ function postRow(p) {
   return '<div class="post">' + inner + '</div>';
 }
 function postsColumn(s) {
-  // 开播类型的动态（LIVE_RCMD）是自动生成的噪音，不展示
+  // 开播类型的动态（LIVE_RCMD）是自动生成的噪音，不展示；卡片固定高度，无小标题，溢出裁剪
   const all = s.posts || [];
   const posts = all.filter(function (p) { return p.type !== 'DYNAMIC_TYPE_LIVE_RCMD'; });
   const rows = posts.length
     ? posts.map(postRow).join('')
     : '<p class="hint">' + (all.length ? '暂无动态' : '暂无抓取') + '</p>';
-  return '<div class="sc-posts"><div class="sc-posts-title">动态</div>' + rows + '</div>';
+  return '<div class="sc-posts">' + rows + '</div>';
 }
 function streamerCard(s) {
   const name = s.alias || s.uname || String(s.uid);
@@ -73,11 +73,12 @@ function streamerCard(s) {
     '<div class="meta"><span class="dot green"></span>' + esc(state) + '</div>' +
     (ruleTags ? '<div class="meta rules-row">' + ruleTags + '</div>' : '') +
     '</div>';
-  let right;
+  // 中栏：直播间关键帧在上（在播带「直播中」徽标），直播信息在关键帧下方
+  let mid;
   if (isLive) {
     const img = s.live.keyframe || s.live.cover;
     const area = [s.live.parentAreaName, s.live.areaName].filter(Boolean).join(' / ');
-    right = '<div class="sc-right"><div class="kf-wrap">' +
+    mid = '<div class="sc-mid"><div class="kf-wrap">' +
       (img ? `<img class="kf" referrerpolicy="no-referrer" src="${esc(img)}" alt="">`
            : '<div class="kf kf-empty">' + icon('bell') + '</div>') +
       '<span class="live-badge">直播中</span></div>' +
@@ -88,11 +89,11 @@ function streamerCard(s) {
   } else {
     const off = (s.live && s.live.lastLiveAt) ? durSpan(s.live.lastLiveAt, '下播 ') : '未见开播';
     const prev = (s.live && s.live.title) ? `<div class="meta">上一场：${esc(s.live.title)}</div>` : '';
-    right = '<div class="sc-right"><div class="kf-wrap"><div class="kf kf-empty">' + icon('bell') + '</div></div>' +
+    mid = '<div class="sc-mid"><div class="kf-wrap"><div class="kf kf-empty">' + icon('bell') + '</div></div>' +
       `<div class="live-info"><div class="off-dur">${off}</div>${prev}</div></div>`;
   }
   return `<div class="sc-card${isLive ? '' : ' off'}" data-action="open-streamer" data-uid="` +
-    `${esc(s.uid)}">${left}${right}${postsColumn(s)}</div>`;
+    `${esc(s.uid)}">${left}${mid}${postsColumn(s)}</div>`;
 }
 export function loadStreamers() {
   return api('/api/streamers').then(function (j) {
