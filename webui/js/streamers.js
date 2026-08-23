@@ -79,7 +79,7 @@ function streamerCard(s) {
     const area = [s.live.parentAreaName, s.live.areaName].filter(Boolean).join(' / ');
     mid = '<div class="sc-mid"><div class="kf-wrap">' +
       (img ? `<img class="kf" referrerpolicy="no-referrer" src="${esc(img)}" alt="">`
-           : '<div class="kf kf-empty">' + icon('bell') + '</div>') +
+           : '<div class="kf kf-empty">' + icon('video-off') + '</div>') +
       '<span class="live-badge">直播中</span></div>' +
       '<div class="live-info"><div class="live-title">' + esc(s.live.title || '') + '</div>' +
       (area ? `<div class="meta">${esc(area)}</div>` : '') +
@@ -88,7 +88,7 @@ function streamerCard(s) {
   } else {
     const off = (s.live && s.live.lastLiveAt) ? durSpan(s.live.lastLiveAt, '下播 ') : '未见开播';
     const prev = (s.live && s.live.title) ? `<div class="meta">上一场：${esc(s.live.title)}</div>` : '';
-    mid = '<div class="sc-mid"><div class="kf-wrap"><div class="kf kf-empty">' + icon('bell') + '</div></div>' +
+    mid = '<div class="sc-mid"><div class="kf-wrap"><div class="kf kf-empty">' + icon('video-off') + '</div></div>' +
       `<div class="live-info"><div class="off-dur">${off}</div>${prev}</div></div>`;
   }
   return `<div class="sc-card${isLive ? '' : ' off'}" data-action="open-streamer" data-uid="` +
