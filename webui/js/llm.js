@@ -1,7 +1,7 @@
 // 面板前端 · 卡片2 LLM 分析：总开关（卡片右上角）+ provider 列表
 // （iOS 开关/名称/多模态标签/测试/编辑/删除/拖拽把手）+ 底部新增按钮。
 // 顺序 = 调用优先级，拖拽排序落库热生效；新增与编辑统一走 sheet 表单。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkboxHtml, makeSortable, openSheet, closeSheet } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkboxHtml, makeSortable, openSheet, closeSheet, dropdownHtml } from './core.js';
 
 let llmCache = [];
 
@@ -75,8 +75,10 @@ function openLlmSheet(name) {
     '<div class="field-row split">' +
     field('baseURL', `<input id="lp-base" placeholder="如 https://api.deepseek.com/v1" value="` +
       (p ? esc(p.baseURL) : '') + '">') +
-    field('协议', '<select id="lp-api"><option value="chat-completions">chat/completions（默认）</option>' +
-      '<option value="responses">responses（GPT 5.6 等）</option></select>') +
+    field('协议', dropdownHtml('lp-api', [
+      { value: 'chat-completions', label: 'chat/completions（默认）' },
+      { value: 'responses', label: 'responses（GPT 5.6 等）' },
+    ], p ? (p.api || 'chat-completions') : 'chat-completions')) +
     '</div>' +
     field('API key', `<input id="lp-key" placeholder="如 sk-xxx；本地无鉴权可留空" value="` +
       (p && p.key.value ? esc(p.key.value) : '') + '">') +
@@ -85,15 +87,13 @@ function openLlmSheet(name) {
       (p ? esc(p.model) : '') + '">') +
     field('多模态', checkboxHtml('id="lp-vision"', !!(p && p.vision), false, '识图')) +
     '</div>' +
-    field('结构化输出', '<select id="lp-so"><option value="schema">schema（默认）</option>' +
-      '<option value="object">object</option>' +
-      '<option value="none">none（本地小模型）</option></select>') +
+    field('结构化输出', dropdownHtml('lp-so', [
+      { value: 'schema', label: 'schema（默认）' },
+      { value: 'object', label: 'object' },
+      { value: 'none', label: 'none（本地小模型）' },
+    ], p ? (p.structuredOutput || 'schema') : 'schema')) +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     '<button class="btn btn-primary" data-action="save-llm">保存</button></div>');
-  if (p) {
-    document.getElementById('lp-so').value = p.structuredOutput || 'schema';
-    document.getElementById('lp-api').value = p.api || 'chat-completions';
-  }
 }
 
 ACTIONS['save-llm'] = function () {

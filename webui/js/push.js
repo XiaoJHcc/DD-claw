@@ -3,7 +3,7 @@
 // + 底部新增渠道按钮；规则卡 = 规则行列表（启停勾/名称/分类与生效主播标签/编辑/删除/拖拽把手，
 // 全局排序 = 匹配优先级）+ 底部添加规则按钮。
 // 渠道与规则的新增/编辑都走 sheet；规则的生效主播选择是二级 sheet。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, chanTag, makeSortable, openSheet, closeSheet, sheetCleanups } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, chanTag, makeSortable, openSheet, closeSheet, sheetCleanups, dropdownHtml } from './core.js';
 import { icon } from './icons.js';
 import { loadStreamers } from './streamers.js';
 
@@ -118,19 +118,18 @@ function openChannelSheet(id) {
   const selType = c ? (c.notifier === 'toast' ? 'toast' : c.targetType) : 'toast';
   openSheet(c ? '编辑渠道' : '新增渠道',
     field('名称', `<input id="cn-name" placeholder="如：粉丝群" value="${c ? esc(c.name) : ''}">`) +
-    field('类型', '<select id="cn-type" data-change="cn-type-change">' +
-      '<option value="toast">系统通知</option>' +
-      '<option value="group">QQ群</option>' +
-      '<option value="private">QQ私聊</option></select>') +
+    field('类型', dropdownHtml('cn-type', [
+      { value: 'toast', label: '系统通知' },
+      { value: 'group', label: 'QQ群' },
+      { value: 'private', label: 'QQ私聊' },
+    ], selType, 'cn-type-change')) +
     '<div class="field" id="cn-target-field">' +
       '<label class="field-label" id="cn-target-label">群号</label>' +
       `<input id="cn-target" value="${c && c.targetId ? esc(c.targetId) : ''}">` +
     '</div>' +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     `<button class="btn btn-primary" data-action="save-channel" data-id="${c ? c.id : ''}">保存</button></div>`);
-  const typeSel = document.getElementById('cn-type');
-  typeSel.value = selType;
-  applyCnTarget(typeSel);
+  applyCnTarget(document.getElementById('cn-type'));
 }
 
 // 目标号随类型联动：系统通知不显示输入框；QQ群/QQ私聊分别标「群号」「QQ号」
@@ -185,10 +184,9 @@ function openPushRuleSheet(id) {
   const r = id === null ? null : pushRuleById(id);
   if (id !== null && !r) { toast('规则数据未加载', true); return; }
   ruleSheetUids = r ? r.uids.slice() : [];
-  const catOptions = '<option value="">任意开播</option>' + ruleCats.map(function (c) {
-    return `<option value="${c.id}"${r && r.categoryId === c.id ? ' selected' : ''}>` +
-      esc(c.name) + '</option>';
-  }).join('');
+  const catOptions = [{ value: '', label: '任意开播' }].concat(ruleCats.map(function (c) {
+    return { value: c.id, label: c.name };
+  }));
   const chanRows = chCache.length === 0
     ? ''
     : chCache.map(function (c) {
@@ -198,7 +196,7 @@ function openPushRuleSheet(id) {
       }).join('');
   openSheet(r ? '编辑规则' : '添加规则',
     field('名称', `<input id="pr-name" placeholder="留空自动命名" value="${r ? esc(r.name) : ''}">`) +
-    field('分类', '<select id="pr-cat">' + catOptions + '</select>') +
+    field('分类', dropdownHtml('pr-cat', catOptions, r ? r.categoryId : '')) +
     field('生效主播', '<div class="row" data-action="open-rule-streamers">' +
       `<span class="row-title" id="pr-uids-summary">${esc(uidsSummary(ruleSheetUids))}</span>` +
       `<span class="row-end">${icon('chevron-right')}</span></div>`) +

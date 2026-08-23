@@ -66,6 +66,7 @@ ACTIONS.noop = function () {};
 export var sheetCleanups = { 1: null, 2: null };
 export function openSheet(title, bodyHtml, level) {
   var l = level || 1;
+  closeDropDown();
   var mask = document.getElementById('sheet-mask' + l);
   mask.querySelector('.sheet').innerHTML =
     `<div class="sheet-head"><div class="sheet-title">${esc(title)}</div>` +
@@ -76,6 +77,7 @@ export function openSheet(title, bodyHtml, level) {
 }
 export function closeSheet(level) {
   var l = level || 1;
+  closeDropDown();
   if (sheetCleanups[l]) { try { sheetCleanups[l](); } catch (e) {} sheetCleanups[l] = null; }
   document.getElementById('sheet-mask' + l).classList.add('hidden');
   document.querySelector('#sheet-mask' + l + ' .sheet').innerHTML = '';
@@ -120,6 +122,131 @@ export function gripHtml() { return `<span class="grip" title="拖拽排序">${i
 export function field(label, inputHtml) {
   return `<div class="field"><label class="field-label">${esc(label)}</label>${inputHtml}</div>`;
 }
+// ---- 下拉选择（自绘，完全替代原生 select）：触发器观感同输入框，caret 为 chevron 图标重画，
+// ---- 展开列表为 fixed 自绘 div（随触发器宽度、空间不足自动上翻），不弹任何原生菜单。
+// 值/事件状态仍挂在隐藏的原生 select（.dd-native）上：getElementById(id).value 与 change 事件
+// （data-change 委托）照常可用，程序化回填用 ddSetValue 同步触发器文本。
+const ddCaret = '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
+  ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+export function dropdownHtml(id, options, value, changeAction) {
+  const opts = options || [];
+  const selIdx = Math.max(0, opts.findIndex(function (o) { return String(o.value) === String(value); }));
+  const selOpts = opts.map(function (o, i) {
+    return `<option value="${esc(o.value)}"${i === selIdx ? ' selected' : ''}>${esc(o.label)}</option>`;
+  }).join('');
+  const optRows = opts.map(function (o, i) {
+    return `<button type="button" role="option" aria-selected="${i === selIdx}" class="dd-opt${i === selIdx ? ' sel' : ''}"` +
+      ` data-action="dd-pick" data-dd="${id}" data-ddv="${esc(o.value)}">` +
+      icon('check') + `<span>${esc(o.label)}</span></button>`;
+  }).join('');
+  const cur = opts[selIdx];
+  return `<div class="dd"><select id="${id}" class="dd-native"` +
+    `${changeAction ? ' data-change="' + changeAction + '"' : ''}>${selOpts}</select>` +
+    `<button type="button" class="dd-trigger" data-action="dd-toggle" data-dd="${id}">` +
+    `<span class="dd-value">${esc(cur ? cur.label : '')}</span>${ddCaret}</button></div>`;
+}
+export function ddSetValue(id, value) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  sel.value = value;
+  const cur = sel.options[sel.selectedIndex];
+  const labelEl = document.querySelector('.dd-trigger[data-dd="' + id + '"] .dd-value');
+  if (labelEl && cur) labelEl.textContent = cur.textContent;
+}
+var openDd = null;
+var ddMenus = {};
+ACTIONS['dd-toggle'] = function (el) {
+  const id = el.getAttribute('data-dd');
+  if (openDd === id) { closeDropDown(true); return; }
+  openDropDown(id);
+};
+ACTIONS['dd-pick'] = function (el) {
+  pickDropDown(el.getAttribute('data-dd'), el.getAttribute('data-ddv'));
+};
+function openDropDown(id) {
+  const sel = document.getElementById(id);
+  const trig = document.querySelector('.dd-trigger[data-dd="' + id + '"]');
+  if (!sel || !trig) return;
+  if (openDd) {                 // 已有展开的下拉：先收起（不夺焦点）
+    const om = ddMenus[openDd];
+    if (om) { om.classList.remove('open'); om.classList.remove('show'); }
+    openDd = null;
+  }
+  const rows = Array.prototype.map.call(sel.options, function (o) {
+    return `<button type="button" role="option" aria-selected="${o.selected}" class="dd-opt${o.selected ? ' sel' : ''}"` +
+      ` data-action="dd-pick" data-dd="${id}" data-ddv="${esc(o.value)}">` +
+      icon('check') + `<span>${esc(o.textContent)}</span></button>`;
+  }).join('');
+  let menu = ddMenus[id];
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.className = 'dd-menu';
+    menu.setAttribute('role', 'listbox');
+    document.body.appendChild(menu);
+    ddMenus[id] = menu;
+  }
+  menu.innerHTML = rows;
+  menu.classList.remove('show');   // visibility:hidden 仍可测量，定位后再 visible
+  menu.classList.add('open');      // display:block 供测量高度
+  const r = trig.getBoundingClientRect();
+  const mh = menu.offsetHeight;
+  menu.style.width = Math.max(r.width, 160) + 'px';
+  menu.style.left = r.left + 'px';
+  const below = window.innerHeight - r.bottom;
+  menu.style.top = (below >= mh || below >= r.top ? r.bottom : r.top - mh) + 'px';
+  openDd = id;
+  const first = menu.querySelector('.dd-opt.sel') || menu.querySelector('.dd-opt');
+  if (first) { first.focus(); first.scrollIntoView({ block: 'nearest' }); }
+  requestAnimationFrame(function () { if (openDd === id) menu.classList.add('show'); });
+}
+function closeDropDown(refocus) {
+  if (!openDd) return;
+  const id = openDd;
+  openDd = null;
+  const menu = ddMenus[id];
+  if (menu) { menu.classList.remove('open'); menu.classList.remove('show'); }
+  if (refocus) {
+    const trig = document.querySelector('.dd-trigger[data-dd="' + id + '"]');
+    if (trig) trig.focus();
+  }
+}
+function pickDropDown(id, value) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  if (String(sel.value) !== String(value)) {
+    sel.value = value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  closeDropDown(true);
+}
+document.addEventListener('click', function (e) {
+  if (!openDd || !(e.target instanceof Element)) return;
+  if (e.target.closest('[data-dd], .dd-menu')) return; // 触发器/选项由 data-action 处理
+  closeDropDown();
+});
+document.addEventListener('keydown', function (e) {
+  if (!openDd) {
+    const a = document.activeElement;
+    if (a && a.matches && a.matches('.dd-trigger[data-dd]') && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      openDropDown(a.getAttribute('data-dd'));
+    }
+    return;
+  }
+  if (e.key === 'Escape') { e.preventDefault(); closeDropDown(true); return; }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const menu = ddMenus[openDd];
+    if (!menu) return;
+    const opts = menu.querySelectorAll('.dd-opt');
+    if (!opts.length) return;
+    let i = Array.prototype.indexOf.call(opts, document.activeElement);
+    i = e.key === 'ArrowDown' ? Math.min(opts.length - 1, i + 1) : Math.max(0, i - 1);
+    if (i < 0) i = e.key === 'ArrowDown' ? 0 : opts.length - 1;
+    opts[i].focus();
+    opts[i].scrollIntoView({ block: 'nearest' });
+  }
+});
 // 渠道类型 → 人话标签（推送卡片与规则编辑共用）
 export function chanTypeName(c) {
   if (c.notifier === 'toast') return '系统通知';
