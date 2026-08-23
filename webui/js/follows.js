@@ -24,8 +24,8 @@ function followCard(f) {
   return '<div class="follow-card">' + avatarHtml(f.face, f.uname, 'f-avatar') +
     `<div class="f-name">${esc(f.uname || f.uid)}</div>` +
     (f.watched
-      ? '<button class="btn btn-sm" disabled>已监听</button>'
-      : `<button class="btn btn-primary btn-sm" data-action="watch" data-uid="${esc(f.uid)}">` +
+      ? '<button class="btn" disabled>已监听</button>'
+      : `<button class="btn btn-primary" data-action="watch" data-uid="${esc(f.uid)}">` +
         icon('plus') + '监听</button>') + '</div>';
 }
 function renderFollows() {

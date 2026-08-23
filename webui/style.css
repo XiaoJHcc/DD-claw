@@ -19,7 +19,7 @@
  * --mask/--hairline。
  * 例外（组件内部量，非样式系统档位，均由组件自有代码硬编码联动，勿改）：时间表泳道——道
  * 5px / 道间距 1-2px / 每道下限 16/32px / 日间距 10px（schedule.js 高度解算器同口径 20×行数）/
- * 色条分段缩进 6px；开关/勾选框（含排序列表启停勾 .checkdot）绘制几何（胶囊半径 11、旋钮 18px 居内 2px、
+ * 色条分段缩进 6px；开关/勾选框（含排序列表启停勾 .checkdot）绘制几何（胶囊半径 12、旋钮 20px 居内 2px、
 * 圆环 18px 线宽 1.5、勾形线宽 2.2 等）；
  * 各处固定尺寸（头像 48/44、卡片栏宽 200/250、二维码 176、控件 32/28 等）属组件尺寸而非间距。
  */
@@ -51,6 +51,8 @@
     --fill:rgba(120,120,128,.22);--hover:rgba(255,255,255,.12);
     --shadow:none;
   }
+  .btn-primary{background:rgba(10,122,255,.2);color:#0a84ff}
+  .btn-primary:hover{background:rgba(10,122,255,.3)}
 }
 body{margin:0;font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
   background:var(--bg);color:var(--text);font-size:var(--fs-base);line-height:1.45;
@@ -64,11 +66,12 @@ body{margin:0;font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",s
 @media (prefers-color-scheme: dark){.sidenav{border:var(--hairline)}}
 .sidenav-title{font-size:var(--fs-xl);font-weight:var(--fw-semibold);padding:var(--sp-1) var(--sp-2) var(--sp-3)}
 .sidenav-nav{display:flex;flex-direction:column;gap:var(--sp-1)}
-.nav-item{display:flex;align-items:center;gap:var(--sp-2);width:100%;height:var(--ctl-h);padding:0 var(--sp-2);
-  border:none;border-radius:var(--r-md);background:transparent;color:var(--text);
-  font:inherit;font-size:var(--fs-base);cursor:pointer;text-align:left}
+.nav-item{display:inline-flex;align-items:center;justify-content:flex-start;gap:var(--sp-2);width:100%;height:var(--ctl-h);
+  padding:0 var(--sp-3);border:none;border-radius:var(--r-md);background:var(--fill);color:var(--text-secondary);
+  font:inherit;font-size:var(--fs-base);cursor:pointer;text-align:left;white-space:nowrap}
 .nav-item:hover{background:var(--hover)}
-.nav-item.active{background:var(--accent);color:var(--white)}
+.nav-item.active{background:rgba(0,122,255,.1);color:var(--accent)}
+.nav-item.active:hover{background:rgba(0,122,255,.18)}
 .nav-item svg{width:var(--icon);height:var(--icon);flex:none}
 /* 内容区定宽 1280（与原 .page 一致）随壳居中，边栏自然贴到它的左缘；窗口不足时收缩。
    滚动条隐藏但保留滚动（Firefox scrollbar-width / WebKit ::-webkit-scrollbar 两套写法） */
@@ -131,15 +134,15 @@ body.sort-dragging{user-select:none}
    顶到 --sp-1，四周视觉留白一致 */
 .row[data-sid] .row-end{margin-right:calc(var(--sp-1) - var(--sp-3))}
 /* 按钮：macOS push button 观感（二级圆角，与输入框同档），统一 --ctl-h 高（btn-sm 只缩字号），
-   主按钮蓝底白字、次按钮浅灰底 */
+    主按钮蓝字浅蓝底、次按钮浅灰底 */
 button{font-family:inherit}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-1);font-size:var(--fs-sm);
-  height:var(--ctl-h);padding:0 var(--sp-3);border:none;border-radius:var(--r-md);
-  background:var(--fill);color:var(--text);cursor:pointer;white-space:nowrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-2);font-size:var(--fs-base);
+  height:var(--ctl-h);min-width:80px;padding:0 var(--sp-3);border:none;border-radius:var(--r-md);
+  background:var(--fill);color:var(--text-secondary);cursor:pointer;white-space:nowrap}
 .btn:hover{background:var(--hover)}
 .btn:active{filter:brightness(.96)}
-.btn-primary{background:var(--accent);color:var(--white)}
-.btn-primary:hover{background:var(--accent);filter:brightness(1.06)}
+.btn-primary{background:rgba(0,122,255,.1);color:var(--accent)}
+.btn-primary:hover{background:rgba(0,122,255,.18)}
 .btn-sm{font-size:var(--fs-xs);padding:0 var(--sp-3)}
 .btn:disabled{opacity:.45;cursor:default}
 .btn-block{width:100%}
@@ -151,16 +154,16 @@ button{font-family:inherit}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;flex:none}
 .dot.green{background:var(--green)}.dot.red{background:var(--red)}
 .dot.gray{background:var(--text-secondary)}.dot.yellow{background:var(--yellow)}
-/* macOS 主控开关：38x22 扁胶囊（开关形态圆角豁免），蓝色开启态、白色旋钮；
-   只用于单个主控（监听两行 + LLM/推送卡总开关），行内垂直居中、行高以 --ctl-h 为准。
-   内部几何（胶囊半径 11、旋钮 18px 居内 2px、位移 16）为组件内部量，属豁免 */
-.switch{position:relative;display:inline-block;width:38px;height:22px;flex:none}
+/* 主控开关：宽矮胶囊（开关形态圆角豁免），蓝色开启态、白色胶囊旋钮；
+    只用于单个主控（监听两行 + LLM/推送/NapCat 卡总开关），行内垂直居中、高度 = 文字行高。
+    内部几何（胶囊半径 11、旋钮 28×16 居内 3px、位移 12）为组件内部量，属豁免 */
+.switch{position:relative;display:inline-block;width:42px;height:20px;flex:none;opacity:.8}
 .switch input{position:absolute;opacity:0;width:0;height:0;margin:0}
-.knob{position:absolute;inset:0;background:var(--switch-off);border-radius:11px;transition:background .18s;cursor:pointer}
-.knob:before{content:"";position:absolute;width:18px;height:18px;left:2px;top:2px;background:var(--white);
-  border-radius:50%;box-shadow:0 1px 2px rgba(0,0,0,.22);transition:transform .18s}
+.knob{position:absolute;inset:0;background:var(--switch-off);border-radius:10px;transition:background .18s;cursor:pointer}
+.knob:before{content:"";position:absolute;width:24px;height:16px;left:2px;top:2px;background:var(--white);
+  border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.12);transition:transform .18s}
 .switch input:checked + .knob{background:var(--accent)}
-.switch input:checked + .knob:before{transform:translateX(16px)}
+.switch input:checked + .knob:before{transform:translateX(14px)}
 .switch input:disabled + .knob{opacity:.45;cursor:default}
 /* 勾选框（.checkbox / .checkdot 统一自绘）：未选 = 浅灰空心圆环，选中 = 蓝色勾，
    无方框、无原生勾选框；圆环为正圆形，几何豁免圆角档位。
