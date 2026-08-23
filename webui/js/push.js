@@ -189,7 +189,7 @@ function openPushRuleSheet(id) {
       `<span class="row-title" id="pr-uids-summary">${esc(uidsSummary(ruleSheetUids))}</span>` +
       `<span class="row-end">${icon('chevron-right')}</span></div>`) +
     '<div class="field"><label>渠道</label>' + (chanRows || '<span class="hint">还没有渠道</span>') + '</div>' +
-    field('推送词', `<input id="pr-tpl" placeholder="留空 = 默认推送词（{alias} 开播了）" value="` +
+    field('推送词', `<input id="pr-tpl" placeholder="留空 = 默认推送词（{liver} 开播了）" value="` +
       (r ? esc(r.messageTemplate || '') : '') + '">') +
     '<div class="sheet-foot"><span id="rule-err" class="form-err"></span>' +
     '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +

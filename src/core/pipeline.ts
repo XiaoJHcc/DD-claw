@@ -173,7 +173,7 @@ export class Pipeline {
    *   推送词 = sort 序首个非空 messageTemplate；并集为空 = 用户明确不推（记 log 不推）
    * - 无命中规则（含一条都没有）= 不推——「任意开播 × 全部主播」规则即旧全局默认的等价物，
    *   需要兜底推送的用户自建一条即可
-   * - 模板：规则覆盖 > 内置默认 '{alias} 开播了'；正文/图片/跳转沿用默认形状
+   * - 模板：规则覆盖 > 内置默认 '{liver} 开播了'；正文/图片/跳转沿用默认形状
    */
   private buildMessage(event: LiveEvent): PushMessage | null {
     const { db } = this.deps;
@@ -201,7 +201,7 @@ export class Pipeline {
     }
     log.info(`命中推送规则 ${hits.map((r) => `#${r.id}`).join('/')}（${event.alias || event.uname}）`);
 
-    const tpl = templateOverride ?? '{alias} 开播了';
+    const tpl = templateOverride ?? '{liver} 开播了';
     const text = renderTemplate(tpl, event).trim();
     return { ...base, title: text || base.title, channels: channelIds.map(String) };
   }

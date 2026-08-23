@@ -31,7 +31,7 @@ function category(over: Partial<NewCategory> = {}): NewCategory {
 function rule(over: Partial<NewPushRule> = {}): NewPushRule {
   return {
     name: '', categoryId: null, uids: [], channels: [1, 2],
-    messageTemplate: '{alias} 开播了', enabled: true,
+    messageTemplate: '{liver} 开播了', enabled: true,
     ...over,
   };
 }
@@ -148,7 +148,7 @@ test('push_rules v2 CRUD：JSON 数组字段往返 / categoryId 可空 / disable
   assert.equal(enabled[0]!.categoryId, 3);
   assert.deepEqual(enabled[0]!.uids, ['1', '2'], 'JSON 数组字段正确解析');
   assert.deepEqual(enabled[0]!.channels, [1, 2]);
-  assert.equal(enabled[0]!.messageTemplate, '{alias} 开播了');
+  assert.equal(enabled[0]!.messageTemplate, '{liver} 开播了');
   assert.equal(db.listPushRules().length, 2, 'listPushRules 含 disabled');
 
   db.upsertPushRule({ id, categoryId: null, uids: [], channels: [3], messageTemplate: null });
@@ -207,10 +207,10 @@ test('verdicts：插入 / UNIQUE(room_id, live_time, category_id) 去重 / 按�
 test('settings：未写为 null，写入可读，覆盖写生效', (t) => {
   const db = memDb(t);
   assert.equal(db.getSetting('default_template'), null);
-  db.setSetting('default_template', '{alias} 开播了');
-  assert.equal(db.getSetting('default_template'), '{alias} 开播了');
-  db.setSetting('default_template', '{alias}来了');
-  assert.equal(db.getSetting('default_template'), '{alias}来了');
+  db.setSetting('default_template', '{liver} 开播了');
+  assert.equal(db.getSetting('default_template'), '{liver} 开播了');
+  db.setSetting('default_template', '{liver}来了');
+  assert.equal(db.getSetting('default_template'), '{liver}来了');
 });
 
 test('推送总开关：缺省开，可开关，persist', (t) => {

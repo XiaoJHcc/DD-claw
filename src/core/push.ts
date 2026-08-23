@@ -138,7 +138,7 @@ export interface PushRule {
   uids: string[];
   /** 引用 push_channels.id */
   channels: number[];
-  /** null = 用内置默认模板（'{alias} 开播了'） */
+  /** null = 用内置默认模板（'{liver} 开播了'） */
   messageTemplate: string | null;
   enabled: boolean;
   createdAt: number;

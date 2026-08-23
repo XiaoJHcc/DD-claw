@@ -319,7 +319,7 @@ test('生效主播集合限定：uid 不在名单内的规则不命中（无其�
 test('命中分类规则：渠道与推送词按规则（categoryId 来自分类判定）', async () => {
   const h = harness({}, 0, [classification(7)]);
   h.db.rules.push(rule({
-    id: 7, categoryId: 7, channels: [2], messageTemplate: '{alias}唱歌速来',
+    id: 7, categoryId: 7, channels: [2], messageTemplate: '{liver}唱歌速来',
   }));
   h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
   await h.pipeline.whenIdle();
@@ -349,7 +349,7 @@ test('多条规则命中：渠道取并集去重（保持顺序），推送词�
   );
   h.db.rules.push(
     rule({ id: 1, categoryId: null, channels: [2, 1] }), // 任意开播
-    rule({ id: 2, categoryId: 7, channels: [1, 3], messageTemplate: '{alias}唱歌速来' }),
+    rule({ id: 2, categoryId: 7, channels: [1, 3], messageTemplate: '{liver}唱歌速来' }),
     rule({ id: 3, categoryId: 9, channels: [3] }), // 分类不命中
   );
   h.bus.emit(sig());
@@ -368,7 +368,7 @@ test('「任意开播」规则与分类规则同时命中：渠道并集；分�
   );
   h.db.rules.push(
     rule({ id: 1, categoryId: null, channels: [1] }), // 任意开播，恒命中
-    rule({ id: 2, categoryId: 7, channels: [2], messageTemplate: '{alias}唱歌速来' }),
+    rule({ id: 2, categoryId: 7, channels: [2], messageTemplate: '{liver}唱歌速来' }),
   );
   h.bus.emit(sig());
   await h.pipeline.whenIdle();
@@ -379,7 +379,7 @@ test('「任意开播」规则与分类规则同时命中：渠道并集；分�
   // 新一场直播（liveTime 变了）才能绕过 OncePerSession 去重
   const h2 = harness();
   h2.db.rules.push(rule({ id: 1, categoryId: null, channels: [1] }));
-  h2.db.rules.push(rule({ id: 2, categoryId: 7, channels: [2], messageTemplate: '{alias}唱歌速来' }));
+  h2.db.rules.push(rule({ id: 2, categoryId: 7, channels: [2], messageTemplate: '{liver}唱歌速来' }));
   h2.bus.emit(sig());
   await h2.pipeline.whenIdle();
   assert.equal(h2.disp.sent.length, 1);

@@ -171,7 +171,7 @@ LLM 不解释偏好，只做**内容分类**这种客观判定（本场直播属
 | 层 | 管什么 | 例子 |
 |---|---|---|
 | analysis（LLM） | **判定**：这场直播在干什么 | 「这是唱歌，依据是动态预告 + 弹幕反应」 |
-| matcher（确定性） | **偏好执行**：分类判定 × 推送规则 → 渠道 / 文案 | 命中「歌回分类 → 群发 / {alias}唱歌速来」 |
+| matcher（确定性） | **偏好执行**：分类判定 × 推送规则 → 渠道 / 文案 | 命中「歌回分类 → 群发 / {liver}唱歌速来」 |
 | rules（确定性） | **护栏**：无论如何都要执行的过滤 | 静音名单、静默时段、每场一次去重、冷却窗口 |
 | notify（执行） | **路由**：通道级覆盖与发送 | 某群屏蔽某主播、低优先级不推、图片降级、失败重试 |
 
@@ -309,7 +309,7 @@ type PushRule = {
   categoryId: number | null;              // null = 任意开播
   uids: string[];                         // 生效主播集合；空 = 全部主播（含未来新增）
   channels: number[];                     // 引用 push_channels.id
-  messageTemplate: string | null;         // null = 用内置默认模板（'{alias} 开播了'）；支持 {alias} {uname} {title} 变量
+  messageTemplate: string | null;         // null = 用内置默认模板（'{liver} 开播了'）；支持 {liver} {uname} {title} 变量
   enabled: boolean;
 };
 

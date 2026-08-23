@@ -679,7 +679,7 @@ test('DELETE /api/categories/:id：级联停用引用它的推送规则并返回
 function ruleBody(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     categoryId: null, uids: [], channels: [],
-    messageTemplate: '{alias} 开播了', enabled: true,
+    messageTemplate: '{liver} 开播了', enabled: true,
     ...over,
   };
 }
