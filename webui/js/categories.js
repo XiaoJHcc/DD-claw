@@ -25,7 +25,7 @@ function catSummaryTags(c) {
 }
 
 function categoryRowHtml(c) {
-  return `<div class="row" draggable="true" data-sid="${c.id}">` +
+  return `<div class="row" data-sid="${c.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-category"', c.enabled) +
     `<span class="row-title">${esc(c.name)}</span>` +

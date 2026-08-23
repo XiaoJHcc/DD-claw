@@ -13,7 +13,7 @@ let ruleCats = [];
 let ruleSheetUids = [];
 
 function channelRowHtml(c) {
-  return `<div class="row" draggable="true" data-sid="${c.id}">` +
+  return `<div class="row" data-sid="${c.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-channel"', c.enabled) +
     `<span class="row-title">${esc(c.name)}</span>` +
@@ -31,7 +31,7 @@ function ruleCatName(categoryId) {
 }
 
 function ruleRowHtml(r) {
-  return `<div class="row" draggable="true" data-sid="${r.id}">` +
+  return `<div class="row" data-sid="${r.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-push-rule"', r.enabled) +
     `<span class="row-title">${esc(r.name)}</span>` +
@@ -122,16 +122,30 @@ function openChannelSheet(id) {
       '<option value="toast">系统通知</option>' +
       '<option value="group">QQ群</option>' +
       '<option value="private">QQ私聊</option></select>') +
-    field('群号 / QQ号', `<input id="cn-target" value="${c && c.targetId ? esc(c.targetId) : ''}">`) +
+    '<div class="field" id="cn-target-field">' +
+      '<label class="field-label" id="cn-target-label">群号</label>' +
+      `<input id="cn-target" value="${c && c.targetId ? esc(c.targetId) : ''}">` +
+    '</div>' +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     `<button class="btn btn-primary" data-action="save-channel" data-id="${c ? c.id : ''}">保存</button></div>`);
-  document.getElementById('cn-type').value = selType;
-  document.getElementById('cn-target').disabled = selType === 'toast';
+  const typeSel = document.getElementById('cn-type');
+  typeSel.value = selType;
+  applyCnTarget(typeSel);
 }
 
-CHANGES['cn-type-change'] = function (el) {
-  document.getElementById('cn-target').disabled = el.value === 'toast';
-};
+// 目标号随类型联动：系统通知不显示输入框；QQ群/QQ私聊分别标「群号」「QQ号」
+function applyCnTarget(sel) {
+  const fieldEl = document.getElementById('cn-target-field');
+  const labelEl = document.getElementById('cn-target-label');
+  if (sel.value === 'toast') {
+    fieldEl.classList.add('hidden');
+    return;
+  }
+  fieldEl.classList.remove('hidden');
+  labelEl.textContent = sel.value === 'group' ? '群号' : 'QQ号';
+}
+
+CHANGES['cn-type-change'] = function (el) { applyCnTarget(el); };
 
 ACTIONS['save-channel'] = function (el) {
   const idAttr = el.getAttribute('data-id');

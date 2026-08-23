@@ -6,7 +6,7 @@ import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, fie
 let llmCache = [];
 
 function llmRowHtml(p) {
-  return `<div class="row" draggable="true" data-sid="${esc(p.name)}">` +
+  return `<div class="row" data-sid="${esc(p.name)}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-llm-provider"', p.enabled) +
     `<span class="row-title">${esc(p.name)}</span>` +
@@ -72,20 +72,22 @@ function openLlmSheet(name) {
   openSheet(p ? '编辑供应商' : '新增供应商',
     field('名称', `<input id="lp-name" placeholder="如 deepseek" value="` +
       (p ? esc(p.name) : '') + '"' + (p ? ' disabled' : '') + '>') +
+    '<div class="field-row split">' +
     field('baseURL', `<input id="lp-base" placeholder="如 https://api.deepseek.com/v1" value="` +
       (p ? esc(p.baseURL) : '') + '">') +
-    field('模型', `<input id="lp-model" placeholder="如 deepseek-chat" value="` +
-      (p ? esc(p.model) : '') + '">') +
-    field('API key', `<input id="lp-key" placeholder="多个用英文逗号分隔；本地无鉴权端点留空" value="` +
-      (p && p.key.value ? esc(p.key.value) : '') + '">') +
-    '<div class="field-row">' +
-      field('多模态', checkboxHtml('id="lp-vision"', !!(p && p.vision), false, '识图')) +
-      field('结构化输出', '<select id="lp-so"><option value="schema">schema（默认）</option>' +
-        '<option value="object">object</option>' +
-        '<option value="none">none（本地小模型）</option></select>') +
-      field('协议', '<select id="lp-api"><option value="chat-completions">chat/completions（默认）</option>' +
-        '<option value="responses">responses（GPT 5.6 等）</option></select>') +
+    field('协议', '<select id="lp-api"><option value="chat-completions">chat/completions（默认）</option>' +
+      '<option value="responses">responses（GPT 5.6 等）</option></select>') +
     '</div>' +
+    field('API key', `<input id="lp-key" placeholder="如 sk-xxx；本地无鉴权可留空" value="` +
+      (p && p.key.value ? esc(p.key.value) : '') + '">') +
+    '<div class="field-row split">' +
+    field('模型 ID', `<input id="lp-model" placeholder="如 deepseek-chat" value="` +
+      (p ? esc(p.model) : '') + '">') +
+    field('多模态', checkboxHtml('id="lp-vision"', !!(p && p.vision), false, '识图')) +
+    '</div>' +
+    field('结构化输出', '<select id="lp-so"><option value="schema">schema（默认）</option>' +
+      '<option value="object">object</option>' +
+      '<option value="none">none（本地小模型）</option></select>') +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     '<button class="btn btn-primary" data-action="save-llm">保存</button></div>');
   if (p) {

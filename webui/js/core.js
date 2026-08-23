@@ -130,50 +130,146 @@ export function chanTag(c) {
   if (c.targetType === 'private') return 'QQ私聊 ' + (c.targetId || '');
   return '系统通知';
 }
-// ---- 通用拖拽排序：provider / 渠道 / 规则三套列表共用 ----
-// 行需 .row[draggable][data-sid]；opts: { items: fn() 当前数组, getId: fn(item), onOrder: fn(ids) 落库 }
+// ---- 通用拖拽排序：provider / 渠道 / 分类 / 规则四套列表共用 ----
+// 行需 .row[data-sid]（不需要 draggable 属性；拖拽把手为行内 .grip，行身也可拖）。
+// 拖动时被拖行悬浮跟随鼠标，其余行实时让位——在鼠标位置空出一个虚线槽位（.sort-ph），
+// 排序随移动实时更新，松手即落入槽位并调 opts.onOrder(ids) 落库。
+// opts: { items: fn() 当前数组, getId: fn(item), onOrder: fn(ids) 落库 }
 export function makeSortable(container, opts) {
-  var dragId = null;
-  container.addEventListener('dragstart', function (e) {
+  var drag = null;         // 活动中的拖拽状态
+  var pending = null;      // 待确认拖拽（pointerdown 后未超过移动阈值）
+  var raf = 0;
+  var suppressClick = false; // 拖拽结束后吞掉合成 click，防误触行内按钮
+
+  container.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0 || drag || pending) return;
     if (!(e.target instanceof Element)) return;
-    var row = e.target.closest('.row[draggable]');
-    if (!row) return;
-    dragId = row.getAttribute('data-sid');
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', dragId || '');
-    row.classList.add('dragging');
-  });
-  container.addEventListener('dragover', function (e) {
-    if (dragId == null) return;
-    if (!(e.target instanceof Element)) return;
-    if (!e.target.closest('.row[draggable]')) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-  });
-  container.addEventListener('drop', function (e) {
-    if (!(e.target instanceof Element)) return;
-    var row = e.target.closest('.row[draggable]');
-    if (!row || dragId == null) return;
-    e.preventDefault();
-    var items = opts.items();
-    var from = -1, to = -1, tid = row.getAttribute('data-sid');
-    for (var i = 0; i < items.length; i++) {
-      var id = String(opts.getId(items[i]));
-      if (id === dragId) from = i;
-      if (id === tid) to = i;
+    var t = e.target;
+    if (t.closest('button, input, label, select, a')) return; // 控件区不发起拖拽
+    var row = t.closest('.row');
+    if (row && row.getAttribute('data-sid') != null) {
+      e.preventDefault();
+      pending = { row: row, x: e.clientX, y: e.clientY, offX: 0, offY: 0 };
+      try { t.setPointerCapture(e.pointerId); } catch (err) {} // 移到窗口外也不丢事件
     }
-    dragId = null;
-    if (from < 0 || to < 0 || from === to) return;
-    var ids = items.map(function (x) { return opts.getId(x); });
-    var moved = ids.splice(from, 1)[0];
-    ids.splice(to, 0, moved);
-    opts.onOrder(ids);
   });
-  container.addEventListener('dragend', function () {
-    dragId = null;
-    var rows = container.querySelectorAll('.row.dragging');
-    for (var i = 0; i < rows.length; i++) rows[i].classList.remove('dragging');
+
+  document.addEventListener('pointermove', function (e) {
+    if (drag) {
+      drag.px = e.clientX; drag.py = e.clientY;
+      if (!raf) raf = requestAnimationFrame(step);
+    } else if (pending) {
+      var dx = e.clientX - pending.x, dy = e.clientY - pending.y;
+      if (dx * dx + dy * dy > 16) {              // 超过 4px 阈值才真正开始拖
+        var r = pending.row.getBoundingClientRect();
+        pending.offX = e.clientX - r.left;
+        pending.offY = e.clientY - r.top;
+        begin(pending, r);
+        pending = null;
+      }
+    }
   });
+
+  function finishPointer() {
+    pending = null;
+    if (drag) end(drag);
+  }
+  document.addEventListener('pointerup', finishPointer);
+  document.addEventListener('pointercancel', function () { abort(); });
+  window.addEventListener('blur', function () { abort(); });
+
+  function begin(p, rect) {
+    var cs = getComputedStyle(p.row);
+    var ph = document.createElement('div');
+    ph.className = 'sort-ph';                     // 空位槽：占住被拖行的原空间
+    ph.style.height = rect.height + 'px';
+    ph.style.marginTop = cs.marginTop;
+    ph.style.marginBottom = cs.marginBottom;
+    drag = { row: p.row, ph: ph, offX: p.offX, offY: p.offY, px: 0, py: 0 };
+    container.insertBefore(ph, p.row);            // 让位：原行位置换成空槽
+    p.row.classList.add('dragging');
+    var st = p.row.style;
+    st.position = 'fixed';                        // 悬浮跟随鼠标，脱离文档流
+    st.left = rect.left + 'px';
+    st.top = rect.top + 'px';
+    st.width = rect.width + 'px';
+    st.margin = '0';
+    document.body.classList.add('sort-dragging');
+    suppressClick = true;
+  }
+
+  function step() {
+    raf = 0;
+    var d = drag;
+    if (!d) return;
+    d.row.style.left = (d.px - d.offX) + 'px';
+    d.row.style.top = (d.py - d.offY) + 'px';
+    // 找鼠标所在的槽位：第一个「中线在指针下方」的元素之前的空位
+    var y = d.py, kids = container.children, i = 0;
+    for (; i < kids.length; i++) {
+      var el = kids[i];
+      if (el === d.row) continue;                 // 悬浮行不参与让位计算
+      var r = el.getBoundingClientRect();
+      if (y < r.top + r.height / 2) break;
+    }
+    var ph = d.ph;
+    if (i < kids.length && kids[i] === ph) return; // 已在目标槽位，无需移动
+    if (i >= kids.length) container.appendChild(ph);
+    else container.insertBefore(ph, kids[i]);      // 实时更新排序槽位
+  }
+
+  // 鼠标取消/失焦：中止拖拽，还原视觉但不提交排序（DOM 仍是原序）
+  function abort() {
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    pending = null;
+    var d = drag;
+    drag = null;
+    if (!d) return;
+    document.body.classList.remove('sort-dragging');
+    d.row.classList.remove('dragging');
+    var st = d.row.style;
+    st.position = ''; st.left = ''; st.top = ''; st.width = ''; st.margin = '';
+    if (d.ph.parentNode === container) container.removeChild(d.ph);
+  }
+
+  function end(d) {
+    drag = null;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    document.body.classList.remove('sort-dragging');
+    d.row.classList.remove('dragging');
+    var st = d.row.style;
+    st.position = ''; st.left = ''; st.top = ''; st.width = ''; st.margin = '';
+    if (!d.row.isConnected) return;               // 拖拽中被重渲，放弃本次
+    var kids = container.children;
+    var at = Array.prototype.indexOf.call(kids, d.ph);
+    if (at >= 0) container.removeChild(d.ph);
+    if (at >= kids.length || at < 0) container.appendChild(d.row);
+    else container.insertBefore(d.row, kids[at]); // 松手:插入空位槽所在位置
+    var ids = [];
+    // data-sid 是字符串，但落库 id 要按各列表类型来：渠道/分类/规则 = number，provider = string。
+    // 直接取 data-sid 会发成字符串 → 服务端校验 400（mock 里 indexOf 也不匹配）→ 一边还原一边报错。
+    var items = opts.items();
+    var bySid = {};
+    for (var j = 0; j < items.length; j++) bySid[String(opts.getId(items[j]))] = items[j];
+    var rows = container.querySelectorAll('.row[data-sid]');
+    for (var i = 0; i < rows.length; i++) {
+      var it = bySid[rows[i].getAttribute('data-sid')];
+      if (it !== undefined) ids.push(opts.getId(it));
+    }
+    var same = ids.length === items.length;
+    for (var j = 0; j < items.length && same; j++) {
+      if (String(ids[j]) !== String(opts.getId(items[j]))) same = false;
+    }
+    if (!same) opts.onOrder(ids);               // 顺序没变不落库（点一下 grip 不算拖）
+  }
+
+  // 拖拽结束后吞掉该次合成 click，避免落到行内按钮上误触发动作
+  document.addEventListener('click', function (e) {
+    if (!suppressClick) return;
+    suppressClick = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
 }
 // ---- 时长：.dur 元素带 data-ts（秒级时间戳）+ data-prefix，每秒本地重算，不打接口 ----
 export function fmtDur(sec) {

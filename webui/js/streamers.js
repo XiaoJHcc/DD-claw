@@ -66,12 +66,11 @@ function streamerCard(s) {
     : '';
   const left = '<div class="sc-left">' + avatarHtml(s.face, name) +
     `<div class="sc-name">${esc(name)}</div>` +
-    `<div class="meta">UID ${esc(s.uid)}</div>` +
     `<div class="meta">直播间 ${s.roomId ? esc(s.roomId) : '—'}</div>` +
     `<div class="meta">微博 ${s.weiboNick ? esc(s.weiboNick) : (s.weiboUid ? esc(s.weiboUid) : '—')}</div>` +
-    `<div class="meta sc-note${s.profileNote ? '' : ' none'}">${esc(s.profileNote || '未填写')}</div>` +
-    '<div class="meta"><span class="dot green"></span>' + esc(state) + '</div>' +
-    (ruleTags ? '<div class="meta rules-row">' + ruleTags + '</div>' : '') +
+    '<div class="sc-state"><span class="meta"><span class="dot green"></span>' + esc(state) + '</span>' +
+    ruleTags +
+    '</div>' +
     '</div>';
   // 中栏：直播间关键帧在上（在播带「直播中」徽标），直播信息在关键帧下方
   let mid;
@@ -93,16 +92,13 @@ function streamerCard(s) {
       `<div class="live-info"><div class="off-dur">${off}</div>${prev}</div></div>`;
   }
   return `<div class="sc-card${isLive ? '' : ' off'}" data-action="open-streamer" data-uid="` +
-    `${esc(s.uid)}">${left}${mid}${postsColumn(s)}</div>`;
+    `${esc(s.uid)}">${left}<div class="sc-divide"></div>${mid}<div class="sc-divide"></div>${postsColumn(s)}</div>`;
 }
 export function loadStreamers() {
   return api('/api/streamers').then(function (j) {
     streamers = j.streamers || [];
-    // 主列表只展示监听中的（watch=true）；关掉的回到「关注列表」等待重新加入
     const active = streamers.filter(function (s) { return s.watch; });
-    const liveCount = active.filter(function (s) { return s.live && s.live.isLive; }).length;
-    const cnt = document.getElementById('streamer-count');
-    if (cnt) cnt.textContent = active.length ? '在播 ' + liveCount + ' · 共 ' + active.length : '';
+    // 主列表只展示监听中的（watch=true）；关掉的回到「关注列表」等待重新加入
     document.getElementById('streamer-list').innerHTML =
       active.map(streamerCard).join('') || '<p class="hint">名单为空（从下方关注列表加入）。</p>';
   }).catch(function (e) { toast(e.message, true); });
@@ -122,13 +118,9 @@ function openStreamer(uid) {
   if (!s) { toast('主播数据未加载', true); return; }
   modalUid = s.uid;
   openSheet(String(s.alias || s.uname || s.uid),
-    `<div class="row-sub">UID ${esc(s.uid)}</div>` +
-    '<div class="form-card">' +
-      field('别名', `<input id="f-alias" value="${esc(s.alias || '')}">`) +
-      field('直播间号', `<div class="field-static">${s.roomId ? esc(s.roomId) : '—'}</div>`) +
-      field('微博昵称', `<input id="f-weibo" value="${esc(s.weiboNick || '')}">`) +
-      field('画像', `<input id="f-note" value="${esc(s.profileNote || '')}">`) +
-    '</div>' +
+    field('别名', `<input id="f-alias" placeholder="如：阿梓" value="${esc(s.alias || '')}">`) +
+    field('微博昵称', `<input id="f-weibo" placeholder="如：阿梓Official" value="${esc(s.weiboNick || '')}">`) +
+    field('画像', `<textarea id="f-note" rows="3" placeholder="性格 / 直播风格 / 观众画像等">${esc(s.profileNote || '')}</textarea>`) +
     '<div class="row">' +
       formCheck('监听', 'f-watch', s.watch) +
       formCheck('LLM 分析', 'f-analyze', s.analyze) +
@@ -139,6 +131,10 @@ function openStreamer(uid) {
     '<div class="sheet-section"><div class="sheet-sub">生效的推送规则</div>' +
     '<div class="hint">勾选 = 该规则对本主播生效；规则的新增/编辑/排序在推送卡片中进行</div>' +
     '<div id="modal-rules">加载中…</div></div>');
+  // 自动提取信息不属设置，追加到大标题右侧（openSheet 会对 title 转义，故事后把 meta 插进标题 DOM）
+  const titleEl = document.querySelector('#sheet-mask1 .sheet-title');
+  if (titleEl) titleEl.insertAdjacentHTML('beforeend',
+    `<span class="sheet-head-meta">UID ${esc(s.uid)} · 直播间 ${s.roomId ? esc(s.roomId) : '—'}</span>`);
   sheetCleanups[1] = function () { modalUid = null; modalChannels = []; modalCats = []; modalRules = []; };
   loadModalRules();
 }
