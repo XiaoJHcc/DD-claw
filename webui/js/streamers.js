@@ -1,6 +1,7 @@
 // 面板前端 · 主播列表视图（每个主播一张独立卡片）+ 详情弹窗（全字段编辑 + 该主播的生效推送规则视图）。
-// 规则的新增/编辑/排序收编在「推送」卡片；详情弹窗只勾选「该规则是否对本主播生效」。
-import { api, toast, ACTIONS, CHANGES, esc, openSheet, sheetCleanups, checkboxHtml, field, durSpan } from './core.js';
+// 规则的新增/编辑/排序收编在「推送」卡片；详情弹窗规则区为纯展示（不再勾选本主播是否生效——
+// 避免取消勾选后规则从列表消失、以及「全部主播」规则被退化为显式名单），点击行直接打开该规则的编辑弹窗。
+import { api, toast, ACTIONS, esc, openSheet, sheetCleanups, checkboxHtml, field, durSpan, ruleDeadReason } from './core.js';
 import { icon } from './icons.js';
 
 let streamers = [];
@@ -58,7 +59,8 @@ function postsColumn(s) {
   return '<div class="sc-posts">' + rows + '</div>';
 }
 function streamerCard(s) {
-  const name = s.alias || s.uname || String(s.uid);
+  // 卡片标题用原名（左栏宽度放得下；简称只留给真正空间受限处：规则行标签/时间表横条/推送文案）
+  const name = s.uname || String(s.uid);
   const isLive = !!(s.live && s.live.isLive);
   const state = '监听中' + (s.notify ? '' : ' · 推送关') + (s.analyze ? ' · LLM分析' : '');
   const ruleTags = (s.rules && s.rules.names && s.rules.names.length)
@@ -104,7 +106,8 @@ export function loadStreamers() {
   }).catch(function (e) { toast(e.message, true); });
 }
 
-// ---- 详情弹窗：上半区分段卡片表单（别名/直播间号/微博/画像 + 三个勾选项），下半区生效规则视图 ----
+// ---- 详情弹窗：上半区分段卡片表单（简称/微博/画像 + 三个勾选项），下半区生效规则视图 ----
+// 弹窗标题用原名（uname）；alias 已正规化为「简称」，仅在空间受限处（卡片名/时间表横条/推送文案）优先
 function formCheck(label, id, checked) {
   return checkboxHtml(`id="${id}"`, checked, false, label);
 }
@@ -117,8 +120,8 @@ function openStreamer(uid) {
   for (let i = 0; i < streamers.length; i++) if (String(streamers[i].uid) === String(uid)) s = streamers[i];
   if (!s) { toast('主播数据未加载', true); return; }
   modalUid = s.uid;
-  openSheet(String(s.alias || s.uname || s.uid),
-    field('别名', `<input id="f-alias" placeholder="如：阿梓" value="${esc(s.alias || '')}">`) +
+  openSheet(String(s.uname || s.uid),
+    field('简称', `<input id="f-alias" placeholder="如：阿梓" value="${esc(s.alias || '')}">`) +
     field('微博昵称', `<input id="f-weibo" placeholder="如：阿梓Official" value="${esc(s.weiboNick || '')}">`) +
     field('画像', `<textarea id="f-note" rows="3" placeholder="性格 / 直播风格 / 观众画像等">${esc(s.profileNote || '')}</textarea>`) +
     '<div class="row">' +
@@ -129,7 +132,6 @@ function openStreamer(uid) {
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">关闭</button>' +
     '<button class="btn btn-primary" data-action="save-streamer">保存</button></div>' +
     '<div class="sheet-section"><div class="sheet-sub">生效的推送规则</div>' +
-    '<div class="hint">勾选 = 该规则对本主播生效；规则的新增/编辑/排序在推送卡片中进行</div>' +
     '<div id="modal-rules">加载中…</div></div>');
   // 自动提取信息不属设置，追加到大标题右侧（openSheet 会对 title 转义，故事后把 meta 插进标题 DOM）
   const titleEl = document.querySelector('#sheet-mask1 .sheet-title');
@@ -157,7 +159,7 @@ ACTIONS['save-streamer'] = function () {
   }), '已保存');
 };
 
-// ---- 生效的推送规则（只读视图 + 勾选本主播是否生效；增删改/排序在「推送」卡片） ----
+// ---- 生效的推送规则（纯展示：规则的增删改/生效主播都在「推送」卡片；点击行跳转过去） ----
 function modalChannelById(id) {
   for (let k = 0; k < modalChannels.length; k++) if (modalChannels[k].id === id) return modalChannels[k];
   return null;
@@ -169,19 +171,21 @@ function modalCatName(categoryId) {
   return '分类已删除';
 }
 
-// 勾选 = 该规则对本主播生效（uids 空 = 全部主播，勾上）；行序 = 全局 sort，不可拖拽
+// 行序 = 全局 sort。不可达规则（ruleDeadReason）整行置灰划线、只留原因标签；
+// 停用渠道的标签不显示（是否可用看渠道卡）
 function modalRuleRowHtml(r) {
-  const uid = String(modalUid);
-  const checked = r.uids.length === 0 || r.uids.indexOf(uid) >= 0;
-  const chanTags = (r.channels || []).map(function (cid) {
-    const c = modalChannelById(cid);
-    return c ? `<span class="tag">${esc(c.name)}</span>` : '';
-  }).join('');
-  return `<div class="row" data-rid="${r.id}">` +
-    checkboxHtml('data-change="toggle-modal-rule"', checked, false, r.name) +
-    (r.enabled ? '' : '<span class="tag">已停用</span>') +
-    `<span class="tag">${esc(modalCatName(r.categoryId))}</span>` +
-    chanTags +
+  const dead = ruleDeadReason(r, modalCats, modalChannels);
+  const tags = dead
+    ? `<span class="tag">${esc(dead)}</span>`
+    : `<span class="tag">${esc(modalCatName(r.categoryId))}</span>` +
+      (r.channels || []).map(function (cid) {
+        const c = modalChannelById(cid);
+        return c && c.enabled ? `<span class="tag">${esc(c.name)}</span>` : '';
+      }).join('');
+  return `<div class="row row-click${dead ? ' rule-dead' : ''}" data-action="goto-push-rule" data-rid="${r.id}">` +
+    `<span class="row-title">${esc(r.name)}</span>` +
+    tags +
+    `<span class="row-end">${icon('chevron-right')}</span>` +
     '</div>';
 }
 
@@ -198,47 +202,7 @@ function loadModalRules() {
     }).catch(function (e) { toast(e.message, true); });
 }
 
-// 勾选切换 = 把本主播加进/移出规则的 uids。
-// 「全部主播」规则（uids 空）取消勾选 → 展开为「当前全部其他主播」的显式名单（PUT 并 toast 说明）；
-// 再次勾回只把本主播加回名单，不再收拢回「全部」。
-CHANGES['toggle-modal-rule'] = function (el) {
-  const row = el.closest('.row');
-  const id = Number(row.getAttribute('data-rid'));
-  let r = null;
-  for (let i = 0; i < modalRules.length; i++) if (modalRules[i].id === id) r = modalRules[i];
-  if (!r || modalUid == null) return;
-  const uid = String(modalUid);
-  const on = el.checked;
-  let uids;
-  let msg = null;
-  if (on) {
-    if (r.uids.indexOf(uid) >= 0) return; // 已在名单内（全部主播规则的勾上态不会走到这里）
-    uids = r.uids.slice();
-    uids.push(uid);
-  } else if (r.uids.length === 0) {
-    uids = [];
-    for (let k = 0; k < streamers.length; k++) {
-      const su = String(streamers[k].uid);
-      if (su !== uid) uids.push(su);
-    }
-    if (uids.length === 0) {
-      // 空名单 = 全部主播：排除唯一一位主播无法表示，拒绝并还原勾选态
-      toast('名单里只有这一位主播，无法单独排除', true);
-      loadModalRules();
-      return;
-    }
-    msg = '已转为显式主播名单';
-  } else {
-    uids = r.uids.filter(function (u) { return u !== uid; });
-  }
-  api('/api/rules/' + id, 'PUT', { uids: uids })
-    .then(function () {
-      if (msg) toast(msg);
-      loadModalRules();
-      loadStreamers(); // 主播卡的规则名标签
-    })
-    .catch(function (e) { toast(e.message, true); loadModalRules(); });
-};
+// 点击规则行（data-action="goto-push-rule"）由 push.js 处理：关弹窗 → 切设置视图 → 直接打开编辑弹窗
 
 // ---- 启动与轮询：监听卡 60s（listen.js），主播列表 30s（弹窗 DOM 不被重建） ----
 loadStreamers();

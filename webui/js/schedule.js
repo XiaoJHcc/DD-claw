@@ -1016,7 +1016,8 @@ function schedShowPop(el, evt) {
     '<div class="sched-pop-title">' + esc(seg.title || '(无标题)') + '</div>' +
     (area ? '<div class="sched-pop-meta">' + esc(area) + '</div>' : '') +
     '<img referrerpolicy="no-referrer" alt="">' + // src 由 schedPopImg 按鼠标时间点填
-    '<div class="sched-pop-meta">' + esc(e.name) + ' · ' + esc(time) + '</div>' + vs;
+    // 弹层空间充足用原名（e.uname），demo 旧夹具无此字段则回退横条名（简称优先的 e.name）
+    '<div class="sched-pop-meta">' + esc(e.uname || e.name) + ' · ' + esc(time) + '</div>' + vs;
   p.classList.remove('hidden');
   schedPopEl = el;
   schedPopBucket = -1; // 强制按当前鼠标位置取一次

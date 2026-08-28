@@ -106,7 +106,8 @@ h2{font-size:var(--fs-xl);font-weight:var(--fw-semibold);margin:0}
   font-size:var(--fs-base);background:var(--row-bg);border-radius:var(--r-md)}
 .row-click{cursor:pointer}
 .row-click:hover{background:var(--hover)}
-.row-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 标题保持自然宽度靠左（不伸展），min-width:0 允许截断——只在标签全部被 fitRow 舍弃后仍放不下才发生 */
+.row-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
 .row-sub{font-size:var(--fs-sm);color:var(--text-secondary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .row-end{margin-left:auto;display:flex;align-items:center;gap:var(--sp-1);color:var(--text-secondary);flex:0 1 auto;min-width:0}
 .row-end svg{width:var(--icon);height:var(--icon);flex:none}
@@ -132,7 +133,7 @@ body.sort-dragging{user-select:none}
 /* 排序列表行（.row[data-sid]）行尾动作图标：36px 按钮在 44px 行高内上下留白 = --sp-1（4px），
    按钮间 gap 亦 --sp-1；行右内边距 --sp-3（12px）用负 margin 抵消，使最右按钮右缘同样
    顶到 --sp-1，四周视觉留白一致 */
-.row[data-sid] .row-end{margin-right:calc(var(--sp-1) - var(--sp-3))}
+.row[data-sid] .row-end{margin-right:calc(var(--sp-1) - var(--sp-3));flex:none}
 /* 按钮：macOS push button 观感（二级圆角，与输入框同档），统一 --ctl-h 高（btn-sm 只缩字号），
     主按钮蓝字浅蓝底、次按钮浅灰底 */
 button{font-family:inherit}
@@ -147,9 +148,11 @@ button{font-family:inherit}
 .btn:disabled{opacity:.45;cursor:default}
 .btn-block{width:100%}
 .btn svg{width:var(--icon);height:var(--icon)}
-/* 标签：圆角矩形 */
+/* 标签：圆角矩形。行内永不压碎（flex:none——半截标签没有信息量）；
+   空间不足时由 core.js 的行宽适配（fitRow）从尾部整枚隐藏 */
 .tag{display:inline-block;font-size:var(--fs-xs);line-height:18px;padding:0 var(--sp-2);border-radius:var(--r-md);
   background:var(--fill);color:var(--text-secondary);white-space:nowrap}
+.row .tag{flex:none}
 /* 状态点（正圆形，圆角豁免） */
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;flex:none}
 .dot.green{background:var(--green)}.dot.red{background:var(--red)}
@@ -183,6 +186,31 @@ button{font-family:inherit}
 /* 多选行（弹窗里的渠道勾选等）：与 .row 同高同底同间距，视觉完全对齐 */
 .check-row{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);padding:var(--sp-1) var(--sp-3);margin:var(--sp-2) 0;
   background:var(--row-bg);border-radius:var(--r-md);cursor:pointer;font-size:var(--fs-base)}
+/* 引用对象不可用（渠道/分类已停用或已删除）：设置状态全部保留，仅 UI 置灰 + 划线
+   （被划掉的标签不渲染，此处只管名称/选项文字）。
+   .check-row.ref-off = 规则弹窗里停用渠道的勾选行（勾保留，灰勾 + 名称划线）；
+   .dd-opt.off / .dd-value.off = 分类下拉里停用的选项与选中态；
+   .row.rule-dead = 整体不可达的推送规则行（自身停用/分类停用或已删/渠道全不可用），
+   标题划线、只保留不可达原因标签 */
+.check-row.ref-off .row-title,
+.dd-opt.off > span,.dd-value.off,
+.row.rule-dead .row-title{color:var(--text-secondary);text-decoration:line-through}
+.check-row.ref-off .box{opacity:.35}
+/* 灰勾：特异性要压过 .checkbox input:checked + .box 的 opacity:1 与 :after 的蓝色勾 */
+.check-row.ref-off input:checked + .box{opacity:.55}
+.check-row.ref-off input:checked + .box:after{border-color:var(--text-secondary)}
+/* 生效主播勾选列表（推送规则编辑的二级 sheet）：整组一个圆角浅底容器，
+   行内左 = 小头像 + 原名（UID 小字）、右 = 勾选框，行间 1px 分割线（非卡片行） */
+.pick-list{background:var(--row-bg);border-radius:var(--r-md);margin:var(--sp-2) 0;overflow:hidden}
+.pick-row{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-2) var(--sp-3);
+  min-height:var(--row-h);cursor:pointer;font-size:var(--fs-base)}
+.pick-row:hover{background:var(--hover)}
+.pick-row + .pick-row{border-top:1px solid var(--separator)}
+.avatar.avatar-sm{width:28px;height:28px;font-size:var(--fs-base);flex:none}
+.pick-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pick-row .meta{flex:none}
+.pick-row .checkbox{margin-left:auto}
+.dd-opt.off > svg{color:var(--text-secondary)}
 /* 表单控件：--ctl-h 高（二级圆角，与按钮同档），focus accent 描边；label --fs-sm secondary
    （原生 select 已由自绘 .dd 下拉取代，参见下方「下拉选择」） */
 input:not([type]),input[type=text]{font:inherit;font-size:var(--fs-base);height:var(--ctl-h);padding:0 var(--sp-3);

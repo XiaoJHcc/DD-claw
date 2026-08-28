@@ -47,7 +47,7 @@ CHANGES['toggle-category'] = function (el) {
   const id = el.closest('.row').getAttribute('data-sid');
   const on = el.checked;
   api('/api/categories/' + id, 'PUT', { enabled: on })
-    .then(function () { toast(on ? '已启用' : '已停用'); })
+    .then(function () { toast(on ? '已启用' : '已停用'); loadPush(); }) // loadPush：引用规则的「分类已停用」划线态
     .catch(function (e) { toast(e.message, true); loadCategories(); });
 };
 

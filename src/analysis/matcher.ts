@@ -54,10 +54,10 @@ export function matchPushRules(
   return hits;
 }
 
-/** 渲染 {liver} {uname} {title} 变量（liver 为主播名称，缺省回退 uname） */
+/** 渲染 {liver} {uname} {title} 变量（{liver} = 主播原名 uname，缺省回退简称 alias；推送文案一律原名） */
 export function renderTemplate(tpl: string, event: LiveEvent): string {
   return tpl
-    .replaceAll('{liver}', event.alias || event.uname)
+    .replaceAll('{liver}', event.uname || event.alias)
     .replaceAll('{uname}', event.uname)
     .replaceAll('{title}', event.title);
 }

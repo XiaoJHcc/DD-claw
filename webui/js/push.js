@@ -3,14 +3,30 @@
 // + 底部新增渠道按钮；规则卡 = 规则行列表（启停勾/名称/分类与生效主播标签/编辑/删除/拖拽把手，
 // 全局排序 = 匹配优先级）+ 底部添加规则按钮。
 // 渠道与规则的新增/编辑都走 sheet；规则的生效主播选择是二级 sheet。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, chanTag, makeSortable, openSheet, closeSheet, sheetCleanups, dropdownHtml } from './core.js';
+// 引用对象不可用的可视化（ruleDeadReason，core.js）：规则引用的分类/渠道被停用或删除时规则实际
+// 失效——规则行整行置灰 + 标题划线 + 原因标签；编辑弹窗里停用渠道保留勾选但灰勾划线、
+// 停用分类在下拉里置灰划线，设置状态本身不受影响。
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, chanTag, makeSortable, openSheet, closeSheet, sheetCleanups, dropdownHtml, ruleDeadReason } from './core.js';
 import { icon } from './icons.js';
-import { loadStreamers } from './streamers.js';
+import { loadStreamers, avatarHtml } from './streamers.js';
 
 let chCache = [];
 let ruleCache = [];
 let ruleCats = [];
+let streamerCache = [];
 let ruleSheetUids = [];
+
+// 规则行生效主播标签与一级表单摘要是空间受限场景：名称用简称（alias）优先、回退原名；
+// 空间充足处（详情弹窗标题、生效主播勾选列表行）一律原名
+function streamerName(uid) {
+  for (let i = 0; i < streamerCache.length; i++) {
+    if (String(streamerCache[i].uid) === String(uid)) {
+      const s = streamerCache[i];
+      return s.alias || s.uname || String(uid);
+    }
+  }
+  return 'UID ' + uid;
+}
 
 function channelRowHtml(c) {
   return `<div class="row" data-sid="${c.id}">` +
@@ -30,13 +46,21 @@ function ruleCatName(categoryId) {
   return '分类已删除';
 }
 
+// 规则整体不可达（ruleDeadReason：自身停用 / 分类停用或已删 / 渠道全不可用）时整行置灰、
+// 标题划线，且只保留不可达原因标签（分类/主播标签此时已无意义）；勾选状态不受影响，
+// 恢复引用对象即自动复原。生效主播标签用简称优先（空间受限，短名能留下更多枚），
+// uids 空 = 一枚「全部主播」标签；行宽不足时 fitRow 从尾部逐枚舍弃
 function ruleRowHtml(r) {
-  return `<div class="row" data-sid="${r.id}">` +
+  const dead = ruleDeadReason(r, ruleCats, chCache);
+  const uidsTags = r.uids.length === 0
+    ? '<span class="tag">全部主播</span>'
+    : r.uids.map(function (u) { return `<span class="tag">${esc(streamerName(u))}</span>`; }).join('');
+  return `<div class="row${dead ? ' rule-dead' : ''}" data-sid="${r.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-push-rule"', r.enabled) +
     `<span class="row-title">${esc(r.name)}</span>` +
-    `<span class="tag">${esc(ruleCatName(r.categoryId))}</span>` +
-    `<span class="tag">${r.uids.length === 0 ? '全部主播' : r.uids.length + ' 位主播'}</span>` +
+    (dead ? `<span class="tag">${esc(dead)}</span>`
+          : `<span class="tag">${esc(ruleCatName(r.categoryId))}</span>` + uidsTags) +
     '<span class="row-end">' +
     iconBtn('edit-push-rule', 'pencil', '编辑') +
     iconBtn('del-push-rule', 'trash', '删除', true) +
@@ -45,7 +69,7 @@ function ruleRowHtml(r) {
 
 export function loadPush() {
   return Promise.all([
-    api('/api/push'), api('/api/channels'), api('/api/rules'), api('/api/categories'),
+    api('/api/push'), api('/api/channels'), api('/api/rules'), api('/api/categories'), api('/api/streamers'),
   ]).then(function (rs) {
     const en = document.getElementById('push-enabled');
     if (en) en.checked = rs[0].enabled;
@@ -53,6 +77,7 @@ export function loadPush() {
     document.getElementById('channel-list').innerHTML = chCache.map(channelRowHtml).join('');
     ruleCache = rs[2].rules || [];
     ruleCats = rs[3].categories || [];
+    streamerCache = rs[4].streamers || [];
     document.getElementById('rule-list').innerHTML = ruleCache.map(ruleRowHtml).join('');
   }).catch(function (e) { toast(e.message, true); });
 }
@@ -68,7 +93,7 @@ CHANGES['toggle-channel'] = function (el) {
   const id = el.closest('.row').getAttribute('data-sid');
   const on = el.checked;
   api('/api/channels/' + id, 'PUT', { enabled: on })
-    .then(function () { toast(on ? '已启用' : '已停用'); })
+    .then(function () { toast(on ? '已启用' : '已停用'); loadPush(); }) // 刷新 chCache + 规则行/弹窗的渠道灰态
     .catch(function (e) { toast(e.message, true); loadPush(); });
 };
 
@@ -76,7 +101,7 @@ CHANGES['toggle-push-rule'] = function (el) {
   const id = el.closest('.row').getAttribute('data-sid');
   const on = el.checked;
   api('/api/rules/' + id, 'PUT', { enabled: on })
-    .then(function () { toast(on ? '已启用' : '已停用'); loadStreamers(); })
+    .then(function () { toast(on ? '已启用' : '已停用'); loadPush(); loadStreamers(); }) // loadPush：规则行「已停用」划线态
     .catch(function (e) { toast(e.message, true); loadPush(); });
 };
 
@@ -177,7 +202,8 @@ ACTIONS['edit-push-rule'] = function (el) {
 };
 
 function uidsSummary(uids) {
-  return uids.length === 0 ? '全部主播（含未来新增）' : '已选 ' + uids.length + ' 位主播';
+  if (uids.length === 0) return '全部主播（含未来新增）';
+  return uids.map(streamerName).join('、');
 }
 
 function openPushRuleSheet(id) {
@@ -185,14 +211,16 @@ function openPushRuleSheet(id) {
   if (id !== null && !r) { toast('规则数据未加载', true); return; }
   ruleSheetUids = r ? r.uids.slice() : [];
   const catOptions = [{ value: '', label: '任意开播' }].concat(ruleCats.map(function (c) {
-    return { value: c.id, label: c.name };
+    return { value: c.id, label: c.name, off: c.enabled === false };
   }));
   const chanRows = chCache.length === 0
     ? ''
     : chCache.map(function (c) {
+        // 停用渠道保留勾选状态，仅灰勾 + 名称划线（ref-off），类型标签不显示
         return checkRowHtml(`class="pr-ch" value="${c.id}"`, !!(r && (r.channels || []).indexOf(c.id) >= 0),
           `<span class="row-title">${esc(c.name)}</span>` +
-          `<span class="tag">${esc(chanTypeName(c))}</span>`);
+          (c.enabled ? `<span class="tag">${esc(chanTypeName(c))}</span>` : ''),
+          c.enabled ? '' : 'ref-off');
       }).join('');
   openSheet(r ? '编辑规则' : '添加规则',
     field('名称', `<input id="pr-name" placeholder="留空自动命名" value="${r ? esc(r.name) : ''}">`) +
@@ -208,19 +236,25 @@ function openPushRuleSheet(id) {
     `<button class="btn btn-primary" data-action="save-push-rule" data-id="${r ? r.id : ''}">保存</button></div>`);
 }
 
-// 二级 sheet：生效主播勾选（全部不勾 = 全部主播含未来新增）
+// 二级 sheet：生效主播勾选（全部不勾 = 全部主播含未来新增）。
+// 列表样式 = 左头像+原名（UID 小字）、右勾选框，行间分割线（.pick-list，非卡片行）
 ACTIONS['open-rule-streamers'] = function () {
   api('/api/streamers').then(function (j) {
     const list = j.streamers || [];
+    streamerCache = list; // 顺带刷新名称缓存（规则行标签/一级表单摘要共用）
     const rows = list.map(function (s) {
-      return checkRowHtml(`class="pr-uid" value="${esc(s.uid)}"`,
-        ruleSheetUids.indexOf(String(s.uid)) >= 0,
-        `<span class="row-title">${esc(s.alias || s.uname || s.uid)}</span>` +
-        `<span class="meta">UID ${esc(s.uid)}</span>`);
+      const nm = s.uname || String(s.uid);
+      return '<label class="pick-row">' +
+        avatarHtml(s.face, nm, 'avatar avatar-sm') +
+        `<span class="pick-name">${esc(nm)}</span>` +
+        `<span class="meta">UID ${esc(s.uid)}</span>` +
+        `<span class="checkbox"><input type="checkbox" class="pr-uid" value="${esc(s.uid)}"` +
+        `${ruleSheetUids.indexOf(String(s.uid)) >= 0 ? ' checked' : ''}><span class="box"></span></span>` +
+        '</label>';
     }).join('');
     openSheet('生效主播',
       '<div class="hint">全部不勾 = 对全部主播生效（含未来新增）</div>' +
-      (rows || '<p class="hint">监听名单为空</p>') +
+      (rows ? `<div class="pick-list">${rows}</div>` : '<p class="hint">监听名单为空</p>') +
       '<div class="sheet-foot"><button class="btn btn-primary" data-action="close-sheet" data-level="2">完成</button></div>',
       2);
     // 关窗（完成 / × / 遮罩）统一走 cleanup 同步选择回一级表单的摘要
@@ -282,6 +316,16 @@ makeSortable(document.getElementById('rule-list'), {
       .catch(function (err) { toast(err.message, true); loadPush(); });
   },
 });
+
+// 主播详情弹窗的规则行（streamers.js 渲染，data-action 委托到这张表）：关详情弹窗 →
+// 切到设置视图 → 直接打开该规则的编辑弹窗（刷新缓存后开，规则已删则 toast 提示）
+ACTIONS['goto-push-rule'] = function (el) {
+  const rid = Number(el.getAttribute('data-rid'));
+  closeSheet(1);
+  const nav = document.querySelector('.nav-item[data-view="settings"]');
+  if (nav) nav.click();
+  loadPush().then(function () { openPushRuleSheet(rid); });
+};
 
 // ---- 推送设置（推送渠道卡底部按钮）：冷启动触发时机 2 项 ----
 function pushBoolRow(id, text, on) {

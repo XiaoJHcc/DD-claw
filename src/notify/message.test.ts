@@ -21,9 +21,9 @@ test('头像进 icon，分区 · 开播时间进 attribution，body 只留标题
     .toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 开播`);
 });
 
-test('缺 face / keyframe 时 icon / image 缺省；alias 优先于 uname', () => {
+test('缺 face / keyframe 时 icon / image 缺省；推送文案用原名（uname 优先）', () => {
   const m = liveEventToMessage(toLiveEvent(status({ face: '', keyframe: '' }), '小梓'));
-  assert.equal(m.title, '小梓 开播了');
+  assert.equal(m.title, '阿梓 开播了');
   assert.equal(m.icon, undefined);
   assert.equal(m.image, undefined);
 });

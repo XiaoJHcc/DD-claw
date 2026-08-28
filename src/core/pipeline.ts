@@ -118,30 +118,30 @@ export class Pipeline {
     // 跳过通知，但上面 live_start 的 recordSession 等归档照做。
     // 开关读 settings（面板推送渠道卡「推送设置」，热生效）
     if (signal.coldStart === 'first_run' && !isNotifyOnFirstRun(db)) {
-      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 首次运行已在播，按配置不推送`);
+      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 首次运行已在播，按配置不推送`);
       return;
     }
     // 重启恢复：上次下播、本次启动前开播的主播，无法得知真实开播时间，
     // 与 first_run 同属「启动时已在播」，共用 notifyOnFirstRun 这一个开关。
     if (signal.coldStart === 'restart_recovery' && !isNotifyOnFirstRun(db)) {
-      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 停机期间开播（启动时已在播），按配置不推送`);
+      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 停机期间开播（启动时已在播），按配置不推送`);
       return;
     }
     if (signal.coldStart === 'new_subscription' && !isNotifyOnNewSubscription(db)) {
-      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 新增订阅正在直播，按配置不推送`);
+      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 新增订阅正在直播，按配置不推送`);
       return;
     }
 
     // notify=false：追踪照常（recordSession 已在上面做），但不产生推送。
     // watch=1 && notify=0 = 旧 mode='silent' 语义；位置在冷启动抑制之后。
     if (db.getStreamer(signal.uid)?.notify === false) {
-      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: notify=off（仅抑制推送，追踪照常）`);
+      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: notify=off（仅抑制推送，追踪照常）`);
       return;
     }
 
     // 推送总开关（面板推送卡右上角）：关 = 全局不推，追踪照常
     if (!isPushEnabled(db)) {
-      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: 推送总开关已关`);
+      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 推送总开关已关`);
       return;
     }
 
@@ -151,14 +151,14 @@ export class Pipeline {
     const decision = await rule.decide({ ...event, classifications }, signal, classifications);
 
     if (!decision.shouldNotify) {
-      log.debug(`不推送 [${signal.kind}] ${event.alias || event.uname}: ${decision.reason}`);
+      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: ${decision.reason}`);
       return;
     }
 
     const msg = this.buildMessage({ ...event, classifications });
     if (!msg) return; // buildMessage 已记日志（规则不命中 / 规则未选渠道）
 
-    log.info(`推送 [${signal.kind}] ${event.alias || event.uname} — ${decision.reason}`);
+    log.info(`推送 [${signal.kind}] ${event.uname || event.alias} — ${decision.reason}`);
     const outcome = await dispatcher.broadcast(msg);
 
     // 只要有任一通道成功就标记，否则 Toast 成功而 QQ 失败会导致下轮重推
@@ -184,7 +184,7 @@ export class Pipeline {
     );
 
     if (hits.length === 0) {
-      log.info(`不推送 ${event.alias || event.uname}: 无命中规则`);
+      log.info(`不推送 ${event.uname || event.alias}: 无命中规则`);
       return null;
     }
     const channelIds: number[] = [];
@@ -196,10 +196,10 @@ export class Pipeline {
       templateOverride ??= r.messageTemplate;
     }
     if (channelIds.length === 0) {
-      log.info(`不推送 ${event.alias || event.uname}: 命中 ${hits.length} 条规则但都未勾选渠道`);
+      log.info(`不推送 ${event.uname || event.alias}: 命中 ${hits.length} 条规则但都未勾选渠道`);
       return null;
     }
-    log.info(`命中推送规则 ${hits.map((r) => `#${r.id}`).join('/')}（${event.alias || event.uname}）`);
+    log.info(`命中推送规则 ${hits.map((r) => `#${r.id}`).join('/')}（${event.uname || event.alias}）`);
 
     const tpl = templateOverride ?? '{liver} 开播了';
     const text = renderTemplate(tpl, event).trim();

@@ -152,7 +152,7 @@ test('first_run 可配置为推送，消息为 PushMessage 且 markNotified', as
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '阿梓 开播了');
+  assert.equal(m.title, '主播1 开播了');
   assert.equal(m.priority, 'normal');
   assert.equal(m.image, 'k.jpg');
   assert.equal(m.url, 'https://live.bilibili.com/r1');
@@ -287,7 +287,7 @@ test('「任意开播 × 全部主播」规则 = 旧全局默认的等价物：�
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '阿梓 开播了', '规则无覆盖推送词 → 内置默认模板');
+  assert.equal(m.title, '主播1 开播了', '规则无覆盖推送词 → 内置默认模板');
   assert.deepEqual(m.channels, ['1', '2'], '渠道 = 规则勾选的渠道');
 });
 
@@ -296,7 +296,7 @@ test('规则未覆盖推送词时用内置默认模板', async () => {
   h.db.rules.push(rule({ categoryId: null }));
   h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent[0]!.title, '阿梓 开播了');
+  assert.equal(h.disp.sent[0]!.title, '主播1 开播了');
 });
 
 test('分类规则不命中（无其他规则）= 不推', async () => {
@@ -325,7 +325,7 @@ test('命中分类规则：渠道与推送词按规则（categoryId 来自分类
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '阿梓唱歌速来');
+  assert.equal(m.title, '主播1唱歌速来');
   assert.deepEqual(m.channels, ['2'], '渠道 = 命中规则的 channels');
   assert.equal(m.url, 'https://live.bilibili.com/r1', '跳转字段沿用默认形状');
 });
@@ -357,7 +357,7 @@ test('多条规则命中：渠道取并集去重（保持顺序），推送词�
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
   assert.deepEqual(m.channels, ['2', '1', '3'], '命中规则 #1/#2 的渠道并集去重保序，未命中的 #3 不参与');
-  assert.equal(m.title, '阿梓唱歌速来', '推送词 = sort 序首个非空 messageTemplate（#1 未设，取 #2 的）');
+  assert.equal(m.title, '主播1唱歌速来', '推送词 = sort 序首个非空 messageTemplate（#1 未设，取 #2 的）');
 });
 
 test('「任意开播」规则与分类规则同时命中：渠道并集；分类不命中时任开播规则照常命中', async () => {
@@ -384,7 +384,7 @@ test('「任意开播」规则与分类规则同时命中：渠道并集；分�
   await h2.pipeline.whenIdle();
   assert.equal(h2.disp.sent.length, 1);
   assert.deepEqual(h2.disp.sent[0]!.channels, ['1'], '只剩任开播规则命中');
-  assert.equal(h2.disp.sent[0]!.title, '阿梓 开播了', '规则无覆盖推送词 → 内置默认模板');
+  assert.equal(h2.disp.sent[0]!.title, '主播1 开播了', '规则无覆盖推送词 → 内置默认模板');
 });
 
 // ---- 健康告警 ----

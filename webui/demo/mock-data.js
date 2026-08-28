@@ -58,11 +58,12 @@ export function bjDayKey(tsSec) {
   return new Date((tsSec + 7200) * 1000).toISOString().slice(0, 10);
 }
 
-// ---- 渠道（demo 手写：toast + QQ群/私聊示例，targetId 为占位假号）----
+// ---- 渠道（demo 手写：toast + QQ群/私聊示例，targetId 为占位假号；备用群停用，演示引用对象置灰划线）----
 export const mockChannels = [
   { id: 1, name: '系统通知', notifier: 'toast', targetType: null, targetId: null, enabled: true, createdAt: 0, updatedAt: 0 },
   { id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001', enabled: true, createdAt: 0, updatedAt: 0 },
   { id: 3, name: '我（私聊）', notifier: 'onebot', targetType: 'private', targetId: '10002', enabled: true, createdAt: 0, updatedAt: 0 },
+  { id: 4, name: '备用群', notifier: 'onebot', targetType: 'group', targetId: '10003', enabled: false, createdAt: 0, updatedAt: 0 },
 ];
 
 // ---- 运行时参数（/api/advanced 默认值，与后端 NUM/BOOL_SPECS 对齐）----

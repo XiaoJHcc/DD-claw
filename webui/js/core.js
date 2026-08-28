@@ -108,10 +108,34 @@ export function checkboxHtml(attrs, checked, disabled, text) {
     `${checked ? ' checked' : ''}${disabled ? ' disabled' : ''}><span class="box"></span>` +
     `${text ? `<span class="check-text">${esc(text)}</span>` : ''}</label>`;
 }
-// 多选行：整行是 label，点击任意处切换（不能套 checkboxHtml，避免 label 嵌套）
-export function checkRowHtml(attrs, checked, innerHtml) {
-  return `<label class="check-row"><span class="checkbox"><input type="checkbox" ${attrs}` +
+// 多选行：整行是 label，点击任意处切换（不能套 checkboxHtml，避免 label 嵌套）。
+// extraClass 例：'ref-off' = 引用对象（渠道）已停用——保留勾选状态，仅视觉置灰划线
+export function checkRowHtml(attrs, checked, innerHtml, extraClass) {
+  return `<label class="check-row${extraClass ? ' ' + extraClass : ''}">` +
+    `<span class="checkbox"><input type="checkbox" ${attrs}` +
     `${checked ? ' checked' : ''}><span class="box"></span></span>${innerHtml}</label>`;
+}
+// 推送规则可达性（推送规则卡与主播详情弹窗共用）：引用对象被停用/删除会让规则实际失效。
+// 返回 null = 可达；否则为原因文案：规则自身停用 / 分类已删除 / 分类已停用（分类判定只跑启用分类，
+// 永不命中）/ 未选渠道（命中后渠道并集为空不推）/ 渠道不可用（所选渠道全部停用或已删除，
+// dispatcher 只发「选中且启用」）。uids 全为主播 watch=0 属临时态，不算死态。
+export function ruleDeadReason(r, cats, chans) {
+  if (!r.enabled) return '已停用';
+  if (r.categoryId != null) {
+    let cat = null;
+    for (let i = 0; i < cats.length; i++) if (cats[i].id === r.categoryId) cat = cats[i];
+    if (!cat) return '分类已删除';
+    if (cat.enabled === false) return '分类已停用';
+  }
+  if (!r.channels || r.channels.length === 0) return '未选渠道';
+  let usable = 0;
+  for (let i = 0; i < r.channels.length; i++) {
+    for (let j = 0; j < chans.length; j++) {
+      if (chans[j].id === r.channels[i] && chans[j].enabled) { usable++; break; }
+    }
+  }
+  if (usable === 0) return '渠道不可用';
+  return null;
 }
 // 勾选排序列表的启停勾：无方框，选中 = 蓝色勾，未选 = 浅灰空心圆环（占位对齐）
 export function checkDotHtml(attrs, checked, disabled) {
@@ -126,32 +150,37 @@ export function field(label, inputHtml) {
 // ---- 展开列表为 fixed 自绘 div（随触发器宽度、空间不足自动上翻），不弹任何原生菜单。
 // 值/事件状态仍挂在隐藏的原生 select（.dd-native）上：getElementById(id).value 与 change 事件
 // （data-change 委托）照常可用，程序化回填用 ddSetValue 同步触发器文本。
+// 选项可带 off:true（引用对象已停用，如分类）：写入 option 的 data-off，选项与触发器文本置灰划线。
 const ddCaret = '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
   ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+function ddOptOff(o) { return o.getAttribute('data-off') === '1'; }
+function ddSyncTrigger(id) {
+  const sel = document.getElementById(id);
+  const labelEl = document.querySelector('.dd-trigger[data-dd="' + id + '"] .dd-value');
+  if (!sel || !labelEl) return;
+  const cur = sel.options[sel.selectedIndex];
+  if (!cur) return;
+  labelEl.textContent = cur.textContent;
+  labelEl.classList.toggle('off', ddOptOff(cur));
+}
 export function dropdownHtml(id, options, value, changeAction) {
   const opts = options || [];
   const selIdx = Math.max(0, opts.findIndex(function (o) { return String(o.value) === String(value); }));
   const selOpts = opts.map(function (o, i) {
-    return `<option value="${esc(o.value)}"${i === selIdx ? ' selected' : ''}>${esc(o.label)}</option>`;
-  }).join('');
-  const optRows = opts.map(function (o, i) {
-    return `<button type="button" role="option" aria-selected="${i === selIdx}" class="dd-opt${i === selIdx ? ' sel' : ''}"` +
-      ` data-action="dd-pick" data-dd="${id}" data-ddv="${esc(o.value)}">` +
-      icon('check') + `<span>${esc(o.label)}</span></button>`;
+    return `<option value="${esc(o.value)}"${i === selIdx ? ' selected' : ''}` +
+      `${o.off ? ' data-off="1"' : ''}>${esc(o.label)}</option>`;
   }).join('');
   const cur = opts[selIdx];
   return `<div class="dd"><select id="${id}" class="dd-native"` +
     `${changeAction ? ' data-change="' + changeAction + '"' : ''}>${selOpts}</select>` +
     `<button type="button" class="dd-trigger" data-action="dd-toggle" data-dd="${id}">` +
-    `<span class="dd-value">${esc(cur ? cur.label : '')}</span>${ddCaret}</button></div>`;
+    `<span class="dd-value${cur && cur.off ? ' off' : ''}">${esc(cur ? cur.label : '')}</span>${ddCaret}</button></div>`;
 }
 export function ddSetValue(id, value) {
   const sel = document.getElementById(id);
   if (!sel) return;
   sel.value = value;
-  const cur = sel.options[sel.selectedIndex];
-  const labelEl = document.querySelector('.dd-trigger[data-dd="' + id + '"] .dd-value');
-  if (labelEl && cur) labelEl.textContent = cur.textContent;
+  ddSyncTrigger(id);
 }
 var openDd = null;
 var ddMenus = {};
@@ -173,8 +202,8 @@ function openDropDown(id) {
     openDd = null;
   }
   const rows = Array.prototype.map.call(sel.options, function (o) {
-    return `<button type="button" role="option" aria-selected="${o.selected}" class="dd-opt${o.selected ? ' sel' : ''}"` +
-      ` data-action="dd-pick" data-dd="${id}" data-ddv="${esc(o.value)}">` +
+    return `<button type="button" role="option" aria-selected="${o.selected}" class="dd-opt${o.selected ? ' sel' : ''}` +
+      `${ddOptOff(o) ? ' off' : ''}" data-action="dd-pick" data-dd="${id}" data-ddv="${esc(o.value)}">` +
       icon('check') + `<span>${esc(o.textContent)}</span></button>`;
   }).join('');
   let menu = ddMenus[id];
@@ -215,6 +244,7 @@ function pickDropDown(id, value) {
   if (!sel) return;
   if (String(sel.value) !== String(value)) {
     sel.value = value;
+    ddSyncTrigger(id); // 同步触发器文本与 off 态（引用对象停用时选中项划线）
     sel.dispatchEvent(new Event('change', { bubbles: true }));
   }
   closeDropDown(true);
@@ -398,6 +428,53 @@ export function makeSortable(container, opts) {
     e.stopPropagation();
   }, true);
 }
+// ---- 行内标签自适应舍弃（fitRow）：行宽不足时从最后一枚标签开始整枚隐藏，
+// 全部隐藏后才轮到标题截断（.row-title 的 ellipsis），两侧控件（flex:none）永不被挤。
+// CSS 表达不了「按内容」的优先级（flex 收缩只会把标签压成无信息量的碎片），故用 JS：
+// ResizeObserver 跟行宽变化（含视图从隐藏切回），MutationObserver 捕获重渲插入的新行 ----
+// 溢出判定不能看 row.scrollWidth：行右 padding + 行尾负 margin 有约 20px 静默余量，
+// 小溢出会被吞掉（表现为标签完整、标题反被 flex 压出省略号）。改为钉回标题自然宽度后，
+// 比较末个子元素右缘与行内容区右缘（行尾负 margin 豁免照常计入）。
+function rowOverflows(row) {
+  var last = row.children[row.children.length - 1];
+  if (!last) return false;
+  var padR = parseFloat(getComputedStyle(row).paddingRight) || 0;
+  var mr = parseFloat(getComputedStyle(last).marginRight) || 0;
+  var limit = row.getBoundingClientRect().right - padR + Math.max(0, -mr);
+  return last.getBoundingClientRect().right > limit + 1;
+}
+function fitRow(row) {
+  var tags = row.querySelectorAll(':scope > .tag');
+  if (!tags.length) return;
+  var title = row.querySelector(':scope > .row-title');
+  for (var i = 0; i < tags.length; i++) tags[i].style.display = '';
+  // 标题平时靠 flex 收缩吃掉小溢出，先钉回自然宽度才能测出真实溢出
+  if (title) title.style.flex = 'none';
+  var n = tags.length;
+  while (n > 0 && rowOverflows(row)) tags[--n].style.display = 'none';
+  if (title) title.style.flex = '';
+}
+var rowFitRO = new ResizeObserver(function (es) {
+  for (var i = 0; i < es.length; i++) fitRow(es[i].target);
+});
+new MutationObserver(function (ms) {
+  for (var i = 0; i < ms.length; i++) {
+    var added = ms[i].addedNodes, removed = ms[i].removedNodes;
+    for (var j = 0; j < removed.length; j++) {
+      var rn = removed[j];
+      if (rn.nodeType !== 1) continue;
+      if (rn.matches('.row')) rowFitRO.unobserve(rn);
+      var rr = rn.querySelectorAll('.row');
+      for (var k = 0; k < rr.length; k++) rowFitRO.unobserve(rr[k]);
+    }
+    for (var j2 = 0; j2 < added.length; j2++) {
+      var n2 = added[j2];
+      if (n2.nodeType !== 1) continue;
+      var rows = n2.matches('.row') ? [n2] : Array.from(n2.querySelectorAll('.row'));
+      for (var k2 = 0; k2 < rows.length; k2++) { rowFitRO.observe(rows[k2]); fitRow(rows[k2]); }
+    }
+  }
+}).observe(document.body, { childList: true, subtree: true });
 // ---- 时长：.dur 元素带 data-ts（秒级时间戳）+ data-prefix，每秒本地重算，不打接口 ----
 export function fmtDur(sec) {
   sec = Math.max(0, Math.floor(sec));

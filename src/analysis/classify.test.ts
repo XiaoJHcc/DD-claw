@@ -72,7 +72,7 @@ test('buildClassifyRequest：直播信息 + 分类清单进 user 文本，关键
   const text = content.find((c) => c.type === 'text')!;
   assert.equal(text.type, 'text');
   if (text.type === 'text') {
-    assert.match(text.text, /主播：阿梓（主播1）/);
+    assert.match(text.text, /主播：主播1/);
     assert.match(text.text, /标题：今晚歌回！/);
     assert.match(text.text, /分区：虚拟主播 \/ 虚拟Singer/);
     assert.match(text.text, /id=1 「歌回」：在以唱歌为主/);
