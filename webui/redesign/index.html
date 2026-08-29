@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DD-claw · 直播监听台（重设计 Demo）</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div class="bg-blobs" aria-hidden="true"><i class="blob b-pink"></i><i class="blob b-blue"></i><i class="blob b-mint"></i></div>
+
+<aside class="side" id="side">
+  <div class="side-logo">
+    <span class="logo-paw" data-icon="paw"></span>
+    <div class="logo-txt">
+      <b>DD-claw</b>
+      <small>直播监听台</small>
+    </div>
+  </div>
+  <nav class="side-nav">
+    <button class="nav-item" data-action="nav-view" data-view="schedule"><i data-icon="calendar"></i><span>时间表</span></button>
+    <button class="nav-item" data-action="nav-view" data-view="streamers"><i data-icon="users"></i><span>主播列表</span></button>
+    <button class="nav-item" data-action="nav-view" data-view="settings"><i data-icon="gear"></i><span>设置</span></button>
+  </nav>
+  <div class="side-foot">
+    <span class="live-count" id="side-live-count"><i class="dot-pulse"></i>在播 <b>0</b></span>
+    <span class="demo-badge">设计 Demo</span>
+  </div>
+</aside>
+
+<main class="view-host" id="view-host">
+  <section class="view" id="view-schedule">
+    <div class="card sched-card" id="card-schedule">
+      <div class="card-head sched-head">
+        <span class="head-chip chip-pink" data-icon="calendar"></span>
+        <div class="head-txt"><b>时间表</b><small>滚轮切换日期 · 点击任意天居中</small></div>
+        <div class="sched-legend">
+          <span class="lg lg-live"><i></i>在播</span>
+          <span class="lg lg-now"><i></i>现在</span>
+        </div>
+      </div>
+      <div class="sched-axis" id="schedule-axis"></div>
+      <div class="sched-body" id="schedule-body"></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-streamers" hidden>
+    <div class="s-grid" id="streamers-grid"></div>
+  </section>
+
+  <section class="view" id="view-settings" hidden>
+    <div class="set-grid" id="settings-grid"></div>
+    <div class="card follows-card" id="card-follows">
+      <div class="card-head">
+        <span class="head-chip chip-blue" data-icon="users"></span>
+        <div class="head-txt"><b>关注列表</b><small>B站关注候选池 · 点击「+监听」加入监听名单</small></div>
+        <div class="follow-search"><i data-icon="search"></i><input id="follow-q" placeholder="搜索昵称 / UID" data-input="follow-q"></div>
+      </div>
+      <div class="follow-grid" id="follow-grid"></div>
+    </div>
+  </section>
+</main>
+
+<div class="sched-pop" id="sched-pop" hidden></div>
+<div class="sheet-mask" id="sheet-mask1" hidden><div class="sheet" id="sheet1"></div></div>
+<div class="sheet-mask" id="sheet-mask2" hidden><div class="sheet sheet-l2" id="sheet2"></div></div>
+<div class="toasts" id="toasts"></div>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>

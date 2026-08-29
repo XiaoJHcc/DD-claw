@@ -25,8 +25,18 @@ const server = http.createServer((req, res) => {
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === '/') pathname = '/index.html';
   // 路径安全：`./` + 请求路径 再 resolve 到 ROOT 下，防 ../ 穿越
-  const file = resolve(ROOT, '.' + pathname);
+  let file = resolve(ROOT, '.' + pathname);
   const inside = file === ROOT || file.startsWith(ROOT + sep);
+  // 目录 → 其 index.html；无尾斜杠先 302 补斜杠（页面内相对路径才能正确解析）
+  if (inside && existsSync(file) && statSync(file).isDirectory()) {
+    if (!pathname.endsWith('/')) {
+      res.writeHead(302, { location: pathname + '/' + url.search });
+      res.end();
+      return;
+    }
+    pathname += 'index.html';
+    file = resolve(ROOT, '.' + pathname);
+  }
   if (!inside || !existsSync(file) || !statSync(file).isFile()) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
     res.end('not found');
