@@ -10,10 +10,12 @@ import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
-  HttpError, checkCategoryConditions, checkChannelShape, parseCategoryPatch, parseChannelPatch,
-  parseNewCategory, parseNewChannel, parseNewRule, parseRulePatch,
-  parseStreamerPatch, parseUid, readJsonBody, sendJson,
+  HttpError, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseCategoryPatch, parseChannelPatch,
+  parseNewCategory, parseNewChannel, parseNewRule, parseRulePatch, parseRuntimePatch,
+  parseStreamerPatch, parseUid, readJsonBody, sendJson, watchStreamer,
 } from './http-util.js';
+import { scheduleInfo } from './schedule.js';
+import { handleMcp } from '../mcp/handler.js';
 import { WEBUI_ASSETS } from './webui-assets.gen.js';
 import { cookieHeader, fetchSelf, loadCookies, saveCookies, type SelfInfo } from '../sources/bili/auth.js';
 import { generateQrcode, pollQrcode } from '../sources/bili/qrcode.js';
@@ -29,7 +31,7 @@ import { llmProviderSchema, type LlmProviderConfig } from '../config/schema.js';
 import { deriveRoutes, isLlmEnabled, setLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
 import { isListenEnabled, listenSetting, setListen, type ListenFeature } from '../core/listen.js';
 import {
-  getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS, type RuntimeConfig,
+  getRuntimeConfig, saveRuntimeConfig,
 } from '../core/runtime-config.js';
 import { isPushEnabled, setPushEnabled } from '../core/push.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
@@ -162,6 +164,11 @@ export function createPanelServer(deps: PanelDeps): http.Server {
   const weiboSession = { qrid: null as string | null };
   return http.createServer((req, res) => {
     handle(deps, weiboSession, req, res).catch((e: unknown) => {
+      // MCP 走 SDK 自己写响应，出错时可能已写出部分响应，此时只记日志
+      if (res.headersSent) {
+        log.error('面板请求处理失败（响应已发出）', e);
+        return;
+      }
       if (e instanceof HttpError) {
         sendJson(res, e.status, { error: e.message });
       } else {
@@ -254,24 +261,8 @@ async function handle(
     return;
   }
   if (method === 'PUT' && path === '/api/advanced') {
-    const b = (await readJsonBody(req)) as Record<string, unknown>;
-    const patch: Record<string, number | boolean> = {};
-    for (const s of NUM_SPECS) {
-      const v = b[s.field];
-      if (v === undefined) continue;
-      if (typeof v !== 'number' || !Number.isInteger(v) || v < s.min || v > s.max) {
-        throw new HttpError(400, `${s.label}必须是 ${s.min}~${s.max} 的整数`);
-      }
-      patch[s.field] = v;
-    }
-    for (const s of BOOL_SPECS) {
-      const v = b[s.field];
-      if (v === undefined) continue;
-      if (typeof v !== 'boolean') throw new HttpError(400, `${s.label}必须是布尔值`);
-      patch[s.field] = v;
-    }
-    if (Object.keys(patch).length === 0) throw new HttpError(400, '没有可保存的字段');
-    saveRuntimeConfig(db, patch as Partial<RuntimeConfig>);
+    const patch = parseRuntimePatch(await readJsonBody(req));
+    saveRuntimeConfig(db, patch);
     deps.advanced?.onChanged();
     sendJson(res, 200, { ok: true, ...getRuntimeConfig(db) });
     return;
@@ -591,66 +582,13 @@ async function handle(
     }
   }
 
+  // ---- MCP 端点（Bearer token 鉴权；工具面按角色过滤，见 src/mcp/）----
+  if (path === '/mcp') {
+    await handleMcp(deps, req, res);
+    return;
+  }
+
   throw new HttpError(404, '未知路由');
-}
-
-// ---- 时间表（/api/schedule）----
-// 日界固定北京时间（UTC+8）凌晨 6 点，与主机时区无关；仅用于归属：
-// 6 点后开播算当天，6 点前开播算前一天，跨 6 点的场次整体按开播日归属。
-
-const DAY_SEC = 86400;
-
-/** 日串 YYYY-MM-DD → 该日界日的起点 ts（当天北京时间 06:00）。格式/合法性错误 → 400 */
-function scheduleDayStart(day: string): number {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new HttpError(400, '日期必须是 YYYY-MM-DD 格式');
-  const ms = Date.parse(day + 'T06:00:00+08:00');
-  if (Number.isNaN(ms)) throw new HttpError(400, `不是合法日期: ${day}`);
-  return Math.floor(ms / 1000);
-}
-
-/** ts → 日界日串（scheduleDayStart 的逆运算：06:00 前归前一天）。换算 = ts+2h 的 UTC 日期 */
-function scheduleDayKey(tsSec: number): string {
-  return new Date((tsSec + 7200) * 1000).toISOString().slice(0, 10);
-}
-
-/** 北京时间今天（from/to 缺省值基准） */
-function beijingToday(): string {
-  return new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
-}
-
-/** 日串加减天数（按 UTC 正午换算，避开时区/夏令时坑） */
-function addDays(day: string, n: number): string {
-  return new Date(Date.parse(day + 'T12:00:00Z') + n * DAY_SEC * 1000).toISOString().slice(0, 10);
-}
-
-function scheduleInfo(db: Db, from: string | null, to: string | null): unknown {
-  const today = beijingToday();
-  const fromTs = scheduleDayStart(from ?? addDays(today, -7));
-  const toTs = scheduleDayStart(to ?? addDays(today, 1));
-  if (fromTs > toTs) throw new HttpError(400, 'from 不能晚于 to');
-  if ((toTs - fromTs) / DAY_SEC > 62) throw new HttpError(400, '查询跨度不能超过 62 天');
-
-  // 归属天 = first_seen 的日界日；查询范围 = [from 日界, to 日界 + 1 天)
-  const entries = db.listTimeline(fromTs, toTs + DAY_SEC);
-  const byDay = new Map<string, unknown[]>();
-  for (const e of entries) {
-    const k = scheduleDayKey(e.startTs);
-    const list = byDay.get(k) ?? [];
-    list.push({
-      kind: 'live', // kind 预留：schedule（预告）后续加入
-      roomId: e.roomId, liveTime: e.liveTime, uid: e.uid, name: e.name, face: e.face,
-      startTs: e.startTs, endTs: e.endTs, keyframe: e.keyframe, cover: e.cover,
-      segments: e.segments, verdicts: e.verdicts,
-    });
-    byDay.set(k, list);
-  }
-  // 无场次的日期也返回空 entries（前端连续渲染）
-  const days: Array<{ date: string; entries: unknown[] }> = [];
-  for (let d = fromTs; d <= toTs; d += DAY_SEC) {
-    const date = scheduleDayKey(d);
-    days.push({ date, entries: byDay.get(date) ?? [] });
-  }
-  return { days };
 }
 
 // ---- 头像代理（/api/avatar）----
@@ -742,21 +680,6 @@ function putCategoryOrder(db: Db, body: unknown): unknown {
   return { ok: true };
 }
 
-/** 规则引用存在性校验：分类 / 渠道 / 主播（监听名单内）都必须存在。 */
-function checkRuleRefs(db: Db, r: { categoryId: number | null; uids: string[]; channels: number[] }): void {
-  if (r.categoryId !== null && !db.listCategories().some((c) => c.id === r.categoryId)) {
-    throw new HttpError(400, '分类不存在');
-  }
-  const channelIds = new Set(db.listPushChannels().map((c) => c.id));
-  for (const id of r.channels) {
-    if (!channelIds.has(id)) throw new HttpError(400, `渠道不存在: ${id}`);
-  }
-  const streamerUids = new Set(db.listStreamers().map((s) => s.uid));
-  for (const uid of r.uids) {
-    if (!streamerUids.has(uid)) throw new HttpError(400, `主播不在监听名单: ${uid}`);
-  }
-}
-
 /** 规则拖拽排序：ids 必须是全部规则的全排列（长度一致/无重复/无增删）。 */
 function putRuleOrder(db: Db, body: unknown): unknown {
   const ids = (body as Record<string, unknown> | null)?.ids;
@@ -805,19 +728,6 @@ function enrichedStreamers(db: Db): unknown[] {
       })),
     };
   });
-}
-
-/** 候选池一键加入监听；已有条目不碰来源，仅 watch=0 时重新打开。新行默认 notify=1、analyze=0。uname/face 从 follows 预填。 */
-function watchStreamer(db: Db, uid: string): unknown {
-  const existing = db.getStreamer(uid);
-  if (existing?.watch) throw new HttpError(409, '该主播已在监听名单');
-  if (existing) {
-    db.upsertStreamer({ uid, watch: true });
-  } else {
-    const follow = db.listFollows(true).find((f) => f.uid === uid);
-    db.upsertStreamer({ uid, uname: follow?.uname, face: follow?.face ?? null, watch: true, source: 'follows' });
-  }
-  return { streamer: db.getStreamer(uid) };
 }
 
 /**

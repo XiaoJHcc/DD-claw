@@ -259,6 +259,8 @@ export class Db {
     this.ensureColumn('streamers', 'weibo_nick', 'weibo_nick TEXT');
     // push_channels 展示顺序（面板拖拽排序；旧库默认全 0 按 id 稳定）
     this.ensureColumn('push_channels', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
+    // push_rules 创建来源（MCP 群自助规则标记 'mcp'，权限隔离用；面板/人工规则为 NULL）
+    this.ensureColumn('push_rules', 'created_by', 'created_by TEXT');
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -860,15 +862,16 @@ export class Db {
       messageTemplate: input.messageTemplate !== undefined
         ? input.messageTemplate : prev?.messageTemplate ?? null,
       enabled: input.enabled ?? prev?.enabled ?? true,
+      createdBy: input.createdBy !== undefined ? input.createdBy : prev?.createdBy ?? null,
     };
     if (prev) {
       this.db
         .prepare(
-          `UPDATE push_rules SET name=?, category_id=?, uids=?, channels=?, message_template=?, enabled=?, updated_at=?
+          `UPDATE push_rules SET name=?, category_id=?, uids=?, channels=?, message_template=?, enabled=?, created_by=?, updated_at=?
            WHERE id=?`,
         )
         .run(r.name, r.categoryId, JSON.stringify(r.uids), JSON.stringify(r.channels),
-          r.messageTemplate, r.enabled ? 1 : 0, now(), prev.id);
+          r.messageTemplate, r.enabled ? 1 : 0, r.createdBy ?? null, now(), prev.id);
       return prev.id;
     }
     const t = now();
@@ -877,11 +880,11 @@ export class Db {
       .get() as { m: number };
     const info = this.db
       .prepare(
-        `INSERT INTO push_rules (name, category_id, uids, channels, message_template, enabled, sort, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO push_rules (name, category_id, uids, channels, message_template, enabled, created_by, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(r.name, r.categoryId, JSON.stringify(r.uids), JSON.stringify(r.channels),
-        r.messageTemplate, r.enabled ? 1 : 0, m, t, t);
+        r.messageTemplate, r.enabled ? 1 : 0, r.createdBy ?? null, m, t, t);
     const id = Number(info.lastInsertRowid);
     if (!r.name) {
       this.db.prepare('UPDATE push_rules SET name = ?, updated_at = ? WHERE id = ?').run(`规则 ${id}`, t, id);
@@ -974,6 +977,27 @@ export class Db {
       }
     }
     return out;
+  }
+
+  /**
+   * 归档检索（MCP search_posts 用）：uid / platform / 正文关键词（LIKE 子串，转义 %_\) 过滤，
+   * 按 pub_ts 倒序，limit 钳 1~50。结果含 raw，调用方按需裁剪。
+   */
+  searchPosts(q: { uid?: string; platform?: string; keyword?: string; limit?: number }): Post[] {
+    const where: string[] = [];
+    const args: Array<string | number> = [];
+    if (q.uid) { where.push('uid = ?'); args.push(q.uid); }
+    if (q.platform) { where.push('platform = ?'); args.push(q.platform); }
+    if (q.keyword) {
+      where.push("text LIKE ? ESCAPE '\\'");
+      args.push(`%${q.keyword.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    }
+    const limit = Math.max(1, Math.min(50, Math.floor(q.limit ?? 20)));
+    const rows = this.db
+      .prepare(`SELECT * FROM posts${where.length ? ` WHERE ${where.join(' AND ')}` : ''}
+                ORDER BY pub_ts DESC, id DESC LIMIT ?`)
+      .all(...args, limit) as PostRow[];
+    return rows.map(rowToPost);
   }
 
   // ---- settings：kv（push_enabled / listen_* / llm_* / napcat_* 等）----

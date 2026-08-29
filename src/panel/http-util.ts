@@ -3,10 +3,12 @@
  * 校验失败一律抛 HttpError，由 server 统一转成 { error } 响应。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Db } from '../core/db.js';
 import type { StreamerInput } from '../core/streamers.js';
 import type {
   CategoryInput, NewCategory, NewPushChannel, NewPushRule, PushChannelInput, PushRuleInput,
 } from '../core/push.js';
+import { NUM_SPECS, BOOL_SPECS, type RuntimeConfig } from '../core/runtime-config.js';
 
 export class HttpError extends Error {
   constructor(
@@ -308,4 +310,59 @@ export function parseRulePatch(body: unknown): PushRuleInput {
   parseRuleFields(o, p);
   if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
   return p;
+}
+
+// ---- 跨表共用逻辑（面板路由与 MCP 工具复用）----
+
+/** 规则引用存在性校验：分类 / 渠道 / 主播（监听名单内）都必须存在。 */
+export function checkRuleRefs(db: Db, r: { categoryId: number | null; uids: string[]; channels: number[] }): void {
+  if (r.categoryId !== null && !db.listCategories().some((c) => c.id === r.categoryId)) {
+    throw new HttpError(400, '分类不存在');
+  }
+  const channelIds = new Set(db.listPushChannels().map((c) => c.id));
+  for (const id of r.channels) {
+    if (!channelIds.has(id)) throw new HttpError(400, `渠道不存在: ${id}`);
+  }
+  const streamerUids = new Set(db.listStreamers().map((s) => s.uid));
+  for (const uid of r.uids) {
+    if (!streamerUids.has(uid)) throw new HttpError(400, `主播不在监听名单: ${uid}`);
+  }
+}
+
+/** 候选池一键加入监听；已有条目不碰来源，仅 watch=0 时重新打开。新行默认 notify=1、analyze=0。uname/face 从 follows 预填。 */
+export function watchStreamer(db: Db, uid: string): unknown {
+  const existing = db.getStreamer(uid);
+  if (existing?.watch) throw new HttpError(409, '该主播已在监听名单');
+  if (existing) {
+    db.upsertStreamer({ uid, watch: true });
+  } else {
+    const follow = db.listFollows(true).find((f) => f.uid === uid);
+    db.upsertStreamer({ uid, uname: follow?.uname, face: follow?.face ?? null, watch: true, source: 'follows' });
+  }
+  return { streamer: db.getStreamer(uid) };
+}
+
+/**
+ * 高级设置（/api/advanced 与 MCP update_runtime_config 共用）：
+ * 按 NUM_SPECS/BOOL_SPECS 规格表逐字段校验范围，空 patch 抛 400。
+ */
+export function parseRuntimePatch(body: unknown): Partial<RuntimeConfig> {
+  const b = asObject(body);
+  const patch: Record<string, number | boolean> = {};
+  for (const s of NUM_SPECS) {
+    const v = b[s.field];
+    if (v === undefined) continue;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < s.min || v > s.max) {
+      throw new HttpError(400, `${s.label}必须是 ${s.min}~${s.max} 的整数`);
+    }
+    patch[s.field] = v;
+  }
+  for (const s of BOOL_SPECS) {
+    const v = b[s.field];
+    if (v === undefined) continue;
+    if (typeof v !== 'boolean') throw new HttpError(400, `${s.label}必须是布尔值`);
+    patch[s.field] = v;
+  }
+  if (Object.keys(patch).length === 0) throw new HttpError(400, '没有可保存的字段');
+  return patch as Partial<RuntimeConfig>;
 }

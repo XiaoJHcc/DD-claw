@@ -122,6 +122,8 @@ export interface PushRuleRow {
   channels: string;
   message_template: string | null;
   enabled: number;
+  /** 创建来源：NULL = 面板/人工；'mcp' = MCP 群自助（gateway 只能动自己创建的） */
+  created_by: string | null;
   /** 全局匹配优先级（面板拖拽排序）；行对象不暴露 */
   sort: number;
   created_at: number;
@@ -141,11 +143,15 @@ export interface PushRule {
   /** null = 用内置默认模板（'{liver} 开播了'） */
   messageTemplate: string | null;
   enabled: boolean;
+  /** 创建来源：null = 面板/人工；'mcp' = MCP 群自助（gateway 角色只能增删自己创建的规则） */
+  createdBy: string | null;
   createdAt: number;
   updatedAt: number;
 }
 
-export type NewPushRule = Omit<PushRule, 'id' | 'createdAt' | 'updatedAt'>;
+export type NewPushRule = Omit<PushRule, 'id' | 'createdAt' | 'updatedAt' | 'createdBy'> & {
+  createdBy?: string | null;
+};
 export type PushRuleInput = Partial<NewPushRule> & { id?: number };
 
 export function rowToRule(r: PushRuleRow): PushRule {
@@ -155,6 +161,7 @@ export function rowToRule(r: PushRuleRow): PushRule {
     channels: JSON.parse(r.channels) as number[],
     messageTemplate: r.message_template,
     enabled: r.enabled === 1,
+    createdBy: r.created_by ?? null,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }

@@ -14,15 +14,17 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "webui:dev": "node scripts/webui-dev.mjs",
-    "test": "node --import tsx --test src/core/state.test.ts src/core/bus.test.ts src/core/pipeline.test.ts src/core/concurrency.test.ts src/core/streamers.test.ts src/core/db.test.ts src/core/push.test.ts src/core/posts.test.ts src/core/onboarding.test.ts src/core/runtime-config.test.ts src/sources/bili/live-status-source.test.ts src/sources/bili/auth.test.ts src/sources/bili/follows.test.ts src/sources/bili/qrcode.test.ts src/sources/bili/dynamic.test.ts src/sources/weibo/resolve.test.ts src/sources/weibo/qrcode.test.ts src/sources/weibo/auth.test.ts src/sources/weibo/feed.test.ts src/sources/media/keyframe.test.ts src/rules/once-per-session.test.ts src/config/config.test.ts src/analysis/matcher.test.ts src/analysis/classify.test.ts src/analysis/providers.test.ts src/notify/onebot.test.ts src/notify/napcat.test.ts src/notify/dispatcher.test.ts src/notify/image-cache.test.ts src/notify/toast.test.ts src/notify/mac-notifier.test.ts src/panel/server.test.ts src/tools/migrate-snapshot-paths.test.ts",
+    "test": "node --import tsx --test src/core/state.test.ts src/core/bus.test.ts src/core/pipeline.test.ts src/core/concurrency.test.ts src/core/streamers.test.ts src/core/db.test.ts src/core/push.test.ts src/core/posts.test.ts src/core/onboarding.test.ts src/core/runtime-config.test.ts src/sources/bili/live-status-source.test.ts src/sources/bili/auth.test.ts src/sources/bili/follows.test.ts src/sources/bili/qrcode.test.ts src/sources/bili/dynamic.test.ts src/sources/weibo/resolve.test.ts src/sources/weibo/qrcode.test.ts src/sources/weibo/auth.test.ts src/sources/weibo/feed.test.ts src/sources/media/keyframe.test.ts src/rules/once-per-session.test.ts src/config/config.test.ts src/analysis/matcher.test.ts src/analysis/classify.test.ts src/analysis/providers.test.ts src/notify/onebot.test.ts src/notify/napcat.test.ts src/notify/dispatcher.test.ts src/notify/image-cache.test.ts src/notify/toast.test.ts src/notify/mac-notifier.test.ts src/panel/server.test.ts src/mcp/mcp.test.ts src/tools/migrate-snapshot-paths.test.ts",
     "probe": "tsx src/index.ts --probe",
     "probe-llm": "tsx src/index.ts --probe-llm",
     "test-notify": "tsx src/index.ts --test-notify",
     "napcat-setup": "tsx src/index.ts --napcat-setup",
+    "mcp-token": "tsx src/tools/mcp-token.ts",
     "migrate:snapshots-path": "tsx src/tools/migrate-snapshot-paths.ts",
     "demo:fixtures": "tsx src/tools/dump-demo-fixtures.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "^13.0.2",
     "powertoast": "^3.0.0",
     "zod": "^4.4.3"
