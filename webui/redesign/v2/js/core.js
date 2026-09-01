@@ -91,6 +91,7 @@ export function openSheet(title, bodyHtml, level = 1, footHtml) {
   mask.hidden = false;
 }
 export function closeSheet(level = 1) {
+  ddMenuClose(); // 打开中的下拉菜单在 body 上，弹窗一关先收回
   const mask = document.getElementById('sheet-mask' + level);
   mask.hidden = true;
   document.getElementById('sheet' + level).innerHTML = '';
@@ -135,26 +136,52 @@ export function ddHtml(name, options, selected) {
     `<div class="dd-menu" hidden>${options.map(o =>
       `<button type="button" class="dd-opt${o === sel ? ' sel' : ''}" data-action="dd-pick" data-v="${esc(o)}"><span class="dd-opt-txt">${esc(o)}</span>${icon('check')}</button>`).join('')}</div></div>`;
 }
+/* 自绘下拉：菜单打开时搬到 body 用 fixed 定位到触发器（上方/下方哪侧空间够朝哪开），
+   逃出 sheet-body overflow 的裁切；关闭时放回 .dd 原位。同一时刻至多一个菜单打开 */
+let ddOpen = null; // { dd, menu, trigger }
+function ddMenuClose() {
+  if (!ddOpen) return;
+  const { dd, menu } = ddOpen;
+  ddOpen = null;
+  menu.hidden = true;
+  dd.appendChild(menu);
+}
+function ddMenuPlace() {
+  if (!ddOpen) return;
+  const r = ddOpen.trigger.getBoundingClientRect();
+  const m = ddOpen.menu;
+  m.style.left = r.left + 'px';
+  m.style.width = r.width + 'px';
+  const mh = m.offsetHeight;
+  const below = window.innerHeight - r.bottom;
+  m.style.top = (below >= mh + 4 || below >= r.top ? r.bottom + 4 : r.top - mh - 4) + 'px';
+}
 ACTIONS['dd-toggle'] = t => {
-  const menu = t.closest('.dd').querySelector('.dd-menu');
-  const willOpen = menu.hidden;
-  document.querySelectorAll('.dd-menu').forEach(m => { m.hidden = true; });
-  menu.hidden = !willOpen;
+  const dd = t.closest('.dd');
+  if (ddOpen && ddOpen.dd === dd) { ddMenuClose(); return; }
+  ddMenuClose();
+  const menu = dd.querySelector('.dd-menu');
+  menu.hidden = false;
+  document.body.appendChild(menu);
+  ddOpen = { dd, menu, trigger: t };
+  ddMenuPlace();
 };
 ACTIONS['dd-pick'] = t => {
-  const dd = t.closest('.dd');
+  const dd = ddOpen ? ddOpen.dd : t.closest('.dd'); // 菜单已搬进 body，只能经 ddOpen 找回触发器
   const v = t.getAttribute('data-v');
   dd.querySelector('input').value = v;
   dd.querySelector('.dd-value').textContent = v;
   dd.querySelectorAll('.dd-opt').forEach(o => o.classList.toggle('sel', o === t));
-  dd.querySelector('.dd-menu').hidden = true;
+  ddMenuClose();
 };
+window.addEventListener('scroll', () => ddMenuPlace(), { capture: true, passive: true });
+window.addEventListener('resize', () => ddMenuPlace());
 document.addEventListener('click', e => {
-  if (!e.target.closest('.dd')) document.querySelectorAll('.dd-menu').forEach(m => { m.hidden = true; });
+  if (!e.target.closest('.dd') && !e.target.closest('.dd-menu')) ddMenuClose();
 });
 
 // ---- 列表拖拽排序（pointer 实现）----
-// 拖 .grip 起拖：行脱离流（position:fixed）浮起跟随指针，原位插 .drop-gap 虚线框预留空位；
+// 拖 .grip 起拖：行脱离流（position:fixed）浮起跟随指针，原位插 .drop-gap 内嵌浅蓝块预留空位；
 // 移动中按「指针越过相邻行中线」实时搬动 gap，其余行 FLIP（先测位、搬 gap、反向 transform 过渡到 0）
 // 平滑让位；松手把行落回 gap 位置并回调 onReorder(from, to)（from===to 时调用方可不重渲染）。
 export function makeSortable(list, onReorder) {

@@ -35,7 +35,7 @@ export function renderSettings() {
   const g = document.getElementById('settings-grid');
 
   // 1. 监听
-  const listen = `<section class="card set-card acc-blue">
+  const listen = `<section class="card set-card acc-pink">
     <div class="card-head"><span class="card-ic">${icon('headphone')}</span><h2>监听</h2></div>
     <div class="set-rows">
       ${platRow('bili', 'B站登录')}
@@ -46,13 +46,13 @@ export function renderSettings() {
     <div class="card-foot"><button class="btn btn-ghost" data-action="listen-adv">${icon('sliders')}抓取设置</button></div>
   </section>`;
 
-  // 2. LLM 分析（行：名称 + 模型 ID 副行，多模态标签；可拖拽排序 = 优先级）
+  // 2. LLM 供应商（行：名称 + 模型 ID 副行，多模态标签；可拖拽排序 = 优先级）
   const llmRows = DATA.providers.map(pv => `<div class="row row-2">${gripHtml()}${checkDotHtml('data-action="demo-check"', pv.enabled)}
     <span class="row-main"><span class="row-line"><span class="row-title">${esc(pv.name)}</span>${pv.vision ? '<span class="tag tag-purple">多模态</span>' : ''}</span>
     <span class="row-sub">${esc(pv.model || pv.baseURL || '')}</span></span>
     <span class="row-end">${iconBtn('llm-test', 'bolt', '测试')}${iconBtn('llm-edit', 'pencil', '编辑')}${iconBtn('demo-del', 'trash', '删除', true)}</span></div>`).join('');
   const llm = `<section class="card set-card acc-purple">
-    <div class="card-head"><span class="card-ic">${icon('sparkles')}</span><h2>LLM 分析</h2>
+    <div class="card-head"><span class="card-ic">${icon('sparkles')}</span><h2>LLM 供应商</h2>
     <div class="card-head-end">${switchHtml('', true)}</div></div>
     <div class="set-rows" data-sort="providers">${llmRows}</div>
     <div class="card-foot"><button class="btn btn-ghost" data-action="llm-new">${icon('plus')}新增供应商</button><button class="btn btn-line" data-action="llm-adv">高级</button></div>
@@ -67,7 +67,7 @@ export function renderSettings() {
     <span class="row-main"><span class="row-line"><span class="row-title">${esc(c.name)}</span>${tags}</span></span>
     <span class="row-end">${iconBtn('cat-edit', 'pencil', '编辑')}${iconBtn('demo-del', 'trash', '删除', true)}</span></div>`;
   }).join('');
-  const cats = `<section class="card set-card acc-mint">
+  const cats = `<section class="card set-card acc-amber">
     <div class="card-head"><span class="card-ic">${icon('tag')}</span><h2>分类规则</h2></div>
     <div class="set-rows" data-sort="categories">${catRows}</div>
     <div class="card-foot"><button class="btn btn-ghost" data-action="cat-new">${icon('plus')}新增分类</button></div>
@@ -79,7 +79,7 @@ export function renderSettings() {
   const chanRows = DATA.channels.map(c => `<div class="row row-2">${gripHtml()}${checkDotHtml('data-action="demo-check"', c.enabled)}
     <span class="row-main"><span class="row-line"><span class="row-title">${esc(c.name)}</span></span><span class="row-sub">${chanSub(c)}</span></span>
     <span class="row-end">${iconBtn('chan-edit', 'pencil', '编辑')}${iconBtn('demo-del', 'trash', '删除', true)}</span></div>`).join('');
-  const push = `<section class="card set-card acc-amber">
+  const push = `<section class="card set-card acc-blue">
     <div class="card-head"><span class="card-ic">${icon('bell')}</span><h2>推送渠道</h2>
     <div class="card-head-end">${switchHtml('', true)}</div></div>
     <div class="set-rows" data-sort="channels">${chanRows}</div>
@@ -96,7 +96,7 @@ export function renderSettings() {
     <span class="row-main"><span class="row-line"><span class="row-title">${esc(r.name)}</span>${cat}${uids}</span></span>
     <span class="row-end">${iconBtn('rule-edit', 'pencil', '编辑')}${iconBtn('demo-del', 'trash', '删除', true)}</span></div>`;
   }).join('');
-  const rules = `<section class="card set-card acc-pink">
+  const rules = `<section class="card set-card acc-mint">
     <div class="card-head"><span class="card-ic">${icon('list')}</span><h2>推送规则</h2></div>
     <div class="set-rows" data-sort="rules">${ruleRows}</div>
     <div class="card-foot"><button class="btn btn-ghost" data-action="rule-new">${icon('plus')}添加规则</button></div>
@@ -123,7 +123,7 @@ export function renderSettings() {
     <div class="card-foot"><button class="btn btn-ghost" data-action="napcat-launch">${icon('send')}手动拉起</button></div>
   </section>`;
 
-  g.innerHTML = listen + llm + cats + push + rules + napcat;
+  g.innerHTML = listen + napcat + llm + push + cats + rules;
   bindSortable(g);
 }
 
@@ -184,10 +184,13 @@ ACTIONS['qr-start'] = async t => {
 };
 
 const num = (l, v) => field(l, `<input class="inp" type="number" value="${v}">`);
+// 抓取设置：分组与字段同旧版监听卡（关注列表 / 直播间轮询 / 动态，共 8 项，关键帧开关与间隔并排）
 ACTIONS['listen-adv'] = () => openSheet('抓取设置',
-  `<div class="adv-group">直播间轮询</div><div class="two">${num('间隔（秒）', 60)}${num('抖动（秒）', 10)}</div>${num('连续失败告警阈值', 5)}` +
-  `<div class="adv-group">抓取间隔</div><div class="two">${num('关注列表同步（秒）', 600)}${num('空间动态（秒）', 300)}</div><div class="two">${num('微博（秒）', 300)}${num('关键帧（秒）', 300)}</div>` +
-  `<div class="adv-group">在播关键帧缓存</div>${checkRowHtml('', true, '启用缓存')}`);
+  `<div class="adv-group">关注列表</div>${num('同步间隔（秒，≥300）', 1800)}` +
+  `<div class="adv-group">直播间轮询</div><div class="two">${num('轮询间隔（秒，20~3600）', 45)}${num('轮询抖动（秒，0~120）', 8)}</div>` +
+  num('连续失败多少次后告警（1~100）', 5) +
+  `<div class="two">${field('关键帧缓存', checkRowHtml('', true, '缓存直播关键帧'))}${num('缓存间隔（秒，60~3600）', 300)}</div>` +
+  `<div class="adv-group">动态</div><div class="two">${num('B站动态抓取间隔（秒，≥120）', 300)}${num('微博抓取间隔（秒，≥120）', 300)}</div>`);
 ACTIONS['llm-adv'] = () => openSheet('LLM 高级',
   num('请求超时（秒）', 60) + `<div class="two">${num('熔断阈值', 3)}${num('熔断冷却（秒）', 300)}</div>`);
 ACTIONS['push-adv'] = () => openSheet('推送设置',
@@ -221,7 +224,9 @@ ACTIONS['rule-new'] = () => {
     field('规则名称', `<input class="inp" placeholder="留空自动命名">`) +
     field('分类', ddHtml('category', ['任意开播', ...DATA.categories.map(c => c.name)])) +
     field('生效主播', `<button class="btn btn-blue btn-block" data-action="rule-pick">${icon('users')}全部主播（点击挑选）</button>`) +
-    `<div class="field"><label class="field-label">推送渠道</label>` + DATA.channels.map(c => checkRowHtml('', c.enabled, esc(c.name))).join('') + '</div>' +
+    `<div class="field"><label class="field-label">推送渠道</label><div class="chips">` +
+    DATA.channels.map(c => `<button type="button" class="chip${c.enabled ? ' on' : ' chip-dis'}" data-action="demo-chip" ${c.enabled ? '' : 'title="该渠道已停用：勾选不会生效"'}><span class="chip-ic">${icon('check')}</span><span class="chip-txt">${esc(c.name)}</span></button>`).join('') +
+    '</div></div>' +
     field('推送词', `<input class="inp" placeholder="{liver} 开播了">`);
   openSheet('推送规则', body, 1);
 };
@@ -240,3 +245,5 @@ ACTIONS['napcat-edit'] = t => {
 ACTIONS['napcat-launch'] = () => toast('已通过计划任务拉起 NapCat（演示）');
 ACTIONS['demo-del'] = () => toast('演示模式：不能真的删除', true);
 ACTIONS['demo-switch'] = () => toast('演示模式：开关不落库');
+// 渠道胶囊可勾可取消；停用渠道（.chip-dis）勾了也置灰划线提示「勾上也没用」，但状态照常切换
+ACTIONS['demo-chip'] = t => t.classList.toggle('on');

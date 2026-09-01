@@ -1,31 +1,32 @@
 /*
  * UI Demo v2 — 设计系统（折中版：线上版的统一令牌为骨 + 克制彩色）
  *
- * 间距唯一四档：--sp-1:4 / --sp-2:8 / --sp-3:12 / --sp-4:20（=--pad）。
+ * 间距唯一四档：--sp-1:4 / --sp-2:8 / --sp-3:12 / --sp-4:20（=--pad）；弹窗窗口内边距单列一档 --sheet-pad:28。
  * 字号四档：--fs-xs:11 标签 / --fs-sm:12 次要 / --fs-base:14 正文 / --fs-xl:16 标题。
- * 圆角两级：--r-lg:16 页面级（卡片/弹窗/边栏） / --r-md:10 卡片内一切（按钮/输入框/tag/拖拽浮行），
- * 正圆形（头像/状态点/勾选框）与开关胶囊为形态豁免。
+ * 圆角三级：--r-lg:24 页面级（卡片/弹窗/边栏） / --r-inset:16 卡片内嵌块（卡片头/行/拖拽浮行） /
+ * --r-md:10 控件（按钮/输入框/tag），正圆形（头像/状态点/勾选框）与开关胶囊为形态豁免。
+ * 内嵌同心圆纪律：卡片头与列表行都是卡片内嵌圆角矩形，四周窄边距 --inset:8，
+ * 边距差值 = 两层圆角半径差值（24 - 8 = 16），内层与卡片圆角同心。
  * 控件高度统一：单行控件（按钮/输入框/下拉/图标按钮）恒 --ctl-h:36；
  * 列表行真单行恒 --row-h:44，主副双行恒 --row-h2:66（1.5 倍）。
  * 颜色纪律：蓝 #4C8DFF 主色（选中/主按钮/开关/链接），粉 #FF5C8A 只做在播强调与 Logo 点缀，
  * 红只表错误/危险，薄荷/紫/琥珀/青只出现在小标签与卡片图标上。
- * 阴影纪律：卡片/弹窗用中性蓝灰投影；控件无彩色外发光（开关开态为蓝渐变 + 轨道内阴影）。
- * 卡片两段式：卡片头（图标+标题+端部控件）与主体以分隔线分区，卡片自身不留内边距。
- * 行底纪律：列表行通宽无圆角，行内左右边距 = 卡片边距 --pad（把手/勾选框与卡片头、
- * 底部按钮同一条左缘，无双重边距）；平常白底，hover 才显浅底通带。
+ * 阴影纪律：卡片/弹窗/卡片头用中性蓝灰投影；控件无彩色外发光（开关开态为蓝渐变 + 轨道内阴影）。
+ * 卡片两段式：卡片头（图标+标题+端部控件）= 主题色极浅底的浮起内嵌块，与白色主体分区。
+ * 行底纪律：列表行内嵌无底色，平常白底，hover 才显浅底（内嵌圆角矩形，非通宽通带）。
  */
 *{box-sizing:border-box}
 :root{
-  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:20px;--pad:var(--sp-4);
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:20px;--pad:var(--sp-4);--sheet-pad:28px;
   --fs-xs:11px;--fs-sm:12px;--fs-base:14px;--fs-xl:16px;
-  --r-lg:16px;--r-md:10px;
+  --r-lg:24px;--r-md:10px;--r-inset:16px;--inset:8px;
   --ctl-h:36px;--row-h:44px;--row-h2:66px;--icon:16px;
   --blue:#4C8DFF;--blue-deep:#3D7BF0;--blue-soft:rgba(76,141,255,.10);
   --pink:#FF5C8A;--red:#E5484D;
   --mint:#2FBD9B;--purple:#8B7CF6;--amber:#E8A13A;--cyan:#3FA9C9;
   --text:#232A3D;--text-2:#8A92A6;
   --card-bg:#FFFFFF;
-  --fill:rgba(84,104,150,.06);--hover:rgba(84,104,150,.05);
+  --fill:rgba(84,104,150,.06);--hover:rgba(84,104,150,.05);--fill-deep:rgba(84,104,150,.10);
   --separator:rgba(30,45,80,.12);--divider:rgba(30,45,80,.06);
   --border-strong:rgba(30,45,80,.28);
   --shadow:0 1px 2px rgba(28,45,90,.05),0 8px 20px rgba(28,45,90,.05);
@@ -88,40 +89,49 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 .wip-ic{display:inline-flex;color:var(--text-2)}
 .wip-ic svg{width:28px;height:28px;display:block}
 
-/* ---- 卡片：两段式。卡片自身不留内边距（overflow:hidden 收圆角）；
-   卡片头 = 该卡主题色的极浅底（90° 左→右微渐变），标题与图标同为卡片主题色
-   （标题用深阶保证可读性），与白色主体天然分区 ---- */
-.card{background:var(--card-bg);border-radius:var(--r-lg);box-shadow:var(--shadow);overflow:hidden}
-.card-head{display:flex;align-items:center;gap:var(--sp-2);padding:18px var(--pad);
-  background:linear-gradient(90deg,var(--acc-bg1,#F2F4FA) 0%,var(--acc-bg2,#FAFBFE) 100%)}
+/* ---- 卡片：两段式内嵌。卡片头 = 内嵌圆角矩形（左右/下边距 --inset，顶距由卡片 padding-top 提供——
+   头部 margin-top 会穿透塌陷到卡片外（.card 非 BFC），导致头部探出卡片顶缘）。
+   半径 = 卡片半径 - 边距，与卡片圆角同心；主题色极浅底 + 顶部光泽带（避开顶边，保住顶缘可读性）
+   + 同色系深阶投影（--acc-sh，压暗降饱和、低透明大模糊）营造立体；卡片自身是白净容器 ---- */
+.card{background:var(--card-bg);border-radius:var(--r-lg);box-shadow:var(--shadow);padding-top:var(--inset)}
+.card-head{display:flex;align-items:center;gap:var(--sp-2);margin:0 var(--inset) var(--inset);min-height:60px;padding:0 var(--pad);
+  border-radius:var(--r-inset);
+  /* 光泽带避开顶边：0~14% 露纯主题底色（顶缘在白卡片上可见），sheen 峰值在 22% 处，48% 消隐 */
+  background:linear-gradient(180deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.34) 22%,rgba(255,255,255,0) 48%),
+    linear-gradient(90deg,var(--acc-bg1,#F2F4FA) 0%,var(--acc-bg2,#FAFBFE) 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.85),inset 0 -1px 0 rgb(var(--acc-sh,28 45 90)/.06),
+    0 8px 22px rgb(var(--acc-sh,28 45 90)/.03),0 -4px 16px rgb(var(--acc-sh,28 45 90)/.06)}
 .card-head h2{flex:none;color:var(--acc-t,var(--text));letter-spacing:.01em}
 .card-head-end{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2);min-width:0}
 /* 卡片图标：无背景，仅着色 glyph；颜色取卡片主题色 --acc */
 .card-ic{display:inline-flex;flex:none;color:var(--acc,var(--text-2))}
 .card-ic svg{width:20px;height:20px;display:block}
-/* 每卡主题色：--acc 图标 / --acc-t 标题深阶 / --acc-bg1→2 头带底色（极浅近白） */
-.acc-blue{--acc:#4C8DFF;--acc-t:#2B5AC9;--acc-bg1:#F0F5FE;--acc-bg2:#FAFCFF}
-.acc-purple{--acc:#8B7CF6;--acc-t:#6B5AE0;--acc-bg1:#F4F2FE;--acc-bg2:#FBFAFF}
-.acc-mint{--acc:#2FBD9B;--acc-t:#1E9C7E;--acc-bg1:#EFF9F6;--acc-bg2:#F7FCFA}
-.acc-amber{--acc:#E8A13A;--acc-t:#C07E1F;--acc-bg1:#FCF6EA;--acc-bg2:#FEFBF5}
-.acc-pink{--acc:#FF5C8A;--acc-t:#E83E72;--acc-bg1:#FFF1F5;--acc-bg2:#FFFAFC}
-.acc-cyan{--acc:#3FA9C9;--acc-t:#2A86A3;--acc-bg1:#EFF8FA;--acc-bg2:#F8FCFD}
+/* 每卡主题色：--acc 图标 / --acc-t 标题深阶 / --acc-bg1→2 头带底色（极浅近白） / --acc-sh 投影色（rgb 三通道，同色系压暗降饱和） */
+.acc-blue{--acc:#4C8DFF;--acc-t:#2B5AC9;--acc-bg1:#F0F5FE;--acc-bg2:#FAFCFF;--acc-sh:58 76 130}
+.acc-purple{--acc:#8B7CF6;--acc-t:#6B5AE0;--acc-bg1:#F4F2FE;--acc-bg2:#FBFAFF;--acc-sh:88 78 150}
+.acc-mint{--acc:#2FBD9B;--acc-t:#1E9C7E;--acc-bg1:#EFF9F6;--acc-bg2:#F7FCFA;--acc-sh:45 100 86}
+.acc-amber{--acc:#E8A13A;--acc-t:#C07E1F;--acc-bg1:#FCF6EA;--acc-bg2:#FEFBF5;--acc-sh:96 71 40}
+.acc-pink{--acc:#FF5C8A;--acc-t:#E83E72;--acc-bg1:#FFF1F5;--acc-bg2:#FFFAFC;--acc-sh:118 56 78}
+.acc-cyan{--acc:#3FA9C9;--acc-t:#2A86A3;--acc-bg1:#EFF8FA;--acc-bg2:#F8FCFD;--acc-sh:48 88 102}
 
-/* 设置小卡片区：响应式换行（宽 3 / 中 2 / 窄 1），卡内 卡片头→通宽行列表(撑开)→底部按钮 */
+/* 设置小卡片区：响应式换行（宽 3 / 中 2 / 窄 1），卡内 卡片头→行列表(撑开)→底部按钮 */
 .set-grid{display:flex;flex-wrap:wrap;gap:var(--pad);margin-bottom:var(--pad)}
 .set-card{flex:1 1 calc((100% - var(--pad)*2)/3);max-width:calc((100% - var(--pad)*2)/3);min-width:0;
   display:flex;flex-direction:column}
 @media (max-width:1100px){.set-card{flex-basis:calc(50% - var(--pad)/2);max-width:calc(50% - var(--pad)/2)}}
 @media (max-width:720px){.set-card{flex-basis:100%;max-width:100%}}
 .set-rows{flex:1;min-height:0}
-.card-foot{display:flex;gap:var(--sp-2);padding:var(--sp-3) var(--pad) var(--pad)}
+/* 底部按钮：左右及底部外边距 = --inset + --pad（行内边距），按钮左右缘/底缘与行的实际内容
+   同一条缘，而不是与行盒外缘对齐；顶距 = --inset - 行底距 2px，使末行→按钮的净距与卡片头四边的 --inset 一致 */
+.card-foot{display:flex;gap:var(--sp-2);padding:calc(var(--inset) - 2px) calc(var(--inset) + var(--pad)) calc(var(--inset) + var(--pad))}
 .card-foot .btn{flex:1}
 
-/* ---- 列表行：通宽、无圆角，行内左右边距 = 卡片边距 --pad（拖拽把手与卡片头图标、
-   底部按钮同一条左缘，无卡片边距+行边距的双重缩进）。真单行恒 44，主副双行（.row-2）恒 66。
-   平常白底，hover 显浅底通带；双行 = 主标题 + 次要信息（只放真实信息） ---- */
+/* ---- 列表行：内嵌圆角矩形（外边距：左右 --inset、下 2px 行间缝；半径 --r-inset 与卡片同心；
+   首行顶距 0 ⇒ 卡片头四边净距均为 --inset），行内左右边距 = --pad（把手/勾选框与卡片头图标同一条内容左缘）。
+   真单行恒 44，主副双行（.row-2）恒 66。
+   平常白底，hover 才显浅底（内嵌圆角矩形，非通宽通带）；双行 = 主标题 + 次要信息（只放真实信息） ---- */
 .row{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);
-  padding:var(--sp-1) var(--pad);transition:background-color .15s ease}
+  margin:0 var(--inset) 2px;padding:var(--sp-1) var(--pad);border-radius:var(--r-inset);transition:background-color .15s ease}
 .row-2{min-height:var(--row-h2)}
 .row:hover{background:var(--hover)}
 .row-click{cursor:pointer}
@@ -136,11 +146,12 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 .row-afford{display:inline-flex;color:var(--text-2);opacity:.55;flex:none}
 .row-afford svg{width:var(--icon);height:var(--icon);display:block}
 
-/* 拖拽排序：拖起 = 行脱离流（fixed）浮起带中性阴影；原位 .drop-gap 通宽浅蓝带预留空位
-   （与行同高、无圆角无边距，与通宽行同一形态语言），移动中 gap 实时改位、其余行 FLIP 平滑让位 */
-.row.dragging{position:fixed;z-index:40;margin:0;border-radius:var(--r-md);background:var(--card-bg);
+/* 拖拽排序：拖起 = 行脱离流（fixed）浮起，保留内嵌圆角矩形形态 + 中性阴影 + 浅蓝底强调；
+   原位 .drop-gap = 与行同外边距同圆角的内嵌浅蓝块预留空位（与内嵌行同一形态语言），
+   移动中 gap 实时改位、其余行 FLIP 平滑让位 */
+.row.dragging{position:fixed;z-index:40;margin:0;border-radius:var(--r-inset);background:#F4F8FF;
   box-shadow:var(--shadow-lg);cursor:grabbing;pointer-events:none}
-.drop-gap{background:var(--blue-soft)}
+.drop-gap{margin:0 var(--inset) 2px;border-radius:var(--r-inset);background:var(--blue-soft)}
 
 /* 状态点（正圆形豁免） */
 .dot{width:9px;height:9px;border-radius:50%;flex:none}
@@ -210,12 +221,15 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 
 /* ---- 表单：输入框/下拉/文本域统一 36 高（文本域除外）、--r-md、focus 蓝环 ---- */
 .field{margin:var(--sp-2) 0}
+/* 表单纵向节奏：纵向堆叠的相邻字段间距 16 = .two 行内字段上下各 8 的观感标准
+   （.two 行内 margin 不折叠，纯堆叠字段 margin 折叠只剩 8，故显窄）；只作用于 sheet-body 直接子级，不碰行内字段 */
+.sheet-body > .field + .field{margin-top:16px}
 .field > .field-label{display:block;font-size:var(--fs-sm);color:var(--text-2);margin-bottom:var(--sp-1)}
 .inp{font:inherit;font-size:var(--fs-base);height:var(--ctl-h);padding:0 var(--sp-3);width:100%;
   border:1px solid var(--separator);border-radius:var(--r-md);background:var(--card-bg);color:var(--text);outline:none;transition:border-color .15s ease,box-shadow .15s ease}
 textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:var(--sp-2) var(--sp-3);resize:vertical}
 .inp:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(76,141,255,.16)}
-/* 自绘下拉：触发器观感同输入框，菜单为浮层（不弹原生菜单） */
+/* 菜单为浮层：打开时由 core.js 搬到 body，fixed 定位在触发器旁（坐标 JS 算，CSS 只管观感） */
 .dd{position:relative}
 .dd-trigger{display:flex;align-items:center;gap:var(--sp-2);width:100%;height:var(--ctl-h);padding:0 var(--sp-3);
   border:1px solid var(--separator);border-radius:var(--r-md);background:var(--card-bg);color:var(--text);
@@ -223,7 +237,7 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .dd-trigger:hover{border-color:var(--border-strong)}
 .dd-value{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dd-trigger > svg{width:var(--icon);height:var(--icon);color:var(--text-2);flex:none;display:block}
-.dd-menu{position:absolute;top:calc(100% + var(--sp-1));left:0;right:0;z-index:30;padding:var(--sp-1);
+.dd-menu{position:fixed;z-index:80;padding:var(--sp-1);
   background:var(--card-bg);border-radius:var(--r-md);box-shadow:var(--shadow-lg)}
 .dd-opt{display:flex;align-items:center;gap:var(--sp-2);width:100%;height:32px;padding:0 var(--sp-2);
   border:none;border-radius:6px;background:transparent;color:var(--text);
@@ -243,10 +257,10 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .adv-group{margin:var(--sp-3) 0 var(--sp-1);font-size:var(--fs-sm);font-weight:600}
 .adv-group:first-child{margin-top:var(--sp-1)}
 
-/* 多选行（sheet 内的渠道勾选等）：与列表行同高同 hover */
+/* 多选行（sheet 内的渠道勾选等）：整行极浅底为常态（表单里的可触发区域可辨识），hover 同系加深 */
 .check-row{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);
-  padding:var(--sp-1) var(--sp-3);margin:var(--sp-2) 0;border-radius:var(--r-md);cursor:pointer;font-size:var(--fs-base);transition:background-color .15s ease}
-.check-row:hover{background:var(--hover)}
+  padding:var(--sp-1) var(--sp-3);margin:var(--sp-2) 0;border-radius:var(--r-md);background:var(--fill);cursor:pointer;font-size:var(--fs-base);transition:background-color .15s ease}
+.check-row:hover{background:var(--fill-deep)}
 .check-row .cr-main{flex:1;min-width:0}
 /* 表单字段内的多选行（如 LLM「能力」）：与输入框同标准高 36、无外边距，label 顶部对齐 */
 .field .check-row{min-height:var(--ctl-h);margin:0}
@@ -258,21 +272,43 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .pick-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pick-uid{font-size:var(--fs-sm);color:var(--text-2);flex:none}
 
+/* 渠道胶囊（推送规则弹窗）：并排多选；未选 = 灰圈 + 浅灰字，已选 = 蓝字淡蓝底带勾（tag-blue 同族，克制彩色）；
+   渠道被停用 = 更浅灰 + 文字划线——仍可勾选切换，但浅灰提示「勾上也不生效」 */
+.chips{display:flex;flex-wrap:wrap;gap:var(--sp-2)}
+.chip{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 12px;border:none;
+  border-radius:999px;background:var(--fill);color:var(--text-2);font:inherit;font-size:var(--fs-sm);font-weight:600;
+  cursor:pointer;white-space:nowrap;transition:background-color .16s ease,color .16s ease}
+.chip-ic{position:relative;width:13px;height:13px;display:inline-flex}
+.chip-ic::before{content:"";position:absolute;inset:0;border-radius:50%;border:1.5px solid currentColor;opacity:.6}
+.chip-ic svg{position:absolute;inset:0;width:13px;height:13px;display:block;opacity:0}
+.chip:hover{background:var(--fill-deep)}
+.chip.on{background:var(--blue-soft);color:var(--blue-deep)}
+.chip.on:hover{background:rgba(76,141,255,.16)}
+.chip.on .chip-ic::before{opacity:0}
+.chip.on .chip-ic svg{opacity:1}
+.chip-dis,.chip-dis:hover{position:relative;background:rgba(84,104,150,.045);color:#BCC2CF}
+/* 停用 = 贯穿整枚胶囊的删除线（文字与勾一起划掉）；text-decoration 划不到 svg，故画线 */
+.chip-dis::after{content:"";position:absolute;left:10px;right:10px;top:50%;height:1.5px;border-radius:1px;
+  background:currentColor;transform:translateY(-50%)}
+.chip-dis.on,.chip-dis.on:hover{background:rgba(84,104,150,.12);color:#B4BAC9}
+.chip-dis.on .chip-ic::before{opacity:0}
+.chip-dis.on .chip-ic svg{opacity:1}
+
 /* ---- sheet 弹窗（两级同款） ---- */
 .sheet-mask{position:fixed;inset:0;background:var(--mask);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
   display:flex;align-items:center;justify-content:center;z-index:20}
 #sheet-mask2{z-index:21}
 .sheet{background:var(--card-bg);border-radius:var(--r-lg);width:560px;max-width:92vw;max-height:86vh;
   display:flex;flex-direction:column;box-shadow:var(--shadow-lg)}
-.sheet-head{display:flex;align-items:center;justify-content:space-between;padding:var(--sp-3) var(--pad) var(--sp-1)}
+.sheet-head{display:flex;align-items:center;justify-content:space-between;padding:var(--sheet-pad) var(--sheet-pad) var(--sp-1)}
 .sheet-head > b{font-size:var(--fs-xl);font-weight:600}
 .sheet-x{display:inline-flex;align-items:center;justify-content:center;width:var(--ctl-h);height:var(--ctl-h);
   border:none;border-radius:var(--r-md);background:transparent;color:var(--text-2);cursor:pointer;transition:background-color .15s ease,color .15s ease}
 .sheet-x:hover{background:var(--hover);color:var(--text)}
 .sheet-x svg{width:var(--icon);height:var(--icon);display:block}
-.sheet-body{padding:var(--sp-2) var(--pad) var(--pad);overflow-y:auto}
+.sheet-body{padding:var(--sp-2) var(--sheet-pad) var(--sheet-pad);overflow-y:auto}
 .sheet-foot{display:flex;justify-content:flex-end;align-items:center;gap:var(--sp-2);
-  padding:0 var(--pad) var(--pad)}
+  padding:0 var(--sheet-pad) var(--sheet-pad)}
 .sheet-foot .sp{flex:1}
 
 /* 二维码舱：固定高度，生成前后容器不变 */
@@ -294,17 +330,17 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 /* ---- 关注列表（v1 风格：胶囊搜索框 + 描边卡片网格 + 三态胶囊监听按钮） ---- */
 /* 搜索框 = 胶囊（特殊控件）：灰蓝底无描边，聚焦变白 + 蓝环 */
 .search-box{position:relative;width:240px}
-.search-box .inp{border:none;background:#EDF1FA;border-radius:999px;padding-left:32px}
+.search-box .inp{border:none;background:#fff;border-radius:999px;padding-left:32px}
 .search-box .inp:focus{background:#fff;box-shadow:0 0 0 2.5px rgba(76,141,255,.22)}
 .search-box > i{position:absolute;left:12px;top:50%;transform:translateY(-50%);display:inline-flex;
   color:var(--text-2);pointer-events:none}
 .search-box:focus-within > i{color:#2F6FEB}
 .search-box svg{width:var(--icon);height:var(--icon);display:block}
-.follow-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));padding:var(--pad)}
-.follow-card{display:flex;flex-direction:column;align-items:center;gap:7px;padding:14px 8px 12px;
-  background:#FDFAFC;border:1.5px solid #ECE9F2;border-radius:var(--r-md);text-align:center;
+.follow-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));padding:0 var(--inset) var(--inset)}
+.follow-card{display:flex;flex-direction:column;align-items:center;gap:7px;padding:20px 16px;
+  background:#FDFAFC;border-radius:var(--r-md);text-align:center;
   transition:all .16s ease}
-.follow-card:hover{border-color:#E2ECFF;background:#EFF4FF;transform:translateY(-2px)}
+.follow-card:hover{background:#EFF4FF;transform:translateY(-2px)}
 .ava{width:46px;height:46px;border-radius:50%;object-fit:cover;display:block;background:var(--hover)}
 .avatar-ph{display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:var(--fs-xl);margin:0 auto}
 .ava-sm{width:28px;height:28px;font-size:var(--fs-base);margin:0}
