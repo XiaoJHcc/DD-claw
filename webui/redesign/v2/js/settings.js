@@ -1,5 +1,5 @@
 // settings.js — v2 设置视图（六卡 + 关注列表）。双行只放真实信息，无注释性文字。
-import { esc, icon, openSheet, field, checkRowHtml, switchHtml, checkDotHtml, iconBtn, gripHtml, toast, avatarHtml, ddHtml, makeSortable, ACTIONS, INPUTS } from './core.js';
+import { esc, icon, openSheet, field, checkRowHtml, switchHtml, checkDotHtml, iconBtn, gripHtml, toast, avatarHtml, ddHtml, makeSortable, ACTIONS, CHANGES, INPUTS } from './core.js';
 import { DATA } from './data.js';
 
 const PLAT_STATE = { ok: ['ok', '已登录'], expired: ['bad', '登录已失效'], none: ['none', '未登录'], imported: ['none', '已导入 Cookie'] };
@@ -219,11 +219,77 @@ ACTIONS['chan-new'] = () => openSheet('推送渠道',
   `<div class="two">${field('类型', ddHtml('type', ['系统通知', 'QQ群', 'QQ私聊']))}${field('目标', `<input class="inp" placeholder="群号 / QQ 号">`)}</div>`);
 ACTIONS['chan-edit'] = () => ACTIONS['chan-new']();
 
+// ---------- 生效主播 3D 圆柱卡 ----------
+/* 推送规则弹窗里的「生效主播」可点卡片：一排头像按圆柱面投影位置排布（CSS 3D：
+   translate3d(R·sinθ, y, R·cosθ)，perspective 提供近大远小；头像正对观察者，不随柱面旋转）。
+   头像相邻贴排——步距按「弦长 = 头像直径 + 缝隙」解算（≈11.5°）；布局恒定单排最多 11 枚：
+   全部主播恒定 11 个（超出丢弃、不足从头部循环补位），已选最多 11 枚（超出丢弃）；
+   只渲染正面可见弧 ±65°（纯侧面不出现），且圆柱宽出卡片——两端头像被渐变遮罩渐渐盖成卡片底色。
+   已选主播 = 从正中向两侧相邻排开（组居中，从左到右即主播序）；未选（全部主播）= 同一排布，
+   正中盖「全部主播」羽化白光晕。
+   挑选弹窗勾选实时驱动重排：uid 无重复时原地改 transform 滑到新位（CSS transition），
+   否则（循环补位产生重复）整体重建 */
+const CYL = { r: 240, ava: 46, gap: 2, thetaMax: 65, max: 11 };
+CYL.step = 2 * Math.asin((CYL.ava + CYL.gap) / (2 * CYL.r)) * 180 / Math.PI; // ≈11.5°
+let ruleDraftUids = new Set(); // 演示态：本次规则弹窗内勾选的主播
+
+function cylCardHtml() {
+  const all = DATA.streamers;
+  const isAll = ruleDraftUids.size === 0;
+  const list = isAll
+    ? (all.length ? Array.from({ length: CYL.max }, (_, i) => all[i % all.length]) : [])
+    : all.filter(s => ruleDraftUids.has(String(s.uid))).slice(0, CYL.max);
+  const items = list.map((s, i) => {
+    const a = (i - (list.length - 1) / 2) * CYL.step;
+    const f = 1 - 0.55 * ((Math.abs(a) / CYL.thetaMax) ** 2); // 两侧减半：中心常态渲染，弧端缩至 ≈0.45
+    const x = (CYL.r * Math.sin(a * Math.PI / 180)).toFixed(2), z = (CYL.r * Math.cos(a * Math.PI / 180)).toFixed(2);
+    return `<span class="cyl-item" data-uid="${esc(String(s.uid))}" style="transform:translate3d(${x}px,0,${z}px) scale3d(${f.toFixed(3)},${f.toFixed(3)},1)">${avatarHtml(s.face, s.uname, 'ava')}</span>`;
+  }).join('');
+  return `<button type="button" class="cyl-card" data-action="rule-pick" aria-label="${isAll ? '全部主播' : `已选 ${ruleDraftUids.size} 人`}，点击挑选">
+    <span class="cyl-view" style="height:78px">
+      <span class="cyl-stage">${items}</span>
+      ${isAll ? '<span class="cyl-alltag">全部主播</span>' : ''}
+    </span>
+  </button>`;
+}
+
+// 挑选弹窗勾选 → 同步重画卡片（sheet1 仍挂在 sheet2 弹窗后面，实时可见）
+function renderRuleUids() {
+  const card = document.querySelector('#sheet1 .cyl-card');
+  if (!card) return;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = cylCardHtml();
+  const next = tpl.content.firstElementChild;
+  const oldStage = card.querySelector('.cyl-stage');
+  const newStage = next.querySelector('.cyl-stage');
+  // 循环补位会产生重复 uid，重复时无法按键配对滑动，只能整体重建
+  const uids = stage => [...stage.children].map(el => el.getAttribute('data-uid'));
+  const keyed = stage => { const u = uids(stage); return new Set(u).size === u.length; };
+  if (oldStage && keyed(oldStage) && keyed(newStage)) {
+    const pool = new Map([...oldStage.children].map(el => [el.getAttribute('data-uid'), el]));
+    newStage.querySelectorAll('.cyl-item').forEach(n => {
+      const uid = n.getAttribute('data-uid');
+      const old = pool.get(uid);
+      if (old) { old.style.transform = n.style.transform; pool.delete(uid); n.remove(); }
+      else n.classList.add('cyl-new');
+    });
+    pool.forEach(el => el.remove());
+    [...newStage.children].forEach(n => oldStage.appendChild(n));
+    const tag = card.querySelector('.cyl-alltag'), ntag = next.querySelector('.cyl-alltag');
+    if (ntag && !tag) card.querySelector('.cyl-view').appendChild(ntag);
+    if (!ntag && tag) tag.remove();
+    card.setAttribute('aria-label', next.getAttribute('aria-label'));
+  } else {
+    card.innerHTML = next.innerHTML;
+  }
+}
+
 ACTIONS['rule-new'] = () => {
+  ruleDraftUids = new Set();
   const body =
     field('规则名称', `<input class="inp" placeholder="留空自动命名">`) +
     field('分类', ddHtml('category', ['任意开播', ...DATA.categories.map(c => c.name)])) +
-    field('生效主播', `<button class="btn btn-blue btn-block" data-action="rule-pick">${icon('users')}全部主播（点击挑选）</button>`) +
+    field('生效主播', cylCardHtml()) +
     `<div class="field"><label class="field-label">推送渠道</label><div class="chips">` +
     DATA.channels.map(c => `<button type="button" class="chip${c.enabled ? ' on' : ' chip-dis'}" data-action="demo-chip" ${c.enabled ? '' : 'title="该渠道已停用：勾选不会生效"'}><span class="chip-ic">${icon('check')}</span><span class="chip-txt">${esc(c.name)}</span></button>`).join('') +
     '</div></div>' +
@@ -232,9 +298,16 @@ ACTIONS['rule-new'] = () => {
 };
 ACTIONS['rule-edit'] = () => ACTIONS['rule-new']();
 ACTIONS['rule-pick'] = () => {
-  const body = `<div class="pick-list">` + DATA.streamers.map(s =>
-    `<label class="pick-row"><input type="checkbox" hidden>${avatarHtml(s.face, s.uname, 'ava ava-sm')}<span class="pick-name">${esc(s.uname)}</span><span class="pick-uid">${esc(s.uid)}</span>${checkDotHtml('', false)}</label>`).join('') + '</div>';
+  const body = `<div class="pick-list">` + DATA.streamers.map(s => {
+    const on = ruleDraftUids.has(String(s.uid));
+    return `<label class="pick-row"><input type="checkbox" hidden data-change="pick-uid" data-uid="${esc(String(s.uid))}" ${on ? 'checked' : ''}>${avatarHtml(s.face, s.uname, 'ava ava-sm')}<span class="pick-name">${esc(s.uname)}</span><span class="pick-uid">${esc(s.uid)}</span>${checkDotHtml('', on)}</label>`;
+  }).join('') + '</div>';
   openSheet('生效主播', body, 2);
+};
+CHANGES['pick-uid'] = t => {
+  const uid = t.getAttribute('data-uid');
+  if (t.checked) ruleDraftUids.add(uid); else ruleDraftUids.delete(uid);
+  renderRuleUids();
 };
 
 const NAPCAT_EDIT = { dir: 'NapCat 路径', uin: '机器人 QQ', alertQq: '超时失败告警 QQ' };
