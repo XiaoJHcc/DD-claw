@@ -1,6 +1,7 @@
 // 面板前端 · 卡片「分类规则」：分类列表（拖拽把手/启停勾/名称/条件摘要标签/编辑/删除）
 // + 底部新增按钮。分类 = LLM 提示词 + 确定性条件（关键词/分区，且/或），归类结果供推送规则引用。
 // 新增/编辑走一级 sheet，保存报错内联在按钮行；删除分类会级联停用引用它的推送规则（先 confirm 告知）。
+// 视觉 = v2（行内嵌形态 + tag-purple/blue/mint 摘要标签 + .inp 表单控件），行为与接口不变。
 import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, makeSortable, openSheet, closeSheet } from './core.js';
 import { loadPush } from './push.js';
 import { loadStreamers } from './streamers.js';
@@ -18,9 +19,9 @@ function catById(id) {
 
 function catSummaryTags(c) {
   let tags = '';
-  if (c.llmPrompt) tags += '<span class="tag">LLM</span>';
-  if (c.keywords.length) tags += `<span class="tag">关键词 ${c.keywords.length}</span>`;
-  if (c.areas.length) tags += `<span class="tag">分区 ${c.areas.length}</span>`;
+  if (c.llmPrompt) tags += '<span class="tag tag-purple">LLM</span>';
+  if (c.keywords.length) tags += `<span class="tag tag-blue">关键词 ${c.keywords.length}</span>`;
+  if (c.areas.length) tags += `<span class="tag tag-mint">分区 ${c.areas.length}</span>`;
   return tags;
 }
 
@@ -28,8 +29,10 @@ function categoryRowHtml(c) {
   return `<div class="row" data-sid="${c.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-category"', c.enabled) +
+    '<span class="row-main"><span class="row-line">' +
     `<span class="row-title">${esc(c.name)}</span>` +
     catSummaryTags(c) +
+    '</span></span>' +
     '<span class="row-end">' +
     iconBtn('edit-category', 'pencil', '编辑') +
     iconBtn('del-category', 'trash', '删除', true) +
@@ -80,17 +83,17 @@ function openCategorySheet(id) {
   if (id !== null && !c) { toast('分类数据未加载', true); return; }
   const cond = c ? c.condMode || 'and' : 'and';
   openSheet(c ? '编辑分类' : '新增分类',
-    field('名称', `<input id="cg-name" placeholder="如：歌回；留空自动命名" value="` +
+    field('名称', `<input class="inp" id="cg-name" placeholder="如：歌回；留空自动命名" value="` +
       (c ? esc(c.name) : '') + '">') +
-    field('LLM 提示词', '<textarea id="cg-prompt" rows="4" placeholder="留空 = 不使用 LLM 判定（只走下面的确定性条件）">' +
+    field('LLM 提示词', '<textarea class="inp" id="cg-prompt" rows="4" placeholder="留空 = 不使用 LLM 判定（只走下面的确定性条件）">' +
       (c && c.llmPrompt ? esc(c.llmPrompt) : '') + '</textarea>') +
     // 关键词/分区并排，中间小方钮切换两组条件的关系（且/或）；当前值在按钮 data-mode 上
     field('确定性条件', '<div class="cond-row">' +
-      `<input id="cg-kw" placeholder="关键词，逗号分隔" value="` +
+      `<input class="inp" id="cg-kw" placeholder="关键词，逗号分隔" value="` +
         (c ? esc(c.keywords.join(', ')) : '') + '">' +
       `<button class="cond-toggle" id="cg-cond" data-action="toggle-cond" data-mode="${cond}"` +
         ' title="关键词与分区两组条件的关系，点击切换 且/或">' + (cond === 'or' ? '或' : '且') + '</button>' +
-      `<input id="cg-area" placeholder="分区，逗号分隔" value="` +
+      `<input class="inp" id="cg-area" placeholder="分区，逗号分隔" value="` +
         (c ? esc(c.areas.join(', ')) : '') + '">' +
       '</div>') +
     '<div class="sheet-foot"><span id="category-err" class="form-err"></span>' +

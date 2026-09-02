@@ -151,13 +151,13 @@ async function api(
 
 // ---- 页面 ----
 
-test('GET / 返回内嵌页面，包含六张卡片（监听/LLM分析/推送/时间表/主播列表/关注列表）', async (t) => {
+test('GET / 返回内嵌页面，包含六张卡片（监听/LLM供应商/推送/时间表/主播列表/关注列表）', async (t) => {
   const { base } = await setup(t);
   const res = await fetch(base + '/', { headers: { connection: 'close' } });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type') ?? '', /text\/html/);
   const html = await res.text();
-  for (const marker of ['监听', 'LLM 分析', '推送', 'id="schedule-body"', '主播列表', '关注列表']) {
+  for (const marker of ['监听', 'LLM 供应商', '推送', 'id="schedule-body"', '主播列表', '关注列表']) {
     assert.ok(html.includes(marker), `页面应包含「${marker}」`);
   }
   // 关注列表是独立卡片（不再嵌在主播列表里），且带搜索框
@@ -171,7 +171,7 @@ test('静态资产路由：/style.css、/js/core.js、demo 资产命中并带正
   assert.equal(css.status, 200);
   assert.match(css.headers.get('content-type') ?? '', /text\/css/);
   assert.equal(css.headers.get('cache-control'), 'no-store');
-  assert.ok((await css.text()).includes('--accent'), 'style.css 应含设计令牌');
+  assert.ok((await css.text()).includes('--blue'), 'style.css 应含设计令牌');
 
   const js = await fetch(base + '/js/core.js', { headers: { connection: 'close' } });
   assert.equal(js.status, 200);

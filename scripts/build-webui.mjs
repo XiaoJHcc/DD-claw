@@ -53,8 +53,7 @@ function urlPath(relPath) {
   return norm === 'index.html' ? '/' : '/' + norm;
 }
 
-// redesign/ 是重设计 Demo（设计方案定稿前的评审原型），不进发布工件
-const files = walk(WEBUI_DIR).sort().filter(f => !f.split(sep).join('/').startsWith('redesign/'));
+const files = walk(WEBUI_DIR).sort();
 const assets = {};
 for (const rel of files) {
   const abs = join(WEBUI_DIR, rel);

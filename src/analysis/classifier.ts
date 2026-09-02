@@ -14,10 +14,10 @@ const log = makeLogger('analysis/classifier');
  *
  * 判定语义（LLM 优先，用户拍板）：
  * - 无 llmPrompt 的分类：永远走确定性条件（matchCategory），与 LLM 开关无关
- * - 有 llmPrompt 的分类：router 可用 && LLM 总开关开 && 该主播 analyze=1 时
+ * - 有 llmPrompt 的分类：router 可用 && LLM 总开关开时
  *   合并成一次 LLM 调用，LLM 判定权威（说「否」不回看确定性条件）；
  *   LLM 不可用 / 调用失败 / 解析失败时回退确定性条件
- * - LLM 只用于 analyze=1 的主播（analyze 开关的真实语义）；确定性路径不受开关影响
+ * - LLM 分类对全部监听主播生效（v2 起 analyze 开关随面板三开关一并删除）
  *
  * 熔断状态在 providers 层：服务异常 = completeJson 抛错 → 当场回退，无需额外状态。
  */
@@ -42,8 +42,7 @@ export class RulesClassifier implements Classifier {
 
     const promptCats = cats.filter((c) => c.llmPrompt);
     const router = this.getRouter();
-    const useLlm = promptCats.length > 0 && router !== null && this.llmEnabled()
-      && this.db.getStreamer(event.uid)?.analyze === true;
+    const useLlm = promptCats.length > 0 && router !== null && this.llmEnabled();
     if (promptCats.length > 0) {
       if (useLlm) {
         try {

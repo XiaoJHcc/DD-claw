@@ -240,28 +240,15 @@ test('title_change 归档：rotateSegment 换段（不推送、不重复分类�
   assert.equal(h.disp.sent.length, 0);
 });
 
-test('被抑制信号照样归档：冷启动 live_start 录场次，notify=false 的 title_change 照换段', async () => {
+test('被抑制信号照样归档：冷启动 live_start 录场次，后续 title_change 照换段', async () => {
   const h = harness(); // notifyOnFirstRun=false
   h.bus.emit(sig({ coldStart: 'first_run' }));
   await h.pipeline.whenIdle();
   assert.deepEqual(h.db.sessions, ['r1:1785310737'], '冷启动抑制只跳推送，归档照做');
-  h.db.streamers.set('1', { alias: '阿梓', notify: false });
   h.bus.emit(sig({ kind: 'title_change', ts: 1_800_000_100, status: status({ title: '新标题' }) }));
   await h.pipeline.whenIdle();
-  assert.equal(h.db.rotated.length, 1, 'notify=false 抑制推送但归档照做');
-  assert.equal(h.disp.sent.length, 0);
-});
-
-// ---- notify=false（旧 silent 语义）：追踪照常，推送抑制 ----
-
-test('notify=false：抑制推送但 recordSession 照做', async () => {
-  const h = harness();
-  h.db.streamers.set('1', { alias: '阿梓', notify: false });
-  h.bus.emit(sig());
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 0);
-  assert.deepEqual(h.db.sessions, ['r1:1785310737'], 'notify=false 只跳推送，场次仍入库');
-  assert.equal(h.db.notified.size, 0);
+  assert.equal(h.db.rotated.length, 1, 'title_change 归档换段');
+  assert.equal(h.disp.sent.length, 0, '无命中规则不推送');
 });
 
 // ---- 推送规则 v2（分类引用 × 生效主播 × push_channels）----

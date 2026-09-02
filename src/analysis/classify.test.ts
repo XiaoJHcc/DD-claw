@@ -139,7 +139,7 @@ test('非 live_start 信号不判定（不调 LLM、不入库）', async (t) => 
   assert.equal(db.listVerdicts('r1', 1_785_310_737).length, 0);
 });
 
-test('LLM 命中：analyze=1 + 开关开 → LLM 判定权威入库（source=llm）', async (t) => {
+test('LLM 命中：总开关开 → LLM 判定权威入库（source=llm）', async (t) => {
   const db = memDb(t);
   db.upsertStreamer({ uid: '1', analyze: true });
   const catId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌' }));
@@ -184,14 +184,13 @@ test('router 抛错（含熔断耗尽）：回退确定性条件', async (t) => 
   assert.match(v[0]!.evidence, /关键词「歌」/);
 });
 
-test('LLM 总开关关 / analyze=0 / router 缺失：均回退确定性条件', async (t) => {
-  for (const [name, analyze, llmOn, withRouter] of [
-    ['llmEnabled=false', true, false, true],
-    ['analyze=0', false, true, true],
-    ['router=null', true, true, false],
+test('LLM 总开关关 / router 缺失：均回退确定性条件（analyze 开关已删除）', async (t) => {
+  for (const [name, llmOn, withRouter] of [
+    ['llmEnabled=false', false, true],
+    ['router=null', true, false],
   ] as const) {
     const db = memDb(t);
-    db.upsertStreamer({ uid: '1', analyze });
+    db.upsertStreamer({ uid: '1' });
     const catId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌', keywords: ['歌'] }));
     const { router, calls } = fakeRouter(async (_req, parse) =>
       parse!({ results: [{ id: catId, match: false, confidence: 0.9, evidence: 'LLM 说不是' }] }));
@@ -199,7 +198,7 @@ test('LLM 总开关关 / analyze=0 / router 缺失：均回退确定性条件', 
 
     const out = await clf.classify(ctx());
     assert.deepEqual(out.map((c) => c.source), ['rule'], `${name}：走确定性路径`);
-    assert.equal(calls.length, withRouter ? 0 : 0, `${name}：不调 LLM`);
+    assert.equal(calls.length, 0, `${name}：不调 LLM`);
     db.close();
   }
 });

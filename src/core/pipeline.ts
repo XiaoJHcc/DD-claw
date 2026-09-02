@@ -132,13 +132,6 @@ export class Pipeline {
       return;
     }
 
-    // notify=false：追踪照常（recordSession 已在上面做），但不产生推送。
-    // watch=1 && notify=0 = 旧 mode='silent' 语义；位置在冷启动抑制之后。
-    if (db.getStreamer(signal.uid)?.notify === false) {
-      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: notify=off（仅抑制推送，追踪照常）`);
-      return;
-    }
-
     // 推送总开关（面板推送卡右上角）：关 = 全局不推，追踪照常
     if (!isPushEnabled(db)) {
       log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 推送总开关已关`);

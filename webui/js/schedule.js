@@ -72,7 +72,9 @@ function schedDayLabel(date) {
 // ---- 颜色：h/s 由来源决定，亮度随主题（亮色 70% / 暗色 40%）----
 // 头像平均色取 h/s（s 开根号提饱和）；头像获取不到回退哈希色（s=50）；未算出前占位灰（s=0）。
 // 存 {h, s} 而非成品色串，主题切换只改亮度重渲，不用重算头像。
-function schedIsDark() { return !!window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }
+// v2 平移后全站浅色单主题（style.css 无深色段），亮度恒走亮色 70%；
+// 恢复深色主题时把下面一行改回 matchMedia 探测即可（监听与重渲机制保留）。
+function schedIsDark() { return false; }
 function schedL() { return schedIsDark() ? 40 : 70; }
 function schedHsl(h, s, l) { return 'hsl(' + h + ',' + s + '%,' + (l === undefined ? schedL() : l) + '%)'; }
 function schedHashHS(uid) {
