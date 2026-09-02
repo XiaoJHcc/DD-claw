@@ -11,7 +11,12 @@
  * 列表行真单行恒 --row-h:44，主副双行恒 --row-h2:66（1.5 倍）。
  * 颜色纪律：蓝 #4C8DFF 主色（选中/主按钮/开关/链接），粉 #FF5C8A 只做在播强调与 Logo 点缀，
  * 红只表错误/危险，薄荷/紫/琥珀/青只出现在小标签与卡片图标上。
- * 阴影纪律：卡片/弹窗/卡片头用中性蓝灰投影；控件无彩色外发光（开关开态为蓝渐变 + 轨道内阴影）。
+ * 背景纪律：填充类容器面（关注列表卡/多选行/圆柱卡/搜索框/二维码舱）统一极浅灰
+ * --bg-soft（源自关注列表卡底色），hover 同系加深 --bg-soft-deep；
+ * 按钮/胶囊/tag 等控件的灰底仍走 --fill，不属此标准。
+ * 灰纪律：一切灰 = 无色相中性灰（R=G=B / 黑基 alpha），有色相的浅底（acc 头带、糖果页面渐变、
+ * 粉强调、红 hover、蓝选中）是有意彩色，不属灰。
+ * 阴影纪律：卡片/弹窗/卡片头用中性灰投影；控件无彩色外发光（开关开态为蓝渐变 + 轨道内阴影）。
  * 卡片两段式：卡片头（图标+标题+端部控件）= 主题色极浅底的浮起内嵌块，与白色主体分区。
  * 行底纪律：列表行内嵌无底色，平常白底，hover 才显浅底（内嵌圆角矩形，非通宽通带）。
  */
@@ -20,18 +25,19 @@
   --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:20px;--pad:var(--sp-4);--sheet-pad:28px;
   --fs-xs:11px;--fs-sm:12px;--fs-base:14px;--fs-xl:16px;
   --r-lg:24px;--r-md:10px;--r-inset:16px;--inset:8px;
-  --ctl-h:36px;--row-h:44px;--row-h2:66px;--icon:16px;
+  --ctl-h:36px;--row-h:48px;--row-h2:64px;--icon:16px;
   --blue:#4C8DFF;--blue-deep:#3D7BF0;--blue-soft:rgba(76,141,255,.10);
   --pink:#FF5C8A;--red:#E5484D;
   --mint:#2FBD9B;--purple:#8B7CF6;--amber:#E8A13A;--cyan:#3FA9C9;
-  --text:#232A3D;--text-2:#8A92A6;
+  --text:#262626;--text-2:#8A8A8A;
   --card-bg:#FFFFFF;
-  --fill:rgba(84,104,150,.06);--hover:rgba(84,104,150,.05);--fill-deep:rgba(84,104,150,.10);
-  --separator:rgba(30,45,80,.12);--divider:rgba(30,45,80,.06);
-  --border-strong:rgba(30,45,80,.28);
-  --shadow:0 1px 2px rgba(28,45,90,.05),0 8px 20px rgba(28,45,90,.05);
-  --shadow-lg:0 12px 32px rgba(28,45,90,.18);
-  --mask:rgba(30,38,60,.38);
+  --fill:rgba(0,0,0,.05);--hover:rgba(0,0,0,.045);--fill-deep:rgba(0,0,0,.09);
+  --bg-soft:#F8F8F8;--bg-soft-deep:#EEEEEE;
+  --separator:rgba(0,0,0,.12);--divider:rgba(0,0,0,.055);
+  --border-strong:rgba(0,0,0,.28);
+  --shadow:0 1px 2px rgba(0,0,0,.05),0 8px 20px rgba(0,0,0,.05);
+  --shadow-lg:0 12px 32px rgba(0,0,0,.18);
+  --mask:rgba(0,0,0,.35);
 }
 body{margin:0;height:100vh;overflow:hidden;font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
   font-size:var(--fs-base);line-height:1.45;color:var(--text);
@@ -76,7 +82,7 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
   opacity:0;animation:pulse-ring 1.8s ease-out infinite}
 @keyframes pulse-ring{0%{transform:scale(.4);opacity:.8}100%{transform:scale(1.15);opacity:0}}
 .demo-badge{margin-left:auto;font-size:10px;letter-spacing:.08em;padding:3px 8px;border-radius:999px;
-  border:1px dashed #E1DCEA;color:var(--text-2);background:none}
+  border:1px dashed #E4E4E4;color:var(--text-2);background:none}
 .view-host{flex:0 1 auto;min-width:0;width:1280px;height:100vh;overflow-y:auto;scrollbar-width:none}
 .view-host::-webkit-scrollbar{display:none}
 .view{max-width:1280px;padding:var(--pad)}
@@ -99,8 +105,8 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
   /* 光泽带避开顶边：0~14% 露纯主题底色（顶缘在白卡片上可见），sheen 峰值在 22% 处，48% 消隐 */
   background:linear-gradient(180deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.34) 22%,rgba(255,255,255,0) 48%),
     linear-gradient(90deg,var(--acc-bg1,#F2F4FA) 0%,var(--acc-bg2,#FAFBFE) 100%);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.85),inset 0 -1px 0 rgb(var(--acc-sh,28 45 90)/.06),
-    0 8px 22px rgb(var(--acc-sh,28 45 90)/.03),0 -4px 16px rgb(var(--acc-sh,28 45 90)/.06)}
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.85),inset 0 -1px 0 rgb(var(--acc-sh,0 0 0)/.06),
+    0 8px 22px rgb(var(--acc-sh,0 0 0)/.03),0 -4px 16px rgb(var(--acc-sh,0 0 0)/.06)}
 .card-head h2{flex:none;color:var(--acc-t,var(--text));letter-spacing:.01em}
 .card-head-end{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2);min-width:0}
 /* 卡片图标：无背景，仅着色 glyph；颜色取卡片主题色 --acc */
@@ -155,7 +161,7 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 
 /* 状态点（正圆形豁免） */
 .dot{width:9px;height:9px;border-radius:50%;flex:none}
-.dot.ok{background:var(--mint)}.dot.bad{background:var(--red)}.dot.none{background:#C4CAD6}
+.dot.ok{background:var(--mint)}.dot.bad{background:var(--red)}.dot.none{background:#C6C6C6}
 
 /* 标签：统一小胶囊矩形（圆角 6，两级体系内的小件）， tinted 底 + 同色字 */
 .tag{display:inline-block;flex:none;font-size:var(--fs-xs);line-height:18px;padding:0 7px;
@@ -184,7 +190,7 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 .btn-ghost:hover{background:#E2ECFF;color:#2F6FEB}
 .btn-blue{background:#E2ECFF;color:#2F6FEB}
 .btn-blue:hover{background:#D3E3FF;color:#2F6FEB}
-.btn-line{background:#fff;border:1.5px solid #E1DCEA;color:#7C7389}
+.btn-line{background:#fff;border:1.5px solid #E4E4E4;color:#757575}
 .btn-line:hover{border-color:var(--blue);color:#2F6FEB;background:#fff}
 .btn-block{width:100%}
 
@@ -210,10 +216,10 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 .checkdot.on svg{opacity:1}
 
 /* ---- 开关：原版形状（42×20 轨道 + 24×16 宽胶囊滑块）+ v1 配色与阴影
-   （关 = #E6DCE5 灰紫，开 = 蓝渐变 + 轨道内阴影；滑块仅中性小投影，无彩色外发光） ---- */
+   （关 = #E4E4E4 无色相灰，开 = 蓝渐变 + 轨道内阴影；滑块仅中性小投影，无彩色外发光） ---- */
 .switch{position:relative;display:inline-block;width:42px;height:20px;flex:none}
 .switch input{position:absolute;opacity:0;width:0;height:0;margin:0}
-.switch .knob{position:absolute;inset:0;border-radius:10px;background:#E6DCE5;transition:background .18s,box-shadow .18s;cursor:pointer}
+.switch .knob{position:absolute;inset:0;border-radius:10px;background:#E4E4E4;transition:background .18s,box-shadow .18s;cursor:pointer}
 .switch .knob:before{content:"";position:absolute;width:24px;height:16px;left:2px;top:2px;border-radius:8px;
   background:#fff;box-shadow:0 2px 5px rgba(0,0,0,.18);transition:transform .18s}
 .switch input:checked + .knob{background:linear-gradient(135deg,#7AA5FF,#2F6FEB);box-shadow:inset 0 1px 3px rgba(23,62,158,.3)}
@@ -257,44 +263,57 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .adv-group{margin:var(--sp-3) 0 var(--sp-1);font-size:var(--fs-sm);font-weight:600}
 .adv-group:first-child{margin-top:var(--sp-1)}
 
-/* 多选行（sheet 内的渠道勾选等）：整行极浅底为常态（表单里的可触发区域可辨识），hover 同系加深 */
+/* 多选行（sheet 内的渠道勾选等）：整行极浅灰 --bg-soft 为常态（背景标准，同关注列表卡），hover 同系加深 */
 .check-row{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);
-  padding:var(--sp-1) var(--sp-3);margin:var(--sp-2) 0;border-radius:var(--r-md);background:var(--fill);cursor:pointer;font-size:var(--fs-base);transition:background-color .15s ease}
-.check-row:hover{background:var(--fill-deep)}
+  padding:var(--sp-1) var(--sp-3);margin:var(--sp-2) 0;border-radius:var(--r-md);background:var(--bg-soft);cursor:pointer;font-size:var(--fs-base);transition:background-color .15s ease}
+.check-row:hover{background:var(--bg-soft-deep)}
 .check-row .cr-main{flex:1;min-width:0}
 /* 表单字段内的多选行（如 LLM「能力」）：与输入框同标准高 36、无外边距，label 顶部对齐 */
 .field .check-row{min-height:var(--ctl-h);margin:0}
-/* 生效主播挑选列表：整组浅底容器，行间细分隔线 */
-.pick-list{background:var(--fill);border-radius:var(--r-md);margin:var(--sp-2) 0;overflow:hidden}
-.pick-row{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);padding:var(--sp-2) var(--sp-3);cursor:pointer;transition:background-color .15s ease}
-.pick-row:hover{background:var(--hover)}
-.pick-row + .pick-row{border-top:1px solid var(--divider)}
-.pick-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pick-uid{font-size:var(--fs-sm);color:var(--text-2);flex:none}
+/* ---- 生效主播挑选弹窗（推送规则）：关注列表同款头像卡网格（头像 + 昵称，无 UID、无胶囊——
+   勾选变蓝即足够）。列表容器定高（随视口钳制）滚动；整卡可点切换勾选 ---- */
+.pick-head{display:flex;align-items:center;gap:var(--sp-2);margin:var(--sp-2) 0 var(--sp-3)}
+.pick-head .search-box{flex:1;width:auto;max-width:280px}
+.pick-head .search-box .inp{background:var(--bg-soft)}
+.pick-count{margin-left:auto;flex:none;font-size:var(--fs-sm);color:var(--text-2)}
+.pick-scroll{height:clamp(300px,calc(86vh - 248px),480px);overflow-y:auto;
+  padding:var(--sp-1) 2px var(--sp-2);scrollbar-width:thin;scrollbar-color:var(--separator) transparent}
+.pick-scroll::-webkit-scrollbar{width:8px}
+.pick-scroll::-webkit-scrollbar-thumb{background:var(--separator);border-radius:4px}
+.pick-scroll::-webkit-scrollbar-track{background:transparent}
+.pick-scroll .follow-grid{padding:0;grid-template-columns:repeat(auto-fill,minmax(108px,1fr));gap:8px}
+.pick-card{border:none;font:inherit;color:inherit;cursor:pointer;padding:12px;gap:6px}
+/* 已选 = 浅蓝底 + 蓝色内嵌描边；hover 与关注列表同款上浮 */
+.pick-card.on{background:#E9F1FF;box-shadow:inset 0 0 0 1.5px rgba(76,141,255,.5)}
+.pick-card.on:hover{background:#DFEAFF}
+.pick-card:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+.pick-empty{padding:48px 0;text-align:center;font-size:var(--fs-sm);color:var(--text-2)}
 
 /* ---- 生效主播 3D 圆柱卡（推送规则弹窗）：可点卡片，一排头像按圆柱面投影位置排布
    （translate3d + perspective，近大远小；头像正对观察者、不随柱面旋转），scale3d 两侧减半。
    头像相邻贴排；圆柱宽出卡片——.cyl-view 负边距扩到卡缘，两端头像被 ::after 渐变遮罩
    （与卡片底色同色）逐渐盖住；可见弧止于 ±65°，纯侧面不出现 ---- */
 .cyl-card{position:relative;display:block;width:100%;padding:var(--sp-2) var(--sp-3);overflow:hidden;
-  border:none;border-radius:var(--r-inset);background:var(--fill);cursor:pointer;text-align:center;
+  border:none;border-radius:var(--r-inset);background:var(--bg-soft);cursor:pointer;text-align:center;
   transition:box-shadow .16s ease}
 /* hover = 整卡最上方的统一色罩（卡片自身 ::after，铺满整个卡片盒、随圆角裁切，盖过头像与渐变遮罩），底色不切换 */
-.cyl-card::after{content:"";position:absolute;inset:0;z-index:5;background:var(--fill-deep);
+/* hover = 整卡最上方的统一色罩（卡片自身 ::after，铺满整个卡片盒、随圆角裁切，盖过头像与渐变遮罩）；
+   必须用半透明色（--hover，黑基 alpha，与列表行 hover 同深）——实色会把头像整个盖死，透不出柱面 */
+.cyl-card::after{content:"";position:absolute;inset:0;z-index:5;background:var(--hover);
   opacity:0;transition:opacity .16s ease;pointer-events:none}
 .cyl-card:hover::after{opacity:1}
 .cyl-card:active{filter:brightness(.98)}
 .cyl-card:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(76,141,255,.22)}
 .cyl-view{position:relative;display:block;margin:0 calc(-1 * var(--sp-3));pointer-events:none}
-/* 渐变遮罩：颜色 = --fill 覆在弹窗白底上的合成色；视口负边距 = 卡片水平内边距（对齐卡片边框盒）。
+/* 渐变遮罩：颜色 = --bg-soft（极浅灰背景标准，即卡底色）；视口负边距 = 卡片水平内边距（对齐卡片边框盒）。
    外侧 32px 实底（头像完全吞掉）+ 向内 96px 渐隐，外侧 2~3 枚被底色明显盖住 */
 .cyl-view::after{content:"";position:absolute;inset:0;z-index:2;
-  background:linear-gradient(90deg,#F5F6F9 0,#F5F6F9 16px,#F5F6F900 128px,
-    #F5F6F900 calc(100% - 128px),#F5F6F9 calc(100% - 16px),#F5F6F9 100%)}
+  background:linear-gradient(90deg,#F8F8F8 0,#F8F8F8 16px,#F8F8F800 128px,
+    #F8F8F800 calc(100% - 128px),#F8F8F8 calc(100% - 16px),#F8F8F8 100%)}
 .cyl-stage{position:absolute;inset:0;transform-style:preserve-3d;perspective:5760px}
 .cyl-item{position:absolute;left:50%;top:50%;width:46px;height:46px;margin:-23px 0 0 -23px;
   transition:transform .55s cubic-bezier(.22,1,.36,1)}
-.cyl-item .ava{box-shadow:0 0 0 3px #fff,0 2px 8px rgba(28,45,90,.2)}
+.cyl-item .ava{box-shadow:0 0 0 3px #fff,0 2px 8px rgba(0,0,0,.2)}
 .cyl-item.cyl-new{animation:cyl-in .45s ease}
 @keyframes cyl-in{from{opacity:0}}
 /* 正中「全部主播」：边缘羽化的白（径向渐变，无硬边框/阴影），文字蓝 */
@@ -318,11 +337,11 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .chip.on:hover{background:rgba(76,141,255,.16)}
 .chip.on .chip-ic::before{opacity:0}
 .chip.on .chip-ic svg{opacity:1}
-.chip-dis,.chip-dis:hover{position:relative;background:rgba(84,104,150,.045);color:#BCC2CF}
+.chip-dis,.chip-dis:hover{position:relative;background:rgba(0,0,0,.045);color:#BFBFBF}
 /* 停用 = 贯穿整枚胶囊的删除线（文字与勾一起划掉）；text-decoration 划不到 svg，故画线 */
 .chip-dis::after{content:"";position:absolute;left:10px;right:10px;top:50%;height:1.5px;border-radius:1px;
   background:currentColor;transform:translateY(-50%)}
-.chip-dis.on,.chip-dis.on:hover{background:rgba(84,104,150,.12);color:#B4BAC9}
+.chip-dis.on,.chip-dis.on:hover{background:rgba(0,0,0,.12);color:#B5B5B5}
 .chip-dis.on .chip-ic::before{opacity:0}
 .chip-dis.on .chip-ic svg{opacity:1}
 
@@ -343,9 +362,9 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
   padding:0 var(--sheet-pad) var(--sheet-pad)}
 .sheet-foot .sp{flex:1}
 
-/* 二维码舱：固定高度，生成前后容器不变 */
+/* 二维码舱：固定高度，生成前后容器不变（底色 = 极浅灰背景标准） */
 .qr-box{display:flex;align-items:center;justify-content:center;height:200px;margin:var(--sp-3) 0;
-  background:var(--fill);border-radius:var(--r-md)}
+  background:var(--bg-soft);border-radius:var(--r-md)}
 .qr-box > svg,.qr-box > img{width:176px;height:176px}
 .qr-status{text-align:center;min-height:20px;font-size:var(--fs-sm);color:var(--text-2)}
 
@@ -370,9 +389,11 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .search-box svg{width:var(--icon);height:var(--icon);display:block}
 .follow-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));padding:0 var(--inset) var(--inset)}
 .follow-card{display:flex;flex-direction:column;align-items:center;gap:7px;padding:20px 16px;
-  background:#FDFAFC;border-radius:var(--r-md);text-align:center;
+  background:var(--bg-soft);border-radius:var(--r-md);text-align:center;
   transition:all .16s ease}
 .follow-card:hover{background:#EFF4FF;transform:translateY(-2px)}
+/* 头像 3px 白描边环 + 轻投影（与圆柱卡头像同款；关注列表与挑选弹窗共用） */
+.follow-card .ava{box-shadow:0 0 0 3px #fff,0 2px 8px rgba(0,0,0,.2)}
 .ava{width:46px;height:46px;border-radius:50%;object-fit:cover;display:block;background:var(--hover)}
 .avatar-ph{display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:var(--fs-xl);margin:0 auto}
 .ava-sm{width:28px;height:28px;font-size:var(--fs-base);margin:0}

@@ -297,17 +297,46 @@ ACTIONS['rule-new'] = () => {
   openSheet('推送规则', body, 1);
 };
 ACTIONS['rule-edit'] = () => ACTIONS['rule-new']();
+// ---------- 生效主播挑选弹窗（关注列表同款头像卡网格，无 UID） ----------
+/* 整卡可点切换勾选；选中态 = 浅蓝底 + 蓝色内嵌描边（变蓝即足够，卡上不放胶囊等交互件）。
+   列表容器定高滚动，搜索只按昵称过滤（不重渲染，保留勾选态）。 */
+const pickCountText = () => ruleDraftUids.size ? `已选 ${ruleDraftUids.size} 人` : '未选 · 生效全部主播';
+function updatePickCount() {
+  const el = document.querySelector('#sheet2 .pick-count');
+  if (el) el.textContent = pickCountText();
+}
+
 ACTIONS['rule-pick'] = () => {
-  const body = `<div class="pick-list">` + DATA.streamers.map(s => {
+  const cards = DATA.streamers.map(s => {
     const on = ruleDraftUids.has(String(s.uid));
-    return `<label class="pick-row"><input type="checkbox" hidden data-change="pick-uid" data-uid="${esc(String(s.uid))}" ${on ? 'checked' : ''}>${avatarHtml(s.face, s.uname, 'ava ava-sm')}<span class="pick-name">${esc(s.uname)}</span><span class="pick-uid">${esc(s.uid)}</span>${checkDotHtml('', on)}</label>`;
-  }).join('') + '</div>';
-  openSheet('生效主播', body, 2);
+    return `<button type="button" class="follow-card pick-card${on ? ' on' : ''}" aria-pressed="${on}" data-action="pick-toggle" data-uid="${esc(String(s.uid))}" data-name="${esc(s.uname)}">` +
+      avatarHtml(s.face, s.uname) + `<span class="f-name">${esc(s.uname)}</span></button>`;
+  }).join('');
+  const body =
+    `<div class="pick-head"><div class="search-box"><i>${icon('search')}</i><input class="inp" placeholder="搜索主播昵称" data-input="pick-q"></div>` +
+    `<span class="pick-count">${pickCountText()}</span></div>` +
+    `<div class="pick-scroll"><div class="follow-grid">${cards}</div><div class="pick-empty" hidden>没有匹配的主播</div></div>`;
+  openSheet('生效主播', body, 2, `<span class="sp"></span><button class="btn btn-primary" data-action="sheet-x" data-level="2">完成</button>`);
 };
-CHANGES['pick-uid'] = t => {
+ACTIONS['pick-toggle'] = t => {
   const uid = t.getAttribute('data-uid');
-  if (t.checked) ruleDraftUids.add(uid); else ruleDraftUids.delete(uid);
-  renderRuleUids();
+  const on = !ruleDraftUids.has(uid);
+  if (on) ruleDraftUids.add(uid); else ruleDraftUids.delete(uid);
+  t.classList.toggle('on', on);
+  t.setAttribute('aria-pressed', String(on));
+  updatePickCount();
+  renderRuleUids(); // 弹窗后面规则表单里的圆柱卡实时同步
+};
+INPUTS['pick-q'] = t => {
+  const q = t.value.trim();
+  let visible = 0;
+  document.querySelectorAll('#sheet2 .pick-card').forEach(c => {
+    const hit = !q || (c.getAttribute('data-name') || '').includes(q);
+    c.hidden = !hit;
+    if (hit) visible++;
+  });
+  const empty = document.querySelector('#sheet2 .pick-empty');
+  if (empty) empty.hidden = visible > 0;
 };
 
 const NAPCAT_EDIT = { dir: 'NapCat 路径', uin: '机器人 QQ', alertQq: '超时失败告警 QQ' };
