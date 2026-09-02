@@ -26,6 +26,9 @@ const ICONS = {
   headphone: '<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="2.5" y="14" width="5" height="7" rx="2.2"/><rect x="16.5" y="14" width="5" height="7" rx="2.2"/>',
   send: '<path d="M21 3 3 10.5l7 2.5m11-10-8 17-3-7m11-10L10 13"/>',
   grip: '<circle cx="9" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.4" fill="currentColor" stroke="none"/>',
+  eye: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+  clock: '<circle cx="12" cy="12" r="9.2"/><path d="M12 7v5l3.4 1.8"/>',
+  'video-off': '<path d="M10.66 6H14a2 2 0 0 1 2 2v2.5l5.248-3.062A.5.5 0 0 1 22 7.87v8.196"/><path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2"/><path d="m2 2 20 20"/>',
 };
 export function icon(name) {
   const d = ICONS[name] || ICONS.tag;
@@ -46,6 +49,33 @@ export function avatarHtml(face, name, cls) {
 window.avatarPhHtml = avatarPhHtml;
 export function avatarPhHtml(ch, cls) {
   return `<span class="avatar-ph ${cls || 'ava'}">${esc(ch)}</span>`;
+}
+
+// ---- 时间格式化 ----
+export function relTime(ts) {
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  return `${Math.floor(diff / 86400)} 天前`;
+}
+// 开播时长：h:mm:ss / m:ss（融进 LIVE 角标，读起来像计时器）
+export function fmtLiveDur(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  const mm = String(m).padStart(h ? 2 : 1, '0'), ss = String(s).padStart(2, '0');
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+// ---- demo 时间冻结：无论哪天打开，「现在」锚在夹具导出瞬间（随后照常流动）----
+export function freezeTime(fixedMs) {
+  const RealDate = Date;
+  const off = fixedMs - RealDate.now();
+  class DemoDate extends RealDate {
+    constructor(...a) { super(...(a.length ? a : [RealDate.now() + off])); }
+    static now() { return RealDate.now() + off; }
+  }
+  window.Date = DemoDate;
 }
 
 // ---- 事件委托 ----

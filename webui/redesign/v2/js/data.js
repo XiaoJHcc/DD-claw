@@ -10,6 +10,8 @@ function fixPath(p) {
 }
 
 export const DATA = {
+  frozen: false,
+  exportedAt: 0,
   streamers: [],
   follows: [],
   categories: [],
@@ -26,7 +28,13 @@ export async function loadData() {
   try { const r = await fetch('../../demo/defaults.json'); if (r.ok) df = await r.json(); } catch { }
   if (!df) df = { llmProviders: [], categories: [], rules: [] };
 
-  DATA.streamers = ((fx && fx.streamers) || []).map(s => ({ ...s, face: fixPath(s.face) }));
+  DATA.exportedAt = fx?.meta?.exportedAt || 0;
+  DATA.frozen = !!DATA.exportedAt;
+  DATA.streamers = ((fx && fx.streamers) || []).map(s => ({
+    ...s,
+    face: fixPath(s.face),
+    live: s.live ? { ...s.live, keyframe: fixPath(s.live.keyframe), cover: fixPath(s.live.cover) } : null,
+  }));
   const watched = new Set(DATA.streamers.map(s => String(s.uid)));
   DATA.follows = (((fx && fx.follows)) || DATA.streamers.map(s => ({ uid: s.uid, uname: s.uname, face: s.face })))
     .map(f => ({ ...f, face: fixPath(f.face), watched: watched.has(String(f.uid)) }));
