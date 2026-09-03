@@ -51,7 +51,9 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 
 /* ---- 壳：浮动边栏 + 内容区（与线上版同构） ---- */
 .shell{display:flex;height:100vh;justify-content:center}
-.sidenav{flex:none;align-self:flex-start;width:216px;margin:var(--pad) 0 var(--pad) var(--pad);
+/* 边栏抬层：view-host 的左翼区（负 margin + padding）伸进边栏右侧下方，
+   z-index 保证边栏压在翼区之上，导航按钮点击不被透明翼区拦截 */
+.sidenav{position:relative;z-index:1;flex:none;align-self:flex-start;width:216px;margin:var(--pad) 0 var(--pad) var(--pad);
   padding:var(--pad) var(--sp-3);background:var(--card-bg);border-radius:var(--r-lg);box-shadow:var(--shadow)}
 .side-logo{display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-2) var(--sp-3)}
 /* Logo：v1 的粉→蓝渐变爪印小徽章（品牌标识，非控件） */
@@ -80,12 +82,16 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 .pulse:after{content:"";position:absolute;inset:-4px;border-radius:50%;border:2px solid var(--pink);
   opacity:0;animation:pulse-ring 1.8s ease-out infinite}
 @keyframes pulse-ring{0%{transform:scale(.4);opacity:.8}100%{transform:scale(1.15);opacity:0}}
-.view-host{flex:0 1 auto;min-width:0;width:1280px;height:100vh;overflow-y:auto;scrollbar-width:none}
+/* 滚动容器恒在自身 padding box 处裁切（overflow-y:auto ⇒ 横向一样裁），内部无论怎么加
+   padding/负 margin 都改变不了「卡片到裁切线的距离 = 视图内边距」。根治 = 让滚动口左右各伸出
+   一段透明翼区（host 加宽 + 对称 padding，裁切线推到内容列之外的页底区），卡片阴影与
+   3D 变换的落笔空间不再依赖视图内边距，三视图间距得以统一为 --pad。
+   左翼区伸进边栏右侧：边栏 .sidenav 以 z-index 压在 host 之上，导航点击不受影响，
+   阴影没入边栏下方的部分 = 被边栏遮挡的自然观感；上下裁切线即窗口物理边缘。 */
+.view-host{flex:0 1 auto;min-width:0;width:calc(1280px + 96px);padding:0 48px;margin-left:-48px;
+  height:100vh;overflow-y:auto;scrollbar-width:none}
 .view-host::-webkit-scrollbar{display:none}
 .view{max-width:1280px;padding:var(--pad)}
-/* 主播列表视图加大留白：st-card 的 hover 浮起阴影（0 14px 34px）模糊尾端超出 --pad 20px 时
-   会被 .view-host 滚动口裁切（overflow-y:auto ⇒ 横向也在 padding box 处裁），32px 给足阴影空间 */
-#view-streamers{padding:32px}
 
 /* ---- 卡片：两段式内嵌。卡片头 = 内嵌圆角矩形（左右/下边距 --inset，顶距由卡片 padding-top 提供——
    头部 margin-top 会穿透塌陷到卡片外（.card 非 BFC），导致头部探出卡片顶缘）。
@@ -444,10 +450,21 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
    ③ 动态段（极浅灰内嵌容器，弱化定高：默认展开第一条三行带图，hover 其余行互斥换展、总高恒定）
    ============================================================ */
 .st-grid{display:grid;gap:var(--pad);grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
-.st-card{display:flex;flex-direction:column;background:var(--card-bg);border-radius:var(--r-lg);
+.st-card{position:relative;display:flex;flex-direction:column;background:var(--card-bg);border-radius:var(--r-lg);
   box-shadow:var(--shadow);cursor:pointer;
-  transition:transform .18s ease,box-shadow .18s ease}
-.st-card:hover{transform:translateY(-3px);box-shadow:0 14px 34px rgba(0,0,0,.12)}
+  /* hover = 正面 3D 浮起（教科书式单函数写法，零补偿）：
+     透视写在卡片自身 transform 里（每张卡以自己的中心为灭点），任意位置浮起观感一致，无左右透视差异；
+     转轴 = 卡片中心横轴（origin 50% 50%），rotateX 正角 = 底缘摆向观者、顶缘远离（+y 朝下）；
+     尾置 translateZ(8px) 沿卡片自身法线（旋转后的局部 z 轴）整体离屏一点点，
+     投影为均匀中心放大 ~0.8%，给倾斜叠一层真实的"浮起厚度"；
+     全程仅 rotateX 一个函数做角度线性插值 + 真实透视投影，中段无补正函数的非线性假象；
+     边缘 ~2px 的对称视差（顶内收/底外延）是倾斜平面的真实投影，非拉伸；
+     transform 与阴影共用同一条近乎无回弹的缓动曲线，进出 hover 动画连贯；
+     z-index 延迟归零——离场时卡片在阴影收敛完成前始终压在邻居之上，不被中途盖住 */
+  transition:transform .34s cubic-bezier(.22,.68,.3,1.06),box-shadow .34s cubic-bezier(.22,.68,.3,1.06),z-index 0s .34s}
+.st-card:hover{z-index:2;transform:perspective(1000px) rotateX(2.5deg) translateZ(8px);
+  box-shadow:0 20px 40px -12px rgba(0,0,0,.14),0 4px 12px rgba(0,0,0,.05);
+  transition:transform .34s cubic-bezier(.22,.68,.3,1.06),box-shadow .34s cubic-bezier(.22,.68,.3,1.06),z-index 0s 0s}
 
 /* ---- ① 关键帧横幅 = 独立卡片头：外边距 12 与动态容器一致（卡片内边距统一为 12），
    半径 12 与卡片同心（24 − 12）。在播粉色描边只描这个头部块、且**向内描**——
