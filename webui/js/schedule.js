@@ -17,6 +17,12 @@
 // 3 当天也降单行条；降级由 JS 按实际道数/可用高度算定，空间恢复自动升回，
 // 各级切换同样全走折叠/展开与 class 过渡。
 //
+// 视觉（v2 化，2026-09 时间表美学改版）：时间胶囊刻度 + 虚线基线轴；日标签为行内悬浮胶囊
+// （无左侧日头列，居中天蓝渐变）；仅居中天有浅蓝底色；泳道无底色、道间浅分割线（mini 不画）；
+// 条面纯实色（无光泽无投影，2026-09-03 决策）；在播散尾 = ::before 的 mask（--fade）整体淡出——
+// 尾端不漏硬边、文字层保持实色、右端直角不收圆；红线 = 粉色纵向渐变 + 圆点光环；
+// hover 弹层 = 16:9 图置顶 + 标题/时间/分区/判定证据（分类名按名哈希五色 tag）。
+//
 // 共享轴（偏移语义）：轴 = 相对各行归属日 06:00 的偏移秒数（offStart/offEnd，
 // 0 = 06:00；06:00 日界只用于「归属哪天」，与渲染窗口无关），按**当前可见全部
 // 5 天**的实际内容算定（center 变化 / 60s 定时器重算）；在播场终点用真实 now——
@@ -30,6 +36,7 @@
 // **uid 分组整体装箱**（同主播当天多场永远同泳道；组内条互叠的异常数据退化为
 // 逐 bar 装箱）。装箱窗口 == 绘制窗口，行高 = 泳道数 × 道高。
 import { api, toast, ACTIONS, esc } from './core.js';
+import { icon } from './icons.js';
 
 var schedDays = [];           // 窗口内 5 天升序 [{date, entries:[...]}]
 var schedCenter = null;       // 居中日（日串）
@@ -44,6 +51,10 @@ var schedDegrade = 0;         // 当前空间降级步数（0-3，schedLevelFor�
 
 // ---- 北京时间工具（固定 UTC+8，与服务端同口径；日界 = 凌晨 6 点，仅用于归属）----
 function bjToday() { return new Date(Date.now() + 28800000).toISOString().slice(0, 10); }
+/** 逻辑今天 = 红线所在日（6:00 日界：now 减 6h 再取日串；凌晨归前一天）。
+ *  「今天」标注与初始居中日都用它——行归属是固定日界，与轴内容无关，
+ *  故红线恒不晚于本行（次日行窗口起点 ≥ 24h 偏移，now 到不了）。 */
+function schedLogicalToday() { return new Date(Date.now() + 28800000 - 21600000).toISOString().slice(0, 10); }
 function schedAddDays(day, n) {
   return new Date(Date.parse(day + 'T12:00:00Z') + n * 86400000).toISOString().slice(0, 10);
 }
@@ -63,10 +74,11 @@ function schedFmtHm(ts) {
   var h = d.getUTCHours(), m = d.getUTCMinutes();
   return (h < 10 ? '0' + h : String(h)) + ':' + (m < 10 ? '0' + m : String(m));
 }
-function schedDayLabel(date) {
+/** 日标签拆段：{ d: 'M月D日', w: '周X' }，供行内悬浮胶囊（.sched-day-pill）拼装 */
+function schedDayParts(date) {
   var p = date.split('-');
   var wd = new Date(Date.parse(date + 'T12:00:00Z')).getUTCDay();
-  return Number(p[1]) + '月' + Number(p[2]) + '日 星期' + '日一二三四五六'.charAt(wd);
+  return { d: Number(p[1]) + '月' + Number(p[2]) + '日', w: '周' + '日一二三四五六'.charAt(wd) };
 }
 
 // ---- 颜色：h/s 由来源决定，亮度随主题（亮色 70% / 暗色 40%）----
@@ -97,20 +109,31 @@ function schedTextColorOf(uid) { var hs = schedHSOf(uid); return schedHsl(hs.h, 
 function schedTextShadowOf(uid) { var hs = schedHSOf(uid); return '0 0 3px hsl(' + hs.h + ',' + hs.s + '%,20%)'; }
 /** 同场分段间的分割线：同色系，亮度取条底与文字之间的中间档（亮/暗模式都可见） */
 function schedDividerOf(uid) { var hs = schedHSOf(uid); return 'hsl(' + hs.h + ',' + hs.s + '%,55%)'; }
-// 在播条背景（齐头散尾）：实色到 p1%（红线处）→ 同色 40% 半透平台到 p2%（开播满 2h 处）
-// → 尾端线性渐变到全透（约 30 分钟宽度）。p1 == p2 时（已播超 2h）从红线直接散尾。
-// 将来的直播预告条（只有开播时间、无下播时间）复用同款散尾样式。
-// 用字符串操作给 rgb()/hsl() 插 alpha 通道（生成 gradient 断点），不写正则。
-function schedLiveBg(css, p1, p2) {
-  var open = css.indexOf('('), close = css.lastIndexOf(')');
-  var kind = css.slice(0, 3);
-  if (open < 0 || close < open || (kind !== 'rgb' && kind !== 'hsl')) return css;
-  var inner = css.slice(open + 1, close);
-  var a4 = kind + 'a(' + inner + ', 0.4)';
-  var a0 = kind + 'a(' + inner + ', 0)';
-  var s1 = (Math.round(p1 * 10) / 10) + '%', s2 = (Math.round(p2 * 10) / 10) + '%';
-  return 'linear-gradient(90deg, ' + css + ' ' + s1 + ', ' + a4 + ' ' + s1 +
-    ', ' + a4 + ' ' + s2 + ', ' + a0 + ' 100%)';
+/** 段间竖分割线（标题/分区切换边界）并入条背景层：每层 = L% 处 1px 竖线渐变。
+ *  画在 ::before 背景里随 border-radius 裁切——落在条圆角边缘的分界线不伸出颜色区域，
+ *  在播条随 mask 一起散尾。与文字层分离，文字保持可向右溢出（设计），互不影响 */
+function schedDividerLayers(bar) {
+  var gspan = bar.end - bar.start;
+  var color = schedDividerOf(bar.uid);
+  var s = '';
+  for (var i = 1; i < bar.parts.length; i++) {
+    var l = Math.round(((bar.parts[i].start - bar.start) / gspan) * 1000) / 10;
+    s += 'linear-gradient(90deg, transparent ' + l + '%, ' + color + ' ' + l + '%, ' +
+      color + ' calc(' + l + '% + 1px), transparent calc(' + l + '% + 1px)), ';
+  }
+  return s;
+}
+/** 在播条是否处于「齐头散尾」态（is-live class 与 --fade mask 共用同一判定） */
+function schedBarFading(bar, now) { return bar.live && bar.end > now && now > bar.start; }
+/** 在播条散尾 mask（齐头散尾）：不透明到 p1%（红线处）→ 40% 半透平台到 p2%（开播满 2h 处）
+ *  → 尾端线性渐变到全透（约 30 分钟宽度）。p1 == p2 时（已播超 2h）从红线直接散尾。
+ *  将来的直播预告条（只有开播时间、无下播时间）复用同款散尾样式。 */
+function schedFadeMask(bar, e, now) {
+  var spanDs = bar.end - bar.start;
+  var r1 = (Math.round(((now - bar.start) / spanDs) * 1000) / 10) + '%';
+  var r2 = (Math.round(Math.min(100, ((Math.max(now, e.startTs + 7200) - bar.start) / spanDs) * 100) * 10) / 10) + '%';
+  return 'linear-gradient(90deg, #000 ' + r1 + ', rgba(0,0,0,0.4) ' + r1 +
+    ', rgba(0,0,0,0.4) ' + r2 + ', rgba(0,0,0,0) 100%)';
 }
 function schedPrepareColor(uid, face) {
   if (!uid || schedColors[uid] !== undefined || schedColorPending[uid]) return;
@@ -364,13 +387,13 @@ function renderSchedAxis() {
   var labelEvery = span > 12 * 3600 ? 2 : 1;
   var hours = Math.floor(span / 3600);
   var html = '';
+  // 刻度 = 单元素（时间胶囊 <b> + 刻度小竖条 <i>），axis 底缘为虚线基线（见 style.css）
   for (var h = 0; h <= hours; h++) {
     var pct = (h * 3600 / span) * 100;
-    html += '<span class="sched-tick" style="left:' + pct + '%"></span>';
-    if (h % labelEvery === 0 && h < hours) {
-      html += '<span class="sched-tick-label" style="left:' + pct + '%">' +
-        schedFmtHm(ref + schedAxis.offStart + h * 3600) + '</span>';
-    }
+    var labeled = h % labelEvery === 0 && h < hours;
+    html += '<span class="sched-tick' + (h === 0 ? ' edge-l' : '') + '" style="left:' + pct + '%">' +
+      (labeled ? '<b>' + schedFmtHm(ref + schedAxis.offStart + h * 3600) + '</b>' : '') +
+      '<i></i></span>';
   }
   el.innerHTML = html;
 }
@@ -382,7 +405,8 @@ function renderSchedAxis() {
  * 末段在播的绘制终点带「假定 2h + 30min 散尾」假设（schedEffEnd，纯绘制层）；
  * 非末段缺 endTs 不至于发生，兜底 e.endTs ?? now。
  * 先按段生成 bar，再把**同场相邻分段（同 rid+lt 且首尾相接）合并为一个视觉组**
- * （schedMergeSegments：整场画成单个圆角矩形，组内 parts 只负责分割线与文字，
+ * （schedMergeSegments：整场画成单个圆角矩形，组内 parts 只负责文字，段间竖分割线
+ *  并入条 ::before 背景层〔schedDividerLayers，随圆角裁切不伸出颜色区域〕，
  * 首/末段再窄也不破坏圆角）。装箱按 **uid 分组整体放置**（同主播当天多场 +
  * 其前一天溢出段同组，永远同泳道；这会故意增加泳道数，是明确选择）：组按最早
  * start 排序，逐组放入第一条「该组所有 bar 与泳道已有 bar 全不相交」的泳道，
@@ -611,13 +635,18 @@ function updateSchedDay(el, day, level, span, now, lanes) {
   el.className = 'sched-day ' + level;
   if (day.date === schedCenter) el.removeAttribute('data-action');
   else el.setAttribute('data-action', 'sched-center');
-  var head = el.querySelector('.sched-day-head');
-  if (!head) { head = document.createElement('div'); el.appendChild(head); }
-  head.className = 'sched-day-head';
-  var label = schedDayLabel(day.date);
-  if (head.textContent !== label) head.textContent = label;
   var lanesEl = el.querySelector('.sched-lanes');
   if (!lanesEl) { lanesEl = document.createElement('div'); lanesEl.className = 'sched-lanes'; el.appendChild(lanesEl); }
+  // 日标签 = 行内悬浮胶囊（不占左侧日头列；pointer-events 穿透，不挡条的 hover/点击）；
+  // 行按 data-date 复用、日期不变，文本有变化才写
+  var pill = lanesEl.querySelector('.sched-day-pill');
+  if (!pill) { pill = document.createElement('span'); pill.className = 'sched-day-pill'; lanesEl.appendChild(pill); }
+  var parts = schedDayParts(day.date);
+  // 「今天/昨天」前缀：逻辑日 = 红线所在行；0-6 点时逻辑日是真实昨天，如实写「昨天」
+  var schedLogical = schedLogicalToday();
+  var dayPrefix = day.date === schedLogical ? (schedLogical === bjToday() ? '今天 · ' : '昨天 · ') : '';
+  var pillHtml = '<b>' + dayPrefix + parts.d + '</b><span>' + parts.w + '</span>';
+  if (pill.innerHTML !== pillHtml) pill.innerHTML = pillHtml;
   // 级别与道数挂在元素上，供 schedSolveHeights 解算像素高度
   el._schedLevel = level;
   el._schedLanes = reconcileSchedLanes(lanesEl, now, winStart, span, lanes);
@@ -753,29 +782,23 @@ function schedExpandDay(el) {
 
 function schedBarKey(bar) { return bar.rid + ':' + bar.lt; }
 
-/** 条背景（在播条含齐头散尾渐变），整窗重画与原地更新共用 */
-function schedBarBg(bar, e, now) {
-  var bg = schedColorOf(bar.uid);
-  if (bar.live && bar.end > now && now > bar.start) {
-    var spanDs = bar.end - bar.start;
-    var p1 = ((now - bar.start) / spanDs) * 100;
-    var p2 = Math.min(100, ((Math.max(now, e.startTs + 7200) - bar.start) / spanDs) * 100);
-    bg = schedLiveBg(bg, p1, p2);
-  }
-  return bg;
-}
-
-/** 单场视觉组完整 HTML：外层 .sched-seg 是一个完整圆角矩形（单背景），
- * 内层 .sched-part 按段划分，只负责分割线 + 文字，不背背景——首/末段再窄也不破坏圆角。 */
+/** 单场视觉组完整 HTML：外层 .sched-seg 是一个完整圆角矩形（背景在 ::before，--bar-bg 注入），
+ * 内层 .sched-part 按段划分，只负责文字，不背背景（段间竖分割线并入 ::before 背景层，
+ * 随圆角裁切）——首/末段再窄也不破坏圆角。 */
 function schedGroupHtml(bar, now, winStart, span) {
   var e = schedDays[bar.di].entries[bar.ei];
   var left = ((bar.start - winStart) / span) * 100;
   var width = ((bar.end - bar.start) / span) * 100;
-  var segStyle = 'left:' + left + '%;width:' + width + '%;background:' + schedBarBg(bar, e, now);
+  // --bar-bg：条背景（::before 承载）；is-live + --fade：在播散尾条由 ::before 的 mask 整体淡出
+  var fading = schedBarFading(bar, now);
+  var segStyle = 'left:' + left + '%;width:' + width + '%;--bar-bg:' +
+    schedDividerLayers(bar) + schedColorOf(bar.uid) +
+    (fading ? ';--fade:' + schedFadeMask(bar, e, now) : '');
   if (schedIsDark()) segStyle += ';color:' + schedTextColorOf(bar.uid); // 暗色文字同色系提亮
+  var cls = 'sched-seg' + (fading ? ' is-live' : '');
   var partsHtml = '';
   for (var i = 0; i < bar.parts.length; i++) partsHtml += schedPartHtml(bar, bar.parts[i], e, i === 0);
-  return '<div class="sched-seg"' +
+  return '<div class="' + cls + '"' +
     ' data-k="' + schedBarKey(bar) + '"' +
     ' data-edate="' + schedDays[bar.di].date + '" data-e="' + bar.ei + '"' +
     ' data-bs="' + bar.start + '" data-be="' + bar.end + '"' +
@@ -790,8 +813,7 @@ function schedPartHtml(bar, part, e, isFirst) {
   var gspan = bar.end - bar.start;
   var left = ((part.start - bar.start) / gspan) * 100;
   var width = ((part.end - part.start) / gspan) * 100;
-  var partStyle = 'left:' + left + '%;width:' + width + '%';
-  if (!isFirst) partStyle += ';border-left:1px solid ' + schedDividerOf(bar.uid); // 段间分割线
+  var partStyle = 'left:' + left + '%;width:' + width + '%'; // 段间竖分割线已并入条背景层（schedDividerLayers）
   var txtShadow = '';
   if (!schedIsDark()) txtShadow = ' style="text-shadow:' + schedTextShadowOf(bar.uid) + '"'; // 亮色同色系阴影
   var oneText = isFirst ? e.name + ' · ' + (seg.title || '') : (seg.title || '');
@@ -807,7 +829,7 @@ function schedPartHtml(bar, part, e, isFirst) {
     '</span></div>';
 }
 
-/** 复用段时原地更新几何 / 分割线 / hover 数据与文字（textContent 保留字层 span） */
+/** 复用段时原地更新几何 / hover 数据与文字（textContent 保留字层 span） */
 function schedApplyPart(partEl, bar, part, e, isFirst) {
   var seg = e.segments[part.si];
   var gspan = bar.end - bar.start;
@@ -815,7 +837,6 @@ function schedApplyPart(partEl, bar, part, e, isFirst) {
   var width = ((part.end - part.start) / gspan) * 100;
   partEl.style.left = left + '%';
   partEl.style.width = width + '%';
-  partEl.style.borderLeft = isFirst ? '' : '1px solid ' + schedDividerOf(bar.uid);
   partEl.setAttribute('data-edate', schedDays[bar.di].date);
   partEl.setAttribute('data-e', bar.ei);
   partEl.setAttribute('data-s', part.si);
@@ -853,7 +874,11 @@ function schedApplyGroup(segEl, bar, now, winStart, span) {
   segEl.setAttribute('data-be', bar.end);
   segEl.style.left = left + '%';
   segEl.style.width = width + '%';
-  segEl.style.background = schedBarBg(bar, e, now);
+  segEl.style.setProperty('--bar-bg', schedDividerLayers(bar) + schedColorOf(bar.uid));
+  var fading = schedBarFading(bar, now);
+  if (fading) segEl.style.setProperty('--fade', schedFadeMask(bar, e, now));
+  else segEl.style.removeProperty('--fade');
+  segEl.classList.toggle('is-live', fading); // 在播散尾条：::before 套 --fade mask
   segEl.style.color = schedIsDark() ? schedTextColorOf(bar.uid) : ''; // 暗色文字同色系提亮，亮色回落白字
   var existing = {};
   var oldParts = segEl.querySelectorAll('.sched-part');
@@ -996,30 +1021,40 @@ function schedPopImg(el, clientX) {
   }
 }
 
+/** 判定分类名 → 全局 .tag 五色修饰类（名字符串哈希取模，同一分类恒同色） */
+var SCHED_TAG_COLORS = ['tag-blue', 'tag-mint', 'tag-purple', 'tag-amber', 'tag-pink'];
+function schedTagColor(name) {
+  var h = 0, s = String(name || '');
+  for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return SCHED_TAG_COLORS[h % SCHED_TAG_COLORS.length];
+}
+
 function schedShowPop(el, evt) {
   var found = schedEntryOf(el);
   var e = found && found.entry;
   var seg = found && found.seg;
   if (!e || !seg) return;
   var p = document.getElementById('sched-pop');
-  var now = Math.floor(Date.now() / 1000);
   var area = [seg.parentAreaName, seg.areaName].filter(Boolean).join(' / ');
-  var time = schedFmtHm(seg.startTs) + ' – ' +
-    (seg.endTs ? schedFmtHm(seg.endTs) : schedFmtHm(now) + '（直播中）');
+  var onAir = !seg.endTs;
+  var time = schedFmtHm(seg.startTs) + ' – ' + (seg.endTs ? schedFmtHm(seg.endTs) : '进行中');
   var vs = e.verdicts.length
     ? e.verdicts.map(function (v) {
-        return '<div class="sched-pop-v"><span class="tag">' + esc(v.categoryName) + '</span>' +
+        return '<div class="sched-pop-v"><span class="tag ' + schedTagColor(v.categoryName) + '">' +
+          esc(v.categoryName) + '</span>' +
           '<span class="sched-pop-src">' + (v.source === 'llm' ? 'LLM' : '规则') +
           (v.confidence != null ? ' ' + v.confidence.toFixed(2) : '') + '</span>' +
           (v.evidence ? '<div class="sched-pop-ev">' + esc(v.evidence) + '</div>' : '') + '</div>';
       }).join('')
     : '<div class="sched-pop-ev">未分类</div>';
   p.innerHTML =
-    '<div class="sched-pop-title">' + esc(seg.title || '(无标题)') + '</div>' +
-    (area ? '<div class="sched-pop-meta">' + esc(area) + '</div>' : '') +
     '<img referrerpolicy="no-referrer" alt="">' + // src 由 schedPopImg 按鼠标时间点填
+    '<div class="sched-pop-body">' +
+    '<div class="sched-pop-title">' + esc(seg.title || '(无标题)') + '</div>' +
     // 弹层空间充足用原名（e.uname），demo 旧夹具无此字段则回退横条名（简称优先的 e.name）
-    '<div class="sched-pop-meta">' + esc(e.uname || e.name) + ' · ' + esc(time) + '</div>' + vs;
+    '<div class="sched-pop-meta">' + icon('clock') + '<span>' + esc(e.uname || e.name) + ' · ' +
+    esc(time) + '</span>' + (onAir ? '<span class="sched-pop-live">直播中</span>' : '') + '</div>' +
+    (area ? '<div class="sched-pop-meta">' + esc(area) + '</div>' : '') + vs + '</div>';
   p.classList.remove('hidden');
   schedPopEl = el;
   schedPopBucket = -1; // 强制按当前鼠标位置取一次
@@ -1085,7 +1120,7 @@ function schedMovePop(evt) {
     if (el && !(e.relatedTarget instanceof Element && el.contains(e.relatedTarget))) schedHidePop();
   });
 
-  schedLoad(bjToday());
+  schedLoad(schedLogicalToday()); // 初始居中 = 逻辑今天（红线所在日，与「今天」标注同口径）
 
   // 窗口缩放 → 重新解算各行像素高度（basis px→px 过渡，连续）；视图从隐藏切回时也需重排
   //（display:none 下 clientHeight 为 0，隐藏期的渲染解算出的高度无效）

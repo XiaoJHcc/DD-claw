@@ -619,17 +619,27 @@ input:disabled{opacity:.5;background:var(--fill)}
 .f-more a{color:var(--blue);cursor:pointer;text-decoration:none}
 .f-more a:hover{text-decoration:underline}
 
-/* ---- 时间表（schedule.js 生成的 DOM 类名不变，仅颜色/圆角映射 v2 令牌） ---- */
+/* ---- 时间表（schedule.js 生成的 DOM 类名不变；v2 化美学：胶囊刻度虚线轴 / 日标签行内悬浮胶囊 /
+   泳道浅分割线 / 仅居中天底色 / 条纯实色无光泽无投影〔在播散尾 = ::before mask 整体淡出；段间竖分割线并入 ::before 背景层随圆角裁切〕/ 粉色渐变红线） ---- */
 /* 时间表视图：卡片刚好一屏（上下各 --pad 留白），卡内头部/轴固定，日列表按权重填满余高 */
 #view-schedule{height:100%;padding-bottom:var(--pad);display:flex;flex-direction:column}
 #view-schedule .card{flex:1;min-height:0;display:flex;flex-direction:column}
-/* 轴表头固定在卡片上部。v2 卡片无整圈内边距（padding-top 仅 --inset），轴/日列表自带横向边距：
-   轴左缘 = --pad + 日头 110 + 间距 8 = 118 偏移，与泳道左缘对齐 */
-.sched-axis{position:relative;flex:none;height:22px;margin:0 var(--pad) 0 calc(var(--pad) + 118px);
-  border-bottom:1px solid var(--separator)}
-.sched-tick{position:absolute;top:0;bottom:0;width:1px;background:var(--separator)}
-.sched-tick-label{position:absolute;top:3px;transform:translateX(4px);font-size:var(--fs-xs);
-  color:var(--text-2);white-space:nowrap}
+/* 卡头右侧图例：在播（齐头散尾演示）/ 现在（红线） */
+.sched-lg{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-xs);color:var(--text-2)}
+.sched-lg i{display:block}
+.sched-lg .lg-live{width:14px;height:8px;border-radius:4px;
+  background:linear-gradient(90deg,#FF7AA2 55%,rgba(255,122,162,.15))}
+.sched-lg .lg-now{width:3px;height:10px;border-radius:2px;background:linear-gradient(180deg,#F13D77,#FF7AA2)}
+/* 轴表头：时间胶囊刻度 + 虚线基线，与泳道区同宽对齐（日标签已移入表内，不再有左侧日头列） */
+.sched-axis{position:relative;flex:none;height:26px;margin:2px var(--pad) 6px;
+  border-bottom:2px dashed var(--separator)}
+.sched-tick{position:absolute;top:0;height:100%;transform:translateX(-50%);display:flex;
+  flex-direction:column;align-items:center;justify-content:flex-end;gap:2px}
+.sched-tick.edge-l{transform:none}
+.sched-tick b{font-size:var(--fs-xs);font-weight:600;color:var(--text-2);white-space:nowrap;
+  background:var(--card-bg);border:1px solid var(--divider);border-radius:999px;
+  padding:0 7px;line-height:16px}
+.sched-tick i{display:block;width:2px;height:5px;border-radius:1px;background:var(--separator)}
 /* 下限总和超出余高（极端矮屏/超多主播）时先由 JS 按步降级（去首末天→相邻天降 mini→当天降单行），仍超出才裁底部，不顶破卡片 */
 .sched-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;margin:0 var(--pad) var(--pad)}
 /* 三级行：center（双行字·全透明）> single（单行字·减淡）> mini（无字色条·更淡）。
@@ -639,23 +649,47 @@ input:disabled{opacity:.5;background:var(--fill)}
    mini 日固定窄条（道 5px + 间距 1px），single/center 日按「道数 × 级权重（1/2）」水装填分配
    剩余高度，每道下限 single 16px / center 32px。basis 恒为像素值 ⇒ 级别切换/道数变化/日进出窗口/
    降级升降级/窗口缩放全部是 basis px→px 的 CSS 过渡，全程连续，无 class 硬跳、无 min-height 瞬弹。
-   本组件间距（道 5px/间距 1-2px/日距 10px/缩进 6px）为内部量，schedule.js 解算器硬编码联动，不走全局间距档 */
-.sched-day{display:flex;gap:var(--sp-2);margin:10px 0;flex:none;min-height:0;
+   本组件间距（道 5px/间距 1-2px/日距 10px）为内部量，schedule.js 解算器硬编码联动，不走全局间距档 */
+.sched-day{display:flex;margin:10px 0;flex:none;min-height:0;
   transition:flex-basis .28s ease,margin .28s ease,opacity .28s ease}
-.sched-day-head{flex:none;width:110px;padding-top:3px;font-size:var(--fs-sm);color:var(--text-2)}
+/* 仅居中天有底色（浅蓝渐隐，acc-blue 同色系），其余天无背景；不加 padding（basis 口径与解算器一致） */
+.sched-day.center{background:linear-gradient(180deg,#F0F5FE,rgba(240,245,254,.35));
+  border-radius:var(--r-inset)}
+/* 日标签：行内悬浮胶囊（不占左侧空间）；pointer-events 穿透，下层条的 hover 与点击居中不受影响。
+   层级：字层 z1 < 胶囊/红线 z2（红线 DOM 在胶囊之后，同层级压过胶囊） */
+.sched-day-pill{position:absolute;left:6px;top:50%;transform:translateY(-50%);z-index:2;
+  pointer-events:none;display:flex;align-items:baseline;gap:4px;white-space:nowrap;
+  font-size:var(--fs-xs);color:var(--text-2);padding:2px 9px;border-radius:999px;
+  background:rgba(255,255,255,.85);backdrop-filter:blur(3px);box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.sched-day.center .sched-day-pill{color:#fff;background:linear-gradient(135deg,#7AA5FF,#2F6FEB);
+  box-shadow:0 3px 8px rgba(47,111,235,.26)}
+.sched-day.mini .sched-day-pill{font-size:10px;padding:1px 7px}
 .sched-lanes{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:2px;position:relative}
-.sched-lane{position:relative;flex:1 1 0;min-height:0;background:var(--fill);
-  border-radius:var(--r-md);overflow:hidden}
+/* 泳道无底色，道间浅分割线（mini 日 5px 窄道不画，太密） */
+.sched-lane{position:relative;flex:1 1 0;min-height:0;overflow:hidden}
+.sched-day:not(.mini) .sched-lane + .sched-lane{border-top:1px solid var(--divider)}
 /* mini 日：窄间距（行高由 JS flex-basis 控制，不再是 class 驱动道高） */
 .sched-day.mini .sched-lanes{gap:1px}
-.sched-day.mini .sched-day-head{padding-top:0;font-size:var(--fs-xs)}
-/* 色条：三级透明度（center 1 / single .62 / mini .34）。一场直播画成一个完整的
-   圆角矩形（.sched-seg，单背景），内部分段 .sched-part 只负责分割线与文字。
+/* 色条：三级透明度（center 1 / single .68 / mini .40）。一场直播画成一个完整的
+   圆角矩形（.sched-seg），内部分段 .sched-part 只负责文字；段间竖分割线（标题/分区
+   切换边界）并入 ::before 背景层（每层 = 1px 竖线渐变），随 border-radius 裁切——
+   落在条圆角边缘的分界线不伸出颜色区域。
    字层绝对定位居中，文字允许向右溢出条范围（z-index:1 画在后续条背景之上）；
-   红线上层（z-index:2）仍盖住文字 */
-.sched-seg{position:absolute;top:1px;bottom:1px;border-radius:var(--r-md);overflow:visible;
+   红线上层（z-index:2）仍盖住文字。
+   条纯实色（2026-09-03 决策：光泽与阴影全部去掉）。
+   背景画在 ::before 上（--bar-bg 由 JS 内联注入 = 分割线层 + 实色）；在播条的齐头散尾
+   用 ::before 的 mask（--fade 由 JS 注入）整体淡出——尾端不漏矩形硬边，
+   文字层（::before 的兄弟节点）不受 mask 影响保持实色 */
+.sched-seg{position:absolute;top:2px;bottom:0;border-radius:var(--r-md);overflow:visible;
   color:#fff;font-size:var(--fs-xs);line-height:1.2;white-space:nowrap;opacity:1;
   transition:opacity .28s ease,left .28s ease,width .28s ease}
+/* 条几何与道间分割线居中配平：条底贴泳道底（0）+ 道间距 2px = 线上方 2px；线下 =
+   border 1px 之下条顶内缩 2px——线两侧各 2px 对称。mini 日无分割线（gap 1px），条上下各 1px */
+.sched-day.mini .sched-seg{top:1px;bottom:0}
+.sched-seg:before{content:"";position:absolute;inset:0;border-radius:inherit;background:var(--bar-bg)}
+/* 在播散尾条：mask 整体淡出（--fade 由 JS 注入）；右端直角（散尾收边不收圆角） */
+.sched-seg.is-live:before{border-radius:var(--r-md) 0 0 var(--r-md);
+  -webkit-mask-image:var(--fade);mask-image:var(--fade)}
 .sched-part{position:absolute;top:0;bottom:0}
 .sched-part-one{position:absolute;left:6px;top:0;bottom:0;display:flex;align-items:center;
   white-space:nowrap;text-shadow:var(--text-shadow);opacity:0;transition:opacity .28s ease;
@@ -669,25 +703,35 @@ input:disabled{opacity:.5;background:var(--fill)}
 .sched-day.center .sched-part-one{opacity:0}
 .sched-day.center .sched-part-two{opacity:1}
 /* single：单行字，整体减淡 */
-.sched-day.single .sched-seg{opacity:.62}
+.sched-day.single .sched-seg{opacity:.68}
 .sched-day.single .sched-part-one{opacity:1}
 .sched-day.single .sched-part-two{opacity:0}
 /* mini：无字色条，更淡 */
-.sched-day.mini .sched-seg{opacity:.34}
+.sched-day.mini .sched-seg{opacity:.40}
 .sched-day.mini .sched-part-one{opacity:0}
 .sched-day.mini .sched-part-two{opacity:0}
-/* 当前时间红线（细线 + 顶端圆点），在色条之上、不拦截鼠标 */
-.sched-now{position:absolute;top:-2px;bottom:0;width:2px;margin-left:-1px;background:var(--red);
+/* 当前时间红线：粉色纵向渐变 + 顶端圆点光环，上下各溢出 3px；在色条之上、不拦截鼠标 */
+.sched-now{position:absolute;top:-3px;bottom:-3px;width:3px;margin-left:-1.5px;border-radius:2px;
+  background:linear-gradient(180deg,#F13D77,#FF7AA2);box-shadow:0 0 6px rgba(241,61,119,.30);
   z-index:2;pointer-events:none;transition:left .28s ease}
-.sched-now:before{content:"";position:absolute;top:-8px;left:-3px;width:8px;height:8px;
-  border-radius:50%;background:var(--red)}
-/* hover 弹层：分类证据 + 最近缓存帧缩略图 */
-.sched-pop{position:fixed;z-index:15;max-width:320px;padding:var(--sp-2) var(--sp-3);font-size:var(--fs-sm);
-  background:var(--card-bg);border-radius:var(--r-md);box-shadow:var(--shadow-lg);
-  pointer-events:none}
-.sched-pop img{display:block;width:100%;border-radius:var(--r-md);margin:var(--sp-1) 0;background:var(--fill)}
-.sched-pop-title{font-size:var(--fs-sm);margin-bottom:var(--sp-1)}
-.sched-pop-meta{color:var(--text-2);margin:var(--sp-1) 0}
-.sched-pop-v{display:flex;flex-wrap:wrap;gap:var(--sp-1);align-items:center;margin-top:var(--sp-1)}
+.sched-now:before{content:"";position:absolute;top:-6px;left:-3px;width:9px;height:9px;
+  border-radius:50%;background:#F13D77;box-shadow:0 0 0 3px rgba(241,61,119,.22)}
+/* hover 弹层：16:9 图置顶 + 标题/时间/分区/分类证据；pointer-events:none 跟随鼠标 */
+.sched-pop{position:fixed;z-index:15;width:268px;padding:0;font-size:var(--fs-sm);
+  background:var(--card-bg);border-radius:var(--r-inset);box-shadow:var(--shadow-lg);
+  overflow:hidden;pointer-events:none}
+.sched-pop:not(.hidden){animation:sched-pop-in .16s ease}
+@keyframes sched-pop-in{from{opacity:0;transform:translateY(5px) scale(.97)}}
+.sched-pop>img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:var(--bg-soft-deep)}
+.sched-pop-body{padding:10px 14px 12px}
+.sched-pop-title{font-size:13px;font-weight:700;line-height:1.35;display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sched-pop-meta{display:flex;align-items:center;gap:5px;color:var(--text-2);
+  font-size:var(--fs-xs);margin-top:5px}
+.sched-pop-meta svg{width:12px;height:12px;flex:none}
+.sched-pop-live{flex:none;font-size:10px;font-weight:600;line-height:15px;padding:0 6px;
+  border-radius:999px;background:rgba(255,92,138,.12);color:var(--pink)}
+.sched-pop-v{display:flex;flex-wrap:wrap;gap:var(--sp-1);align-items:center;margin-top:6px}
 .sched-pop-src{color:var(--text-2);font-size:var(--fs-xs)}
-.sched-pop-ev{flex-basis:100%;color:var(--text-2)}
+.sched-pop-ev{flex-basis:100%;color:var(--text-2);font-size:var(--fs-xs)}
+.sched-pop-body>.sched-pop-ev{margin-top:6px}
