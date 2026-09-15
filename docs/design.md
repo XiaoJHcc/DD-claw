@@ -79,60 +79,81 @@
 
 ## 4. 架构
 
-三段解耦：**抓取**、**分析**、**推送**。解耦点有三个：
+项目有**两条正交的轴**：**轴 A 运行时数据流**（事件从抓到推）、**轴 B 能力面与接入**（查数据/改设置的 N 种入口）。旧「抓取→分析→推送 三段」只描述了轴 A。两轴的交叉点是 SQLite（尤其 `settings`）——它既是轴 A 的归档，也是轴 B 的唯一配置信源。
 
-1. **Signal 总线**（抓取 → 分析）：source 不知道有 LLM，只产信号和原始数据
-2. **任务化 LLM 接口**（分析内部）：schema 进，JSON 出，中间用什么模型/服务商随时替换
-3. **PushDirective**（分析 → 推送）：推送层不解释语义，只执行路由和通道规则
+### 轴 A — 运行时数据流
 
 ```
-┌─ 1. 抓取 sources/   持续生产：原始数据入库归档 + 状态变更信号上总线
-│   ├─ bili/follows      关注列表同步         [SESSDATA] → 自动维护订阅表
-│   ├─ bili/live-status  批量轮询（分片 POST） [匿名]    → 开播/下播/标题变更
-│   ├─ bili/danmaku      WS 按需拉起          [匿名]    → 弹幕文本流
-│   ├─ bili/dynamic      空间动态             [cookie]  → 预告/延播文本
-│   ├─ weibo/feed        微博时间线           [cookie]  → 预告/延播文本
-│   └─ media/keyframe    画面采样             [匿名]    → 截图引用
+┌─ 抓取 sources/   持续生产：原始数据入库归档 + 变更信号上总线
+│   ├─ bili/live-status  批量轮询（分片 POST） [匿名] → 开播/下播/标题变更
+│   ├─ bili/follows      关注列表同步         [SESSDATA]
+│   ├─ bili/dynamic      空间动态             [cookie]  → 正文/预告文本
+│   ├─ weibo/feed        微博时间线           [cookie]
+│   ├─ media/keyframe    画面采样             [匿名]
+│   └─ bili/danmaku      弹幕 WS（待启动，按需拉起）
 │                            ↓
-│   core/db  原始归档：signals / posts / snapshots / follows …（持续状态，供反复分析）
-│   core/bus 变更信号：live_start / live_end / title_change / feed_post / …
+│   core/db  领域归档：live_sessions / live_segments / posts / snapshots / follows / …
+│   core/bus 变更信号：live_start / live_end / title_change / feed_post / health_alert / …
 │                            ↓
-│   core/pipeline  信号编排（唯一装配点）：bus → triggers → 分析队列 → 护栏 → 推送
+│   core/pipeline  信号编排唯一装配点：bus → 冷启动抑制 → 分析触发 → 队列 → 规则匹配 → 机械去重 → 推送
 │                            ↓
-├─ 2. 分析 analysis/  LLM 即任务：zod schema 进，JSON 出
-│   ├─ triggers    触发策略：开播时 / 新动态时 /（预留）直播中抽查、定时全量
-│   ├─ queue       分析队列：并发受限 + 优先级 + 结果缓存  ← 高峰 30+ 在播的关键
-│   ├─ tasks/      classify          内容分类（单次批量 LLM 调用，判定入 verdicts）
-│   │              schedule-extract  从动态/微博解析预告时间表
-│   ├─ classifier  RulesClassifier：LLM 优先（仅 analyze=1 主播）+ 失败回退确定性条件
-│   ├─ matcher     确定性匹配：matchCategory（分类条件）/ matchPushRules（分类引用 × 主播集合 → 渠道/文案）
-│   ├─ context     按房间聚合时间窗内多源数据 → 一份 context
-│   └─ providers   text/vision 路由 + 熔断 + 多 key 池 + 降级链
+├─ 分析 analysis/  LLM 即任务：zod schema 进，JSON 出
+│   ├─ triggers   分析触发（目标）：哪些信号送进 LLM——现仅 live_start，目标为任意时机按规则
+│   ├─ queue      分析队列：并发受限（2）；优先级/结果缓存为预留扩展点
+│   ├─ tasks/     classify（现状）· schedule-extract（目标）
+│   ├─ classifier RulesClassifier：LLM 优先 + 失败回退确定性
+│   ├─ matcher    确定性偏好执行：matchCategory / matchPushRules
+│   ├─ context    多源聚合（目标）：按房间取时间窗内动态/弹幕喂给分类 prompt
+│   └─ providers  text/vision 路由 + 熔断 + 多 key 池 + 降级链
+│                            ↓ 判定入库 verdicts / schedules（目标）
+├─ 推送时机与去重（目标态）默认开播；未来可选：延迟到有封面 / 换标题 / 内容实际变更
+│                    机械去重与防抖始终生效（每场一次 + 场景切换去重 + 冷却，用户不可配）
 │                            ↓
-│   判定结果入库：verdicts / schedules 表
+├─ 偏好执行 matcher → PushMessage（解耦边界就是 PushMessage，无中间态）
 │                            ↓
-├─ 护栏 rules/     确定性过滤，不经过 LLM：静音名单、静默时段、每场一次、冷却窗口
-│                            ↓
-│              PushDirective { priority, targets[], message, image? }
-│                            ↓
-└─ 3. 推送 notify/   只负责执行
-    ├─ dispatcher  按 directive.targets 路由；通道级规则（某群忽略某主播、丢弃低优先级）
-    └─ channels/   onebot(NapCat) / toast / ntfy —— 实现 Notifier 接口即可增删
+└─ 通知 notify/   只负责执行
+    ├─ dispatcher  按 PushMessage.channels 路由到启用渠道
+    └─ onebot(NapCat) / toast —— 实现 Notifier 接口即可增删（ntfy 已放弃）
 ```
 
-替换规则：
+**解耦点与替换规则：**
 
-- 加数据源（抖音、YouTube）→ 只写一个 source
-- 换模型 / 换服务商 → 只动 providers，task 的 schema 和 prompt 不变
-- 加 LLM 任务（新分析维度）→ 只在 tasks/ 加一个文件
-- 加推送通道 → 只实现 Notifier 接口
-- 改偏好措辞 → 只改面板里的推送规则，不动代码
+| 解耦点 | 边界 | 加东西时只动哪 |
+|---|---|---|
+| Signal 总线 | 抓取→分析 | 加数据源 → 写一个 source |
+| 任务化 LLM 接口 | 分析内部 | 换模型 → providers；加分析维度 → `tasks/` 加一个文件 |
+| PushMessage | 决策→推送 | 加推送通道 → 实现 Notifier 接口 |
+| 能力面注册表 | 轴 B | 加能力 → 进 `tools.ts` 注册表，再接前端 |
+
+**偏好归属（已决策，2026-08-09 修订）**：人类需求是唯一锚点信源，直接以结构化形式落地，不做 NL→结构化编译。用户面板直填**推送规则**（`push_rules` v2，全局）：分类引用（可空 = 任意开播）× 生效主播集合（空 = 全部主播，含未来新增）→ 渠道、推送词模板。LLM 不解释偏好，只做**内容分类**这种客观判定（本场直播属于哪些分类，结果入 `verdicts` 表）；分类口径也由人填（`categories` 表：LLM 提示词 + 确定性关键词/分区条件〔且/或〕）——分类配了提示词且 LLM 可用以 LLM 判定为准，LLM 关闭/熔断/调用失败回退确定性条件，无提示词永远走确定性。推送规则的匹配、模板渲染、路由全确定性。运行管线无人工环节。
+
+**推送时机的边界（2026-09 收敛）**：`push_rules` 已覆盖「推给谁、推什么」。未来只做**增加式可选推送时机**——延迟到有封面再推、换标题时推、内容实际变更时推（依赖 LLM 分析可信）；**不做**定时推、不做静音名单/静默时段/「不推」偏好。同一场内的「每场一次 + 场景切换去重 + 冷却防抖」是机械约束，始终生效、用户不可配。详见 §11「已放弃 / 不采用」。
+
+分层职责：
+
+| 层 | 管什么 | 例子 |
+|---|---|---|
+| analysis（LLM + matcher） | **判定与偏好执行**：这场在干什么 × 人填规则 → 推给谁/推什么 | 「歌回分类 → 群发 / {liver}唱歌速来」 |
+| 推送时机（pipeline） | **何时推**：默认开播；未来可选增加时机 + 机械去重防抖 | 「换标题也推」「等到有关键帧再推」 |
+| notify（执行） | **路由与发送**：按 channels 触达、图片降级、失败重试 | 「该规则只发这个群」 |
+
+### 轴 B — 能力面与接入
+
+```
+                      ┌─ Web UI REST（/api/*）                  [已落地，待收敛到注册表]
+一个能力面            ├─ MCP over HTTP（/mcp）                 [已落地 v1]
+src/mcp/tools.ts ────┼─ WebUI Agent（进程内 agent loop）       [目标 P1]
+（tool + schema +     ├─ MaiBot 插件（HTTP 调 /mcp）           [目标 P2]
+ handler + role）     └─ NapCat 直连（OneBot 事件 → 进程内）   [目标 P3]
+```
+
+能力层与传输层解耦：注册表是纯数据结构，任何前端直接消费；`/mcp` 只是「进程外 Host」这一种接线的适配器。**角色在能力层标注（admin/gateway），身份在接入层确权**。信任模型：localhost = 主人；连接级 Bearer token → 角色；OneBot 事件身份（`user_id`/`group_id`）天然可信；**LLM 生成的参数永不可信**。目标重构：面板 REST 收敛到注册表，使「一个能力面是唯一能力信源」成立。详见 [plan/agent-access.md](plan/agent-access.md)。
 
 ### Pipeline：唯一的装配点
 
-信号进入系统后的编排只发生在 `core/pipeline`：从 bus 订阅信号 → triggers 决定要不要分析 → 分析队列 → rules 护栏 → PushMessage → dispatcher。
+信号进入系统后的编排只发生在 `core/pipeline`：bus 订阅 → 冷启动抑制 → 分析触发 → 分析队列 → 机械去重 → 规则匹配 → `PushMessage` → dispatcher。
 
-推论：**source 内不允许出现任何通知逻辑**。冷启动抑制、每场一次去重、健康告警的阈值判断，全部在 pipeline 及之后的层；source 只负责如实产信号（打上 `coldStart` 等标记）和归档原始数据。状态机保持纯函数，不做政策判断。
+推论：**source 内不允许出现任何通知逻辑**。冷启动抑制、去重、健康告警的阈值判断，全部在 pipeline 及之后的层；source 只负责如实产信号（打上 `coldStart` 等标记）和归档原始数据。状态机保持纯函数，不做政策判断。
 
 ### 全员开播检测：一个批量接口，不是逐个轮询
 
@@ -142,38 +163,21 @@
 
 ### 高峰并发的关键：分析不入轮询循环
 
-轮询循环只做两件便宜的事：拉批量状态、diff 产信号。所有 LLM 调用进 `analysis/queue`：并发上限、按优先级排队、时间窗内信号无显著变化则复用上次结果（缓存）。30+ 同时开播时，推送通知（便宜）照常即时发出，内容分析（贵）排队跟进。
+轮询循环只做两件便宜的事：拉批量状态、diff 产信号。所有 LLM 调用进 `analysis/queue`：并发上限（当前 2）。「按优先级排队」「时间窗内信号无显著变化复用结果」是预留扩展点（当前刻意不做）。30+ 同时开播时，推送通知（便宜）照常即时发出，内容分析（贵）排队跟进。
 
-### 弹幕 WS 的定位
+### 弹幕 WS 的定位（待启动）
 
 不是全员常驻。逐房间建连的成本（连接池、心跳、token 刷新）在几十上百个关注对象时不划算。
 
 ```
-轮询层（批量，30-60s）── 发现开播 ──┐
+轮询层（批量，30-60s）── 发现开播 ──
                                   ↓
-              该房间开了内容分析？ ── 是 ── 拉起弹幕 WS ── 采样 ── 进分析队列
+              该房间需要内容分析？ ── 是 ── 拉起弹幕 WS ── 采样 ── 进分析队列
                                   ↓
                       下播事件 ── 关闭连接
 ```
 
-实际并发只有「正在直播 且 已开启分析」的几路。高峰 30+ 在播时也可用配置限制只对重点主播开分析。
-
-### 偏好放哪一层（已决策，2026-07-30 定稿，2026-08-09 修订）
-
-**人类需求是唯一锚点信源，直接以结构化形式落地，不做 NL→结构化的衍生编译。** 用户在控制面板直接填写**推送规则**（`push_rules` v2，全局）：分类引用（可空 = 任意开播）× 生效主播集合（空 = 全部主播，含未来新增）→ 渠道、推送词模板。习惯上一句话压缩了三个阶段（评价 / 文案 / 路由）的偏好，在面板上就是一行表单；三个阶段在入库和推送执行各有落点，互不耦合。
-
-LLM 不解释偏好，只做**内容分类**这种客观判定（本场直播属于哪些分类，结果入 `verdicts` 表）；分类口径也是人填的（`categories` 表：LLM 提示词 + 确定性关键词/分区条件〔且/或〕）。判定语义是 LLM 优先：分类配了提示词且 LLM 可用时以 LLM 判定为准；LLM 关闭/熔断/调用失败时回退该分类的确定性条件路径，无提示词的分类永远走确定性。推送规则的匹配、模板渲染、路由全确定性，LLM 不可用时偏好链路只损失分类精度、不断链。唯一读自由文本的是 `profile_note`（主播画像），预留给分类 prompt 增强——自由文本是它的原生格式，无需衍生。
-
-抓取→推送的运行管线中**没有任何人工参与环节**（不设人工确认队列）；人工只在面板指定需求。可选的 LLM 文案润色（模板之上）是增强而非主路径，挂了回退模板。
-
-分层职责：
-
-| 层 | 管什么 | 例子 |
-|---|---|---|
-| analysis（LLM） | **判定**：这场直播在干什么 | 「这是唱歌，依据是动态预告 + 弹幕反应」 |
-| matcher（确定性） | **偏好执行**：分类判定 × 推送规则 → 渠道 / 文案 | 命中「歌回分类 → 群发 / {liver}唱歌速来」 |
-| rules（确定性） | **护栏**：无论如何都要执行的过滤 | 静音名单、静默时段、每场一次去重、冷却窗口 |
-| notify（执行） | **路由**：通道级覆盖与发送 | 某群屏蔽某主播、低优先级不推、图片降级、失败重试 |
+实际并发只有「正在直播 且 需要分析」的几路。前置：`wbi.ts`（签名）→ `danmaku.ts`（WS 客户端）→ `triggers`（按需拉起）→ `context`/词频分析。合适时机启动。
 
 ## 5. 目录结构
 
@@ -251,8 +255,8 @@ type Streamer = {
   weiboUid: string | null;              // 微博 uid，面板填昵称经 resolve 解析
   weiboNick: string | null;             // 微博昵称（面板直填）
   watch: boolean;                       // 是否在监听名单（名单内即监听中；false = 退回关注候选池）
-  analyze: boolean;                     // 【遗留列】面板三开关已删，classifier 不再消费
-  notify: boolean;                      // 【遗留列】面板三开关已删，pipeline 不再消费
+  analyze: boolean;                     // 【待删遗留列】面板三开关已删、无人消费
+  notify: boolean;                      // 【待删遗留列】面板三开关已删、无人消费
   profileNote: string | null;           // 主播画像自由文本（常见内容/语言风格/优先级经验），预留给分类 prompt 增强
   face: string | null;                  // 头像 URL（批量接口回填）
   source: 'follows' | 'manual';
@@ -277,16 +281,7 @@ type PushRule = {
   enabled: boolean;
 };
 
-/** 推送指令（分析→推送的解耦点；当前由 pipeline buildMessage 直接产 PushMessage 承担） */
-type PushDirective = {
-  priority: 'high' | 'normal' | 'low';
-  targets: Array<{ type: 'group' | 'private'; id: string }>;
-  message: string;                        // 规则覆盖或内置默认模板渲染的推送词
-  image?: string;
-  event: LiveEvent;                       // 溯源用
-};
-
-/** 推送层的通用载荷。notify 不认识 LiveEvent / PushDirective，只认识 PushMessage */
+/** 推送层的通用载荷。notify 不认识 LiveEvent，只认识 PushMessage（这就是决策→推送的解耦边界） */
 type PushMessage = {
   title: string; body: string;
   image?: string;                          // 主图（toast heroImg / QQ 图）
@@ -317,30 +312,28 @@ interface Notifier {
 | `streamers` | 监听名单 + 主播画像（面板管理），source 的事实来源 | 已建 |
 | `push_channels` / `push_rules` v2 | 推送渠道（面板统一管理，可停用）/ 推送规则（分类引用 × 主播集合 → 渠道/文案），面板直填 | 已建 |
 | `categories` | 分类规则（LLM 提示词 + 确定性关键词/分区条件），面板直填 | 已建 |
-| `signals` | 原始信号流归档（所有 source 的原始 payload） | 待建 |
 | `posts` | 动态/微博原文，供预告解析反复使用 | 已建 |
 | `snapshots` | 画面采样引用，供内容判定 | 已建 |
 | `verdicts` | 每场直播的分类判定结果（source llm/rule + evidence，可追溯误判） | 已建 |
 | `schedules` | 预告时间表 | 待建 |
 
-## 7. 降本分层
+## 7. 成本分层（现状）
 
-LLM 不是每次采样都调。分层拦截，越靠前越便宜：
+LLM 不是每次采样都调，按「越靠前越便宜」分层拦截。当前落地情况：
 
-| 层 | 手段 | 成本 |
+| 层 | 手段 | 现状 |
 |---|---|---|
-| L0 | 标题/分区关键词命中（「歌回」「唱歌」） | 零 |
-| L0 | 动态结构化信号（`MAJOR_TYPE_LIVE_RCMD`、预约卡片） | 零 |
-| L1 | 弹幕词频统计（「好听」类 vs 游戏术语类占比） | 零 |
-| L1 | keyframe 帧间差异 / 画面变化率 | 极低 |
-| L2 | **LLM 融合判定**（仅前面层不确定时） | 免费额度 |
-| L3 | 视觉 LLM 看画面（文本信号全部矛盾时） | 免费额度，更贵 |
-| L3 | 音频 music/speech 检测（边界情况二次确认） | 本地算力 |
+| L0 确定性 | `categories` 的关键词/分区条件（组内任一、组间且/或） | ✅ 已落地，同时是 LLM 失败的回退路径 |
+| L0 结构化 | 动态 `LIVE_RCMD` / 预约卡片等结构化信号 |  解析已具备（`dynamic.ts`），未接入分类 |
+| L1 本地信号 | 弹幕词频统计、keyframe 帧间差异 | ⬜ 待弹幕抓取启动 |
+| L2 LLM 判定 | `tasks/classify` 单次批量分类（带图自动走 vision 路由） | ✅ 已落地（**未真机验收/调优**） |
+| L3 二次确认 | 视觉 LLM 看画面 | ✅ 已随 classify（`keyframe`/`cover` 非空即带图） |
+| L3 音频 | music/speech 检测 |  未规划（原设计留的方向，优先级低） |
 
-外加两级省钱手段：
+两级省钱手段（`analysis/queue` 注释明确「现在刻意不做」，属**预留扩展点、非承诺**）：
 
-- **结果缓存**：时间窗内信号无显著变化则复用上次判定。最直接，尤其「聊天」「挂机」这类长时间不变的场景
-- **分析队列去重**：同一房间短时间内多个触发源（开播 + 新动态 + 弹幕突变）合并成一次 LLM 调用
+- **结果缓存**：时间窗内信号无显著变化则复用上次判定
+- **队列去重 / 优先级**：同房间多触发合并成一次分析；开播触发 > 直播中抽查
 
 ## 8. 里程碑
 
@@ -351,8 +344,8 @@ LLM 不是每次采样都调。分层拦截，越靠前越便宜：
 | M1 — MVP：开播通知 | 批量轮询 + 状态机 + OncePerSession + OneBot/Toast | 实时开播推送可达；QQ 链路经 `--test-notify` 验证 |
 | M2 第 0 步 — 架构纠偏 | 事件总线 + `Source` 接口 + `PeriodicTask` + pipeline 唯一装配点 + 分析队列 + `PushMessage` | 不新增功能，行为与 M1 对齐，既有测试保持有效 |
 | M2 — 规模化 + 内容判定 | 凭据管理 → follows 同步 → 名单迁库 → 原始数据归档 → 内容分类（LLM 优先 + 确定性回退）→ verdicts | 上百位订阅稳定轮询；高峰在播时分析排队不阻塞通知；判定依据可从 verdicts 追溯 |
-| M3 — 预告时间表 | 过往直播统计（时间轴）+ 预告解析（schedule-extract → schedules）→ 预告发布/临近时推送 | 时间轴可查；预告条目带置信度入库、按阈值过滤 |
-| M4 — 偏好与路由 | matcher 基础版 → rules 护栏完善（冷却窗口/状态跳变抑制）→ dispatcher 通道级规则 → 直播中抽查触发器 | 偏好规则准确生效、可回溯 |
+| M3 — 预告时间表 | 过往时间轴（已落地）+ 预告解析（`schedule-extract` → `schedules`）→ 预告条/到点推送；前置 = 分析触发层能消费 `feed_post` | 时间轴可查；预告条目带置信度入库、按阈值过滤 |
+| M4 — 偏好与路由 | `matcher` + `push_rules` v2 已落地；剩余 = 可选推送时机（延迟/换标题/内容变更）+ 优先级产品方案（机制未定）+ 直播中抽查（依赖弹幕） | 偏好规则准确生效、可回溯 |
 | M5 — 产品化 | 控制面板（扫码登录/名单/画像/规则编辑/verdicts 总览/时间表日历）；多平台数据源 | 全流程面板可运维 |
 
 > 架构纠偏背景：旧计划假设在 M1 代码上增量演进，但 M1 的「调度器一个类包揽 拉取→判定→规则→推送」结构承载不了第 4 节的架构，故单列第 0 步。它不新增功能——`Source` 接口 start/stop 只产 Signal + 归档、轮询循环从「编排者」降级为 source 内部细节、`PushMessage` 让 `Notifier` 不再认识 `LiveEvent`。
@@ -365,9 +358,8 @@ LLM 不是每次采样都调。分层拦截，越靠前越便宜：
 | cookie 泄露 | **账号被完整冒充** | gitignore、不落日志、建议小号、兜底改密码 |
 | cookie 过期 | 关注同步/预告功能静默失效 | `isLogin` 心跳 + 停止轮询 + 主动告警 |
 | 免费额度耗尽/政策变动 | 分析层瘫痪 | provider 熔断降级链 + 多 key 池；L0/L1 规则层仍可独立工作 |
-| NapCat 账号被封 | QQ 通道失效 | 用小号；Toast/ntfy 作为独立通道不受影响 |
-| LLM 判定误报 | 该推的没推 / 不该推的推了 | evidence 可追溯；置信度阈值可调；偏好支持「宁滥勿缺」模式 |
-| LLM 润色文案不当 | 群里发出奇怪文案 | 推送词以人工模板为主；LLM 润色仅可选增强，可全局关闭 |
+| NapCat 账号被封 | QQ 通道失效 | 用小号；本机 Toast 作为独立通道不受影响 |
+| LLM 判定误报 | 该推的没推 / 不该推的推了 | evidence 可追溯；置信度阈值可调；分类口径（categories）可随时收紧 |
 | 高峰分析积压 | 判定延迟 | 队列优先级（开播触发 > 抽查）；通知不等分析结果 |
 | B站接口文档仓库已被法务关停 | 无权威参考 | 关键接口自行实测记录在 docs/research/；不在项目内大量摘录接口清单 |
 
@@ -375,8 +367,28 @@ LLM 不是每次采样都调。分层拦截，越靠前越便宜：
 
 | 问题 | 当前倾向 | 影响面 |
 |---|---|---|
-| 直播中抽查的触发策略 | 定时 + 弹幕突变双触发 | analysis/triggers |
-| B站扫码登录取 cookie（面板内） | 已落地并**真实扫码实测通过（2026-08-03）**：passport generate/poll → 落盘热重启；兜底手动放 cookies.json | 凭据管理、控制面板 |
-| 主播 → 微博账号的映射 | 面板手动填 `streamers.weibo_uid`，自动发现不可靠 | follows 同步、weibo source |
+| 直播中抽查的触发策略 | 定时 + 弹幕突变双触发（依赖弹幕抓取启动） | analysis/triggers |
 | 微博关注列表是否也要同步 | 暂不同步，以B站关注为准 | follows |
-| 多主播同时开播合并推送 | 逐条推（M1 遗留，量大了再议） | dispatcher |
+| 多主播同时开播合并推送 | 逐条推（量大了再议） | dispatcher |
+| 可选推送时机的产品形态 | 延迟到有封面 / 换标题 / 内容变更；**只增不减**，具体在面板怎么配未定 | push_rules / pipeline |
+| 优先级（`priority` / 通道级阈值） | 等产品层方案想好再补，机制不预设 | dispatcher / PushMessage |
+
+## 11. 已放弃 / 不采用（防止再被当待办）
+
+以下方案在演进中被明确放弃或替代，**不要**再从旧文档里翻出来当待办：
+
+| 项 | 原因 / 替代 |
+|---|---|
+| `PushDirective`（分析→推送指令对象） | 解耦边界就是 `PushMessage`，中间态无价值 |
+| `rules` 用户可见护栏：静音名单、静默时段、定时推、「不推」偏好 | `push_rules` 已足够；未来只做**增加式**可选推送时机 |
+| `ntfy` 通道 | 本机 Toast + NapCat 已覆盖，不需要异地提醒 |
+| `signals` 表（原始信号全量归档） | 领域表（live_sessions / posts / snapshots / …）已归档有用数据，无功能依赖 |
+| `analyze` / `notify` 列 | 面板三开关已删、无消费者，数据模型待删遗留 |
+| `preference_clauses` 表 | 历史设计，已被 `push_rules` v2 取代并 DROP |
+| LLM 文案润色 | 推送词以人工模板为准，不做润色增强 |
+| Anthropic `/messages` 协议 | 不接；只用 chat-completions / responses |
+| 订阅反代 / agent CLI 当 LLM 后端 | 封号风险，舍弃；OpenCode 走官方 API |
+| 自动读取 Chrome/Edge 已登录 cookie | ABE 封死；绕过手段等同恶意软件，不采用 |
+| CDP 直挂用户日常 Chrome | ≥136 不支持对默认 profile 远程调试 |
+| 完整录播、人工确认队列、公开部署 | 定位为个人短采样 / 无人管线 / 本机自用 |
+| OCR 服务、音频声学确认、原画截图 | 有能力但本项目不需要 |

@@ -1,6 +1,6 @@
 # 核心、配置与装配（src/core/ + src/config/ + src/index.ts + src/tools/）
 
-三段解耦的中间层：`core` 定义领域类型、信号总线、状态机、归档与信号编排；`index.ts` 是唯一装配根（只 new 和接线，不含业务逻辑）。抓取层见 [sources.md](sources.md)，分析层见 [analysis.md](analysis.md)，推送层见 [notify.md](notify.md)。实现现状见 [../status.md](../status.md)。
+轴 A 的中间层：`core` 定义领域类型、信号总线、状态机、归档与信号编排；`index.ts` 是唯一装配根（只 new 和接线，不含业务逻辑）。抓取层见 [sources.md](sources.md)，分析层见 [analysis.md](analysis.md)，推送层见 [notify.md](notify.md)。实现现状见 [../status.md](../status.md)。
 
 ## 改前必知
 
@@ -24,7 +24,7 @@
 `PeriodicTask`：通用周期任务器（间隔 + 抖动 + 自调度不重叠），不含业务逻辑。
 
 ### `pipeline.ts` — 信号编排唯一装配点
-bus 信号按序走：**归档分派** → **冷启动抑制** → **分析队列** → **护栏** → **推送规则 v2 匹配** → **推送**。
+bus 信号按序走：**归档分派** → **冷启动抑制** → **分析触发 / 队列** → **机械去重（`rules.decide`）** → **推送规则匹配（`matcher`）** → **推送**。
 
 - **归档分派**（位于抑制闸门之前，冷启动/静音场次照样留痕；在信号同步前缀按序执行）：`live_start → recordSession`（含首段）/ `live_end → endSession` / `title_change → rotateSegment`。
 - **分析**：`RulesClassifier` 内容分类，**仅 `live_start` 调用**（live_end / title_change 不烧 LLM）；判定入 verdicts 表并填 `LiveEvent.classifications`。
@@ -45,7 +45,7 @@ bus 信号按序走：**归档分派** → **冷启动抑制** → **分析队�
 - `settings`：kv（`push_enabled` 等总开关、`llm_providers`/`llm_key:*`、`napcat_*`、`mcp_tokens`…）。
 - `posts`：动态/微博归档，`UNIQUE(platform, item_id)` 去重、raw 整 item 全留；`insertPosts`（返回新行下标）/ `listRecentPosts`（分组取近 N 供面板 enrich）/ `searchPosts`（供 MCP）。
 - `snapshots`：关键帧缓存 room_id/live_time/ts/path/bytes，idx `(room_id, live_time, ts)`；`insertSnapshot`、`nearestSnapshot(roomId, liveTime, ts)` 按 `ABS(ts-?)` 取最近一帧（`/api/snapshot` 用）。**path 语义 = 相对 keyframe 目录、分隔符恒为正斜杠**（`<roomId>/<liveTime>/<ts>.ext`）——落库处（keyframe.ts）保证、绝不用 `join()`（Windows 反斜杠换机后全 404），读端读库时归一化反斜杠兜底，存量用 `migrate:snapshots-path` 一次性收敛。
-- **待扩展**：`signals` / `schedules`。
+- **目标**：`schedules` 表（预告时间表）。`signals` 表已放弃（见 `../design.md` §11）。
 
 ### `streamers.ts`
 streamers / follows 两表的行类型与「行 ↔ 对象」映射（JSON 字段序列化集中在此）；监听名单 CRUD 是 `Db` 的方法。

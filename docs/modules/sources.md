@@ -17,7 +17,7 @@
 | `src/sources/bili/client.ts` | HTTP 层：强制注入 UA、超时重试、HTTP 错误与业务错误（`code != 0`）分层 |
 | `src/sources/bili/types.ts` | B站接口返回类型 |
 | `src/sources/bili/dm.ts` | dm 设备指纹参数（`dm_img_list` 高斯随机轨迹 + 两个静态 base64），算法出处 RSSHub `addDmVerifyInfo`；弹幕等风控接口复用 |
-| `src/sources/bili/wbi.ts` | ⬜ 未实现。WBI 签名仅弹幕 WS 前置需要；动态接口实测不需要，勿为此实现 |
+| `src/sources/bili/wbi.ts` | ⬜ 目标（待启动）。WBI 签名仅弹幕 WS 前置需要；动态接口实测不需要，勿为此实现 |
 
 ## B站 直播间状态
 

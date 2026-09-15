@@ -6,7 +6,7 @@ B站关注列表全员监听（直播间 + 动态 + 微博）→ 持续追踪 �
 
 | 文档 | 内容 |
 |---|---|
-| [design.md](design.md) | 项目设计：规模假设、三段解耦架构、数据结构、里程碑 M1-M5、待定项 |
+| [design.md](design.md) | 项目设计：两条正交轴（运行时数据流 / 能力面接入）、数据结构、里程碑 M1-M5、待定项、已放弃清单 |
 | [status.md](status.md) | **实现现状**：里程碑（M1 起）与模块两视图 + 未实现清单 |
 | [boundaries.md](boundaries.md) | **能力边界**：什么能做、什么做不到、代价是什么 + 已知踩坑清单 |
 | [mcp.md](mcp.md) | **MCP 接口**：Agent 接入（令牌/角色权限/Claude Code 等 Host 配置/安全边界；MaiBot 不直连） |
@@ -25,7 +25,7 @@ B站关注列表全员监听（直播间 + 动态 + 微博）→ 持续追踪 �
 |---|---|
 | [modules/core.md](modules/core.md) | core + config + logger + tools + index.ts 装配 |
 | [modules/sources.md](modules/sources.md) | B站（直播间/关注/动态）/ 微博 / 媒体关键帧 |
-| [modules/analysis.md](modules/analysis.md) | analysis + rules：分类管线、LLM provider、matcher、护栏 |
+| [modules/analysis.md](modules/analysis.md) | analysis + rules：触发 / 分类管线、LLM provider、matcher、机械去重 |
 | [modules/notify.md](modules/notify.md) | notify：dispatcher / onebot / NapCat 托管 / toast（含 macOS helper） |
 | [modules/panel.md](modules/panel.md) | panel 路由契约 + webui + 构建内嵌 + demo 契约 |
 

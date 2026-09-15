@@ -8,8 +8,8 @@
 |---|---|---|
 | M1 开播通知 | ✅ | 批量轮询 + 状态机 + OncePerSession + OneBot/Toast 全链路；NapCat/Toast 已实测（`--test-notify` 私聊带图发送成功、notify_log ok=1） |
 | M2 规模化 + 内容判定 | ✅ | 名单迁库 / 扫码登录 / 关注同步 / 空间动态 / 微博 / LLM 分类管线 / 推送规则 v2 / 面板 v1+v2，详见下表 |
-| M3 预告时间表 | 过半 | **时间轴统计已落地**（live_segments + `GET /api/schedule` + 面板时间轴卡）；预告解析（schedule-extract → schedules 表）与「预定时间到」推送**未做** |
-| M4 偏好与路由 | 未开始 | matcher 基础版已随 M2 落地，护栏完善/通道级规则未做 |
+| M3 预告时间表 | 过半 | **时间轴统计已落地**；预告解析（schedule-extract → schedules 表）与「预定时间到」推送**未做**；前置 = 分析触发层能消费 `feed_post` |
+| M4 偏好与路由 | 部分 | `matcher` + `push_rules` v2 已落地；剩余 = 可选推送时机 + 优先级（待产品方案） |
 | M5 产品化 | 未开始 | 面板 v0/v1/v2 已提前在 M2 落地，不计入 |
 
 ### M2 已落地（按能力）
@@ -36,28 +36,26 @@
 |---|---|---|
 | core（总线/状态/归档/装配） | ✅ | [modules/core.md](modules/core.md) |
 | sources（B站 / 微博 / 媒体） | 直播间状态 / 关注 / 动态 / 微博 / 关键帧 ✅；弹幕 WS ⬜ | [modules/sources.md](modules/sources.md) |
-| analysis + rules | 分类管线 ✅；triggers / context / schedule-extract / preference 护栏 ⬜ | [modules/analysis.md](modules/analysis.md) |
-| notify | onebot(NapCat) / toast ✅；ntfy ⬜ | [modules/notify.md](modules/notify.md) |
+| analysis + rules | 分类管线 ✅；triggers / context / schedule-extract 为目标 ⬜；preference 护栏已放弃 ❌ | [modules/analysis.md](modules/analysis.md) |
+| notify | onebot(NapCat) / toast ✅（ntfy 已放弃 ❌） | [modules/notify.md](modules/notify.md) |
 | panel + webui | ✅（verdicts 总览、预告条预留） | [modules/panel.md](modules/panel.md) |
 | mcp | ✅ v1（admin / gateway 双角色） | [mcp.md](mcp.md) |
 
 ## 未实现清单
 
-**未建文件（占位）**
+**未建文件（目标 / 待启动）**
 
 | 文件 | 规划职责 |
 |---|---|
 | `src/sources/bili/danmaku.ts` | 弹幕 WS 按需拉起/关闭、采样进分析队列 |
 | `src/sources/bili/wbi.ts` | WBI 签名，仅弹幕 WS 前置需要（动态接口勿为此实现） |
-| `src/analysis/triggers.ts` | 触发策略：开播 / 新动态 /（预留）直播中抽查、定时全量 |
-| `src/analysis/context.ts` | 按房间聚合时间窗内多源数据 → 一份 context |
+| `src/analysis/triggers.ts` | **分析触发**：哪些信号送进 LLM（开播 / 新动态 / 直播中抽查 / 定时全量） |
+| `src/analysis/context.ts` | 按房间聚合时间窗内多源数据 → 一份 context（喂给分类 prompt） |
 | `src/analysis/tasks/schedule-extract.ts` | 预告解析 → schedules 表（置信度入库，阈值过滤） |
-| `src/rules/preference.ts` | 护栏全集：静音名单、静默时段、冷却窗口、状态跳变抑制 |
-| `src/notify/ntfy.ts` | ntfy 兜底通道 |
 
 **未落地能力**
 
-- `PushDirective` 类型：其角色当前由 pipeline `buildMessage` 直接产 `PushMessage` 承担
-- `signals` / `schedules` 表未建
+- `schedules` 表未建（目标）；`signals` 表已放弃（见 `design.md` §11）
 - verdicts 总览 UI；预告半透明条与「预定时间到」推送
-- dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）
+- dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）：待产品方案，机制不预设
+- 其余已放弃 / 不采用方案见 `design.md` §11

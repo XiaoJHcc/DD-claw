@@ -1,55 +1,70 @@
 # DD-claw
 
-监听用户在面板选定的B站主播（关注列表同步作候选池，直播间 + B站动态 + 微博）→ 持续状态追踪 → LLM 分析（内容分类 / 预告时间表 / 偏好推送词）→ 按优先级路由推送（QQ 群 / 私聊 / 本机 Toast）。
+监听用户在面板选定的B站主播（关注列表同步作候选池，直播间 + B站动态 + 微博）→ 持续状态追踪 → LLM 分析（内容分类；预告时间表为目标）→ 按人填的推送规则路由推送（QQ 群 / 私聊 / 本机 Toast）。
 
 **规模假设**：关注上百位、高峰 30+ 同时在播、信号是持续状态而非一次性事件、偏好用自然语言描述。这四条决定了架构，**改代码前先读 `docs/design.md` 第 1、4 节**。
 
-## 架构：三段解耦
+## 架构：两条正交轴
+
+旧「抓取→分析→推送」只描述了**轴 A（运行时数据流）**；项目还有一条正交的**轴 B（能力面与接入：查数据/改设置的 N 种入口）**。交叉点是 SQLite（尤其 `settings`）——轴 A 的归档，也是轴 B 的唯一配置信源。
+
+### 轴 A — 运行时数据流
 
 ```
-─ 1. 抓取  src/sources/   持续生产：原始数据入库归档 + 变更信号上总线
-│           bili/live-status  批量轮询（50/片 POST，非逐个）       [已实现]
-│           bili/follows      关注列表同步（SESSDATA）           [已实现]
-│           bili/dynamic      空间动态（cookie，无 WBI）          [已实现]
-│           weibo/feed        微博时间线（cookie）               [已实现]
-│           media/keyframe    在播关键帧定时本地缓存              [已实现]
-│           bili/danmaku      弹幕 WS 按需拉起                   [未实现]
-│                            ↓
-│   core/db  原始归档（signals/posts/snapshots/follows，供反复分析）
-│   core/bus 变更信号（live_start / feed_post / …）
-│                            ↓
-├─ 2. 分析  src/analysis/  LLM 即任务：schema 进 JSON 出
-│           queue      分析队列：限流（并发 2）                [已实现]
-│           classifier RulesClassifier：LLM 优先 + 回退确定性  [已实现]
-│           tasks/     classify（单次批量 LLM 分类）；matcher 确定性匹配
-│           providers  熔断 + 多 key 池 + 降级链                [已实现]
-│           （triggers / context / schedule-extract 未实现）
-│                            ↓ 判定结果入库（verdicts/schedules）
-├─ 护栏 src/rules/      确定性过滤，不经过 LLM：静音、静默时段、每场一次、冷却
-│                            ↓
-│              PushDirective { priority, targets[], message, image? }
-│                            ↓
-└─ 3. 推送  src/notify/    只执行：按 targets 路由 + 通道级规则（群×主播屏蔽、
-            丢弃低优先级）+ 发送。通道实现 Notifier 即可增删：
-            onebot(NapCat) [已实测] / toast [已实现] / ntfy [未实现]
+┌─ 抓取  src/sources/   持续生产：原始数据入库归档 + 变更信号上总线
+│   bili/live-status 批量轮询（50/片）· follows 关注同步 · dynamic 空间动态
+│   weibo/feed 微博时间线 · media/keyframe 在播关键帧缓存
+│   bili/danmaku 弹幕 WS（待启动）
+│        ↓
+│   core/db 领域归档 · core/bus 变更信号（live_start / title_change / feed_post / …）
+│        ↓
+├─ 分析  src/analysis/   分析触发（目标）→ 队列（并发 2）→ LLM 任务 → 判定入库
+│   tasks/classify（现状）· schedule-extract（目标）· providers 路由/熔断/多key/降级
+│   context 多源聚合（目标）· triggers 现仅 live_start，目标任意时机按规则进 LLM
+│        ↓ 判定入库 verdicts / schedules（目标）
+├─ 推送时机与去重  默认开播；未来可选：延迟到有封面 / 换标题 / 内容实际变更（只增不减）
+│   机械去重防抖始终生效：每场一次 + 场景切换去重 + 冷却（用户不可配）
+│        ↓
+├─ 偏好执行  matcher（纯确定性）  人填推送规则 × 判定 → PushMessage
+│   push_rules v2：分类引用〔空=任意开播〕× 生效主播〔空=全部〕→ 渠道 + 推送词
+│        ↓ PushMessage
+└─ 通知  src/notify/   dispatcher 按 channels 路由 + 通道执行
+     onebot(NapCat) [已实测] / toast [已实现]（ntfy 已放弃）
 ```
 
-**三个解耦点，改代码不要破坏：** ① **Signal 总线**（抓取→分析）：source 不知道有 LLM。② **任务化 LLM 接口**（分析内部）：schema 进 JSON 出，换模型只动 providers。③ **PushDirective**（分析→推送）：推送层不解释语义。
+**解耦点（改代码不要破坏）：** ① **Signal 总线**（抓取→分析）：source 不知道有 LLM。② **任务化 LLM 接口**（分析内部）：schema 进 JSON 出，换模型只动 providers。③ **PushMessage**（决策→推送）：推送层不解释语义（无 `PushDirective` 中间态）。④ **能力面注册表**（轴 B）：`tools.ts` 是唯一能力信源，传输层只是适配器。
 
-**偏好归属（已决策，2026-08-09 修订）**：人类需求是唯一锚点信源——用户面板直填**推送规则**（push_rules v2：分类引用〔空 = 任意开播〕× 生效主播〔空 = 全部，含未来新增〕→ 渠道 + 推送词），matcher 确定性执行；LLM 只做**内容分类**（本场属于哪些分类，入 verdicts）。分类口径也由人填（categories：LLM 提示词 + 确定性关键词/分区条件）：有提示词且 LLM 可用以 LLM 为准，LLM 关/熔断/失败回退确定性条件，无提示词永远确定性。不做 NL→结构化编译，运行管线无人工环节；rules 只做护栏，notify 只做路由。细节见 `docs/design.md` §4。
+**偏好归属（已决策，2026-08-09 修订）**：人类需求是唯一锚点信源——用户面板直填**推送规则**（push_rules v2），matcher 确定性执行；LLM 只做**内容分类**（本场属于哪些分类，入 verdicts）。分类口径也由人填（categories：LLM 提示词 + 确定性关键词/分区条件）——有提示词且 LLM 可用以 LLM 为准，LLM 关/熔断/失败回退确定性条件，无提示词永远确定性。不做 NL→结构化编译，运行管线无人工环节。**不做静音名单/静默时段/定时推/「不推」偏好**；未来只有增加式可选推送时机（见 `docs/design.md` §11）。
 
 **高峰并发原则**：轮询循环只做「拉批量状态 + diff 产信号」两件便宜事；所有 LLM 调用进 `analysis/queue`，通知不等分析结果。
+
+### 轴 B — 能力面与接入
+
+```
+                      ┌─ Web UI REST（/api/*，人点鼠标）        [已落地，待收敛到注册表]
+一个能力面            ├─ MCP over HTTP（/mcp，进程外 Host）     [已落地 v1]
+src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [目标 P1]
+（schema + handler    ├─ MaiBot 插件（HTTP 调 /mcp）           [目标 P2]
+ + 角色标注）         └─ NapCat 直连（OneBot 事件 → 进程内）   [目标 P3]
+```
+
+- **能力层与传输层解耦**：注册表是纯数据结构（工具名 + zod schema + handler + role），前端直接消费；`/mcp` 只是「进程外 Host」接线。
+- **角色在能力层标注（admin/gateway），身份在接入层确权**：localhost = 主人；Bearer token → 角色；OneBot 事件身份天然可信；**LLM 生成的参数永不可信**。
+- 目标重构：面板 REST 收敛到注册表，使「唯一能力信源」成立。计划见 `docs/plan/agent-access.md`，已落地见 `docs/mcp.md`。
 
 ## 关键接口
 
 | 接口 | 位置 | 约定（细节见 `docs/design.md` §6） | 状态 |
 |---|---|---|---|
 | `Signal` / `LiveEvent` / `PushMessage` | `src/core/types.ts` | 事件载荷；`LiveEvent.classifications` 仅 live_start 由分析队列填充、其余恒空；notify 只认 `PushMessage`，`channels` 存在时 dispatcher 按 push_channels 路由 | ✅ |
+| `Source.start(ctx)` | `src/sources/types.ts` | `start/stop` 只产 Signal + 归档；source 内禁止任何通知 / LLM 逻辑 | ✅ |
 | `Classifier.classify(ctx)` | `src/analysis/types.ts` | 返回 `Classification[]`（非 live_start 为 `[]`）；实现自行入 verdicts | ✅ RulesClassifier |
 | `LlmTask<I,O>` | `src/analysis/types.ts` | zod schema 进，JSON 出 | ✅ 类型占位 |
-| `DecisionRule.decide(event, signal, classifications?)` | `src/rules/types.ts` | 去重/护栏属于这层，不要塞到 Classifier 之前；第三参可空数组 | ✅ M1 版 |
-| `PushDirective` | 待定（rules 或 notify types） | 分析→推送指令；⬜ 未实现，角色现由 pipeline `buildMessage` 产 `PushMessage` 承担 | ⬜ |
+| `DecisionRule.decide(event, signal, classifications?)` | `src/rules/types.ts` | 机械去重 / 防抖属于这层（不是用户偏好过滤）；第三参可空数组 | ✅ M1 版 |
 | `Notifier.send(msg)` | `src/notify/types.ts` | 载荷是 `PushMessage`；`capabilities` 声明能否带图；`alert()` 供健康告警（当前仅 toast） | ✅ |
+| 能力面 tool def | `src/mcp/tools.ts` | 工具名 + zod schema + handler + role；前端不得绕过注册表私接 Db | ✅ v1 |
+
+`PushMessage.priority` 目前是**预留字段、无消费者**，等优先级产品方案定了再补。
 
 ## 文件地图
 
@@ -61,7 +76,7 @@
 - `src/core/bus.ts` — 类型化信号总线（handler 异常隔离）
 - `src/core/state.ts` — `diffRoom → Signal`；轮播=未开播；title_change=标题/分区变更
 - `src/core/scheduler.ts` — `PeriodicTask` 通用周期任务器
-- `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析→护栏→规则→推送）
+- `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送）
 - `src/core/db.ts` — SQLite 十三表 + 仓储；`ensureColumn` 在线补列
 - `src/core/streamers.ts` — streamers / follows 行类型与映射
 - `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
@@ -144,8 +159,10 @@
 ## 开发约定
 
 - **ESM + Node ≥ 22**：相对导入带 `.js` 后缀；不装 axios，用原生 `fetch` + `AbortSignal.timeout`
+- **依赖方向**：`core` 不 import `sources`；`sources` / `analysis` / `notify` 互不 import；`mcp/*` 依赖 `panel` 的 `http-util` / `schedule` / `PanelDeps`（共享 API 层）；`webui` 只经 `/api/*`；`index.ts` 是唯一装配根
+- **`settings` 表是运行时配置唯一信源**，`config.json` 只剩 `panel` 段自举；改动落 settings 后经热生效回调（`onChanged` / `onProvidersChanged` / `onCookiesSaved` / `rebuildNotifiers` / `reconcileRuntime` / `reconcileListen`）生效，绝不要求手改配置文件
 - 配置错误**启动即失败**并指明字段；拉取失败**绝不能当成下播**（保留旧状态，什么都不做）
-- **不做任何写操作**（不发弹幕、不点赞）；匿名接口优先，需凭据的功能由用户显式导入 cookie 后才启用
+- **不写外部平台**（不发弹幕、不点赞）；本地配置写是正常能力，由面板 / MCP（gateway 受限）受控进行
 - LLM 调用一律走 `analysis/queue`，禁止在轮询循环里直接调
 - B站/微博外部接口已知坑（UA、Referer、轮播、dm 指纹、扫码等）见 `docs/boundaries.md` 第 5 节，改 source 前先查
 - **UI 只在 `webui/` 里改**：日常 `npm run webui:dev`（静态服 + `?demo=1` mock，刷新即生效）；改完 `npm run build && npm start` 接线后端。运行时页面来源 = 构建期内嵌内存快照，**绝不读磁盘**；改 `/api/*` 须同步改 `webui/demo/mock-api.js`（与真实后端同构）
@@ -172,13 +189,14 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 
 ## 实现现状
 
-- **M1 ✅** 开播通知（NapCat/Toast 已实测）；**M2 ✅** 规模化 + 内容判定（名单迁库 / 扫码登录 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2 / 面板 v1+v2）
-- **M3 过半**：时间轴统计 ✅；预告解析（schedule-extract → schedules）与到点推送未做　**M4 / M5 未开始**
-- 逐项明细见 `docs/status.md`
+- **已落地主干**：开播通知（NapCat/Toast 已实测）、规模化 + 内容判定（名单迁库 / 扫码登录 / 关注同步 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2）、时间轴统计、控制面板 v1+v2、MCP v1、NapCat 双平台托管
+- **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、面板 REST 收敛到能力面、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
+- **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
+- 逐项明细与未建占位见 `docs/status.md` 
 
 ## 文档索引
 
-- `docs/design.md` — 总体设计：规模假设、三段架构、数据结构、里程碑 M1-M5、待定项
+- `docs/design.md` — 总体设计：两条正交轴（数据流 / 能力面）、数据结构、里程碑、待定项、**§11 已放弃清单**
 - `docs/status.md` — 实现现状：里程碑 + 模块两视图、未实现清单
 - `docs/boundaries.md` — 能力边界：匿名可得 / 需凭据 / 做不到，已知踩坑清单
 - `docs/modules/` — 模块实现笔记：core / sources / analysis / notify / panel（逐文件职责与「改前必知」）

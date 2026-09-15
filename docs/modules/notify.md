@@ -1,6 +1,6 @@
 # 推送层（src/notify/）
 
-三段解耦的第三段：**只执行，不解释语义**（解耦点 3）。载荷是 `PushMessage`——notify 不认识 `LiveEvent` / `PushDirective`；dispatcher 做路由 + fan-out + 通道级规则，通道实现 `Notifier` 即可增删。分析层见 [analysis.md](analysis.md)，装配见 [core.md](core.md) 的 index.ts；实现现状见 [../status.md](../status.md)。
+轴 A 的第三段（通知执行）：**只执行，不解释语义**（`PushMessage` 边界）。载荷是 `PushMessage`——notify 不认识 `LiveEvent`；dispatcher 做路由 + fan-out + 通道级规则，通道实现 `Notifier` 即可增删。分析层见 [analysis.md](analysis.md)，装配见 [core.md](core.md) 的 index.ts；实现现状见 [../status.md](../status.md)。
 
 ## 文件
 
@@ -16,7 +16,7 @@
 - `msg.channels` 存在时渠道路由：查 `push_channels` 过滤「选中且启用」按 notifier 分组，onebot 组解析成 `msg.targets`，无选中渠道的 notifier 跳过；缺省走全通道旧行为。
 - `alertAll(title, body, qqTarget?)`：本机告警只派发到实现 `alert()` 的通道（当前仅 toast），`qqTarget` 存在时另走 `onebot.send` 私聊点对点。
 - `setNotifiers` 装配级替换（NapCat 配置热更新后重建，pipeline 引用不变；无通道级开关——通道启停走 `push_channels.enabled`）。
-- **待扩展**：通道级规则。
+- **通道级规则**（群×主播屏蔽、优先级阈值）：待产品方案，机制不预设。
 
 ### `onebot.ts`
 NapCat OneBot 11 HTTP；消息段数组；attribution 拼成正文第三行；图片失败降级纯文本；每目标串行 + 1.2s 间隔。
@@ -50,6 +50,6 @@ Win32 AUMID「DD-claw」自动注册：.lnk 缺失时调 `scripts/register-aumid
 ### `image-cache.ts`
 toast 图片本地化：http 图下载到 `data/cache/toast/`（B站图床需 UA+Referer，3MB 上限，3 天清理），失败返回 null。
 
-## 未实现
+## 已放弃
 
-`ntfy.ts` — ntfy 兜底通道。
+`ntfy.ts`（ntfy 兜底通道）**已放弃**：本机 Toast + NapCat 已覆盖（见 `../design.md` §11）。

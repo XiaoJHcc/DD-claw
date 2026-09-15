@@ -1,12 +1,12 @@
-# 分析层与护栏（src/analysis/ + src/rules/）
+# 分析层（src/analysis/ + src/rules/）
 
-三段解耦中的第二段与护栏层：消费 signal 总线上的变更信号，LLM 只做**内容分类**（判定结果入 verdicts 表），护栏做确定性过滤，matcher 把人填的推送规则确定性执行成推送目标。总体架构见 `../design.md`，实现现状见 `../status.md`。
+轴 A 的第二段：消费 signal 总线上的变更信号，LLM 只做**内容分类**（判定结果入 verdicts 表），matcher 把人填的推送规则确定性执行成推送目标。`src/rules/` 只剩**机械去重 / 防抖**（每场一次、场景切换去重、冷却），不再有用户可见护栏。总体架构见 `../design.md`，实现现状见 `../status.md`。
 
 ## 职责边界（改代码不要破坏）
 
 - **LLM 即任务**：zod schema 进，JSON 出，中间可替换；换模型只动 providers。
 - **高峰并发原则**：所有 LLM 调用一律进 `analysis/queue`（信号量限流，并发 2），禁止在轮询循环里直接调。
-- **护栏归属**：去重/护栏属于 `src/rules/` 这一层，不要塞到 Classifier 之前。
+- **去重 / 防抖归属**：机械去重属于 `src/rules/` 这一层（不是用户偏好过滤），不要塞到 Classifier 之前；用户可见的静音名单 / 静默时段 / 定时推 /「不推」偏好**已放弃**（见 `../design.md` §11）。
 - **LLM 不参与偏好解释**：「推给谁、推什么」始终由人填的推送规则决定（matcher 确定性执行）；LLM 可用性不影响偏好链路，分类口径也是人填的（categories 表：LLM 提示词 + 确定性关键词/分区条件）。
 
 ## 接口契约
@@ -59,21 +59,22 @@ OpenAI 兼容直连，无外部网关。
 - `matchPushRules(rules, event, matchedCategoryIds)`：命中 =（categoryId 空 = 任意开播，或 ∈ 判定集合）且（uids 空 = 全部主播，或含 event.uid）。**返回全部命中规则**（保持 sort 顺序），所有命中规则独立生效——调用方对渠道取并集去重（同一渠道只推一次），推送词 = sort 序首个非空 messageTemplate。无命中规则 = 不推送（「任意开播 × 全部主播」规则即兜底）。
 - `renderTemplate` 渲染 `{liver}`（原名）/ `{uname}` / `{title}`；推送词链 = 规则覆盖 > 内置默认。
 
-### 未实现
+### 目标态待做
 
 | 文件 | 规划职责 |
 |---|---|
-| `triggers.ts` | 触发策略：开播 / 新动态 /（预留）直播中抽查、定时全量 |
-| `context.ts` | 按房间聚合时间窗内多源数据 → 一份 context |
-| `tasks/schedule-extract.ts` | 从动态/微博解析预告时间 → schedules 表（置信度入库，阈值过滤） |
+| `triggers.ts` | **分析触发**：哪些信号送进 LLM——现仅 live_start，目标任意时机按规则（开播 / 新动态 / 直播中抽查 / 定时全量） |
+| `context.ts` | 按房间聚合时间窗内多源数据 → 一份 context（喂给分类 prompt） |
+| `tasks/schedule-extract.ts` | 从动态/微博解析预告时间 → schedules 表（依赖 triggers 能消费 feed_post） |
 
-## rules — 确定性护栏
+## rules — 机械去重（非用户偏好）
 
 | 文件 | 职责 | 状态 |
 |---|---|---|
 | `types.ts` | `DecisionRule` / `NotifyDecision` 类型 | ✅ 仅类型 |
-| `once-per-session.ts` | M1 规则：每场直播推一次 | ✅ 占位 |
-| `preference.ts` | 护栏全集：静音名单、静默时段、冷却窗口、状态跳变抑制 | ⬜ 未实现 |
+| `once-per-session.ts` | 每场直播推一次；目标演进：场景切换去重 + 冷却防抖 | ✅ 占位 |
+
+`preference.ts`（静音名单 / 静默时段 / 冷却窗口 / 状态跳变抑制）**已放弃**——推送规则已足够，未来只做**增加式**可选推送时机（见 `../design.md` §11）。
 
 ## LLM 选型
 
