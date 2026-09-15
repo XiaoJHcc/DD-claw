@@ -1,7 +1,11 @@
 # MCP 接口（Agent 接入）
 
 DD-claw 的 Agent 能力面：挂在控制面板同一个端口上的 `/mcp` 端点（Streamable HTTP transport，
-`@modelcontextprotocol/sdk`），供 Claude Code、MaiBot 等 MCP Host 读写设置、查询数据库。
+`@modelcontextprotocol/sdk`），供 Claude Code 等 MCP Host 读写设置、查询数据库。
+
+**MaiBot 不直连本端点**（2026-09-15 定案：其 MCP 连接进程级共享、无法按群隔离）——
+群自助能力由 MaiBot 插件以 gateway 令牌调用本端点实现，见
+[plan/agent-access.md](plan/agent-access.md) P2 详案。
 
 定位：**工具的具体用法看工具自身的 description**（LLM 消费，随 tools/list 下发）；
 本文档只覆盖运维面——令牌、角色、接入配置、安全边界。
@@ -10,7 +14,7 @@ DD-claw 的 Agent 能力面：挂在控制面板同一个端口上的 `/mcp` 端
 
 ```bash
 npm run mcp-token -- add claude admin      # 生成 admin 令牌（token 只打印这一次）
-npm run mcp-token -- add maibot gateway    # 生成 gateway 令牌
+npm run mcp-token -- add maibot gateway    # 生成 gateway 令牌（给 MaiBot 插件用）
 npm run mcp-token -- list                  # 列出令牌（只显示前 12 位）
 npm run mcp-token -- remove <名字>         # 吊销
 ```
@@ -25,23 +29,17 @@ claude mcp add --transport http dd-claw http://127.0.0.1:8787/mcp \
   --header "Authorization: Bearer ddc_..."
 ```
 
-### MaiBot（bot_config.toml）
+### 其他 MCP Host
 
-```toml
-[[mcp.servers]]
-name = "dd-claw"
-transport = "streamable_http"
-url = "http://127.0.0.1:8787/mcp"
-headers = { Authorization = "Bearer ddc_..." }   # gateway 令牌
-```
-
-MaiBot 启动日志应出现 `✓ MCP 服务器 'dd-claw' 已连接 (工具 12 / …)`；其 WebUI 工具列表可见。
+任何支持 streamable_http 的 Host 均可接入：POST `http://127.0.0.1:8787/mcp`，
+请求头带 `Authorization: Bearer <token>`。服务端是无状态模式（不校验会话），
+握手后逐请求独立调用即可。
 
 ## 角色与权限
 
 | | admin | gateway |
 |---|---|---|
-| 典型持有者 | 主人本机（Claude Code / 其他 Agent） | MaiBot（群里所有人间接调用） |
+| 典型持有者 | 主人本机（Claude Code / 其他 Agent） | MaiBot 插件（群里所有人间接调用） |
 | 只读查询 | ✔ 全部 | ✔ 全部 |
 | 设置/名单/规则/渠道/LLM 写 | ✔ | ✘（工具不存在） |
 | 群推送规则自助 | ✘（用全量规则 CRUD） | ✔（受限，见下） |
@@ -51,9 +49,9 @@ MaiBot 启动日志应出现 `✓ MCP 服务器 'dd-claw' 已连接 (工具 12 /
 
 ### 为什么不信工具参数
 
-MaiBot 的 MCP 调用由其 LLM 规划器发起，参数是模型生成的——群友一句精心设计的话
-（prompt injection）就能让 MaiBot 在参数里谎称「这是主人私聊」「群号是 X」。
-因此服务端**只信任连接级 Bearer token**，参数里任何身份声明都不作数。
+下游 Host 的工具调用由 LLM 发起，参数是模型生成的——一句精心设计的 prompt injection
+就能让模型在参数里谎称「这是主人私聊」「群号是 X」。因此服务端**只信任连接级 Bearer token**，
+参数里任何身份声明都不作数；按角色拆分 tools/list 正是这一原则的落地。
 
 ### gateway 写操作的服务端强制（不信任调用方声明）
 
@@ -65,9 +63,10 @@ MaiBot 的 MCP 调用由其 LLM 规划器发起，参数是模型生成的——
 - 单群渠道自助规则 ≤ 20 条；写操作限流 20 次/10 分钟（每令牌）
 - 同主播同分类去重；全部写操作落审计日志（`[mcp] MCP 写操作 [角色:令牌名] 工具 参数`）
 
-残留风险（如实说明）：群号参数本身不可验证，群友理论上可诱导 MaiBot 给**别的**群渠道加规则。
-爆炸半径被限制在「往某群加开播推送」这种可撤销的骚扰级；如需锁死「只能操作本群」，
-做 v2 的 MaiBot 插件（见下）。
+残留风险（如实说明）：gateway 令牌的调用方若被 prompt injection 诱导，渠道参数本身不可验证，
+理论上可给**任意已启用**群渠道加规则。爆炸半径被限制在「往某群加开播推送」这种可撤销的骚扰级；
+要锁死「每个群只能操作本群」，必须在调用方事件层钉死群身份——即 MaiBot 插件方案
+（见 [plan/agent-access.md](plan/agent-access.md) P2 详案）。
 
 ## 工具一览（细节以 tools/list 的 description 为准）
 
@@ -85,8 +84,9 @@ MaiBot 的 MCP 调用由其 LLM 规划器发起，参数是模型生成的——
 ## 边界与 v2 预留
 
 - **主人 QQ 私聊改设置**：v1 不做。私聊消息也走 MaiBot → 同样不可信；管理动作用 Claude Code 或面板
-- **per-message 可信身份**：v2 以 MaiBot 插件实现——插件在代码层取消息事件的发送者/群号，
-  用共享密钥 HMAC 签名随调用带给 DD-Claw，验签后才信任（LLM 无法伪造签名）
+- **MaiBot 群自助接入**：详案在 [plan/agent-access.md](plan/agent-access.md) P2 节——插件在事件层取真实
+  group_id 钉死 channelId（LLM 不可见该参数），以 gateway 令牌调本端点；HMAC 盖章留给
+  「单入口跨权限域」（主人私聊提升 admin 权限）场景，届时才动 DD-claw 侧
 - **面板 token 管理卡**：v1 只有 CLI；token 纯文本存库（同 LLM key 的本机明文口径）
 - 只暴露 tools；MCP resources / prompts / SSE 服务端推送不实现
 
@@ -94,8 +94,8 @@ MaiBot 的 MCP 调用由其 LLM 规划器发起，参数是模型生成的——
 
 | 现象 | 原因 |
 |---|---|
-| 503「未配置访问令牌」 | 还没跑过 `mcp-token add`（注意令牌存在库裡，换库/换机要重建） |
+| 503「未配置访问令牌」 | 还没跑过 `mcp-token add`（注意令牌存在库里，换库/换机要重建） |
 | 401 | Bearer 缺失或 token 打错；`mcp-token list` 核对前缀 |
-| MaiBot 里看不到某个工具 | 角色不对（gateway 本就没有 admin 工具），或撞上 MaiBot 内置保留名 |
-| MaiBot 显示连接失败 | DD-claw 面板没起来（panel.enabled）或端口写错 |
+| Host 里看不到某个工具 | 角色不对（gateway 本就没有 admin 工具），或 Host 侧保留名冲突 |
+| 连接失败 | DD-claw 面板没起来（panel.enabled）或端口写错 |
 | 调用返回「错误：…」 | 业务校验拒绝，消息是中文的具体原因（同面板报错口径） |

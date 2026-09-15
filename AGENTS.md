@@ -150,7 +150,7 @@ v1 范围：**边栏 + 三视图壳**（左边栏为浮动卡片〔不贴边、�
 
 ### mcp — Agent 接口（MCP over HTTP，已落地 v1）
 
-给 Agent（Claude Code / MaiBot 等）用的能力面，挂在面板 server 的 `/mcp`（同 127.0.0.1 端口，Streamable HTTP transport，@modelcontextprotocol/sdk）。**权限模型（2026-08-29 定）**：MCP 客户端（MaiBot）的工具参数由 LLM 生成、可被 prompt injection 伪造，唯一可信身份是连接级 Bearer token——token → 角色（settings 表 `mcp_tokens` JSON 数组，`npm run mcp-token` CLI 管理）：**admin**（Claude Code/主人，全量读写）/ **gateway**（MaiBot，只读 + 群推送规则自助）。admin 工具在 gateway 连接上**不注册**（tools/list 不可见，而非调用时拒绝）。gateway 写操作服务端强制：只能往已启用的 QQ 群渠道建规则、主播必须在监听名单、规则打 `created_by='mcp'` 标记且只能删同标记规则（面板规则动不了）、单渠道 ≤20 条、写限流 20 次/10min、写操作全部落审计日志（llm key 值打码）。主人 QQ 私聊改设置 v1 不做（走 Claude Code/面板）；per-message 身份将来以 MaiBot 插件 HMAC 盖章解决。写路径全部复用面板同款 Db 方法 + http-util 校验 + deps 热生效回调（listen.onChanged / advanced.onChanged / llm.onProvidersChanged），与面板语义一致。
+给 Agent（Claude Code 等 MCP Host）用的能力面，挂在面板 server 的 `/mcp`（同 127.0.0.1 端口，Streamable HTTP transport，@modelcontextprotocol/sdk）。**多前端接入统一计划在 docs/plan/agent-access.md**（一个能力面 N 种接线：Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连，分期 P1-P3）。**MaiBot 不直连本端点**（2026-09-15 定案：其 MCP 连接进程级共享、无按群隔离字段，群身份只能由事件层插件钉死）——群自助走 MaiBot 插件（P2 详案在统一计划内），插件以 gateway 令牌调本端点，DD-claw 侧零改动。**权限模型（2026-08-29 定）**：MCP 客户端的工具参数由 LLM 生成、可被 prompt injection 伪造，唯一可信身份是连接级 Bearer token——token → 角色（settings 表 `mcp_tokens` JSON 数组，`npm run mcp-token` CLI 管理）：**admin**（Claude Code/主人，全量读写）/ **gateway**（MaiBot 插件，只读 + 群推送规则自助）。admin 工具在 gateway 连接上**不注册**（tools/list 不可见，而非调用时拒绝）。gateway 写操作服务端强制：只能往已启用的 QQ 群渠道建规则、主播必须在监听名单、规则打 `created_by='mcp'` 标记且只能删同标记规则（面板规则动不了）、单渠道 ≤20 条、写限流 20 次/10min、写操作全部落审计日志（llm key 值打码）。主人 QQ 私聊改设置 v1 不做（走 Claude Code/面板）；「单入口跨权限域」（主人私聊提升 admin）预留 HMAC 盖章（v2，见 docs/plan/agent-access.md）。写路径全部复用面板同款 Db 方法 + http-util 校验 + deps 热生效回调（listen.onChanged / advanced.onChanged / llm.onProvidersChanged），与面板语义一致。
 
 | 文件 | 职责 |
 |---|---|
@@ -205,7 +205,8 @@ npm run demo:fixtures  # 真实库 → webui/demo/fixtures.json demo 夹具（12
 
 - `docs/design.md` — 总体设计：规模假设、三段架构、数据结构、里程碑 M1-M5、待定项
 - `docs/boundaries.md` — 能力边界：匿名可得 / 需凭据 / 做不到，已知踩坑清单（含 M1 实施经验）
-- `docs/mcp.md` — MCP 接口：Agent 接入（令牌管理、角色权限、Claude Code / MaiBot 配置、安全模型与 v2 预留）
+- `docs/mcp.md` — MCP 接口：Agent 接入（令牌管理、角色权限、Claude Code 等 Host 配置、安全模型与 v2 预留；MaiBot 不直连）
+- `docs/plan/agent-access.md` — 多前端接入统一计划：一个能力面（tools.ts 注册表）N 种接线（Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连），信任模型矩阵 + 共享组件（agent loop / completeChat）+ 分期 P1-P3（含 MaiBot 插件详案）
 - `docs/research/` — 分模块调研（live-status、danmaku、feeds、llm、notify、media-capture、auth-cookie、ts-stack）
 
 ## 当前进度
