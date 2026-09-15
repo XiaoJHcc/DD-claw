@@ -177,48 +177,9 @@ LLM 不解释偏好，只做**内容分类**这种客观判定（本场直播属
 
 ## 5. 目录结构
 
-```
-DD-claw/
-├─ docs/                          本文档
-├─ src/
-│  ├─ core/
-│  │   ├─ bus.ts                  类型化事件总线（Signal 发布订阅）
-│  │   ├─ types.ts                Signal / PushMessage / LiveEvent 等领域类型
-│  │   ├─ state.ts                纯函数状态机 diffRoom
-│  │   ├─ db.ts                   SQLite + 仓储
-│  │   ├─ scheduler.ts            PeriodicTask：通用周期任务（间隔+抖动+不重叠）
-│  │   ├─ pipeline.ts             信号编排唯一装配点
-│  │   └─ concurrency.ts          mapLimit / 信号量
-│  ├─ sources/
-│  │   ├─ types.ts                Source 接口（start/stop，只产 Signal + 归档）
-│  │   └─ bili/
-│  │       ├─ client.ts           HTTP 层，强制注入 UA
-│  │       ├─ types.ts            接口返回类型
-│  │       ├─ live-status.ts      批量接口 get_status_info_by_uids
-│  │       ├─ live-status-source.ts  轮询 + diff + 冷启动标记 + 健康计数
-│  │       ├─ follows.ts          关注列表同步（SESSDATA）
-│  │       ├─ danmaku.ts          WS 按需拉起/关闭
-│  │       └─ dynamic.ts          空间动态
-│  │   （weibo/feed.ts、media/keyframe.ts 与 bili/ 同级）
-│  ├─ analysis/
-│  │   ├─ types.ts                Classifier / Classification / AnalysisContext / LlmTask
-│  │   ├─ queue.ts                分析队列：并发受限（预留合并、缓存）
-│  │   ├─ classifier.ts           RulesClassifier：分类编排 + LLM 优先/回退 + verdicts 入库
-│  │   ├─ triggers.ts             触发策略（开播/新动态/抽查）
-│  │   ├─ providers.ts            熔断 + 多 key 池 + 降级链
-│  │   ├─ matcher.ts              确定性匹配（matchCategory / matchPushRules）
-│  │   └─ tasks/                  classify / schedule-extract
-│  ├─ rules/{types,once-per-session,preference}.ts
-│  ├─ notify/
-│  │   ├─ types.ts                Notifier / PushMessage
-│  │   ├─ message.ts              LiveEvent → PushMessage 映射
-│  │   ├─ dispatcher.ts           路由 + fan-out + 通道级规则
-│  │   └─ onebot.ts / toast.ts / ntfy.ts
-│  ├─ config/
-│  └─ index.ts                    装配根：只 new 和接线，不含业务逻辑
-├─ cookies.json                   gitignore
-└─ .env                           gitignore
-```
+目录与逐文件职责的**唯一信源**是 [AGENTS.md 文件地图](../AGENTS.md#文件地图)（一行一文件，含「改前必知」）+ [docs/modules/](modules/)（各模块实现笔记）；本节不再重复枚举，避免双信源漂移。
+
+顶层：`src/`（core / sources / analysis / rules / notify / panel / mcp / config / tools + `index.ts` 装配根）、`webui/`（面板前端唯一信源，构建期内嵌进 `src/panel/webui-assets.gen.ts`）、`scripts/`（构建与一次性脚本）、`docs/`（本文档 + 调研 / 计划 / 模块笔记）、`data/`（SQLite 库与缓存，gitignore）。
 
 ## 6. 关键数据结构
 
@@ -287,10 +248,13 @@ type Streamer = {
   uname: string;                        // 昵称缓存，follows 同步/轮询自动刷新
   alias: string | null;                 // 用户别名，推送文案与面板展示用
   roomId: string | null;                // 批量接口响应自动回填，无需手填
-  weiboUid: string | null;              // 手动映射
-  mode: 'off' | 'silent' | 'on';        // off=不监听 silent=追踪不推送 on=正常
-  analyze: boolean;                     // 是否开 LLM 分析（弹幕/内容判定），默认关
+  weiboUid: string | null;              // 微博 uid，面板填昵称经 resolve 解析
+  weiboNick: string | null;             // 微博昵称（面板直填）
+  watch: boolean;                       // 是否在监听名单（名单内即监听中；false = 退回关注候选池）
+  analyze: boolean;                     // 【遗留列】面板三开关已删，classifier 不再消费
+  notify: boolean;                      // 【遗留列】面板三开关已删，pipeline 不再消费
   profileNote: string | null;           // 主播画像自由文本（常见内容/语言风格/优先级经验），预留给分类 prompt 增强
+  face: string | null;                  // 头像 URL（批量接口回填）
   source: 'follows' | 'manual';
 };
 
@@ -325,9 +289,14 @@ type PushDirective = {
 /** 推送层的通用载荷。notify 不认识 LiveEvent / PushDirective，只认识 PushMessage */
 type PushMessage = {
   title: string; body: string;
-  image?: string; url?: string;           // 点击跳转
+  image?: string;                          // 主图（toast heroImg / QQ 图）
+  icon?: string;                           // 小图标（主播头像；toast appLogoOverride）
+  attribution?: string;                    // 辅助小灰字（分区 · 开播时间）
+  url?: string;                            // 点击跳转
   priority: 'high' | 'normal' | 'low';
   targets?: Array<{ type: 'group' | 'private'; id: string }>;  // 缺省 = 各通道默认目标
+  channels?: string[];                     // 引用 push_channels.id；存在时 dispatcher 按此路由，缺省 = 全通道旧行为
+  ref?: { roomId: string; liveTime: number };  // notify_log 溯源
 };
 
 interface Notifier {
@@ -350,7 +319,7 @@ interface Notifier {
 | `categories` | 分类规则（LLM 提示词 + 确定性关键词/分区条件），面板直填 | 已建 |
 | `signals` | 原始信号流归档（所有 source 的原始 payload） | 待建 |
 | `posts` | 动态/微博原文，供预告解析反复使用 | 已建 |
-| `snapshots` | 画面采样引用，供内容判定 | 待建 |
+| `snapshots` | 画面采样引用，供内容判定 | 已建 |
 | `verdicts` | 每场直播的分类判定结果（source llm/rule + evidence，可追溯误判） | 已建 |
 | `schedules` | 预告时间表 | 待建 |
 
@@ -375,44 +344,18 @@ LLM 不是每次采样都调。分层拦截，越靠前越便宜：
 
 ## 8. 里程碑
 
-凭据（cookie/SESSDATA）从原 M3 **提前到 M2**：关注列表同步和动态/微博都依赖它，而它们是规模化的前提。
+凭据（cookie/SESSDATA）从原 M3 **提前到 M2**：关注列表同步和动态/微博都依赖它，而它们是规模化的前提。**各里程碑当前实现状态见 [status.md](status.md)**（本节只记目标与验收，不记进度）。
 
-### M1 — MVP：开播通知（已完成，QQ 通道待验证）
+| 里程碑 | 目标 | 验收要点 |
+|---|---|---|
+| M1 — MVP：开播通知 | 批量轮询 + 状态机 + OncePerSession + OneBot/Toast | 实时开播推送可达；QQ 链路经 `--test-notify` 验证 |
+| M2 第 0 步 — 架构纠偏 | 事件总线 + `Source` 接口 + `PeriodicTask` + pipeline 唯一装配点 + 分析队列 + `PushMessage` | 不新增功能，行为与 M1 对齐，既有测试保持有效 |
+| M2 — 规模化 + 内容判定 | 凭据管理 → follows 同步 → 名单迁库 → 原始数据归档 → 内容分类（LLM 优先 + 确定性回退）→ verdicts | 上百位订阅稳定轮询；高峰在播时分析排队不阻塞通知；判定依据可从 verdicts 追溯 |
+| M3 — 预告时间表 | 过往直播统计（时间轴）+ 预告解析（schedule-extract → schedules）→ 预告发布/临近时推送 | 时间轴可查；预告条目带置信度入库、按阈值过滤 |
+| M4 — 偏好与路由 | matcher 基础版 → rules 护栏完善（冷却窗口/状态跳变抑制）→ dispatcher 通道级规则 → 直播中抽查触发器 | 偏好规则准确生效、可回溯 |
+| M5 — 产品化 | 控制面板（扫码登录/名单/画像/规则编辑/verdicts 总览/时间表日历）；多平台数据源 | 全流程面板可运维 |
 
-批量轮询 + 状态机 + OncePerSession + OneBot/Toast。实施中确认的经验已折叠进 [boundaries.md](boundaries.md) 第 5 节。**遗留：NapCat 部署后跑 `--test-notify` + `--force-uid` 验证 QQ 链路。**
-
-### M2 第 0 步 — 架构纠偏（先于一切新功能）
-
-**此前的任务规划没有包含这一步**——旧计划假设在 M1 代码上增量演进，但 M1 的「调度器一个类包揽 拉取→判定→规则→推送」结构承载不了第 4 节的架构。纠偏内容：
-
-- 事件总线落地（`core/bus`），source 与 pipeline 彻底分离
-- `Source` 接口统一（start/stop，只产 Signal + 归档）
-- 通用周期任务器（`PeriodicTask`），轮询循环从「编排者」降级为 source 的内部细节
-- `core/pipeline` 成为唯一装配点，接管冷启动抑制、健康告警、分析调度
-- 分析队列落地（当前接 NoopAnalyzer，接口就位）
-- `PushMessage` 通用载荷，`Notifier` 不再认识 `LiveEvent`
-
-不新增任何功能，行为与 M1 对齐（全部既有测试保持有效，验收清单重跑）。
-
-### M2 — 规模化 + 内容判定
-
-凭据管理（cookie 导入、`isLogin` 心跳失效告警）→ follows 同步 → `streamers` 表（config.json 的 subscriptions 迁库，库成为监听名单事实来源）→ 原始数据归档（signals/posts/snapshots 表）→ 弹幕 WS 按需拉起 → 内容分类（classify，LLM 优先 + 确定性回退）→ verdicts 入库。
-
-验收：上百位订阅批量轮询稳定运行；高峰在播时分析排队不阻塞通知；阿梓唱歌推、打游戏静默，判定依据可从 verdicts 表追溯。
-
-### M3 — 预告时间表
-
-过往直播统计侧已落地（2026-08-09）：`live_sessions` 补结束时间/画面快照列 + `live_segments` 内容变更切段 → `GET /api/schedule`（北京 06:00 日界归属）→ 面板时间轴卡（共享轴、泳道色条、hover 对照分类证据）。
-
-预告侧仍为预留：dynamic / weibo sources → schedule-extract → schedules 表（置信度入库，推送时机按置信度阈值过滤）→ 新推送时机：预告发布时、预告时间临近时。响应结构的 `kind` 字段已为预告条目预留（半透明条），「预定时间到」推送不实现。
-
-### M4 — 偏好与路由
-
-matcher（push_rules × classifications → PushMessage；已落地基础版）→ rules 护栏完善（冷却窗口、状态跳变抑制）→ dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）→ 直播中抽查触发器。
-
-### M5 — 产品化
-
-控制面板（localhost WebUI，轻量起步不引框架）：扫码登录与 cookie 健康、监听名单管理、主播画像与分类/推送规则编辑、verdicts 总览、时间表日历。v0（名单管理）与 v1（三卡片展示 + 扫码登录 + 主播实况）已提前至 M2 落地；多平台数据源。
+> 架构纠偏背景：旧计划假设在 M1 代码上增量演进，但 M1 的「调度器一个类包揽 拉取→判定→规则→推送」结构承载不了第 4 节的架构，故单列第 0 步。它不新增功能——`Source` 接口 start/stop 只产 Signal + 归档、轮询循环从「编排者」降级为 source 内部细节、`PushMessage` 让 `Notifier` 不再认识 `LiveEvent`。
 
 ## 9. 风险登记
 
@@ -433,7 +376,7 @@ matcher（push_rules × classifications → PushMessage；已落地基础版）�
 | 问题 | 当前倾向 | 影响面 |
 |---|---|---|
 | 直播中抽查的触发策略 | 定时 + 弹幕突变双触发 | analysis/triggers |
-| B站扫码登录取 cookie（面板内） | 已落地（面板 v1，passport generate/poll + 落盘热重启）；字段名为社区共识**未经实测**，见 `qrcode.ts`【实测点】；兜底手动放 cookies.json | 凭据管理、控制面板 |
+| B站扫码登录取 cookie（面板内） | 已落地并**真实扫码实测通过（2026-08-03）**：passport generate/poll → 落盘热重启；兜底手动放 cookies.json | 凭据管理、控制面板 |
 | 主播 → 微博账号的映射 | 面板手动填 `streamers.weibo_uid`，自动发现不可靠 | follows 同步、weibo source |
 | 微博关注列表是否也要同步 | 暂不同步，以B站关注为准 | follows |
 | 多主播同时开播合并推送 | 逐条推（M1 遗留，量大了再议） | dispatcher |

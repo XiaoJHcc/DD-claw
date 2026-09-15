@@ -90,6 +90,16 @@ claude mcp add --transport http dd-claw http://127.0.0.1:8787/mcp \
 - **面板 token 管理卡**：v1 只有 CLI；token 纯文本存库（同 LLM key 的本机明文口径）
 - 只暴露 tools；MCP resources / prompts / SSE 服务端推送不实现
 
+## 实现文件
+
+| 文件 | 职责 |
+|---|---|
+| `src/mcp/auth.ts` | token 模型：`mcp_tokens` settings 读写、`mintToken`（`ddc_` + 24B base64url）、`resolveMcpAuth`（Bearer → {name, role}；无配置 = 'unconfigured' 503，无效 = null 401；sha256 后 timingSafeEqual 比较；token 不进日志） |
+| `src/mcp/tools.ts` | 工具注册表（能力层）：shared 只读 + admin 写 + gateway 群自助；`registerTools(server, deps, auth)` 按角色注册，写操作审计日志 |
+| `src/mcp/handler.ts` | `/mcp` 请求处理：Bearer 鉴权 → 每请求新建 McpServer + StreamableHTTPServerTransport（`sessionIdGenerator: undefined` 无状态模式，无会话管理），GET/DELETE 由 SDK 回 405 |
+| `src/mcp/rate-limit.ts` | gateway 写操作滑动窗口限流（内存，每 token 20 次/10min）；`resetMcpWriteLimiter` 供测试隔离 |
+| `src/tools/mcp-token.ts` | `npm run mcp-token` CLI：list / add <名字> <admin\|gateway> / remove <名字>；token 只在 add 时打印一次 |
+
 ## 故障排查
 
 | 现象 | 原因 |

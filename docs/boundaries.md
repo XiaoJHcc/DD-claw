@@ -122,3 +122,10 @@
 21. NapCat OneBot 端点管理：**DD-claw 自建自管 `name: "dd-claw"` 的专属 httpServers 条目**（用户决策 2026-08-09：不靠「取第一个」排序协议，用户不手动改、DD-claw 自动改）——`ensureNapcatEntry` 缺了自动选高位空闲端口（41990 起扫）创建、被禁用自动启用、端口被占（探测=conflict）自动换端口；只动这一条，其他服务条目（如教程惯例的 http/3000）原样保留，发现逻辑按名匹配、无条目回落第一个启用条目。写配置后 NapCat 需重启才生效：看门狗识别「陈旧实例」（新端口 down 但 lastOk 旧端口仍 ok）→ 停止任务杀进程树 → 拉起；**NapCat 被 /rl highest 拉起后是高权限进程，非提权进程 Stop-Process 拒绝访问，停止也必须做成配套计划任务（DD-claw NapCat Stop，taskkill /F /IM ... /T，同一次 UAC 创建）**。[实测 2026-08-09：创建条目保留 http/3000 → stop/start 双端口同时在线]
 22. NapCat 失活自动拉起双平台（2026-08-16）：**任务生命周期 = 开关**——「失活自动拉起」开时建拉起任务（Windows 弹一次 UAC）、关时 `schtasks /delete` 彻底移除；任务本身 `/sc once` 无自触发，拉起唯一驱动是 DD-claw 进程内的看门狗，因此 **DD-claw 关闭后不会再拉起 NapCat**（旧实现残留的「关闭后仍持续拉起」根因是任务与开关脱钩 + 依赖外部常驻）。**macOS 无需提权任务**：NapCat-Mac-Installer 已用 sudo 改好 QQ 的 package.json（注入 loadNapCat.js），DD-claw 拉起只是 `open -a QQ --args --no-sandbox --qq <uin>`——`--no-sandbox` 是安装器要求（Chromium 沙箱禁止加载未签名库）；**`--qq <uin>`（等价 `-q`）进 QQ 主进程 process.argv，NapCat 的 `napcat-shell/base.ts` 读取后走 `quickLoginWithUin` 快速登录，无需扫码**（源码实测；另有 `NAPCAT_QUICK_ACCOUNT` 环境变量等价）。macOS 停止 = `osascript -e 'tell application "QQ" to quit'`（QQ 跑在用户态，无需提权杀）。
 
+以下来自微博接入 / 关注接口实施（2026-08-03）：
+
+23. 微博扫码 `passport sso/v2` 的 generate **必须带 `Referer: https://weibo.com/`，否则 403**；返回 image 是 png 直链（面板直接 `<img src>`）。poll 的 retcode 归一化：`20000000`=confirmed、`50114001`=waiting（已实测）；`50114002`=scanned、其他 `50114xxx`=expired（防御式映射，未单独观测）。[实测]
+24. 微博登录态心跳走 `ajax/log/action`，看 **`X-Log-Uid` 响应头**；异常与缺头都归一化为未登录。[实测]
+25. 微博昵称→UID 匿名解析链（`src/sources/weibo/resolve.ts`）：`genvisitor` 拿 tid → `incarnate` 拿 SUB/SUBP → `m.weibo.cn/n/<昵称>` 302 到 `/u/<uid>`；cookie 模块级缓存、失效自动重建并重试一次，绝不进日志。[实测]
+26. B站 `x/relation/followings` 分页 **50/页**，按返回 total 翻页、短页到底；**无需 WBI 签名**（604 关注 13 页实测）。[实测]
+27. B站批量接口 `get_status_info_by_uids` 传入**非纯数字 uid** 会报 `65530 route_exception`，单 uid 拉取也必败——`listWatchedUids()` 只回 watch=1 且纯数字的 uid（防止 demo 演示数据混入）。[实测]

@@ -2,23 +2,23 @@
 
 监听用户在面板选定的B站主播（关注列表同步作候选池，直播间 + B站动态 + 微博）→ 持续状态追踪 → LLM 分析（内容分类 / 预告时间表 / 偏好推送词）→ 按优先级路由推送（QQ 群 / 私聊 / 本机 Toast）。
 
-**规模假设**：关注上百位、高峰 30+ 同时在播、信号是持续状态而非一次性事件、偏好用自然语言描述。这四条决定了架构，改代码前先读 `docs/design.md` 第 1、4 节。
+**规模假设**：关注上百位、高峰 30+ 同时在播、信号是持续状态而非一次性事件、偏好用自然语言描述。这四条决定了架构，**改代码前先读 `docs/design.md` 第 1、4 节**。
 
 ## 架构：三段解耦
 
 ```
-┌─ 1. 抓取  src/sources/   持续生产：原始数据入库归档 + 变更信号上总线
-│           bili/live-status  批量轮询（50/片 POST，非逐个轮询）  [已实现]
+─ 1. 抓取  src/sources/   持续生产：原始数据入库归档 + 变更信号上总线
+│           bili/live-status  批量轮询（50/片 POST，非逐个）       [已实现]
 │           bili/follows      关注列表同步（SESSDATA）           [已实现]
-│           bili/danmaku      弹幕 WS 按需拉起                   [未实现]
-│           bili/dynamic      空间动态（cookie）                 [已实现]
+│           bili/dynamic      空间动态（cookie，无 WBI）          [已实现]
 │           weibo/feed        微博时间线（cookie）               [已实现]
 │           media/keyframe    在播关键帧定时本地缓存              [已实现]
+│           bili/danmaku      弹幕 WS 按需拉起                   [未实现]
 │                            ↓
 │   core/db  原始归档（signals/posts/snapshots/follows，供反复分析）
 │   core/bus 变更信号（live_start / feed_post / …）
 │                            ↓
-├─ 2. 分析  src/analysis/  LLM 即任务：zod schema 进，JSON 出，中间可替换
+├─ 2. 分析  src/analysis/  LLM 即任务：schema 进 JSON 出
 │           queue      分析队列：限流（并发 2）                [已实现]
 │           classifier RulesClassifier：LLM 优先 + 回退确定性  [已实现]
 │           tasks/     classify（单次批量 LLM 分类）；matcher 确定性匹配
@@ -34,207 +34,154 @@
             onebot(NapCat) [已实测] / toast [已实现] / ntfy [未实现]
 ```
 
-**三个解耦点，改代码不要破坏：**
+**三个解耦点，改代码不要破坏：** ① **Signal 总线**（抓取→分析）：source 不知道有 LLM。② **任务化 LLM 接口**（分析内部）：schema 进 JSON 出，换模型只动 providers。③ **PushDirective**（分析→推送）：推送层不解释语义。
 
-1. **Signal 总线**（抓取→分析）：source 不知道有 LLM
-2. **任务化 LLM 接口**（分析内部）：schema 进 JSON 出，换模型只动 providers
-3. **PushDirective**（分析→推送）：推送层不解释语义
+**偏好归属（已决策，2026-08-09 修订）**：人类需求是唯一锚点信源——用户面板直填**推送规则**（push_rules v2：分类引用〔空 = 任意开播〕× 生效主播〔空 = 全部，含未来新增〕→ 渠道 + 推送词），matcher 确定性执行；LLM 只做**内容分类**（本场属于哪些分类，入 verdicts）。分类口径也由人填（categories：LLM 提示词 + 确定性关键词/分区条件）：有提示词且 LLM 可用以 LLM 为准，LLM 关/熔断/失败回退确定性条件，无提示词永远确定性。不做 NL→结构化编译，运行管线无人工环节；rules 只做护栏，notify 只做路由。细节见 `docs/design.md` §4。
 
-**偏好归属（已决策，2026-08-09 修订）**：人类需求是唯一锚点信源——用户在控制面板直填**推送规则**（push_rules v2，全局：分类引用〔可空 = 任意开播〕× 生效主播集合〔空 = 全部主播，含未来新增〕→ 渠道 + 推送词覆盖），matcher 确定性执行。LLM 只做**内容分类**（客观判定：本场直播属于哪些分类，结果入 verdicts 表）；分类口径也是人填的（categories 表：LLM 提示词 + 确定性关键词/分区条件〔且/或〕）——配了提示词且 LLM 可用时以 LLM 判定为准，LLM 关闭/熔断/调用失败时回退该分类的确定性条件路径，无提示词的分类永远走确定性。不做 NL→结构化衍生编译，运行管线无人工环节。rules 只做确定性护栏；notify 只做路由执行。LLM 不参与偏好解释（决定「推给谁、推什么」的始终是人填的推送规则），其可用性不影响偏好链路。
-
-**高峰并发原则**：轮询循环只做「拉批量状态 + diff 产信号」两件便宜事；所有 LLM 调用进 analysis/queue，通知不等分析结果。
+**高峰并发原则**：轮询循环只做「拉批量状态 + diff 产信号」两件便宜事；所有 LLM 调用进 `analysis/queue`，通知不等分析结果。
 
 ## 关键接口
 
-| 接口 | 位置 | 约定 | 状态 |
+| 接口 | 位置 | 约定（细节见 `docs/design.md` §6） | 状态 |
 |---|---|---|---|
-| `Signal` / `LiveEvent` / `PushMessage` | `src/core/types.ts` | 抓取→分析的事件载荷；`LiveEvent.classifications`（分类判定结果数组，live_start 由分析队列填充，其余信号恒空，下游必须能处理空数组）；notify 只认识 `PushMessage`；`PushMessage.channels`（渠道 id 字符串数组）存在时 dispatcher 按 push_channels 表路由，缺省 = 全通道旧行为 | ✅ |
-| `Classifier.classify(ctx)` | `src/analysis/types.ts` | 返回 `Classification[]`（非 live_start 返回 []）；判定结果由实现自行入 verdicts 表 | ✅ RulesClassifier |
+| `Signal` / `LiveEvent` / `PushMessage` | `src/core/types.ts` | 事件载荷；`LiveEvent.classifications` 仅 live_start 由分析队列填充、其余恒空；notify 只认 `PushMessage`，`channels` 存在时 dispatcher 按 push_channels 路由 | ✅ |
+| `Classifier.classify(ctx)` | `src/analysis/types.ts` | 返回 `Classification[]`（非 live_start 为 `[]`）；实现自行入 verdicts | ✅ RulesClassifier |
 | `LlmTask<I,O>` | `src/analysis/types.ts` | zod schema 进，JSON 出 | ✅ 类型占位 |
-| `DecisionRule.decide(...)` | `src/rules/types.ts` | 去重/护栏属于这一层，不要塞到 Classifier 之前；第三参 `classifications: Classification[]`（可空数组） | ✅ M1 版 |
-| `PushDirective` | 待定（rules 或 notify types） | 分析→推送的指令：优先级、目标、文案 | ⬜ 未实现（其角色现由 pipeline `buildMessage` 直接产 `PushMessage` 承担） |
-| `Notifier.send(msg)` | `src/notify/types.ts` | 载荷是 `PushMessage`（不认识 LiveEvent）；`capabilities` 声明能否带图；`alert()` 供健康告警（可选，当前仅 toast 实现） | ✅ |
+| `DecisionRule.decide(event, signal, classifications?)` | `src/rules/types.ts` | 去重/护栏属于这层，不要塞到 Classifier 之前；第三参可空数组 | ✅ M1 版 |
+| `PushDirective` | 待定（rules 或 notify types） | 分析→推送指令；⬜ 未实现，角色现由 pipeline `buildMessage` 产 `PushMessage` 承担 | ⬜ |
+| `Notifier.send(msg)` | `src/notify/types.ts` | 载荷是 `PushMessage`；`capabilities` 声明能否带图；`alert()` 供健康告警（当前仅 toast） | ✅ |
 
-## 文件清单
+## 文件地图
 
-### core — 总线与状态（已实现）
+一行一文件（`路径 — 职责`）；「改前必知」与深度笔记见 `docs/modules/`，未实现占位见 `docs/status.md`。测试与被测同目录（`*.test.ts`）不逐列。
 
-| 文件 | 职责 |
-|---|---|
-| `src/core/types.ts` | `LiveStatus`（平台无关，bili `RoomStatus` 是其扩展，含可选 face 头像）/ `Signal`（含可选 `previousTitle`/`previousAreaName`，title_change 专用）/ `LiveEvent`（含可选 face）/ `PushMessage`（含可选 icon 头像、attribution 小灰字行），`toLiveEvent()`；`STREAK_QQ_ALERT_AFTER_SEC`=600（连续失败持续告警阈值，source 与 pipeline 共享）。core 不得 import 任何 sources/ 下的类型 |
-| `src/core/bus.ts` | 类型化信号总线：emit 不 await，单 handler 异常记日志不影响其他 |
-| `src/core/state.ts` | 纯函数状态机 `diffRoom(prev, curr)` → Signal；`(room_id, live_time)` 是一场直播的身份；轮播（`live_status=2`）视为未开播；拉取失败不产 Signal；无 prev 也如实产 live_start（抑制政策在 pipeline）；**title_change = 标题/分区内容变更**（title/areaName/parentAreaName 任一变化、同一 liveTime 内，同时变只产一条；带 `previousTitle`，分区变带 `previousAreaName`） |
-| `src/core/scheduler.ts` | `PeriodicTask`：通用周期任务器（间隔+抖动+自调度不重叠），不含业务逻辑 |
-| `src/core/pipeline.ts` | 信号编排唯一装配点：bus → **归档分派**（live_start → recordSession〔含首段〕/ live_end → endSession / title_change → rotateSegment；位于抑制闸门前，冷启动/静音场次照样留痕，且在信号同步前缀按序执行）→ 冷启动抑制 → 分析队列（RulesClassifier 内容分类，**仅 live_start 调用**——live_end/title_change 不烧 LLM；判定入 verdicts 表并填 `LiveEvent.classifications`） → 护栏 → 推送规则 v2 匹配（matcher：categoryId 可空 = 任意开播、uids 空 = 全部主播；**全部命中规则独立生效**：渠道 = 命中规则 channels 并集去重、推送词 = sort 序首个非空覆盖；无命中规则 = 不推送〔「任意开播 × 全部主播」规则即旧全局默认推送的等价物〕）→ 推送；冷启动推送两开关（notify_on_first_run/notify_on_new_subscription）直读 settings 热生效；信号处理并发 4；health_alert → alertAll（payload 带 `message` 时用自定义文案；本机告警只派发到实现 `alert()` 的通道〔当前仅 toast〕；**QQ 告警政策**：payload `alertKind==='login_drop'`〔运行中登录掉线〕立即报、`durationAlert===true`〔连续失败满 10 分钟 source 再发的一次〕才报，目标 = settings `napcat_alert_qq`〔留空 = 全不发〕，经 onebot.send 私聊点对点发出，其余告警不发 QQ） |
-| `src/core/db.ts` | better-sqlite3。已有十三表：`live_sessions`（含时间轴列 last_seen〔在播每轮刷新 = 近似下播锚点，崩溃恢复也有近似终点〕/ keyframe / cover〔开场快照 + 在播刷新〕；方法：`recordSession` 扩展写快照 + 插首段、`touchLiveSessions` 存活打点、`endSession(roomId, endTs)` 按房间 first_seen 最新一场关闭〔liveTime 在 live_end 信号里不可靠，理由见代码注释〕、`rotateSegment` 内容变更换段、`listTimeline` 时间轴三表归并；endTs 语义：last_seen 鲜度窗口（10min）内 = 在播 null，超时/无打点 = last_seen ?? first_seen〔崩溃错过 live_end 的兜底，legacy 场零长不画〕）/ `live_segments`（一场按内容变更切分的连续时间段，idx (room_id, live_time)）/ `notify_log` / `room_state`（已扩展展示列 area_name/parent_area_name/keyframe/cover/online/last_live_at，存库迁移自动补列；`countLiveRooms()` / `listRoomStatesFull()` 供面板）/ `streamers`（监听名单，事实来源，含 face；`watch` 仍是名单机制〔watch=0 退回关注列表候选、主列表不显示〕，`analyze`/`notify` 列为遗留——v2 起面板三开关删除，classifier/pipeline 不再消费；另有 `weibo_nick` 列；`listWatchedUids()` 只回 watch=1 且**纯数字** uid〔防御演示数据等非数字 uid 混入——批量接口会 65530 route_exception、单 uid 拉取必败〕）/ `follows`（关注候选池，含 face）/ `push_channels`（推送渠道，事实来源，面板管理；含 `sort` 展示顺序列，面板拖拽排序）/ `push_rules` v2（推送规则，全局：`category_id` 可空 = 任意开播、`uids` JSON 数组空 = 全部主播〔含未来新增〕、`channels` 渠道 id 数组、`message_template` 可空 = 全局默认模板；`sort` 全局 = 匹配优先级；空名补「规则 N」；`created_by` 可空 = 面板/人工，'mcp' = MCP 群自助规则〔权限隔离用〕）/ `categories`（分类规则，全局：`llm_prompt` 空 = 纯确定性分类、keywords/areas JSON 数组 + `cond_mode` and/or、enabled/sort；空名补「分类 N」；删除前 `disablePushRulesByCategory` 级联停用引用它的推送规则）/ `verdicts`（每场直播的分类判定结果：UNIQUE(room_id,live_time,category_id) 去重 INSERT OR IGNORE；category_name 冗余存名、source llm/rule、confidence〔rule 路径 NULL〕、evidence 命中说明）/ `settings`（kv：push_enabled 推送总开关等）/ `posts`（动态/微博时间线归档，UNIQUE(platform,item_id) 去重，raw 整 item 全留；`insertPosts` 返回新行下标、`listRecentPosts` 分组取近 N 条供面板 enrich、`searchPosts` uid/platform/keyword 检索供 MCP）/ `snapshots`（关键帧缓存：room_id/live_time/ts/path/bytes，idx (room_id, live_time, ts)；`insertSnapshot` 写入、`nearestSnapshot(roomId, liveTime, ts)` 按 ABS(ts-?) 取最近一帧〔/api/snapshot 用〕；**path 语义 = 相对 keyframe 目录的相对路径且分隔符恒为正斜杠**〔`<roomId>/<liveTime>/<ts>.ext`〕——落库处（keyframe.ts）保证、绝不用 join()（Windows 会落反斜杠，换机后 resolve 当普通字符全 404）、读端（/api/snapshot）读库时顺带归一化反斜杠兜底、一次性命令（migrate:snapshots-path）把存量绝对/反斜杠相对路径收敛为正斜杠相对，运行时 Db 构造绝不做数据改写）。旧库缺列由 `ensureColumn` 在线补齐（唯一的 schema 迁移机制）。**待扩展**：`signals` / `schedules` |
-| `src/core/streamers.ts` | streamers / follows 两表的行类型与「行 ↔ 对象」映射（JSON 字段序列化集中在此）；监听名单 CRUD 是 `Db` 的方法 |
-| `src/core/push.ts` | push_channels / categories / push_rules / verdicts 四表的行类型与「行 ↔ 对象」映射（JSON 数组字段序列化集中在此；`isPushEnabled`/`setPushEnabled` 推送总开关；PushRule 含 `createdBy`〔null = 面板/人工，'mcp' = MCP 群自助〕）；CRUD 是 `Db` 的方法 |
-| `src/core/posts.ts` | posts 表的行类型与「行 ↔ 对象」映射（pics JSON 序列化集中在此）；归档/查询是 `Db` 的方法 |
-| `src/core/listen.ts` | 监听功能开关（面板「监听」卡）：动态/微博两个开关。settings 存 `listen_<feature>`：缺省=auto（没登录默认关、登录成功自动开）、'1'/'0'=手动（手动设置为准）；`isListenEnabled`（UI 有效态，auto 跟随登录态）、`shouldRunListen`（源是否运行：cookie 存在 &&（手动开 || auto）——**无 config 闸门**，面板开关唯一信源；auto 下登录过期不自动停——源自己心跳跳过并告警、保留源以感知恢复）、`setListen`（切换：与 auto 默认一致则回 auto〔删除 key，不留空串〕、否则落手动值） |
-| `src/core/runtime-config.ts` | 运行时参数（**settings 表唯一信源**，面板按模块分散管理：监听卡「抓取设置」/ LLM 卡「高级」/ 推送渠道卡「推送设置」，`/api/advanced` 统一读写）：`RuntimeConfig` 十三项（poll 间隔/抖动、告警阈值、三源抓取间隔、LLM 超时/熔断/冷却、冷启动推送两开关、**关键帧缓存开关 + 间隔**〔60~3600s〕）；`NUM_SPECS`/`BOOL_SPECS` 规格表（settings 键 + 默认值 + 范围，API 校验复用）；`getRuntimeConfig`（非法/越界值回落默认）/ `saveRuntimeConfig` / `withRuntimeConfig`（覆盖回 AppConfig 供 sources/router 消费，keyframe 两参数叠回 `eff.keyframe` 段）/ `isNotifyOnFirstRun`/`isNotifyOnNewSubscription`（pipeline 直读，热生效） |
-| `src/core/onboarding.ts` | 发布后首启默认值种入：`seedOnboardingDefaults(db)`（index.ts 装配处在 Db 创建后调用）——settings `onboarding_seeded` **一次性闸门**（用户清空默认值后不复活）；各项独立判空/判未设：push_channels 空 → 种「系统通知」toast 渠道〔开箱即用〕、settings `llm_providers` 未设 → 种默认 provider 名单〔只种名单不种 key〕、categories 空 → 种默认分类、push_rules 空 → 种默认规则（分类按名映射回新 id、渠道重映射到现有首条或新种渠道、uids 恒空） |
-| `src/core/onboarding-defaults.gen.ts` | 首启默认值数据（**构建期生成物，gitignore 防漂移，勿手改**）：由 scripts/build-webui.mjs 从 `webui/demo/defaults.json` 生成——defaults.json 是 LLM provider / 分类 / 推送规则的**唯一手工信源**（demo mock 与首启默认值共用同一份展示案例）。`ONBOARDING_LLM_PROVIDERS`（LlmProviderConfig[]）+ `ONBOARDING_CATEGORIES`（name/llmPrompt/keywords/areas/condMode）+ `ONBOARDING_RULES`（name/category〔按名引用〕/messageTemplate） |
-| `src/core/concurrency.ts` | `mapLimit` 有界并发工具 |
+### core / config / logger
+
+- `src/core/types.ts` — 领域类型 + `toLiveEvent` + 告警阈值常量
+- `src/core/bus.ts` — 类型化信号总线（handler 异常隔离）
+- `src/core/state.ts` — `diffRoom → Signal`；轮播=未开播；title_change=标题/分区变更
+- `src/core/scheduler.ts` — `PeriodicTask` 通用周期任务器
+- `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析→护栏→规则→推送）
+- `src/core/db.ts` — SQLite 十三表 + 仓储；`ensureColumn` 在线补列
+- `src/core/streamers.ts` — streamers / follows 行类型与映射
+- `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
+- `src/core/posts.ts` — posts 行类型与映射（pics JSON）
+- `src/core/listen.ts` — 监听功能开关（settings `listen_<feature>`）
+- `src/core/runtime-config.ts` — 运行时参数（settings 唯一信源）
+- `src/core/onboarding.ts` — 首启默认值种入（一次性闸门）
+- `src/core/onboarding-defaults.gen.ts` — 构建期生成物（勿手改）
+- `src/core/concurrency.ts` — `mapLimit` 有界并发
+- `src/config/index.ts` — 读 `.env` + `config.json`（只有 panel 段生效）
+- `src/config/schema.ts` — panel 校验 + provider schema + 默认配置
+- `src/logger.ts` — 极简结构化日志
 
 ### sources — 抓取
 
-| 文件 | 职责 | 状态 |
-|---|---|---|
-| `src/sources/types.ts` | `Source` / `SourceContext` 接口：只产 Signal + 归档，不含通知逻辑 | ✅ |
-| `src/sources/bili/client.ts` | HTTP 层：强制注入 UA、超时重试、HTTP 错误与业务错误（`code != 0`）分层 | ✅ |
-| `src/sources/bili/live-status.ts` | 批量 `get_status_info_by_uids`（POST，50/片）；缺 key = 未开播，不是失败 | ✅ |
-| `src/sources/bili/live-status-source.ts` | 轮询 + diff + 批量落状态 + `coldStart` 标记（`first_run` / `new_subscription` / 重启恢复 `restart_recovery`）+ 健康计数发 `health_alert` 信号（次数阈值一次 + 持续满 10 分钟再发一次〔payload `durationAlert`〕，恢复复位）；face / roomId 空值回填（已有值不覆盖）；saveRoomStates 同事务点 `touchLiveSessions` 存活打点（在播条目刷 last_seen + 非空 keyframe 覆盖） | ✅ |
-| `src/sources/bili/types.ts` | 接口返回类型 | ✅ |
-| `src/sources/bili/wbi.ts` | WBI 签名（仅弹幕 WS 前置；动态接口实测不需要，勿为此实现） | ⬜ |
-| `src/sources/bili/auth.ts` | cookie 管理：`loadCookies`（cookies.json 整套字段，坏 JSON 启动即失败）/ `saveCookies`（扫码落盘，merge：新值覆盖、旧值兜底）/ `cookieHeader`（绝不进日志）/ `fetchSelf`（nav isLogin 心跳，-101 归一化为未登录） | ✅ |
-| `src/sources/bili/qrcode.ts` | passport 扫码登录客户端：`generateQrcode` / `pollQrcode`（data.code 归一化 waiting/scanned/confirmed/expired，confirmed 从 Set-Cookie 提全套 cookie）；不走 biliRequest（要响应头） | ✅ 已实测（2026-08-03 真实扫码登录成功） |
-| `src/sources/bili/followings.ts` | 分页拉 `x/relation/followings`（50/页，按 total 翻页，短页到底）；已实测 604 关注 13 页无需 WBI 签名 | ✅ 已实测 |
-| `src/sources/bili/follows.ts` | `FollowsSource`：isLogin 心跳合并进同步周期（运行中意外失效〔本进程内此前成功登录过〕才发一次 health_alert 并跳过、恢复复位；本来就没登录只记日志不告警；每轮 `onLoginState` 上报登录态供面板展示）→ 整轮成功才落库（单页失败整轮放弃，绝不清空）。关注**不自动入监听**：follows 表只是面板候选池，监听名单全由用户在面板管理；仅对已有 streamer 做空 face 回填 | ✅ 已实测 |
-| `src/sources/bili/danmaku.ts` | 弹幕 WS，开播拉起、下播关闭；采样进分析队列 | ⬜ |
-| `src/sources/bili/dynamic.ts` | `DynamicSource`：空间动态轮询（`feed/space`，全量 cookie + dm 三参 + space Referer，**无 WBI**；mapLimit(2) 逐 uid）→ posts 表归档（UNIQUE 去重）→ 新帖 emit `feed_post`（payload 带 post 摘要）；登录态心跳折进轮询周期（每轮 `fetchSelf`，运行中意外失效〔此前成功登录过〕才发一次 health_alert 并跳过本轮、恢复复位，本来就没登录只记日志不告警；每轮 `onLoginState` 上报——follows.enabled=false 时这是 B站登录态唯一来源）；每 uid 首轮静默归档；拉取失败保留旧数据，单 uid 连续失败到阈值发一次 health_alert、持续满 10 分钟再发一次（payload `durationAlert`）、恢复复位；无 cookie 不启动，随 follows 热重启。`parseDynamicItem`：LIVE_RCMD 二次解析 live_play_info / WORD / DRAW（opus pics、draw items）/ AV / FORWARD（拼「//转发自 @xx」摘要） | ✅ 已实测（2026-08-03：22 个 uid 全量归档，零 412） |
-| `src/sources/bili/dm.ts` | dm 设备指纹参数（`dm_img_list` 高斯随机轨迹 + 两个静态 base64），算法出处 RSSHub `addDmVerifyInfo`；弹幕等风控接口复用 | ✅ |
-| `src/sources/weibo/feed.ts` | `WeiboFeedSource`：微博时间线轮询（`ajax/statuses/mymblog`，桌面 UA + `Referer: /u/<uid>` + 全量 weibo cookie；对象 = watch=1 且 weiboUid 非空，mapLimit(2)）→ posts 表归档（`platform='weibo'`，posts.uid 存监听名单 uid 供第三栏混排，微博 uid 只用于拉取与拼 url）→ 新帖 emit `feed_post`。登录态心跳折进同步周期（`fetchWeiboSelf` 运行中意外失效〔此前成功登录过〕才发一次 health_alert 并跳过整轮、恢复复位，本来就没登录只记日志不告警；每轮 `onLoginState` 上报）；每 uid 首轮静默归档；失败纪律同 dynamic。`parseMblog`：text_raw 纯文本 / retweeted_status 转发拼「//转发自 @xx」（被删残桩不炸）/ pics large.url / created_at Date.parse 转秒 / isLongText 补 `ajax/statuses/longtext`（失败用截断兜底不算错误） | ✅ 已实测（2026-08-03 真扫全链路：换票落盘 → 时间线归档 → 面板新增微博 5 分钟内自动纳入） |
-| `src/sources/weibo/qrcode.ts` | passport sso/v2 扫码客户端：`generateQrcode`（**必须带 Referer: https://weibo.com/ 否则 403**，image 是 png 直链面板直接 `<img src>`）/ `pollQrcode`（retcode 归一化：20000000=confirmed、50114001=waiting 已实测；50114002=scanned、其他 50114xxx=expired 防御式映射）/ `exchangeCookies`（confirmed 的 data.url 起跟 302 链收集 Set-Cookie 换全套 cookie，3xx 时 res.ok=false 勿当错误）；fetch 可注入，cookie 绝不进日志 | ✅ 已实测（2026-08-03 真扫全链路） |
-| `src/sources/weibo/auth.ts` | weibo-cookies.json 管理：`loadWeiboCookies`（坏 JSON 启动即失败）/ `saveWeiboCookies`（merge：新值覆盖、旧值兜底）/ `weiboCookieHeader`（绝不进日志）/ `fetchWeiboSelf`（`ajax/log/action` 看 X-Log-Uid 响应头，异常与缺头归一化为未登录） | ✅ |
-| `src/sources/weibo/resolve.ts` | 昵称→UID 解析（匿名访客通道：genvisitor 拿 tid → incarnate 拿 SUB/SUBP → m.weibo.cn/n/<昵称> 302 /u/<uid>；cookie 模块级缓存、失效自动重建重试一次、绝不进日志；fetch 可注入） | ✅ 已实测昵称解析 |
-| `src/sources/media/keyframe.ts` | `KeyframeCache`：在播直播间关键帧定时本地缓存（积累判定素材，供后续人工/LLM 对照分类正确性）。`consider(live)` 每轮由 live-status source 喂同一份在播数据（同步返回、内部 mapLimit(2) 异步下载，绝不阻塞轮询）；同一场 (roomId, liveTime) 距上次**尝试**不足 intervalMs 跳过（失败也记，不重试轰炸）；下载 UA+Referer / 8s 超时 / 10MB 防御上限 / content-type 定扩展名；**内容 md5 去重**（与上一帧相同直接丢弃不写盘，不按 URL 判）；落盘 `<dir>/<roomId>/<liveTime>/<ts>.jpg` + `insertSnapshot` 入库；**库内 path 存相对 `<dir>` 的相对路径**（`<roomId>/<liveTime>/<ts>.ext`，换机/移动目录可迁移；绝不可存绝对路径）；失败仅 log.debug；下播场次清出内存表防无限增长；**暂不清理**，体积用户已接受。**开关/间隔事实来源 = settings（RuntimeConfig）**：`configure({enabled, intervalMs})` 热生效——关闭只是 consider no-op，去重/间隔记忆保留，重开不炸量 | ✅ |
+- `src/sources/types.ts` — `Source` / `SourceContext` 接口
+- `src/sources/bili/client.ts` — HTTP 层（UA、超时重试、错误分层）
+- `src/sources/bili/types.ts` — B站接口返回类型
+- `src/sources/bili/live-status.ts` — 批量 `get_status_info_by_uids`（50/片）
+- `src/sources/bili/live-status-source.ts` — 轮询 + diff + coldStart + 健康计数
+- `src/sources/bili/auth.ts` — cookies.json + nav 心跳（不进日志）
+- `src/sources/bili/qrcode.ts` — passport 扫码客户端（要响应头）
+- `src/sources/bili/followings.ts` — `x/relation/followings` 分页（50/页，无 WBI）
+- `src/sources/bili/follows.ts` — `FollowsSource`（正轮成功才落库；不自动入监听）
+- `src/sources/bili/dynamic.ts` — `DynamicSource`：`feed/space`（无 WBI）→ posts
+- `src/sources/bili/dm.ts` — dm 设备指纹参数（RSSHub 算法）
+- `src/sources/media/keyframe.ts` — `KeyframeCache`（md5 去重、相对路径入库）
+- `src/sources/weibo/feed.ts` — `WeiboFeedSource`：mymblog 轮询
+- `src/sources/weibo/qrcode.ts` — 微博扫码（generate 必须带 Referer）
+- `src/sources/weibo/auth.ts` — weibo-cookies + `X-Log-Uid` 心跳
+- `src/sources/weibo/resolve.ts` — 昵称→UID 匿名解析链
 
-### analysis — 分析（LLM 即任务）
+### analysis / rules
 
-| 文件 | 职责 | 状态 |
-|---|---|---|
-| `src/analysis/types.ts` | `Classifier` / `Classification` / `AnalysisContext` / `LlmTask`（占位） | ✅ 仅类型 |
-| `src/analysis/classifier.ts` | `RulesClassifier`：每场 live_start 对全部启用分类逐个判定，结果 `insertVerdict` 入库。LLM 优先：有 llm_prompt 的分类在 router 可用 && LLM 总开关开时合并成一次 LLM 调用（对全部监听主播生效，analyze 闸门已随面板三开关删除），判定权威（判否不回看确定性条件）；LLM 不可用/调用失败/解析失败回退 `matchCategory`；无提示词分类永远走确定性（source 'rule'）。构造注入 `(db, getRouter, llmEnabled)`——router 是 getter 每轮取最新（面板热重建不失效） | ✅ |
-| `src/analysis/triggers.ts` | 触发策略：开播 / 新动态 /（预留）直播中抽查、定时全量 | ⬜ |
-| `src/analysis/queue.ts` | 分析队列：包装 `Classifier`，`submit(ctx): Promise<Classification[]>`，信号量限流（并发 2）。预留：同房间触发合并、结果缓存、优先级 | ✅ |
-| `src/analysis/context.ts` | 按房间聚合时间窗内多源数据 → 一份 context | ⬜ |
-| `src/analysis/providers.ts` | LLM provider 层（OpenAI 兼容直连，无外部网关；`api` 双协议 chat-completions / responses〔responses：system→instructions、部件 input_text/input_image、结构化输出走 text.format〕，Anthropic /messages 明确不接）：`LlmRouter.completeJson(req, parse?)` 按输入是否含图自动选 text/vision 路由（可显式覆盖），沿路由降级，全挂抛 `AllProvidersExhaustedError`；熔断（连续失败阈值 + 冷却期跳过）；多 key 池轮询（`needsAuth` 启发式：loopback 端点 = 无鉴权，其余无 key = 标「缺 key」跳过，不算配置错误）；`structuredOutput` 三档（schema / object / none，none 剥 ```json 围栏兜底）；任务层 zod parse 失败同等计入熔断；key 只进 Authorization 头绝不进日志/错误信息；**provider 名单唯一信源是 settings 表 `llm_providers`**（`listLlmProviders` / `saveLlmProviders`），路由 `deriveRoutes` 自动推导（顺序 = 优先级，text = 全部启用，vision = 启用且多模态）；**key 唯一信源是 settings 表 `llm_key:<providerName>`**（逗号分隔多 key，`dbKeysOf`）；保存后 `router.refreshKeys()` 热更新；`router.ping(name)` 面板「测试」按钮用（绕熔断直连，结果计入熔断）；`createLlmRouter(cfg, keysOf?)` 装配（路由内部推导） | ✅ |
-| `src/analysis/tasks/classify.ts` | 内容分类 LLM 任务：一次 live_start 对所有「启用且有 llm_prompt」的分类**合并成一次调用**（成本与降级语义最简单）：`buildClassifyRequest`（system 指令 + 主播/标题/分区 + 分类清单；`keyframe || cover` 非空带图走 vision 路由；jsonSchema `{results:[{id,match,confidence,evidence}]}`）+ `parseClassifyResults`（zod 校验 + 过滤 `match && confidence ≥ 0.5`，模型编造的未知 id 丢弃；parse 失败由 providers 层计入熔断 → 调用方回退确定性） | ✅ |
-| `src/analysis/tasks/schedule-extract.ts` | 从动态/微博解析预告时间 → schedules 表（置信度入库，阈值过滤） | ⬜ |
-| `src/analysis/matcher.ts` | 确定性匹配（零 LLM 依赖）：`matchCategory(cat, event)` → `{matched, evidence}`——关键词组 vs 标题子串、分区组 vs areaName/parentAreaName 子串，大小写不敏感、组内任一、`condMode` and/or 控制组间关系、空组忽略、两组皆空不命中，evidence 记录命中词（入 verdicts）；`matchPushRules(rules, event, matchedCategoryIds)` 命中 =（categoryId 空 = 任意开播，或 ∈ 判定集合）且（uids 空 = 全部主播，或含 event.uid），**返回全部命中规则**（保持 sort 顺序）：所有命中规则独立生效，调用方对渠道取并集去重（同一渠道只推一次），推送词 = sort 序首个非空 messageTemplate。`renderTemplate` 渲染 {liver}（原名）/{uname}/{title} | ✅ |
+- `src/analysis/types.ts` — `Classifier` / `Classification` / `AnalysisContext` / `LlmTask`
+- `src/analysis/classifier.ts` — `RulesClassifier`（LLM 优先 + 确定性回退，入 verdicts）
+- `src/analysis/queue.ts` — 分析队列（限流并发 2）
+- `src/analysis/providers.ts` — LLM provider（路由/熔断/多 key/双协议）
+- `src/analysis/tasks/classify.ts` — 单次批量 LLM 分类任务
+- `src/analysis/matcher.ts` — 确定性匹配（`matchCategory` / `matchPushRules` / `renderTemplate`）
+- `src/rules/types.ts` — `DecisionRule` / `NotifyDecision`
+- `src/rules/once-per-session.ts` — 每场直播推一次
 
-### rules — 确定性护栏
+### notify — 推送
 
-| 文件 | 职责 | 状态 |
-|---|---|---|
-| `src/rules/types.ts` | `DecisionRule`（`decide(event, signal, classifications)`）/ `NotifyDecision` | ✅ 仅类型 |
-| `src/rules/once-per-session.ts` | M1 规则：每场直播推一次 | ✅ 占位 |
-| `src/rules/preference.ts` | 护栏全集：静音名单、静默时段、冷却窗口、状态跳变抑制 | ⬜ |
+- `src/notify/types.ts` — `Notifier` 接口
+- `src/notify/message.ts` — `liveEventToMessage()`（不用 emoji）
+- `src/notify/dispatcher.ts` — fan-out + 渠道路由 + `alertAll`
+- `src/notify/onebot.ts` — NapCat OneBot 11 HTTP（串行 + 1.2s；无 alert）
+- `src/notify/napcat.ts` — NapCat 通道 + 失活自动拉起（双平台、端口条目自管）
+- `src/notify/toast.ts` — 本机通知（健康告警唯一通道）
+- `src/notify/mac-notifier.ts` — macOS 原生 helper（失败回落 osascript）
+- `src/notify/aumid.ts` — Win32 AUMID 注册
+- `src/notify/image-cache.ts` — toast 图片本地化
 
-### notify — 推送（只执行，不解释语义）
+### panel / mcp
 
-| 文件 | 职责 | 状态 |
-|---|---|---|
-| `src/notify/types.ts` | `Notifier` 接口：`send(PushMessage)` + `capabilities` + `alert()`（可选，供健康告警；当前仅 toast 实现） | ✅ |
-| `src/notify/message.ts` | `liveEventToMessage()`：LiveEvent → PushMessage（纯文案不用 emoji——QQ iOS 气泡渲染会把增补平面 emoji 拆成两个方框；body 只留直播标题，分区 · 开播时间进 attribution，头像进 icon，刚开播无关键帧时通知仍有图） | ✅ |
-| `src/notify/dispatcher.ts` | 并行 fan-out、notify_log 用 `msg.ref` 溯源、任一通道成功即标记。`msg.channels` 存在时渠道路由：查 push_channels 过滤「选中且启用」按 notifier 分组，onebot 组解析成 `msg.targets`，无选中渠道的 notifier 跳过；缺省走全通道旧行为。`alertAll(title, body, qqTarget?)`：本机告警只派发到实现 `alert()` 的通道（当前仅 toast），`qqTarget` 存在时另走 onebot.send 私聊点对点。`setNotifiers` 装配级替换（NapCat 配置热更新后重建，pipeline 引用不变；无通道级开关——通道启停走 push_channels.enabled）。**待扩展**：通道级规则 | ✅ |
-| `src/notify/onebot.ts` | NapCat OneBot 11 HTTP；消息段数组；attribution 拼成正文第三行；图片失败降级纯文本；每目标串行 + 1.2s 间隔。常规 `send` 只看 `msg.targets`（空 = 不发）；**不实现 `alert()`——次数阈值类健康告警不发 QQ，QQ 告警由 dispatcher 按 pipeline 判定带 qqTarget 走 `send` 私聊点对点**；`updateEndpoint()` 供 NapCat 看门狗热跟随端点；`--test-notify` 的假消息取 push_channels 表的启用 QQ 渠道可真实验证链路 | ✅ 已实测（2026-08-05 test-notify 私聊发送成功） |
-| `src/notify/napcat.ts` | NapCat 通道 + 失活自动拉起（**双平台**）：**dd-claw 专属条目自管**——`ensureNapcatEntry` 在 onebot11_<uin>.json 自建/修复 `name: "dd-claw"` 的 httpServers 条目（缺了选高位空闲端口〔41990 起扫〕创建、被禁用启用、端口被占自动换，只动这一条）；`readOnebotEndpoint` 按名匹配发现（无条目回落第一个启用条目；host 0.0.0.0/:: 归一化回环）；`probeNapCat` 三态探测（连接拒绝=down / TCP 通但非 OneBot=conflict / OneBot JSON=ok 再看 retcode 判登录态）；`NapcatWatchdog` 状态机（`target` 回调每 tick 取生效 dir/uin、缺条目自建、conflict 自动换端口再拉起、**陈旧实例识别**〔新端口 down 但 lastOk 旧端口仍 ok → 停旧再拉起让新配置生效〕、down 冷却 10min 内拉起、3 次放弃告警、未登录只告警一次、恢复自动复位；**拉起由 `autoRestart` 开关 + `available` 能力双闸门控制**——开关关 = 只探测/告警/热跟随绝不拉起，能力不可用〔任务被删〕告警一次不拉起）；`getNapcatConfig`/`saveNapcatConfig` 生效配置（**settings 表 `napcat_enabled`〔使用 NapCat 通道〕/`napcat_autorestart`〔失活自动拉起，缺省关〕/`napcat_dir`/`napcat_uin` 唯一信源**——webui 管理；传空串 = 清空字段，无回落）；`getNapcatAlertQq` 读 settings `napcat_alert_qq`（健康告警 QQ 私聊目标，留空 = 不报，独立设置不进 NapcatConfig）；**`napcatRelaunchDriver(platform)` 拉起能力抽象**：win32 = schtasks（`setupNapcatTask` 一次 UAC 同建拉起 + 停止双任务：生成 `data/napcat-launch.cmd`〔先 `cd /d` 进一键包目录——launcher.bat 用 %cd% 拼 NAPCAT_* 路径〕+ `data/napcat-stop.cmd`〔taskkill /F /IM /T，高权限进程非提权杀不掉〕+ `data/napcat-setup.cmd` 提权 schtasks /create〔日志落 napcat-setup.log〕；**不经 Start-Process -ArgumentList 拼参**〔带空格元素不加引号的坑〕；`launchNapcatViaTask`/`stopNapcatViaTask`/`removeNapcatTask`）/ darwin = `open -a QQ --args --no-sandbox --qq <uin>`（**快速登录**：--qq 进 process.argv 由 NapCat shell/base.ts 读走；`launchMacNapcat`/`stopMacNapcat`〔osascript quit〕；setup/remove 为 no-op——NapCat-Mac-Installer 已改 QQ 无需提权任务，`macNapcatInstalled` = /Applications/QQ.app 存在即能力就绪）。探测/执行/时钟全可注入 | ✅ 已实测（2026-08-09 stop/start 双端口在线） |
-| `src/notify/toast.ts` | powertoast 本机通知；**健康告警（health_alert → alertAll）的唯一通道**。构造可传 `aumid` + `cacheDir`；http 图先经 image-cache 本地化（Win32 身份不支持远程图），失败按无图发。icon = 左侧方形头像（appLogoOverride，不裁圆）、heroImg = 顶部关键帧大图、attribution = 底部分区 · 开播时间小灰字 | ✅ 已实测 |
-| `src/notify/aumid.ts` | Win32 AUMID「DD-claw」自动注册：.lnk 缺失时调 `scripts/register-aumid.ps1`（PowerShell COM interop 写 AppUserModel.ID + 通知中心注册表，**必须 UTF-8 BOM + STGM_READWRITE**）；失败回落 Microsoft Store 默认身份，通知照发 | ✅ 已实测 |
-| `src/notify/image-cache.ts` | toast 图片本地化：http 图下载到 `data/cache/toast/`（B站图床需 UA+Referer，3MB 上限，3 天清理），失败返回 null | ✅ |
-| `src/notify/ntfy.ts` | ntfy 兜底通道 | ⬜ |
+- `src/panel/server.ts` — node:http + 静态内嵌 + `/api/*` + `/mcp`
+- `src/panel/http-util.ts` — 解析/校验/响应 + 面板与 MCP 共用逻辑
+- `src/panel/schedule.ts` — 时间表查询（北京 06:00 日界）
+- `src/panel/webui-assets.gen.ts` — 构建期生成物（勿手改）
+- `src/mcp/auth.ts` — token 模型 + `resolveMcpAuth`
+- `src/mcp/tools.ts` — 工具注册表（按角色）
+- `src/mcp/handler.ts` — `/mcp` 无状态处理
+- `src/mcp/rate-limit.ts` — gateway 写限流
+- 细节见 `docs/modules/panel.md`、`docs/mcp.md`
 
-### panel — 控制面板（localhost WebUI，v1）
+### 装配 / 工具 / 前端 / 脚本
 
-| 文件 | 职责 | 状态 |
-|---|---|---|
-| `src/panel/server.ts` | `createPanelServer({ db, status, weiboResolver?, auth?, weiboAuth?, listen?, napcat? })`：同进程 node:http，零框架零依赖，只绑 127.0.0.1；**静态资产**：`GET` 且 `WEBUI_ASSETS[path]` 命中 → 200 + 对应 content-type + `cache-control: no-store`（构建期内嵌快照，运行时绝不读磁盘；纯 map 查键无路径拼接、天然无穿越；在 /api/* 判断之前，未命中自然落 API/404）；REST API 读写 streamers/follows/push_channels/push_rules/settings + `/api/status`（platforms/liveCount 新形状）；`/api/listen` + `PUT /api/listen/:feature` 监听功能开关（listen dep 存在才挂载；GET 回 auto 有效态 + platforms；PUT 改手动设置并回调 onChanged 热启停源）；`/api/napcat` + `PUT /api/napcat` + `POST /api/napcat/launch` NapCat 通道（napcat dep 存在才挂载：GET 回生效配置〔含 autorestart〕+ source 标注 + 端点 + 实时三态探测 + taskRegistered〔拉起能力就绪〕；PUT 校验〔enabled/autorestart 布尔 / uin/alertQq 纯数字，空串 = 清空字段（settings 唯一信源，无 config 回落）〕后 await save——**autorestart 开 = 建拉起任务〔失败 400 透传、不落开关〕、关 = 移除任务**；launch 双平台失败 400 透传原因）；`/api/advanced` GET/PUT 高级设置（无 dep 也挂载：GET 回 RuntimeConfig 全量；PUT 按 NUM_SPECS/BOOL_SPECS 规格表逐字段校验范围〔非法 400 中文报错、空 patch 400〕落 settings 并回调 advanced dep 的 onChanged 热生效）；`/api/snapshot` 缓存关键帧（snapshots dep〔dir = keyframes 目录〕存在才挂载，否则 404；`?room&lt&ts` 校验正整数否则 400；`db.nearestSnapshot` 取距 ts 最近一帧，无行/文件读不到 404；**路径安全**：库内 path（相对 keyframe 目录、分隔符正斜杠）读库时 `/` 归一化后 resolve 到注入 dir 下、必须在 dir 内否则 404〔防路径穿越 + 兜底 Windows 反斜杠残留〕；200 按扩展名 image/png|jpeg + `cache-control: no-store`〔nearest 随新帧落地变化〕）；`/api/streamers` enrich（三开关〔遗留字段，面板不再展示〕 + face + live 实况 + rules 生效规则名数组〔uids 空或含该 uid，全局 sort 序，含 disabled〕 + posts 最近 5 条动态摘要〔platform/type/text/pics/pubTs/url，raw 不下发，一次分组查询〕，一次请求每表各查一次）；`PUT /api/streamers/:uid` 可写键 alias/watch/analyze/notify/weiboNick/profileNote（面板只提交 alias/weiboNick/profileNote + 关注列表取消监听的 watch；weiboNick 与现值不同才走 resolver 解析，成功连同 weibo_uid 入库，找不到/网络错误 400，传空两字段一起清；resolver 未注入时 400「微博解析不可用」）；`/api/channels` + `/api/channels/:id` 渠道 CRUD（notifier 枚举、onebot 必填纯数字 targetId、name 非空，PUT 对合并后形状做联动校验）+ `PUT /api/channels/order` 拖拽排序（ids 必须与现有渠道一一对应，否则 400；在 :id 通配之前匹配）；`/api/push` + `PUT /api/push/enabled` 推送总开关（settings.push_enabled，缺省开；关 = pipeline 全局不推，追踪照常）；`/api/schedule` 时间表（GET-only 无 dep；`?from&to` 为北京日界日串〔UTC+8 凌晨 6 点界，仅用于归属：6 点前开播归前一天、跨 6 点整体按开播日〕，缺省今天-7 ~ 今天+1，跨度上限 62 天；返回逐日 entries〔含 segments/verdicts/主播信息，`kind` 字段预留 schedule 预告〕，空日期返回空数组）；`/api/categories` + `/api/categories/:id` 分类 CRUD（name 省略补「分类 N」、显式空串 400「分类名称不能为空」；llmPrompt/keywords/areas 至少一项非空否则 400，PUT 对合并后形状校验；condMode 枚举）+ `PUT /api/categories/order` 拖拽排序（ids 全排列，在 :id 通配之前匹配）+ `DELETE /api/categories/:id` 级联停用引用它的推送规则（返回 `disabledRules` 供面板提示）；`/api/rules?uid=` + `/api/rules` + `/api/rules/:id` 推送规则 v2 CRUD（`?uid=` = 对该主播生效的规则〔uids 空或含该 uid〕；name 省略补「规则 N」、显式空串 400；categoryId 可空 = 任意开播、非空必须存在于 categories 否则 400「分类不存在」；uids 元素纯数字且在监听名单内；channels 必须存在于 push_channels——存在性校验在路由层对合并后形状做）+ `PUT /api/rules/order` 全局拖拽排序（body 只带 ids，必须是全部规则的全排列，否则 400；在 :id 通配之前匹配）；`/api/auth/bili/qrcode` + `/poll` B站扫码登录（auth dep 存在才挂载，confirmed → saveCookies 落盘 → onCookiesSaved 热重启 follows + dynamic）；`/api/auth/weibo/qrcode` + `/poll` 微博扫码登录（weiboAuth dep 存在才挂载，qrid 会话存服务端；confirmed → exchangeCookies 换票 → saveWeiboCookies 落盘 → onCookiesSaved 热重启 weibo feed；expired 清会话）；`/api/llm` + `PUT /api/llm/keys` LLM provider 展示与 key 管理（llm dep 存在才挂载；key 按 provider 存 `llm_key:<providerName>`，**本机面板明文回显/编辑**〔用户决策 2026-08-06，不做掩码〕：GET 回 source panel/unset + count + value；空 value = 清除已填 key；保存后 router.refreshKeys() 热更新）+ `POST /api/llm/providers` + `PUT/DELETE /api/llm/providers/:name` provider 名单 CRUD（llmProviderSchema 校验、重名 400、name 是路径标识不可改；body 可携带 `key` 一并保存〔弹窗单表单体验〕，不带则不动现有 key；落 settings 表后 onProvidersChanged 重建 router 热生效）+ `PUT /api/llm/providers/order` 整体重排（names 必须是现有名单的排列：长度一致/无重复/无增删，否则 400；在 :name 通配之前匹配）+ `POST /api/llm/providers/:name/test` 可用性 ping（404 不存在 / 400 缺 key / 200 {ok,ms} / 502 端点错误，错误信息不含 key）+ `PUT /api/llm/enabled` 总开关（settings.llm_enabled '1'/'0'，缺省关，isLlmEnabled 解析）；cookie 值不进任何响应/日志（LLM key 例外：明文回显是本机面板的明示决策）；`/mcp` MCP 端点（Bearer token 鉴权 + 按角色注册工具面，实现委托 src/mcp/，见下方 mcp 段） | ✅ v1 |
-| `src/panel/http-util.ts` | 请求体解析（64KB 上限）、参数校验（400 + 中文错误）、JSON 响应；**面板路由与 MCP 工具共用的跨表逻辑也在这里**：`checkRuleRefs`（规则引用存在性）、`watchStreamer`（候选池一键加入监听）、`parseRuntimePatch`（高级设置规格表校验） | ✅ |
-| `src/panel/schedule.ts` | 时间表查询（北京 06:00 日界 + listTimeline 归并 + 空日期占位）：`/api/schedule` 与 MCP `get_schedule` 共用同一实现 | ✅ |
-| `webui/` | 控制面板前端**唯一信源**（真实 HTML/CSS/JS，ES modules 显式 import/export——2026-08-19 从 TS 模板字符串内嵌重构而来；**2026-09-03 起视觉 = UI 重设计 v2 平移定稿**，原 `webui/redesign/` 评审原型已删除）：`index.html`（壳：**左边栏 + 右内容区三视图**——边栏为浮动卡片样式〔不贴边、与内容区左相邻〕，side-logo 爪印徽章 + 视图导航〔时间表 / 主播列表 / 设置〕+ side-foot 在播计数胶囊 `#side-live-count`；时间表视图卡片刚好一屏，主播列表视图为竖版三段式卡片网格（.st-grid/.st-card），设置视图 = .set-grid 六设置卡（acc 主题色：监听粉/NapCat青/LLM紫/渠道蓝/分类黄/规则绿）+ 关注列表；引用 `./style.css` + `./js/boot.js`）+ `style.css`（v2 设计系统：间距 4/8/12/20、圆角三级 24/16/10、控件恒 36 高、--bg-soft #F8F8F8 纯中性灰、卡片两段式内嵌同心圆、按钮四语义色 primary/ghost/blue/line；浅色单主题〔深色媒体查询已删〕；时间表已 v2 化美学改版〔2026-09-03：胶囊刻度 + 虚线基线轴 / 日标签行内悬浮胶囊 / 泳道浅分割线 / 仅居中天浅蓝底 / 条纯实色〔光泽阴影全去〕/ 在播散尾 = ::before mask 整体淡出〔文字保持实色、右端直角不收圆〕/ 粉色渐变红线 / hover 弹层 16:9 图置顶重设计〕）+ `js/boot.js`（入口：`?demo=1` 时先 `await import('../demo/mock-api.js')` 装 fetch 拦截器再进 app，真实部署不带 demo 参数 = 零影响）+ `js/app.js`（装配各卡模块 + 边栏 `nav-view` 视图切换）+ `js/core.js`（esc/api/toast/sheet〔openSheet/closeSheet/sheetCleanups/footHtml 第四参〕/switchHtml/checkboxHtml/checkRowHtml/checkDotHtml/iconBtn/gripHtml/field/chanTypeName+chanTag/**makeSortable 拖拽排序**〔v2 视觉：拖起浮起浅蓝底 + 原位 .drop-gap 内嵌浅蓝块 + FLIP 让位〕/**事件委托 ACTIONS·CHANGES·INPUTS 三张表**/**fitRow 行宽适配**（行宽不足时行内标签从尾部整枚舍弃〔flex 压碎片无信息量〕，标题保持自然宽度、标签全舍弃后才截断，两侧控件 flex:none 不动；ResizeObserver 跟行宽 + MutationObserver 捕获重渲新行；溢出判定用末子元素右缘对比，不看 scrollWidth〔右 padding + 行尾负 margin 有约 20px 静默余量〕）/avatarHtml+avatarPhHtml〔头像 + 首字占位兜底，捕获阶段 error 委托〕/relTime/fmtLiveDur/dropdownHtml+ddSetValue〔自绘下拉 .dd，菜单搬 body fixed 定位〕/fmtDur+durSpan/data-icon 填充——全部显式 export）+ `js/icons.js`（图标渲染 `icon(name)`：消费本地节选的 lucide v1.33.0 官方节点数据 `js/lucide-icons.js`〔ISC，面板用到的图标全收，v2 平移时补入 paw/eye/video-off/send 等〕，按 lucide 官网同款 SVG 属性输出，离线可用）+ `js/qr-lib.js`（qrcode-generator v1.4.4 真实 JS，base64 解码回文件 + `export default qrcode`）+ `js/listen.js`/`llm.js`/`categories.js`/`push.js`/`napcat.js`/`streamers.js`/`follows.js`/`schedule.js`（9 卡一一对应原 app-*.ts，隐式全局改显式 import：streamers.js 导出 `loadStreamers` 并 re-export core 的 `avatarHtml`，push.js 导出 `loadPush`，categories.js 跨卡 import 二者；无循环依赖）+ `demo/mock-data.js`（demo 数据层手写部分：SVG 占位图/头像兜底、bj 日界助手、**freezeTime 时间冻结**、渠道/NapCat/高级设置等设置卡片的已登录最简态〔targetId/uin 全为占位假号〕）+ `demo/mock-api.js`（fetch 拦截器：内存实现整张 /api/* 路由表含 PUT/POST/DELETE 与拖拽排序；扫码 poll 走 waiting→scanned→confirmed 演示循环；/api/snapshot 404 走前端回退链）+ `demo/fixtures.json`（**真实数据节选夹具，随仓库发布**：`npm run demo:fixtures` 一次性从本机库导出 demo 主播 12 位〔七海/阿梓/星瞳/雫るる/明前奶绿/永雏塔菲/栞栞/弥月/灰泽满/花礼/泽音/菫時〕+ 关注 18 位〔+米汀/岁己/巴老师/樱群/三理/雪烛〕+ 近 14 天时间表，**导出后人工节选维护**，已存在时拒绝覆盖、须 `--force`；`meta.exportedAt` = demo 时间冻结点——无论哪天打开 demo，时间表红线/在播时长/动态时间都按导出瞬间渲染；全是公开数据无需脱敏）+ `demo/defaults.json`（**LLM provider / 分类规则 / 推送规则的手工展示案例 = 发布后首启默认值唯一信源**，demo mock 与 onboarding 共用；构建期生成 `src/core/onboarding-defaults.gen.ts` 供后端种入）。mock-api 启动时真实 fetch 这两个 JSON（缺失逐项回退空态）。**契约**：mock-api 与 server.ts 的 /api/* 完全同构，改 server 路由必须同步改 mock-api | ✅ |
-| `scripts/build-webui.mjs` | 构建期内嵌：读 `webui/**`（含 demo/）→ 生成 `src/panel/webui-assets.gen.ts`（`WEBUI_ASSETS` map：URL 路径 → {type, body}，正文 JSON.stringify 转义、绝不进模板字面量）；另把 `webui/demo/defaults.json` 生成 `src/core/onboarding-defaults.gen.ts`（首启默认值的后端消费形）。纯 node fs 零依赖；由 `prebuild`/`predev`/`pretest`/`pretypecheck` npm 钩子保证每次 build/dev/test 先于编译现生成；**两个生成物内容没变就不写盘**（tsx watch 盯 src/，mtime 变化会白重启 dev 服；dev 脚本另把两个 .gen.ts 列进 `--ignore`，真变了也不重启） | ✅ |
-| `src/panel/webui-assets.gen.ts` | 生成物（**gitignore 防漂移，勿手改**）：运行时 server 只服这份内存快照，dist 里只有编译产物——发布工件天然与同 commit 后端同版本 | ✅ |
-
-面板范围（视觉 = v2 设计，2026-09-03 平移定稿）：**边栏 + 三视图壳**（左边栏为浮动卡片〔不贴边、与内容区左相邻、高度仅包内容〕= DD-claw 控制面板标题 + 时间表 / 主播列表 / 设置导航；右内容区宽度与原单页一致，body 整屏不滚动、视图各自滚动）。时间表视图：卡片刚好一屏，日列表填满余高（**泳道高度 0-1-2 级权重制，行高由 JS 解算成 flex-basis 像素值**：mini 日固定 5px 窄条不占弹性空间，single/center 日按「当天泳道数 × 级权重 1/2」水装填分配余高〔不足 10 道补空〕，每道下限 single 16px / center 32px〔钳住后余量重分；下限总和放不下时按三步降级——去掉首末两天只显示三天 → 相邻两天降 mini 条 → 当天降单行条，JS 按实际道数/可用高度算定，空间恢复自动升回，仍超出才裁底〕，道内 flex:1 均分——同级别各天泳道等高、随屏幕高度伸缩，沿用旧三档道高的层级比例；basis 恒为像素值，级别切换/进出窗口/缩放全是 px→px 连续过渡；横条文字可用空间随屏幕高度与泳道数变化，暂不做特殊处理；**视觉已 v2 化**（2026-09-03 美学改版，动画/三态/分段/交互全保留：日标签改行内悬浮胶囊〔不占左侧日头列，居中天蓝渐变、今天加前缀——「今天」= 逻辑日（6:00 日界、红线所在日），0-6 点前缀如实写「昨天」，初始居中日同口径〕、时间胶囊刻度 + 虚线基线轴〔轴与泳道同宽〕、泳道去底色改道间浅分割线〔mini 不画〕、段间竖分割线并入条 ::before 背景层〔随圆角裁切不伸出颜色区域、在播条随 mask 散尾，文字溢出不受影响〕、仅居中天浅蓝渐变底、条纯实色〔2026-09-03 用户决策光泽与阴影全去〕、在播散尾 = ::before mask〔--fade〕整体淡出〔尾端不漏矩形硬边、文字层保持实色、右端直角不收圆〕、红/粉渐变「现在」线 + 顶端圆点光环、卡头右侧在播/现在图例、hover 弹层 = 16:9 图置顶 + 2 行标题 + clock 图标时间行 + 直播中胶囊 + 判定分类名按名哈希五色 tag）；主播列表视图：**竖版严格三段式卡片 .st-card**（网格 auto-fill minmax(300px,1fr)，在播优先再按 lastLiveAt 排序）：①关键帧横幅头（16/9 独立卡片头，在播粉色内描边 ::after 覆盖层 + 粉底 LIVE 角标〔脉动点 + h:mm:ss 开播时长〕+ 右上在线人数胶囊〔eye 图标 + 万格式化〕，标题分区叠 .st-ov 磨砂衬底；下播 = 压灰 + 底部下播时间行，无画面 = video-off 占位）②主播信息段（头像 3px 白描边环 + 名称 + 直播间/微博 meta + 规则行：绿点 + 规则名标签单行恒高尾部裁剪）③动态段（--bg-soft 内嵌容器定高 166px，默认第一条展开、其余收起单行 28px，hover 互斥换展，LIVE_RCMD 过滤，enrich posts 取前 3 条混排）；**主播的监听/LLM/推送三开关已删**（「名单内即监听中」无状态设计：详情弹窗只留字段编辑〔alias/weiboNick/profileNote〕+ 生效规则视图，后端 analyze/notify 闸门同步移除，watch 仍是名单机制）；设置视图 = 六设置卡（监听〔B站登录 / 监听动态开关 / 微博登录 / 监听微博开关，开关没登录默认关、登录后自动开、手动设置为准，底部「抓取设置」〕/ LLM 供应商〔底部「高级」〕/ 分类规则 / 推送渠道〔底部「推送设置」〕/ 推送规则 / NapCat，**.set-grid 响应式网格容器**）+ 关注列表（B站关注候选池：三态监听胶囊〔监听 = 蓝渐变 / 已监听 = 灰底 / hover 变红调「取消监听」可点取消〔PUT watch:false〕〕+ 搜索过滤）；NapCat 卡 = 通道配置（「使用 NapCat 通道」总开关 + 路径/QQ号/超时失败告警QQ号，settings 唯一信源）+ 状态探测 + **「失活自动拉起」独立开关**（开启建拉起任务〔Windows 一次 UAC / macOS 无需任务〕、关闭移除任务）+ 手动拉起（双平台）；高级设置卡已删除，运行时参数按模块收纳进对应卡片底部按钮的 sheet（监听「抓取设置」8 项 / LLM「高级」3 项 / 推送渠道「推送设置」2 项，settings 唯一信源，保存即热生效）；B站扫码登录（平台状态点：none/imported/ok/expired，弹窗出二维码轮询，确认后落盘热重启 follows + dynamic）；微博扫码登录（同一状态点与弹窗复用，png 直链 `<img>` 显示，confirmed → 换票落 weibo-cookies.json → 热重启微博时间线）；分类规则卡 = 分类管理（LLM 提示词 + 关键词/分区条件〔且/或切换小方钮〕，删除级联停用引用的推送规则）；推送渠道卡 = 渠道管理（系统通知 / QQ群 / QQ私聊，可单独停用）+ 推送总开关 + 「推送设置」冷启动两开关；推送规则卡 = 推送规则管理（分类引用 + 生效主播集合 + 渠道勾选 + 推送词覆盖，全局拖拽排序 = 匹配优先级；无命中规则 = 不推送，「任意开播 × 全部主播」规则即兜底；**引用对象不可用的可视化**：规则引用的分类/渠道被停用或删除时规则实际失效——不可达规则整行置灰 + 标题划线 + 原因标签〔core.js `ruleDeadReason`：自身停用 / 分类停用或已删 / 未选渠道 / 渠道全不可用〕，编辑弹窗里停用渠道保留勾选但灰勾划线、停用分类在下拉里置灰划线，设置状态本身不变；规则行的生效主播标签直接列主播名〔简称优先，uids 空 = 一枚「全部主播」标签，空间不足 fitRow 从尾部逐枚舍弃〕，生效主播选择 = **3D 圆柱头像卡 .cyl-card**（已选从正中向两侧排开、uids 空 = 铺满可见弧 + 正中「全部主播」盖层、单排最多 11 枚）+ 点击开挑选弹窗〔pick-card 头像卡网格：整卡可点、已选浅蓝底内嵌描边、搜索只按昵称、挑选即生效、底部单枚「完成」〕，规则弹窗渠道选择 = .chips 胶囊多选〔停用渠道灰显 + 贯穿删除线，仍可勾〕）；主播详情弹窗 = 字段编辑（alias/weiboNick/profileNote，**三开关已删**）+ 生效的推送规则（**纯展示不再勾选**〔避免取消勾选后规则从列表消失、及「全部主播」规则被退化为显式名单〕，点击行关弹窗并直接打开该规则的编辑弹窗〔`goto-push-rule` 处理注册在 push.js，事件委托共享、不引入循环依赖〕，规则区 = .sheet-rules 无容器、每条规则行是 --bg-soft 圆角块）。后续预留：verdicts 总览、预告半透明条与「预定时间到」推送（M3 预告侧，schedule-extract/schedules 未做）。
-
-### mcp — Agent 接口（MCP over HTTP，已落地 v1）
-
-给 Agent（Claude Code 等 MCP Host）用的能力面，挂在面板 server 的 `/mcp`（同 127.0.0.1 端口，Streamable HTTP transport，@modelcontextprotocol/sdk）。**多前端接入统一计划在 docs/plan/agent-access.md**（一个能力面 N 种接线：Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连，分期 P1-P3）。**MaiBot 不直连本端点**（2026-09-15 定案：其 MCP 连接进程级共享、无按群隔离字段，群身份只能由事件层插件钉死）——群自助走 MaiBot 插件（P2 详案在统一计划内），插件以 gateway 令牌调本端点，DD-claw 侧零改动。**权限模型（2026-08-29 定）**：MCP 客户端的工具参数由 LLM 生成、可被 prompt injection 伪造，唯一可信身份是连接级 Bearer token——token → 角色（settings 表 `mcp_tokens` JSON 数组，`npm run mcp-token` CLI 管理）：**admin**（Claude Code/主人，全量读写）/ **gateway**（MaiBot 插件，只读 + 群推送规则自助）。admin 工具在 gateway 连接上**不注册**（tools/list 不可见，而非调用时拒绝）。gateway 写操作服务端强制：只能往已启用的 QQ 群渠道建规则、主播必须在监听名单、规则打 `created_by='mcp'` 标记且只能删同标记规则（面板规则动不了）、单渠道 ≤20 条、写限流 20 次/10min、写操作全部落审计日志（llm key 值打码）。主人 QQ 私聊改设置 v1 不做（走 Claude Code/面板）；「单入口跨权限域」（主人私聊提升 admin）预留 HMAC 盖章（v2，见 docs/plan/agent-access.md）。写路径全部复用面板同款 Db 方法 + http-util 校验 + deps 热生效回调（listen.onChanged / advanced.onChanged / llm.onProvidersChanged），与面板语义一致。
-
-| 文件 | 职责 |
-|---|---|
-| `src/mcp/auth.ts` | token 模型：`mcp_tokens` settings 读写、`mintToken`（`ddc_` + 24B base64url）、`resolveMcpAuth`（Bearer → {name, role}；无配置 = 'unconfigured' 503，无效 = null 401；sha256 后 timingSafeEqual 比较；token 不进日志） |
-| `src/mcp/tools.ts` | 工具注册表（能力层）：shared 只读（get_status / get_live_now / get_schedule / list_streamers / search_streamers / list_push_rules / list_categories / list_channels / search_posts）+ admin 写（watch/unwatch/set_streamer、set_push_enabled、set_llm_enabled、set_listen、update_runtime_config〔schema 从 NUM_SPECS/BOOL_SPECS 生成〕、category/rule/channel CRUD、llm provider CRUD + set_llm_key）+ gateway 群自助（list_group_channels / add_group_push_rule / remove_group_push_rule）；`registerTools(server, deps, auth)` 按角色注册，写操作审计日志 |
-| `src/mcp/handler.ts` | `/mcp` 请求处理：Bearer 鉴权 → 每请求新建 McpServer + StreamableHTTPServerTransport（`sessionIdGenerator: undefined` 无状态模式，无会话管理），GET/DELETE 由 SDK 回 405 |
-| `src/mcp/rate-limit.ts` | gateway 写操作滑动窗口限流（内存，每 token 20 次/10min）；`resetMcpWriteLimiter` 供测试隔离 |
-| `src/tools/mcp-token.ts` | token CLI（`npm run mcp-token -- list/add <名字> <admin\|gateway>/remove <名字>`）：token 只在 add 时完整打印一次，list 只显示前 12 位。入口守卫照抄 migrate 工具 |
-
-配套 schema 变更：`push_rules` 加 `created_by TEXT` 列（ensureColumn 在线迁移；NULL = 面板/人工，'mcp' = 群自助）；db 新增 `searchPosts`（uid/platform/keyword LIKE 转义/limit ≤50）。
-
-### 装配与基础设施（已实现）
-
-| 文件 | 职责 |
-|---|---|
-| `src/index.ts` | 装配入口 + CLI：`--dry-run` / `--test-notify` / `--probe` / `--probe-llm`（列 provider 状态 + text 路由 ping，验证 LLM 接线）/ `--force-uid` / `--napcat-setup`（一次性创建 NapCat 最高权限计划任务，弹一次 UAC，做完即退出）；onebot 端点：只读跟随 NapCat 自己的 onebot11 配置（dd-claw 专属条目；发现失败 = **降级不装配 QQ 通道**〔log 说明，不阻塞启动〕——没配 QQ 是正常状态）；`reconcileNapcat` 统一看门狗启停（生效配置 enabled && onebot 已装配，**双平台**；`napcatRelaunchDriver` 按 platform 装配拉起能力、`autoRestart` 每 tick 读 settings 热生效；面板 napcat dep 保存后 `rebuildNotifiers` 重装配 + 立即 tick，dir/uin 热生效——装配无通道级开关，通道启停走 push_channels）；**`eff = withRuntimeConfig(defaultAppConfig, settings)` 生效配置**：sources 的 ctx.config / llm router 重建全消费它；`reconcileRuntime`（面板 /api/advanced 保存回调）：间隔/阈值变化重启对应源、LLM 超时熔断变化重建 router；follows 有 cookie 即跑（无开关），dynamic/weibo 由 `reconcileListen` 按面板监听开关 + cookie 启停；`panel.enabled` 时起控制面板；follows / dynamic / weibo 三 source 单独持有（有各自 cookie 才创建，扫码登录后 `onCookiesSaved` 热重启，shutdown 停最新实例；dynamic / weibo 无 cookie 时各 log 一次不阻塞启动）；live-status source 单独持有 `liveSrc`（轮询参数热更新时 stop+新建+start，restore 从库恢复状态不丢轨迹；`KeyframeCache` 总是创建〔dir = data/cache/keyframes/〕、开关/间隔初始与 `reconcileRuntime` 热更新都走 `configure`，实例跨 liveSrc 重启复用；`snapshots: {dir}` 注入面板 `/api/snapshot`）；`onLoginState` → 面板平台状态 |
-| `src/config/index.ts` | 读 `.env` + `config.json`（**全程可选**：文件不存在 = 全默认值启动；JSONC 注释、BOM 剥离，zod 启动即校验）。config.json 只有 `panel` 段被读取（面板自举），其余顶层字段一律无视（zod 剥离）；AppConfig 运行参数全部是 `defaultAppConfig()` 代码默认值，生效值 = settings 叠加（runtime-config） |
-| `src/config/schema.ts` | `configSchema` 只校验 `panel` 段（enabled/port，默认 8787 只绑 127.0.0.1）；`llmProviderSchema` 供面板 provider CRUD 校验；`AppConfig` 手写字段接口（含 `keyframe` 段：在播关键帧缓存 enabled/intervalSec——只是底形，生效值一律 = RuntimeConfig 叠加，settings 唯一信源）+ `defaultAppConfig()` 代码默认值（无文件侧来源）。秘密只在 `.env`（DB_PATH/LOG_LEVEL）/ `cookies.json` / `weibo-cookies.json`；LLM key 在 settings（面板明文填写） |
-| `src/logger.ts` | 极简结构化日志 |
-| `src/tools/migrate-snapshot-paths.ts` | 一次性迁移：`snapshots.path` 旧绝对/反斜杠相对路径 → 正斜杠相对 keyframe 目录（`npm run migrate:snapshots-path`；幂等可重复，换机后各跑一次）。**只作为 CLI 直接运行时执行 main**（入口守卫），测试导入导出的 `migrateSnapshotPaths(db)` 不触发。运行时 Db 构造不做任何数据改写——本项目数据迁移一律一次性命令，绝不在启动时悄悄改库 |
-| `src/tools/dump-demo-fixtures.ts` | demo 夹具一次性导出（`npm run demo:fixtures`）：读真实库 → 写 `webui/demo/fixtures.json`（**随仓库发布**）。只导三个数据型卡片的固定名单节选：demo 主播 12 位 enrich（含 live/posts）+ 关注 18 位 + 近 14 天时间表（北京 06:00 日界，随带 meta.exportedAt 冻结点）；**其余卡片一律不导**（LLM/分类/推送规则 = defaults.json 手工案例；渠道/NapCat/监听态 = mock-data.js 手写）；导出内容全是公开数据，无需脱敏、cookie 绝不读取；在播/下播以 room_state 为准校准 listTimeline 鲜度窗口（导出瞬间在播的场次 endTs 强制 null 含末段开口〔demo 透明过渡延伸到红线〕，刚下播 <10min 被误判在播的场次回填末段终点）；头像本地化到 `webui/demo/avatars/<uid>.<ext>`、关键帧每位主播一张本地化到 `webui/demo/keyframes/<uid>.<ext>`（均随仓库发布，face/keyframe/cover 改写为站点相对路径——时间表颜色条要头像进 canvas 取平均色，本地图天然同源不污染画布，demo 下替代 /api/avatar 反代；关键帧为该主播所有场次共用同一张，demo 离线/纯静态也有画面；下载失败保留远程 URL）。**防覆盖**：fixtures.json 已存在须 `--force`（导出是一次性引导，产物由人工节选维护）。形状与 GET /api/streamers（enrich 去 rules）/ GET /api/schedule entry 同构，库定位与入口守卫照抄 migrate 工具 |
+- `src/index.ts` — 装配根 + CLI；三个 reconcile
+- `src/tools/migrate-snapshot-paths.ts` — 一次性迁移 snapshots.path
+- `src/tools/dump-demo-fixtures.ts` — demo 夹具导出（--force）
+- `src/tools/mcp-token.ts` — MCP 令牌 CLI
+- `webui/` — 前端唯一信源（含 demo/）；构建期内嵌
+- `scripts/build-webui.mjs` — 内嵌 `webui/**` 与 defaults.json
+- `scripts/webui-dev.mjs` — 开发静态服
+- `scripts/mac-notify.swift` / `scripts/register-aumid.ps1` — macOS helper / Win32 AUMID
+- `scripts/seed-timeline.mjs` — 时间表演示种子（手动跑）
 
 ## 开发约定
 
 - **ESM + Node ≥ 22**：相对导入带 `.js` 后缀；不装 axios，用原生 `fetch` + `AbortSignal.timeout`
-- 配置错误**启动即失败**并指明字段
-- 拉取失败**绝不能当成下播**——保留旧状态，什么都不做
+- 配置错误**启动即失败**并指明字段；拉取失败**绝不能当成下播**（保留旧状态，什么都不做）
 - **不做任何写操作**（不发弹幕、不点赞）；匿名接口优先，需凭据的功能由用户显式导入 cookie 后才启用
 - LLM 调用一律走 `analysis/queue`，禁止在轮询循环里直接调
-- B站接口已知坑（UA 必填、Referer、轮播状态等）见 `docs/boundaries.md` 第 5 节，改 source 前先查
-- **UI 只在 `webui/` 里改**：日常 UI 改动用 `npm run webui:dev`（静态服 + `?demo=1` 浏览器 mock 数据，刷新即生效、零重启）；改完一次性 `npm run build && npm start`（或 `npm run dev`）接线后端。运行时页面来源 = 构建期内嵌进 dist 的内存快照，**运行时绝不读磁盘静态文件**。tsx watch 与 webui 改动解绑双保险（2026-08-20）：build-webui.mjs 两个生成物**内容没变就不写盘**（mtime 不动），且 dev 脚本把两个 .gen.ts 列进 `--ignore`（内容真变了也不触发重启）——npm run build/test 不再顺手重启 dev 服，webui 改动只在重启时生效。改 `/api/*` 路由须同步改 `webui/demo/mock-api.js`（demo 与真实后端同构）
-- **streamers.alias 正规化为「简称」**：默认一律用原名 uname（主播卡标题、详情弹窗标题、生效主播勾选列表、hover 弹层、推送文案 `{liver}` 与 toast 标题、日志、LLM 分类提示词）；简称仅在空间受限处优先——推送规则行的生效主播标签与编辑表单摘要（push.js）、时间表横条（db `listTimeline` name）
+- B站/微博外部接口已知坑（UA、Referer、轮播、dm 指纹、扫码等）见 `docs/boundaries.md` 第 5 节，改 source 前先查
+- **UI 只在 `webui/` 里改**：日常 `npm run webui:dev`（静态服 + `?demo=1` mock，刷新即生效）；改完 `npm run build && npm start` 接线后端。运行时页面来源 = 构建期内嵌内存快照，**绝不读磁盘**；改 `/api/*` 须同步改 `webui/demo/mock-api.js`（与真实后端同构）
+- **streamers.alias 正规化为「简称」**：默认一律用原名 uname；简称仅在空间受限处优先（规则行主播标签、时间表横条）
 
-### 命令
+## 命令
 
 ```bash
 npm run dev          # tsx watch 开发
-npm run build        # tsc → dist/，常驻用 node dist/index.js
-npm run webui:dev    # 静态服 webui/（改 UI 零重启，浏览器开 ?demo=1 地址看 mock 数据）
-npm test             # node --test（state/bus/pipeline/concurrency/streamers/db/push/posts/live-status-source/auth/follows/qrcode/dynamic/weibo-resolve/weibo-qrcode/weibo-auth/weibo-feed/rules/config/matcher/classify/providers/onebot/napcat/dispatcher/image-cache/message/panel）
+npm run build        # tsc → dist/（prebuild 先内嵌 webui）
+npm run typecheck    # tsc --noEmit
+npm run webui:dev    # 静态服 webui/（改 UI 零重启，浏览器开 ?demo=1 看 mock 数据）
+npm test             # node --test（各 *.test.ts）
 npm run probe        # 只查一次开播状态，验证接口通不通
-npm run probe-llm    # 列 LLM provider 状态 + text 路由 ping，验证 llm 段接线
+npm run probe-llm    # 列 LLM provider 状态 + text 路由 ping
 npm run test-notify  # 假事件走完整推送链路，验证 NapCat/Toast 配置
-npm run napcat-setup # 一次性创建 NapCat 最高权限计划任务（弹一次 UAC），并开启「失活自动拉起」——与面板开关等效
-npm run migrate:snapshots-path # 一次性迁移：snapshots.path 旧绝对/反斜杠相对路径→正斜杠相对 keyframe 目录（换机后跑一次；幂等可重复）
-npm run mcp-token    # MCP 访问令牌管理：list / add <名字> <admin|gateway> / remove <名字>（token 只在 add 时打印一次）
-npm run demo:fixtures  # 真实库 → webui/demo/fixtures.json demo 夹具（12 主播 + 18 关注 + 近 14 天时间表，一次性导出后人工节选维护；已存在须 --force 覆盖）
+npm run napcat-setup # 一次性创建 NapCat 最高权限计划任务（弹一次 UAC）并开启自动拉起
+npm run migrate:snapshots-path # 一次性迁移 snapshots.path（换机后跑一次；幂等）
+npm run mcp-token    # MCP 令牌管理：list / add <名字> <admin|gateway> / remove <名字>
+npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --force）
 ```
 
-手动验证三手段：`--dry-run`（只打日志不真发）、`--test-notify`、`--force-uid <uid>`（监听正在直播的房间，立刻触发真实全链路）。
+手动验证：`--dry-run`（只打日志不真发）、`--test-notify`、`--force-uid <uid>`（监听正在直播的房间，立刻触发真实全链路）。
+
+## 实现现状
+
+- **M1 ✅** 开播通知（NapCat/Toast 已实测）；**M2 ✅** 规模化 + 内容判定（名单迁库 / 扫码登录 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2 / 面板 v1+v2）
+- **M3 过半**：时间轴统计 ✅；预告解析（schedule-extract → schedules）与到点推送未做　**M4 / M5 未开始**
+- 逐项明细见 `docs/status.md`
 
 ## 文档索引
 
 - `docs/design.md` — 总体设计：规模假设、三段架构、数据结构、里程碑 M1-M5、待定项
-- `docs/boundaries.md` — 能力边界：匿名可得 / 需凭据 / 做不到，已知踩坑清单（含 M1 实施经验）
-- `docs/mcp.md` — MCP 接口：Agent 接入（令牌管理、角色权限、Claude Code 等 Host 配置、安全模型与 v2 预留；MaiBot 不直连）
-- `docs/plan/agent-access.md` — 多前端接入统一计划：一个能力面（tools.ts 注册表）N 种接线（Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连），信任模型矩阵 + 共享组件（agent loop / completeChat）+ 分期 P1-P3（含 MaiBot 插件详案）
-- `docs/research/` — 分模块调研（live-status、danmaku、feeds、llm、notify、media-capture、auth-cookie、ts-stack）
-
-## 当前进度
-
-- **M1（开播通知）**：代码完成，测试通过。**NapCat 已部署并实测**（2026-08-05：NapCat 4.18.13 + QQNT 9.9.32，OneBot11 HTTP 127.0.0.1:3000，`--test-notify` 私聊带图发送成功，notify_log ok=1）
-- **M2 第 0 步（架构纠偏）**：完成。bus / pipeline / PeriodicTask / Source 接口 / 分析队列 / PushMessage 落地，行为与 M1 对齐，测试全绿
-- **M2（规模化 + 内容判定）**：进行中。监听名单已迁库：`streamers` / `follows` 两表 + CRUD + config 种子导入完成，source 名单改读 `listWatchedUids()`，测试全绿。**cookie 管理 + 关注列表同步已落地**：`auth.ts`（cookies.json 整套字段 + nav isLogin 心跳，端点 `x/web-interface/nav`，旧 `x/member/web/nav` 已 404）+ `FollowsSource`（心跳合并进同步周期、失效告警一次、单页失败整轮放弃；关注不自动入监听，follows 表仅作面板候选池），分页已实测（604 关注 13 页），测试全绿。**推送规则产品化已落地（替代旧 L0 + preference_clauses 设计）**：无 LLM 时不做模糊分类——用户直填透明条件规则（push_rules：关键词/分区 AND、组内任一，仅条件规则）→ matcher 确定性匹配 → PushMessage.channels 引用 push_channels（面板统一管理系统通知/QQ群/QQ私聊，可停用；空表时 config 种子导入）→ dispatcher 按渠道路由（onebot 组解析 msg.targets）；条件规则都不命中走**全局默认推送**（settings.default_channels 渠道 + default_template 推送词，推送卡片统一配置；default_channels 未设 = 全部启用渠道，显式空数组 = 默认不推）；推送词 = 规则覆盖 > settings.default_template > 内置默认；旧 preference_clauses 表开库即 DROP，测试全绿。**控制面板 v0 已落地**：`src/panel/`（node:http 只绑 127.0.0.1，内嵌单页无依赖），名单管理/画像编辑、候选池一键加入、系统状态展示，改库即生效无需重启，测试全绿。**控制面板 v1 已落地**：四卡片产品化展示（运行状态 platforms/liveCount、时间表占位、主播卡片实况、推送卡片）+ B站扫码登录（passport generate/poll，confirmed → saveCookies merge 落盘 → onCookiesSaved 热重启 follows source；`onLoginState` 心跳驱动平台状态点 none/imported/ok/expired）+ 主播卡片实况（room_state 展示列 + last_live_at 下播锚点 + rules 摘要）+ 主播详情推送规则 CRUD。扫码链路已真实实测通过（2026-08-03：扫码 → 落 cookie → 热重启 → 心跳 ok → 604 关注同步入库）。**空间动态源已落地**：`DynamicSource`（`feed/space` 全量 cookie + dm 三参 + space Referer，实测无需 WBI，推翻 feeds.md 旧 412 结论）+ `dm.ts`（RSSHub 算法）→ `posts` 表归档（UNIQUE(platform,item_id) 去重，raw 全留）→ 新帖 emit `feed_post`（每 uid 首轮静默；pipeline 现状自然不推送，M3 再消费）；主播卡片第三栏动态时间线（enrich 带最近 5 条）。已真实实测（2026-08-03：22 个监听对象首轮归档 281 条，含 LIVE_RCMD 二次解析，零 412/解析报错）。**微博接入已落地**：`weibo/qrcode.ts`（sso/v2 扫码，generate 必须带 `Referer: https://weibo.com/` 否则 403〔冒烟实测〕；image 为 png 直链）+ `weibo/auth.ts`（weibo-cookies.json 管理 + `ajax/log/action` X-Log-Uid 心跳）+ `weibo/feed.ts`（`ajax/statuses/mymblog` 轮询，text_raw 纯文本、转发递归、长文 longtext 补全兜底、登录态心跳折进同步周期）→ posts 表 `platform='weibo'`，第三栏动态时间线自然混排（`weibo`→「微博」标签）；面板微博扫码登录复用同一弹窗（png 直链 `<img>` 显示，qrid 会话存服务端，confirmed → 换票落盘 → 热重启 feed 源）；config 加 `weibo` 段。冒烟已验：generate/poll waiting/status 平台点真实可用。**真扫实测通过（2026-08-03）**：扫码确认 → 换票落盘 weibo-cookies.json → 登录态 ok → 阿梓微博归档 → 面板新增七海微博 5 分钟内自动纳入（无需重启）；50114002=scanned 等少数状态码为防御式映射（未单独观测）。**LLM 接线已落地（2026-08-06）**：`providers.ts`（OpenAI 兼容聚合：text/vision 路由〔含图自动走 vision〕+ 熔断 + 多 key 池 + structuredOutput 三档 + api 双协议〔chat-completions / responses，Anthropic /messages 不接〕）+ config `llm` 段 + `--probe-llm` 验证命令，测试全绿；**provider 名单与 key 都在面板管理**：LLM 卡片 = provider 列表〔每行仅勾选框/名称/多模态标签/测试/编辑/删除/拖拽把手，上移下移用拖拽排序替代；最后一行新增按钮；总开关在卡片右上角〕（settings 表 `llm_providers` 事实来源，config 仅种子，路由按名单顺序自动推导，改名单/排序重建 router 热生效）+ key 明文填写/回显（settings 表 `llm_key:<providerName>` 逗号分隔多 key，本机面板不做掩码〔用户决策 2026-08-06〕，面板 > .env 优先级，refreshKeys 热更新免重启）+ 总开关（settings.llm_enabled 覆盖 config 默认）——LLM 全流程不需要碰任何配置文件；选型结论同日修订（多模态硬要求、便宜付费 API 主力〔MiniMax-M3 vision / DeepSeek text〕、本地 LM Studio 作 vision 降级位、OpenCode Go 走官方 API 作降级链 provider〔CLI/反代方式舍弃，chat/completions 族直接可接、gpt-5.6-luna 族配 api: responses、Anthropic 族不接〕、订阅反代不做），详见 docs/research/llm.md。后续：scene-classify / schedule-extract 任务接入 queue；面板 v2 = verdicts 总览、时间表日历（M3）
-**WebUI 卡片整理 + 监听功能开关已落地（2026-08-07）**：六卡片布局（监听 / LLM分析 / 推送 三并列，时间表占位，主播列表，关注列表独立卡片带搜索框）；「监听」卡四行——B站登录（点击行扫码弹窗）/ 监听动态（开关）/ 微博登录 / 监听微博（开关），直播间轮询匿名常开不在卡片展示；`core/listen.ts` 三态开关（settings `listen_<feature>`：缺省=auto 跟随登录、'1'/'0'=手动，手动设置为准；`setListen` 与 auto 一致则回 auto），`shouldRunListen`（config 开 && cookie &&（手动开||auto），auto 下登录过期不自动停由源心跳兜底），动态/微博源启停统一走 `reconcileListen`（index.ts），面板 `/api/listen` GET/PUT 热启停；**LLM/推送卡统一为「总开关右上角 + 列表行〔勾选框/名称/标签/按钮/拖拽把手〕+ 弹窗编辑」**：LLM 用拖拽排序替代上移下移（`/api/llm/providers/order`），推送卡新增总开关（settings.push_enabled，pipeline 全局闸门）+ 渠道拖拽排序（push_channels.sort + `/api/channels/order`）+ 渠道/全局默认推送弹窗化；**推送规则 UI 同款列表化**：push_rules 加 name/sort 列，主播弹窗内规则 = 可排序勾选列表〔勾选框/规则名称/渠道名多标签/编辑/删除/拖拽把手〕+ 添加规则按钮，规则新增/编辑走嵌套弹窗 modal2（表单带 label，含规则名称/关键词/分区/渠道勾选/推送词；启停由列表勾选框控制，弹窗内无「启用」），`PUT /api/rules/order`（uid + ids 全排列）；**规则弹窗去注释文字 + 允许空条件**：关键词/分区可空 = 任意匹配（双条件仍 AND）、推送词空 = 全局默认，移除 checkRuleConditions 与「空条件开库即删」迁移；保存报错不再走顶部 toast，改在保存按钮同一行内联显示；测试全绿（271）。
-**面板 UI 设计重构 + 规则语义修正已落地（2026-08-08）**：上次提交审查修复——**推送规则语义改为「全部命中独立生效 + 按渠道去重」**（用户拍板：`matchPushRule` → `matchPushRules` 返回全部命中，pipeline 渠道并集去重、推送词取 sort 序首个非空；空条件规则不再单独兜底）；DynamicSource 补登录态心跳（follows.enabled=false 时 B站登录态唯一来源）；`/api/status` 删 followsCount 死字段；规则名显式传空 = 400（三方口径统一）；`setListen` 回 auto 删 key 不留空串；清理 index.ts 冗余 stop 与过时注释。**前端整体重写（苹果风格）**：设计令牌 CSS 变量 + prefers-color-scheme 深色双主题；统一控件（44px 列表行 / 28×28 图标按钮 / 44×26 iOS 开关 / 胶囊按钮 / pill 标签 / sheet 两级弹窗 / 顶部胶囊 toast）；事件委托（data-action/change/input 三张表）彻底消灭内联 on* 与 jsq 转义（顺带修掉 provider name 属性注入 XSS）；makeSortable 通用拖拽三处复用；B站/微博登录流程参数化统一；新增 icons.ts 内联 SVG 图标集；app-status → app-listen 改名；主播卡片「直播中」徽标 + 标题栏「在播 N · 共 M」+ LIVE_RCMD 过滤后空白修复；测试全绿（275）。
-**NapCat 托管化已落地（2026-08-09）**：`notify/napcat.ts`（端口/token 只读跟随 NapCat 自己的 `onebot11_<uin>.json`——.env NAPCAT_BASE_URL 降为兜底，webui 改端口看门狗每 tick 重读热跟随〔OneBotNotifier.updateEndpoint〕；三态探测 down/conflict/ok；看门狗状态机：down 冷却 10min 内经计划任务拉起 + 快速登录 uin、3 次放弃告警、conflict/未登录只告警一次、恢复复位；告警走 bus health_alert → toast）+ config `napcat` 段（enabled/dir/uin，启用时必填启动即校验）+ `--napcat-setup`（powershell -Verb runAs 一次性 UAC 创建 /rl highest /it 计划任务「DD-claw NapCat」，action 复用一键包 launcher.bat，之后 schtasks /run 静默拉起）。不做扫码自动化；测试全绿（293）。
-**NapCat 面板卡片已落地（2026-08-09）**：顶部小卡片区第四张「NapCat」（监听/LLM/推送/NapCat 响应式换行——宽屏一行最多三张、中屏两张、窄屏一张，可增至 5-6 张）；napcat enabled/dir/uin 事实来源迁 settings 表（`napcat_enabled/napcat_dir/napcat_uin`，面板覆盖 > config 默认，留空删 key 回落 config，与 LLM key 同口径）；`/api/napcat` GET/PUT + `POST /api/napcat/launch|setup`（napcat dep 存在才挂载）；卡片 = 总开关 + 状态行（实时三态探测：在线已登录/在线未登录/不在线/端口冲突/未配置）+ 路径/QQ号 sheet 编辑 + 手动拉起/计划任务按钮（setup 从面板触发，主机弹一次 UAC）；看门狗改 `target` 回调每 tick 取生效配置 + `reconcileNapcat` 热启停，面板保存立即 tick 不等周期；测试全绿（299）。
-**dd-claw 专属端口条目自管已落地（2026-08-09）**：用户拍板「端口管理不靠取第一个，用户不手动改、DD-claw 自动改」——`ensureNapcatEntry` 在 onebot11_<uin>.json 自建自管 `name: "dd-claw"` 专属 httpServers 条目（缺了选高位空闲端口 41990 起扫创建、被禁用启用、端口被占自动换；只动这一条，http/3000 等其他条目原样保留供别的服务）；发现逻辑按名匹配；看门狗 conflict → 自动换端口 + 拉起，新增**陈旧实例识别**（新端口 down 但旧端口仍 ok → 停止任务杀进程树 → 拉起让新配置生效）；**配套停止任务**「DD-claw NapCat Stop」（高权限进程非提权杀不掉，taskkill /F /IM /T，同一次 UAC 与拉起任务一起创建）；面板「手动拉起」= ensure → 停旧 → 拉起。已实测：创建条目保留 http/3000 → stop/start → dd-claw/41990 与 http/3000 双端口同时在线、QQ 已登录；测试全绿（308）。
-**推送规则全局化重构 + LLM 分类管线已落地（2026-08-09）**：分类与推送规则都改全局定义——`categories` 表（LLM 提示词 + 确定性关键词/分区条件〔cond_mode 且/或〕；删除前级联停用引用它的推送规则）+ `push_rules` v2（分类引用可空 = 任意开播 × 生效主播集合空 = 全部主播含未来新增 × 渠道 × 推送词；旧按 uid 表开库检出 uid 列即 DROP 重建，旧规则不迁移）+ `verdicts` 表（每场归类结果，UNIQUE(room_id,live_time,category_id) 去重）；**LLM 分类管线**：`tasks/classify.ts`（一次 live_start 对所有提示词分类合并单次批量 LLM 调用，带图走 vision 路由，zod parse + match && 置信度 ≥ 0.5 过滤）+ `RulesClassifier`（LLM 优先——提示词分类 LLM 判定权威、判否不回看确定性；LLM 关/熔断/失败回退 `matchCategory` 确定性路径；仅 `analyze=1` 的主播用 LLM，analyze 开关自此有真实语义；判定 insertVerdict 入库）接入 AnalysisQueue，pipeline 仅 live_start 调分类（live_end 不烧 LLM），`LiveEvent.verdict` → `classifications: Classification[]`，DecisionRule 第三参同步；matcher v2（`matchCategory` + `matchPushRules(rules, event, matchedCategoryIds)`）；**面板**：新增「分类规则」卡（条件摘要 tag / sheet 表单 / 删除引用告警）+ 推送卡加推送规则区（全局拖拽排序、二级 sheet 选生效主播、内联报错）+ 主播详情改生效规则视图（勾选 = 规则 uids 增删本主播；「全部主播」规则取消勾选转显式名单并 toast）+ `/api/categories*` 新路由（DELETE 返回 disabledRules）+ rules API v2（`?uid=` = 对该主播生效的规则、全局 order、categoryId/uids/channels 引用存在性校验）；测试全绿（338），tsc + build 通过。
-**面板修正 + 全局默认推送删除已落地（2026-08-09）**：分类 sheet 修复（textarea 纳入设计系统同款样式〔--fill/--r-md/focus 描边、纵向 resize〕；关键词/分区输入框并排 + 中间且/或切换小方钮 .cond-toggle，删除原条件关系 select）；「推送」卡拆成「推送渠道」（总开关 + 渠道行 + 新增渠道）与「推送规则」（规则行 + 添加规则）两张独立小卡，小卡片区 6 张；**全局默认推送整体删除**（语义被「任意开播 × 全部主播」规则完全覆盖）：`/api/push/default` 路由与 parsePushDefaultBody 移除、pipeline 无命中兜底（defaultChannelIds + default_template）删除——无命中规则 = 不推送，推送词链 = 规则覆盖 > 内置默认 '{alias} 开播了'，settings 不再读写 default_channels/default_template；测试全绿（334）。
-**时间表（过往直播统计）已落地（2026-08-09）**：数据层——`live_sessions` 补 last_seen/keyframe/cover（ensureColumn 迁移）+ 新表 `live_segments`（内容变更切段）；`diffRoom` 的 title_change 放宽为标题/分区内容变更（带 previousTitle/previousAreaName，同时变只产一条）；pipeline 在抑制闸门前做归档分派（live_start → recordSession 含首段 / live_end → endSession〔按房间最新场次关闭，liveTime 在 live_end 信号里不可靠〕/ title_change → rotateSegment），live-status source 每轮 touchLiveSessions 打点（last_seen 近似下播锚点）；`GET /api/schedule`（北京 06:00 日界归属、缺省今天-7~今天+1、跨度 ≤62 天、空日期占位、kind 预留 schedule）；面板 `app-schedule.ts` 时间轴卡（**5 天滑动窗口制**：居中日 ±2 天，中间 3 天全量行 + 两端 2 天缩略行；点击非居中天居中 + 方向感滑动动画；滚轮按天步进〔preventDefault、300ms 节流〕；偏移轴按中间 3 天一次算定、仅 center 变化重算；泳道按完整日窗贪心装箱、行高 = 泳道数 × 20px 自适应；同场多分段合并为单个完整圆角矩形（组内分段只负责分割线与文字，主播名首段一次、后续段仅标题）；头像平均色取 h/s（s 开根号提饱和），亮度随主题 70/40（存 {h,s}、主题切换只改亮度重渲；暗色条内文字同色系提亮 90% 去阴影、亮色白字+同色系 20% 阴影）；哈希色仅头像获取不到时用〔s=50〕、其余如未算出前占位灰；hover 弹层对照 LLM 分类证据；在播条 + 当前时间红线每分钟推进）。预告半透明条与「预定时间到」推送仍为预留；测试全绿（349）。
-**健康告警收敛已落地（2026-08-11）**：告警只发本机系统通知——onebot 移除 `alert()`（健康告警从不发 QQ），alertAll 只派发到实现 `alert` 的通道（当前仅 toast），config onebot.targets 降为 push_channels 种子 + `--test-notify` 验证目标；登录失效告警加「运行中意外失效」门槛——follows / dynamic / weibo feed 三源只有本进程内成功登录过才在失效时告警一次，本来就没登录（启动起从未成功）只记日志不告警；`listWatchedUids()` 过滤非纯数字 uid（演示数据 demo* 混入曾导致批量接口 65530 route_exception + 动态源逐 uid 必败告警刷屏）；测试全绿（350）。
-**QQ 健康告警已落地（2026-08-11）**：告警 QQ 设置（settings `napcat_alert_qq`，面板 NapCat 卡第三行「告警 QQ」输入框，留空 = 不报；`/api/napcat` GET/PUT 带 alertQq，纯数字校验）；QQ 路由政策在 pipeline——`alertKind==='login_drop'`（运行中登录掉线，三源已带标记）立即报、`durationAlert===true` 才报，次数阈值与看门狗告警仍只发本机 toast；三个连续失败源（live-status / dynamic / weibo feed）在次数阈值之外按持续时间再发一次：首轮失败记 firstFailTs，持续满 `STREAK_QQ_ALERT_AFTER_SEC`（600s）emit 第二条 health_alert（payload 带 durationAlert + durationSec + 「已持续失败约 N 分钟」文案），恢复复位；dispatcher `alertAll(title, body, qqTarget?)` 带 qqTarget 时经 onebot.send 私聊点对点（onebot 仍不实现 alert）；测试全绿（356）。**同日修正**：NapCat 配置信源纠正为 settings 表唯一信源（webui 管理，不存在手改 config.json 的场景）——`getNapcatConfig` 不再读 config 回落，`seedNapcatConfigIfUnset` 首次启动把 config napcat 段导入 settings 一次；传空串 = 清空字段。NapCat 卡 sheet 删说明文字，「告警 QQ」更名「超时失败告警 QQ 号」。
-**参数失控清查 + 全部面板化已落地（2026-08-11）**：用户原则「webui 是唯一信源，永不手改 config.json」。A 类事故修复——config.json 缺失不再拒绝启动（全默认值）；schema superRefine 整体删除（onebot targets/napcat dir/uin/subscriptions dup/provider dup 这些针对种子字段的启动校验会让 config 独立搞挂启动）；config/index.ts 的 onebot 端点启动检查删除（装配处等价检查保留且改降级）；`--napcat-setup` 改读 settings 生效配置（原直读 config，面板配置不生效的 bug）；`notify` 段补对象级 default（否则无文件启动校验失败）；onebot 端点不可得从启动失败改为**降级不装配 + log**（面板时代没配 QQ 是正常状态）；无通道可用从退出改为 warn 继续（追踪照常）。B 类面板化——新建 `core/runtime-config.ts`：十三项运行时参数（poll 间隔/抖动、healthAlertAfterFailures、三源抓取间隔、LLM 超时/熔断/冷却、冷启动推送两开关、QQ/toast 通道开关）全部 settings 唯一信源 + `seedRuntimeConfigIfUnset` 首次从 config 种子 + `withRuntimeConfig` 合并出生效 AppConfig（`eff`）供 sources/router/装配消费；冷启动两开关 pipeline 直读 settings 热生效；`reconcileRuntime`（`/api/advanced` 保存回调）：间隔/阈值变化重启对应源（live-status 整体 stop+新建，restore 不丢轨迹）、LLM 参数变化重建 router、通道开关变化 buildNotifiers + `dispatcher.setNotifiers` 热切换；follows/dynamic/weibo 的 config enabled 闸门删除（follows 有 cookie 即跑，dynamic/weibo 面板监听开关唯一闸门，`shouldRunListen`/`isListenEnabled` 去掉 configEnabled 参）；面板第 7 张小卡「高级设置」（`app-advanced.ts`，`/api/advanced` GET/PUT 按规格表校验）；config.example.json 重写为「全部可选、仅种子/自举」框架。C 类文案全清（.env.example / 各注释 / 错误提示）。测试全绿（362）。**同日再纠正**：「首次种子」措辞仍留「写了不生效」的陷阱——config.json 唯一活配置收窄为 panel 段，其余顶层字段全部降级为**遗留迁移来源**（`legacyKeys` 检出 → 库空/未配置才一次性导入 + 启动 warn 提示删除），config.example.json 精简到只剩 panel 段，示例里不再展示任何可误改的字段。
-**遗留/兜底/迁移机器整体删除（2026-08-12）**：项目不对外发布、用户配置已全部在库，迁移兜底不再必要——config 种子机全删（seedStreamersIfEmpty / seedPushChannelsIfEmpty / seedLlmProvidersIfEmpty / seedNapcatConfigIfUnset / seedRuntimeConfigIfUnset / migrateLiteralKeys / legacyKeys 提示）；db 遗留数据迁移全删（preference_clauses DROP / push_rules v1→v2 重建 / streamers mode→三开关迁移；ensureColumn 保留为唯一 schema 迁移机制）；.env 兜底全删（LLM key env 回退——dbKeysOf 只剩面板来源、NAPCAT_BASE_URL/TOKEN——onebot 端点只读 NapCat 发现）；`isLlmEnabled(db)` settings 唯一（缺省关）；configSchema 收窄为只校验 panel 段 + `AppConfig` 手写字段接口 + `defaultAppConfig()` 代码默认值；`--test-notify` 测试目标改读 push_channels 表；.env.example 只剩 DB_PATH/LOG_LEVEL；测试全绿（353）。
-**在播关键帧定时缓存已落地（2026-08-12）**：`sources/media/keyframe.ts`（`KeyframeCache`：live-status source 每轮把现成的在播 {roomId, liveTime, keyframe} 喂给 `consider`——同步返回、mapLimit(2) 异步下载不阻塞轮询；同一场距上次尝试不足 interval 跳过〔失败也记〕；UA+Referer/8s 超时/10MB 防御；内容 md5 去重不写重复盘；落盘 `data/cache/keyframes/<roomId>/<liveTime>/<ts>.jpg` + 新表 `snapshots`〔十三表，insertSnapshot 只写不查〕；失败仅 log.debug；**暂不清理**〔用户已定，几个 GB 可接受〕）+ db `snapshots` 表 + AppConfig `keyframe` 段（enabled/intervalSec 默认 true/300，装配处钳下限 60s）+ index.ts 装配（实例跨 liveSrc 重启复用）；用途 = 积累判定素材供后续人工/LLM 对照分类正确性，检索与对照界面后续做；测试全绿（359）。
-**关键帧缓存面板化 + hover 最近帧对照已落地（2026-08-12）**：keyframe 开关/间隔迁入 RuntimeConfig（NUM_SPECS `keyframe_interval_sec` 60~3600 默认 300、BOOL_SPECS `keyframe_enabled` 默认 true，settings 唯一信源），撤掉 AppConfig 代码默认值写法（schema 只留底形注释）；`KeyframeCache.configure` 热生效（关闭 = consider no-op，记忆保留重开不炸量），index.ts 改为总是创建实例、初始与 reconcileRuntime 都走 configure；**高级设置卡改「仅标题 + 更多高级设置按钮 + 单 sheet 全量表单」**（含关键帧缓存开关 + 间隔输入框，保存一次性 PUT 全字段、报错内联 .form-err，删除逐组嵌套 sheet）；**hover 缩略图最近缓存帧优先**：db `nearestSnapshot`（ABS(ts-?) 最近邻）+ `GET /api/snapshot?room&lt&ts`（snapshots dep 注入 dir，参数/无行/读不到/路径穿越全 404，content-type 按扩展名、no-store）+ app-schedule `.sched-seg` 带 data-bs/data-be，鼠标横向位置 → 60s 分桶取帧、桶变才换图，404 记 schedSnapFail 回退远程 keyframe ?? cover、再挂移除 img 防循环；测试全绿（367）。
-**高级设置按模块收纳已落地（2026-08-15）**：删掉「高级设置」卡（顶部 7 → 6 张），运行时参数按归属模块收纳进各卡底部按钮的 sheet——监听卡「抓取设置」（8 项：直播间轮询〔间隔/抖动/连续失败告警阈值〕/ 关注列表同步 / 空间动态 / 微博 / 在播关键帧缓存开关+间隔，分组标题 .adv-group）、LLM 卡「高级」（3 项：超时/熔断阈值/熔断冷却）、推送渠道卡「推送设置」（2 项：冷启动两开关）；**QQ/系统通知两个通道开关删除**（默认恒开、想关走推送渠道卡渠道启停，`notifier_onebot_enabled`/`notifier_toast_enabled` 从 RuntimeConfig/BOOL_SPECS/AppConfig.notify 移除，装配恒尝试：onebot 随 NapCat 配置热建、toast 恒装配）；`app-advanced.ts` 删除；`/api/advanced` 保持单端点（GET/PUT 规格表校验不变，onChanged → reconcileRuntime 热生效）；NapCat 配置保存回调改走 `rebuildNotifiers` 重装配（开/关 NapCat 立即生效，dir/uin 热跟随）；测试全绿（369）。
-**关键帧路径迁移根治已落地（2026-08-16）**：snapshots.path 曾落绝对路径（换机后旧盘符失效、webui hover 全 404）。根治分三处——写端：keyframe.ts 落库只存**相对 keyframe 目录**的相对路径 `<roomId>/<liveTime>/<ts>.ext`，分隔符恒用**正斜杠**（`join()` 在 Windows 会落反斜杠，同一份库换到 macOS 后 `resolve` 把反斜杠当普通文件名全 404——本次复制迁移后仍失效的根因）；读端：/api/snapshot 按注入 dir `resolve(root, path)` + 穿越校验，读库时先 `/` 归一化反斜杠兜底残留；**一次性迁移**：`npm run migrate:snapshots-path`（src/tools/migrate-snapshot-paths.ts，幂等可重复）把存量绝对/反斜杠相对路径统一收敛为正斜杠相对（重写判断 = 非规范相对形式即改写，含 Windows join 产出的 `room\lt\ts.ext`）。**删除了临时加的运行时迁移**（Db 构造不再改写库——启动时悄悄改库会让库与代码版本脱节，旧进程读到新库全 404，这正是本次事故的诱因）；运行时 Db 构造唯一的迁移机制仍是 ensureColumn（schema 补列）。本机库已迁移（3043 行）、端到端验证 /api/snapshot 200、测试全绿（400）。
-**NapCat 失活自动拉起双平台重构已落地（2026-08-16）**：修复「DD-claw 关闭后 Windows 仍持续拉起 NapCat」并补上 macOS 拉起。语义重构——旧「托管」拆成两个独立开关：「使用 NapCat 通道」（`napcat_enabled`，装配 onebot 与否）与「失活自动拉起」（`napcat_autorestart`，缺省关，看门狗是否在失活时拉起）。**拉起能力抽象 `napcatRelaunchDriver(platform)`**：win32 = schtasks（`setupNapcatTask` 一次 UAC 同建拉起+停止双任务 / `launchNapcatViaTask` / `stopNapcatViaTask` / **新增 `removeNapcatTask`**），darwin = `open -a QQ --args --no-sandbox --qq <uin>`（**快速登录**：--qq 进 process.argv 由 NapCat shell/base.ts 读走，无需扫码）+ `stopMacNapcat`（osascript quit），setup/remove 为 no-op（NapCat-Mac-Installer 已改 QQ、无需提权任务）。**看门狗改双平台运行**（端点热跟随 + 探测 + 告警，不再限 win32），拉起由 `autoRestart` + `available` 双闸门控制：开关关 = 只探测绝不拉起（顺带复位计数）；能力不可用〔任务被删/无 QQ〕告警一次不拉起。**任务生命周期 = 开关**：面板「失活自动拉起」开 → 建任务（Windows 弹一次 UAC，失败 400 不落开关）、关 → 彻底移除任务；DD-claw 关闭时看门狗随进程消失，任务本身 `/sc once` 不自我重复。UI：NapCat 卡右上角改「使用 NapCat 通道」+ 新增「失活自动拉起」开关行（行尾小字显示拉起能力状态）+ 手动拉起双平台，删「添加自动拉起任务」按钮（`POST /api/napcat/setup` 一并移除）；`--napcat-setup` 保留（等效开启开关）。测试全绿（407）。
-**WebUI 静态化重构 + demo 解耦已落地（2026-08-19）**：前端从 TS 模板字符串内嵌（src/panel/page.ts + page/*.ts，已删）迁为真实静态文件 `webui/`（index.html + style.css + js/ 9 卡 ES modules 显式 import/export，行为 1:1 平移未夹带改版；qr-lib base64 解码回真实 JS）；**构建期内嵌**：`scripts/build-webui.mjs` 读 webui/** 生成 `src/panel/webui-assets.gen.ts`（gitignored 防漂移，prebuild/predev/pretest/pretypecheck 钩子先跑），server.ts 改 `WEBUI_ASSETS[path]` 纯 map 查键 + no-store（运行时绝不读磁盘，发布工件与后端天然同版本）；**demo 模式**：`?demo=1` 时 boot.js 先装 `demo/mock-api.js` fetch 拦截器（内存实现整张 /api/* 路由表）再进 app，纯静态可托管（文档示例/GitHub Pages 可跑）；`npm run webui:dev`（scripts/webui-dev.mjs 静态服 webui/）改 UI 刷新即生效零重启，tsx watch 下改 webui/ 不触发重启是预期。验收修两处：llm.js/categories.js 漏 import openSheet/closeSheet（旧全局作用域遗留，生产同样坏）、mock 死路由与 alias/profileNote 清空。测试全绿（409 中 3 个失败为 macOS 专属断言在 Windows 的既有失败）。
-**真实数据 demo 夹具 + 首启默认值已落地（2026-08-20）**：用户决策「发布 demo 也用真实数据（脱敏），调 UI 看到的就是发布样子；demo 中的分类/推送规则即发布后首启默认值」——`src/tools/dump-demo-fixtures.ts`（`npm run demo:fixtures`）：读真实库导出 `webui/demo/fixtures.json`（**随仓库发布**，导出时脱敏：QQ号/群号/本机路径 → 占位 10001…/空；保密红线：cookie 只看存在性、绝不读 llm_key:*）+ 归一化生成 `src/core/onboarding-defaults.ts`（生成物但提交：全部分类 + uids 为空的通用规则，分类按名引用、渠道不落盘）；`src/core/onboarding.ts` 首启种入（settings `onboarding_seeded` 一次性闸门、各表独立判空、空渠道表先种「系统通知」toast 渠道、规则渠道重映射）；mock-api.js 启动时真实 fetch fixtures 按字段覆盖合成夹具（缺失回退合成）；AGENTS.md 历史实测记录中的真实 QQ 一并清除。测试全绿（412，3 新增 onboarding）。
-**demo 数据分层重做已落地（2026-08-20，取代上一条的导出方案）**：用户拍板「三卡片（LLM/分类规则/推送规则）= 手工展示案例 + 首启默认值共用一份；时间表和主播列表 = 真实数据一次性导出后人工节选；其余卡片 = demo 手写最简态」——**`webui/demo/defaults.json`** 是三卡片唯一手工信源（DeepSeek provider + 歌回分类 + 歌回/全部两条规则），构建期由 build-webui.mjs 生成 `src/core/onboarding-defaults.gen.ts`（gitignored），onboarding 新增 LLM provider 名单种入（`llm_providers` 未设才种、不种 key）；**fixtures.json 收窄**为固定名单导出（demo 主播 12 位 enrich + 关注 18 位 + 近 14 天时间表，「岁几」实为岁己SUI），全是公开数据**不再脱敏**（渠道/NapCat/LLM 等配置面根本不进夹具），加**防覆盖闸门**（已存在须 `--force`，保护人工节选成果）；**demo 时间冻结**：fixtures 带 `meta.exportedAt`，mock-data.js `freezeTime` 偏移式覆盖全局 Date，无论哪天打开 demo 都按导出瞬间渲染（取代原「每天挪到今天」的设想）；mock-data.js 删除全部合成主播/关注/时间表生成器（buildScheduleEntries 等），只留 SVG 助手 + 手写设置卡片（渠道假号 10001/10002、NapCat 已登录最简态）。测试全绿（410，3 失败仍为 macOS 专属断言在 Windows 的既有失败）。
-**WebUI 边栏化重构已落地（2026-08-20）**：瀑布单页 → **左边栏 + 右内容区三视图**——边栏为浮动卡片样式（不贴边、与内容区左相邻、高度仅包内容 align-self:flex-start），放标题「DD-claw 控制面板」+ 导航（时间表 / 主播列表 / 设置，`nav-view` action 切换 hidden，隐藏视图后台轮询照跑）；body 整屏不滚动，`.view-host` 内各视图自己滚动；右内容区 max-width 1280 与原页面一致。**时间表视图**：卡片刚好一屏（view 100vh flex 列，卡内头部/轴固定、`.sched-body` flex:1 裁底），**行高由 JS 按 0-1-2 级权重解算成 flex-basis 像素值**（grow/shrink 恒 0）——mini 日固定窄条（道 5px + 间距 1px），single/center 日按「道数 × 级权重（1/2）」水装填分配余高（不足 10 道补空道），**每道下限 single 16px / center 32px**（低于下限钳住、余量重分给未钳行，极端矮屏/超多主播时不比 mini 条还窄；下限总和放不下时按三步降级——`schedLevelFor`：1 去掉首末两天只显示三天 → 2 相邻两天降 mini 条 → 3 当天降单行条，由 JS 按实际道数/可用高度算定、空间恢复自动升回，视图隐藏 clientHeight=0 时保持上次级别不切，仍超出才全钳下限裁底）；道内 `.sched-lane` flex:1 均分，同级别各天泳道等高、随屏幕高度与泳道数伸缩（横条文字可用空间随屏幕高度与泳道数变化，暂不做特殊处理）；basis 恒为像素值 ⇒ 级别切换/道数变化/日进出窗口/窗口缩放全是 basis px→px CSS 过渡，**全程连续，无 class 硬跳、无 min-height 瞬弹**，目标没变 JS 不碰样式（进行中的过渡不被中途重渲打断）；新天从 0 高度展开插入、移除天等高度到 0 后才删 DOM，展开中的行打 schedExpanding 标记；三级行（center/single/mini）只剩透明度与字层差异，不再决定弹性权重。**滚动跳闪修复**：滚轮步进原要等 /api/schedule 返回才渲染（先停顿再一齐动），改为相邻 ±1 步窗口后台预取缓存——命中立即渲染、随后后台重取纠偏（JSON 比对无变化不重渲，防二次闪动），缓存只留 center ±3 步内；60s 保鲜结果同步写回缓存；折叠中的行在中途重渲（头像色解析/保鲜）时跳过重复折叠。**主播列表视图**：每个主播一张独立卡片（`.card` 同级圆角底色、固定高 250px、overflow hidden 不被动态撑大），三栏 = 左基本信息（头像 48 + 15px 600 名字 + meta 行 + 规则标签）｜中关键帧（宽 250、16:9）+ **直播信息移到关键帧下方**（标题 clamp 2 行 + 分区 + 开播时长/在线）｜右动态时间线（**去掉「动态」小标题**，flex:1 占满余宽、溢出裁剪，post 底色从 card-bg 改 row-bg）；设置视图 = 原六设置卡 + 关注列表原样照搬。icons.js 新增 calendar/person；测试全绿（414，3 失败仍为 macOS 专属断言在 Windows 的既有失败）。
-- **M3（预告时间表）**：过往直播统计已落地（见上条）；预告解析（schedule-extract → schedules 表）与到点推送未开始。**UI 重设计 v2 已平移为正式版（2026-09-03）**：策略定调「v2 先平移成正式版（时间表维持现状），时间表重设计直接在正式版上做」（理由：schedule.js 1116 行的状态机与真实数据节奏耦合，demo 环境验证不了过渡/预取/保鲜，移植等于做两遍）——基座（style.css 以 v2 全文为基底 + .sched-* 令牌映射迁入、index.html v2 壳〔side-logo/在播计数胶囊/acc 主题卡头〕、core.js 吸收 v2〔avatarHtml/relTime/fmtLiveDur/makeSortable 视觉/openSheet footHtml〕、lucide-icons 补 paw/eye/video-off 等）+ 七卡模块逐卡平移（streamers 竖版三段式 .st-card/push 渠道 chips + 生效主播 3D 圆柱 .cyl-card + pick-card 挑选弹窗/listen/llm/categories/napcat/follows 三态胶囊），api 路径/ACTIONS key/轮询全部 1:1 不变；**主播三开关按设计删除**——UI 无监听/LLM/推送勾（名单内即监听中），后端同步去闸门（classifier 删 analyze=1 条件、pipeline 删 notify=false 抑制，列保留作遗留），关注列表「取消监听」接 PUT {watch:false}；深色主题移除（浅色单主题，schedule 亮度恒 70%）；`webui/redesign/` 与过时的 scripts/panel-smoke.mjs 删除，build-webui.mjs 去掉 redesign 排除；测试全绿（413，4 失败 = macOS 专属断言在 Windows 的既有失败〔3 断言 + 文件汇总〕）。时间表重设计（v2 化）待做。
-- **M4（偏好与路由）/ M5（产品化）**：未开始
+- `docs/status.md` — 实现现状：里程碑 + 模块两视图、未实现清单
+- `docs/boundaries.md` — 能力边界：匿名可得 / 需凭据 / 做不到，已知踩坑清单
+- `docs/modules/` — 模块实现笔记：core / sources / analysis / notify / panel（逐文件职责与「改前必知」）
+- `docs/mcp.md` — MCP 接口：令牌、角色权限、Host 配置、安全模型与 v2 预留（MaiBot 不直连）
+- `docs/plan/agent-access.md` — 多前端接入统一计划：一个能力面 N 种接线 + 信任模型矩阵 + 分期 P1-P3
+- `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、llm、notify、media-capture、auth-cookie、ts-stack）
