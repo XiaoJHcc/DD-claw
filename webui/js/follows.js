@@ -1,7 +1,8 @@
-// 面板前端 · 卡片6 关注列表：B站关注候选池（头像网格 + 已监听标记 + 搜索过滤 + 一键加入监听）。
-import { api, toast, ACTIONS, INPUTS, esc } from './core.js';
+// 面板前端 · 卡片6 关注列表：B站关注候选池（头像卡网格 + 已监听标记 + 搜索过滤 + 一键加入监听）。
+// 视觉 = UI 重设计 v2（白底浅底卡片 hover 上浮 + 30px 三态监听胶囊），行为与改版前 1:1。
+import { api, toast, ACTIONS, INPUTS, esc, avatarHtml } from './core.js';
 import { icon } from './icons.js';
-import { avatarHtml, loadStreamers } from './streamers.js';
+import { loadStreamers } from './streamers.js';
 
 let followAll = [];
 let followSearch = '';
@@ -21,11 +22,13 @@ function followMatches(f) {
          String(f.uid).indexOf(kw) >= 0;
 }
 function followCard(f) {
-  return '<div class="follow-card">' + avatarHtml(f.face, f.uname, 'f-avatar') +
-    `<div class="f-name">${esc(f.uname || f.uid)}</div>` +
+  return '<div class="follow-card">' + avatarHtml(f.face, f.uname) +
+    `<span class="f-name">${esc(f.uname || f.uid)}</span>` +
     (f.watched
-      ? '<button class="btn" disabled>已监听</button>'
-      : `<button class="btn btn-primary" data-action="watch" data-uid="${esc(f.uid)}">` +
+      // 已监听：胶囊可点取消监听（PUT watch:false，回到候选池等重新加入）；
+      // hover 红调「取消监听」文案为 v2 三态胶囊的视觉形态（纯 CSS 双 span 切换）。
+      ? `<button class="f-watch fw-on" data-action="unwatch" data-uid="${esc(f.uid)}"><span class="w-idle">${icon('check')} 已监听</span><span class="w-hover">取消监听</span></button>`
+      : `<button class="f-watch fw-add" data-action="watch" data-uid="${esc(f.uid)}">` +
         icon('plus') + '监听</button>') + '</div>';
 }
 function renderFollows() {
@@ -55,6 +58,11 @@ ACTIONS['follow-expand'] = function () {
 ACTIONS['watch'] = function (el) {
   api('/api/streamers/' + el.getAttribute('data-uid') + '/watch', 'POST').then(function () {
     toast('已加入监听'); loadStreamers(); loadFollows();
+  }).catch(function (e) { toast(e.message, true); });
+};
+ACTIONS['unwatch'] = function (el) {
+  api('/api/streamers/' + el.getAttribute('data-uid'), 'PUT', { watch: false }).then(function () {
+    toast('已取消监听'); loadStreamers(); loadFollows();
   }).catch(function (e) { toast(e.message, true); });
 };
 

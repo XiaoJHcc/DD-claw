@@ -100,14 +100,13 @@ const sharedTools: McpToolDef[] = [
   },
   {
     name: 'list_streamers',
-    description: '监听名单：uid/昵称/别名/直播间号/三个开关（watch 监听、analyze LLM 分析、notify 推送）/微博昵称',
+    description: '监听名单：uid/昵称/别名/直播间号/watch 监听开关/微博昵称（名单内即监听中）',
     schema: {},
     role: 'shared',
     handler: (deps) =>
       deps.db.listStreamers().map((s) => ({
         uid: s.uid, uname: s.uname, alias: s.alias, roomId: s.roomId,
-        watch: s.watch, analyze: s.analyze, notify: s.notify,
-        weiboNick: s.weiboNick, profileNote: s.profileNote,
+        watch: s.watch, weiboNick: s.weiboNick, profileNote: s.profileNote,
       })),
   },
   {
@@ -200,13 +199,11 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'set_streamer',
-    description: '更新监听名单条目：alias 别名 / watch 监听 / analyze LLM 分析 / notify 推送 / weiboNick 微博昵称（自动解析 uid，传 null 清除）/ profileNote 备注。至少传一个字段',
+    description: '更新监听名单条目：alias 别名 / watch 监听 / weiboNick 微博昵称（自动解析 uid，传 null 清除）/ profileNote 备注。至少传一个字段',
     schema: {
       uid: uidSchema,
       alias: z.string().nullable().optional(),
       watch: z.boolean().optional(),
-      analyze: z.boolean().optional(),
-      notify: z.boolean().optional(),
       weiboNick: z.string().nullable().optional().describe('微博昵称；传 null 清除（连同 weiboUid）'),
       profileNote: z.string().nullable().optional(),
     },
@@ -217,7 +214,7 @@ const adminTools: McpToolDef[] = [
       const prev = deps.db.getStreamer(uid);
       if (!prev) throw new HttpError(404, '该 uid 不在监听名单');
       const patch = parseStreamerPatch(
-        pickBody(args, ['alias', 'watch', 'analyze', 'notify', 'weiboNick', 'profileNote']),
+        pickBody(args, ['alias', 'watch', 'weiboNick', 'profileNote']),
       );
       // weiboNick → weiboUid 解析（同面板 resolveWeiboNick 语义，内联避免模块循环依赖）
       if (patch.weiboNick !== undefined) {

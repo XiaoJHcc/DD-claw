@@ -35,7 +35,7 @@ const SYSTEM_PROMPT =
 
 export function buildClassifyRequest(event: LiveEvent, categories: ClassifyCategory[]): LlmRequest {
   const text = [
-    `主播：${event.alias || event.uname}（${event.uname}）`,
+    `主播：${event.uname || event.alias}`,
     `标题：${event.title}`,
     `分区：${event.parentAreaName} / ${event.areaName}`,
     '',

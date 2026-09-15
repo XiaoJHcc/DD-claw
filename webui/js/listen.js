@@ -1,12 +1,14 @@
 // 面板前端 · 卡片1 监听：B站/微博登录行（点击开统一扫码弹窗）+ 动态/微博两个开关。
 // 直播间开播轮询不依赖登录，常开无开关，不在卡片里展示。
-import { api, toast, ACTIONS, CHANGES, openSheet, closeSheet, sheetCleanups, switchHtml, checkboxHtml, esc, field } from './core.js';
+// 视觉 = v2：行 = 内嵌圆角矩形（白底 hover 浅底，单行 44 / 主副双行 .row-2 恒 66）；
+// 登录行整行可点（.row-click），行尾二维码图标只是可点性提示（.row-afford），不是按钮。
+import { api, toast, ACTIONS, CHANGES, openSheet, closeSheet, sheetCleanups, switchHtml, checkRowHtml, esc, field } from './core.js';
 import { icon } from './icons.js';
 import qrcode from './qr-lib.js';
 
 const PLAT_STATE = {
-  ok: ['green', '已登录'], imported: ['green', '已登录'],
-  expired: ['red', '已失效'], none: ['gray', '未登录'], reserved: ['gray', '预留'],
+  ok: ['ok', '已登录'], imported: ['ok', '已登录'],
+  expired: ['bad', '已失效'], none: ['none', '未登录'], reserved: ['none', '预留'],
 };
 let listenState = null;
 
@@ -28,17 +30,20 @@ function loadListen() {
   }).catch(function (e) { toast(e.message, true); });
 }
 
+// 登录行：整行可点（开扫码弹窗），状态进副行，行尾二维码 = .row-afford 可点性提示
 function loginRow(name, plat, key) {
-  const st = (plat && PLAT_STATE[plat.state]) || ['gray', '未登录'];
-  return `<div class="row row-click" data-action="open-login" data-platform="${key}">` +
+  const st = (plat && PLAT_STATE[plat.state]) || ['none', '未登录'];
+  return `<div class="row row-2 row-click" data-action="open-login" data-platform="${key}">` +
     `<span class="dot ${st[0]}"></span>` +
-    `<span class="row-title">${name}</span>` +
-    `<span class="row-end"><span class="row-sub">${st[1]}</span>${icon('chevron-right')}</span>` +
+    `<span class="row-main"><span class="row-line"><span class="row-title">${name}</span></span>` +
+    `<span class="row-sub">${st[1]}</span></span>` +
+    `<span class="row-end"><span class="row-afford">${icon('qrcode')}</span></span>` +
     '</div>';
 }
 
 function featureRow(name, f) {
-  return `<div class="row"><span class="row-title">${name}</span>` +
+  return `<div class="row"><span class="row-main"><span class="row-line">` +
+    `<span class="row-title">${name}</span></span></span>` +
     `<span class="row-end">` +
     switchHtml(`data-change="toggle-listen" data-feature="${f.feature}"`, f.enabled) +
     '</span></div>';
@@ -98,13 +103,13 @@ ACTIONS['open-login'] = function (el) {
   const conf = LOGIN_PLATFORMS[key];
   if (!conf) return;
   const p = platformByKey(key);
-  const st = (p && PLAT_STATE[p.state]) || ['gray', '未知'];
+  const st = (p && PLAT_STATE[p.state]) || ['none', '未知'];
   loginPlatform = key;
   openSheet(conf.title,
     `<div class="login-status"><span class="dot ${st[0]}"></span>${st[1]}` +
       `<span class="row-sub">${conf.idLabel} ${esc((p && p.mid) || '—')}</span></div>` +
     `<div class="qr-box" id="qr-box">${qrEmptyHtml()}</div>` +
-    `<div id="qr-msg" class="hint qr-msg"></div>`);
+    `<div id="qr-msg" class="qr-status"></div>`);
   sheetCleanups[1] = stopLoginPoll;
 };
 
@@ -140,6 +145,7 @@ function pollLoginQr() {
 }
 
 // ---- 抓取设置（监听卡底部按钮）：关注列表 / 直播间轮询 / 关键帧 / 空间动态 / 微博 8 项 ----
+// v2 表单观感：分组标题 .adv-group + .field 纵向 16 间距 + 并排 .two，范围写进字段标签小字
 function advNum(id) {
   const v = parseInt(document.getElementById(id).value, 10);
   return isNaN(v) ? null : v;
@@ -147,30 +153,34 @@ function advNum(id) {
 function advGroup(text) {
   return `<div class="adv-group">${esc(text)}</div>`;
 }
+function advField(label, id, value) {
+  return field(label, `<input class="inp" type="number" id="${id}" value="${value}">`);
+}
 
 ACTIONS['open-fetch-settings'] = function () {
   api('/api/advanced').then(function (j) {
     openSheet('抓取设置',
       advGroup('关注列表') +
-      field('同步间隔（秒，≥300）', `<input id="ft-follows" value="${j.followsSyncIntervalSec}">`) +
+      advField('同步间隔（秒，≥300）', 'ft-follows', j.followsSyncIntervalSec) +
       advGroup('直播间轮询') +
-      '<div class="field-row two">' +
-      field('轮询间隔（秒，20~3600）', `<input id="ft-poll" value="${j.pollIntervalSec}">`) +
-      field('轮询抖动（秒，0~120）', `<input id="ft-jitter" value="${j.pollJitterSec}">`) +
+      '<div class="two">' +
+      advField('轮询间隔（秒，20~3600）', 'ft-poll', j.pollIntervalSec) +
+      advField('轮询抖动（秒，0~120）', 'ft-jitter', j.pollJitterSec) +
       '</div>' +
-      field('连续失败多少次后告警（1~100）', `<input id="ft-threshold" value="${j.healthAlertAfterFailures}">`) +
-      '<div class="field-row two">' +
-      field('关键帧缓存', checkboxHtml('id="ft-b-keyframe"', j.keyframeEnabled, false, '缓存直播关键帧')) +
-      field('缓存间隔（秒，60~3600）', `<input id="ft-keyframe" value="${j.keyframeIntervalSec}">`) +
+      advField('连续失败多少次后告警（1~100）', 'ft-threshold', j.healthAlertAfterFailures) +
+      '<div class="two">' +
+      field('关键帧缓存', checkRowHtml('id="ft-b-keyframe"', j.keyframeEnabled, '缓存直播关键帧')) +
+      advField('缓存间隔（秒，60~3600）', 'ft-keyframe', j.keyframeIntervalSec) +
       '</div>' +
       advGroup('动态') +
-      '<div class="field-row two">' +
-      field('B站动态抓取间隔（秒，≥120）', `<input id="ft-dynamic" value="${j.dynamicIntervalSec}">`) +
-      field('微博抓取间隔（秒，≥120）', `<input id="ft-weibo" value="${j.weiboIntervalSec}">`) +
-      '</div>' +
-      `<div class="sheet-foot"><span id="ft-err" class="form-err"></span>` +
+      '<div class="two">' +
+      advField('B站动态抓取间隔（秒，≥120）', 'ft-dynamic', j.dynamicIntervalSec) +
+      advField('微博抓取间隔（秒，≥120）', 'ft-weibo', j.weiboIntervalSec) +
+      '</div>',
+      1,
+      `<span id="ft-err" class="form-err"></span>` +
       `<button class="btn" data-action="close-sheet" data-level="1">取消</button>` +
-      `<button class="btn btn-primary" data-action="save-fetch-settings">保存</button></div>`);
+      `<button class="btn btn-primary" data-action="save-fetch-settings">保存</button>`);
   }).catch(function (e) { toast(e.message, true); });
 };
 

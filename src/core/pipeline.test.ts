@@ -152,7 +152,7 @@ test('first_run 可配置为推送，消息为 PushMessage 且 markNotified', as
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '阿梓 开播了');
+  assert.equal(m.title, '主播1 开播了');
   assert.equal(m.priority, 'normal');
   assert.equal(m.image, 'k.jpg');
   assert.equal(m.url, 'https://live.bilibili.com/r1');
@@ -240,28 +240,15 @@ test('title_change 归档：rotateSegment 换段（不推送、不重复分类�
   assert.equal(h.disp.sent.length, 0);
 });
 
-test('被抑制信号照样归档：冷启动 live_start 录场次，notify=false 的 title_change 照换段', async () => {
+test('被抑制信号照样归档：冷启动 live_start 录场次，后续 title_change 照换段', async () => {
   const h = harness(); // notifyOnFirstRun=false
   h.bus.emit(sig({ coldStart: 'first_run' }));
   await h.pipeline.whenIdle();
   assert.deepEqual(h.db.sessions, ['r1:1785310737'], '冷启动抑制只跳推送，归档照做');
-  h.db.streamers.set('1', { alias: '阿梓', notify: false });
   h.bus.emit(sig({ kind: 'title_change', ts: 1_800_000_100, status: status({ title: '新标题' }) }));
   await h.pipeline.whenIdle();
-  assert.equal(h.db.rotated.length, 1, 'notify=false 抑制推送但归档照做');
-  assert.equal(h.disp.sent.length, 0);
-});
-
-// ---- notify=false（旧 silent 语义）：追踪照常，推送抑制 ----
-
-test('notify=false：抑制推送但 recordSession 照做', async () => {
-  const h = harness();
-  h.db.streamers.set('1', { alias: '阿梓', notify: false });
-  h.bus.emit(sig());
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 0);
-  assert.deepEqual(h.db.sessions, ['r1:1785310737'], 'notify=false 只跳推送，场次仍入库');
-  assert.equal(h.db.notified.size, 0);
+  assert.equal(h.db.rotated.length, 1, 'title_change 归档换段');
+  assert.equal(h.disp.sent.length, 0, '无命中规则不推送');
 });
 
 // ---- 推送规则 v2（分类引用 × 生效主播 × push_channels）----
@@ -287,7 +274,7 @@ test('「任意开播 × 全部主播」规则 = 旧全局默认的等价物：�
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '阿梓 开播了', '规则无覆盖推送词 → 内置默认模板');
+  assert.equal(m.title, '主播1 开播了', '规则无覆盖推送词 → 内置默认模板');
   assert.deepEqual(m.channels, ['1', '2'], '渠道 = 规则勾选的渠道');
 });
 
@@ -296,7 +283,7 @@ test('规则未覆盖推送词时用内置默认模板', async () => {
   h.db.rules.push(rule({ categoryId: null }));
   h.bus.emit(sig({ status: status({ title: '今晚歌回！' }) }));
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent[0]!.title, '阿梓 开播了');
+  assert.equal(h.disp.sent[0]!.title, '主播1 开播了');
 });
 
 test('分类规则不命中（无其他规则）= 不推', async () => {
@@ -325,7 +312,7 @@ test('命中分类规则：渠道与推送词按规则（categoryId 来自分类
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '阿梓唱歌速来');
+  assert.equal(m.title, '主播1唱歌速来');
   assert.deepEqual(m.channels, ['2'], '渠道 = 命中规则的 channels');
   assert.equal(m.url, 'https://live.bilibili.com/r1', '跳转字段沿用默认形状');
 });
@@ -357,7 +344,7 @@ test('多条规则命中：渠道取并集去重（保持顺序），推送词�
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
   assert.deepEqual(m.channels, ['2', '1', '3'], '命中规则 #1/#2 的渠道并集去重保序，未命中的 #3 不参与');
-  assert.equal(m.title, '阿梓唱歌速来', '推送词 = sort 序首个非空 messageTemplate（#1 未设，取 #2 的）');
+  assert.equal(m.title, '主播1唱歌速来', '推送词 = sort 序首个非空 messageTemplate（#1 未设，取 #2 的）');
 });
 
 test('「任意开播」规则与分类规则同时命中：渠道并集；分类不命中时任开播规则照常命中', async () => {
@@ -384,7 +371,7 @@ test('「任意开播」规则与分类规则同时命中：渠道并集；分�
   await h2.pipeline.whenIdle();
   assert.equal(h2.disp.sent.length, 1);
   assert.deepEqual(h2.disp.sent[0]!.channels, ['1'], '只剩任开播规则命中');
-  assert.equal(h2.disp.sent[0]!.title, '阿梓 开播了', '规则无覆盖推送词 → 内置默认模板');
+  assert.equal(h2.disp.sent[0]!.title, '主播1 开播了', '规则无覆盖推送词 → 内置默认模板');
 });
 
 // ---- 健康告警 ----

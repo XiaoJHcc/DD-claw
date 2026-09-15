@@ -216,8 +216,10 @@ export interface TimelineEntry {
   roomId: string;
   liveTime: number;
   uid: string;
-  /** alias ?? uname */
+  /** 简称优先（alias ?? uname）：空间受限的时间表横条用；要原名用 uname 字段 */
   name: string;
+  /** 原名（hover 弹层等空间充足处用） */
+  uname: string;
   face: string | null;
   startTs: number;
   /** null = 仍在播（或从未观测到下播） */
@@ -558,6 +560,7 @@ export class Db {
       return {
         roomId: s.room_id, liveTime: s.live_time, uid: s.uid,
         name: st ? (st.alias || st.uname) : (s.uname ?? ''),
+        uname: st?.uname ?? s.uname ?? '',
         face: st?.face ?? null,
         startTs: s.first_seen, endTs,
         keyframe: s.keyframe, cover: s.cover,

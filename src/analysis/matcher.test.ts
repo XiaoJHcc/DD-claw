@@ -131,13 +131,13 @@ test('多条规则全部命中都返回，保持传入顺序', () => {
 
 // ---- renderTemplate ----
 
-test('模板变量 {liver} {uname} {title} 渲染', () => {
+test('模板变量 {liver} {uname} {title} 渲染（{liver} 用原名）', () => {
   assert.equal(
     renderTemplate('{liver}唱歌速来｜{uname}｜{title}', event({ title: '今晚歌回' })),
-    '阿梓唱歌速来｜主播1｜今晚歌回',
+    '主播1唱歌速来｜主播1｜今晚歌回',
   );
 });
 
-test('alias 为空时 {liver} 回退 uname', () => {
-  assert.equal(renderTemplate('{liver}开播', event({ alias: '' })), '主播1开播');
+test('uname 为空时 {liver} 回退简称', () => {
+  assert.equal(renderTemplate('{liver}开播', event({ uname: '' })), '阿梓开播');
 });

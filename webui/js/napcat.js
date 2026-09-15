@@ -1,9 +1,11 @@
-// 面板前端 · 卡片 NapCat：右上角「使用 NapCat 通道」总开关 + 状态行 / 路径 /
-// 机器人QQ / 超时失败告警QQ号 / 失活自动拉起开关 五行 + 底部「手动拉起」按钮。
+// 面板前端 · 卡片 NapCat（v2 形态）：右上角「使用 NapCat 通道」总开关 + 状态行 /
+// 路径 / 机器人QQ / 超时失败告警QQ号 / 失活自动拉起开关 五个主副双行（.row-2）。
+// 状态行 = 状态点 + 主标题状态文案 + 副行端点；配置行整行可点（行尾 .row-afford
+// 右箭头仅可点性提示，非按钮）；自动拉起行副行显示拉起能力状态（taskRegistered）。
 // 编辑走 sheet（留空 = 清空该字段，settings 表是唯一信源，无 config 回落）。
 // 「失活自动拉起」= 独立开关：开启时建拉起任务（Windows 弹一次 UAC，macOS 无任务
 // 直接 open QQ），关闭时彻底移除任务。状态每 30s 重取（GET 是一次真实探测）。
-import { api, toast, ACTIONS, CHANGES, esc, field, openSheet, closeSheet } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, field, openSheet, closeSheet, switchHtml } from './core.js';
 import { icon } from './icons.js';
 
 let ncCache = null;
@@ -34,25 +36,26 @@ function loadNapcat() {
     const needUinEl = document.getElementById('napcat-need-uin');
     if (needUinEl) needUinEl.style.display = hasUin ? 'none' : '';
     const ar = !!j.autorestart;
+    // 配置行（路径/QQ/告警QQ）同构：标题 + 值副行，整行可点
+    const cfgRow = function (title, val, tip) {
+      return '<div class="row row-2 row-click" data-action="edit-napcat">' +
+        `<span class="row-main"><span class="row-line"><span class="row-title">${title}</span></span>` +
+        `<span class="row-sub"${tip ? ` title="${esc(tip)}"` : ''}>${esc(val)}</span></span>` +
+        `<span class="row-end"><span class="row-afford">${icon('chevron')}</span></span></div>`;
+    };
     document.getElementById('napcat-rows').innerHTML =
-      `<div class="row"><span class="dot ${st.cls}"></span>` +
-      `<span class="row-title">${st.text}</span>` +
-      `<span class="row-end"><span class="row-sub" title="${esc(j.endpoint || '')}">${esc(j.endpoint || '')}</span></span></div>` +
-      '<div class="row row-click" data-action="edit-napcat">' +
-      '<span class="row-title">路径</span>' +
-      `<span class="row-end"><span class="row-sub" title="${esc(j.dir || '')}">${esc(dirText)}</span>` +
-      `${icon('chevron-right')}</span></div>` +
-      '<div class="row row-click" data-action="edit-napcat">' +
-      '<span class="row-title">机器人 QQ</span>' +
-      `<span class="row-end"><span class="row-sub">${esc(j.uin || '未设置')}</span>` +
-      `${icon('chevron-right')}</span></div>` +
-      '<div class="row row-click" data-action="edit-napcat">' +
-      '<span class="row-title">超时失败告警 QQ 号</span>' +
-      `<span class="row-end"><span class="row-sub">${esc(j.alertQq || '不告警')}</span>` +
-      `${icon('chevron-right')}</span></div>` +
-      '<div class="row"><span class="row-title">失活自动拉起</span>' +
-      '<span class="row-end"><label class="switch"><input type="checkbox" id="napcat-autorestart" data-change="toggle-napcat-autorestart"' +
-      (ar ? ' checked' : '') + (hasUin ? '' : ' disabled') + '><span class="knob"></span></label></span></div>';
+      `<div class="row row-2"><span class="dot ${st.cls}"></span>` +
+      `<span class="row-main"><span class="row-line"><span class="row-title">${st.text}</span></span>` +
+      `<span class="row-sub" title="${esc(j.endpoint || '')}">${esc(j.endpoint || '未发现端点')}</span></span></div>` +
+      cfgRow('路径', dirText, j.dir || '') +
+      cfgRow('机器人 QQ', j.uin || '未设置') +
+      cfgRow('超时失败告警 QQ 号', j.alertQq || '不告警') +
+      '<div class="row row-2"><span class="row-main"><span class="row-line">' +
+      '<span class="row-title">失活自动拉起</span></span>' +
+      `<span class="row-sub">${j.taskRegistered ? '拉起任务已就绪' : '拉起任务未就绪'}</span></span>` +
+      '<span class="row-end">' +
+      switchHtml('id="napcat-autorestart" data-change="toggle-napcat-autorestart"', ar, !hasUin) +
+      '</span></div>';
   }).catch(function (e) { toast(e.message, true); });
 }
 

@@ -1,23 +1,44 @@
-// 面板前端 · 卡片「推送渠道」+「推送规则」两张独立小卡：
-// 渠道卡 = 总开关（卡片右上角）+ 渠道行列表（启停勾/名称/类型标签〔群号写在标签内〕/编辑/删除/拖拽把手）
-// + 底部新增渠道按钮；规则卡 = 规则行列表（启停勾/名称/分类与生效主播标签/编辑/删除/拖拽把手，
-// 全局排序 = 匹配优先级）+ 底部添加规则按钮。
-// 渠道与规则的新增/编辑都走 sheet；规则的生效主播选择是二级 sheet。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, chanTag, makeSortable, openSheet, closeSheet, sheetCleanups, dropdownHtml } from './core.js';
+// 面板前端 · 卡片「推送渠道」+「推送规则」两张独立小卡（v2 形态，行为与接口不变）：
+// 渠道卡 = 总开关（卡片右上角）+ 渠道行列表（拖拽把手/启停勾/名称+类型标签/副行「类型 · 目标号」，
+// 双行档 .row-2）+ 底部新增渠道按钮；规则卡 = 规则行列表（拖拽把手/启停勾/名称/分类与生效主播标签
+// /编辑/删除，全局排序 = 匹配优先级）+ 底部添加规则按钮。
+// 渠道与规则的新增/编辑都走一级 sheet。规则表单内：分类 = 自绘下拉（停用分类 off 置灰划线）、
+// 渠道 = .chips 胶囊并排多选（未选灰圈浅灰字、已选蓝字淡蓝底带勾、停用渠道更浅灰 + 贯穿整枚删除线，
+// 仍可勾——勾上也不生效，语义同旧版「保留勾选但灰勾划线」）、生效主播 = .cyl-card 3D 圆柱头像卡
+// （点击开二级挑选弹窗）。挑选弹窗 = 关注列表同款 pick-card 头像卡网格（整卡可点、搜索只按昵称过滤、
+// 挑选即生效到内存草稿并实时同步圆柱卡），全部不选 = 全部主播（含未来新增）；保存时才 PUT/POST 落库。
+// 引用对象不可用的可视化（ruleDeadReason，core.js）：规则行整行置灰 + 标题划线 + 原因标签。
+import { api, toast, ACTIONS, CHANGES, INPUTS, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, makeSortable, openSheet, closeSheet, dropdownHtml, ruleDeadReason, avatarHtml } from './core.js';
 import { icon } from './icons.js';
 import { loadStreamers } from './streamers.js';
 
 let chCache = [];
 let ruleCache = [];
 let ruleCats = [];
-let ruleSheetUids = [];
+let streamerCache = [];
+let ruleDraftUids = new Set(); // 规则表单草稿：生效主播 uid（字符串），空 = 全部主播（含未来新增）
 
+// 规则行生效主播标签是空间受限场景：名称用简称（alias）优先、回退原名
+function streamerName(uid) {
+  for (let i = 0; i < streamerCache.length; i++) {
+    if (String(streamerCache[i].uid) === String(uid)) {
+      const s = streamerCache[i];
+      return s.alias || s.uname || String(uid);
+    }
+  }
+  return 'UID ' + uid;
+}
+
+// 渠道行：v2 双行档（.row-2）——主行名称，副行只放真实信息「类型 · 目标号」（v2 不定 tag，副行已承载）
 function channelRowHtml(c) {
-  return `<div class="row" data-sid="${c.id}">` +
+  const sub = c.notifier === 'toast' ? '本机系统通知' : chanTypeName(c) + ' · ' + (c.targetId || '');
+  return `<div class="row row-2" data-sid="${c.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-channel"', c.enabled) +
+    '<span class="row-main"><span class="row-line">' +
     `<span class="row-title">${esc(c.name)}</span>` +
-    `<span class="tag">${esc(chanTag(c))}</span>` +
+    '</span>' +
+    `<span class="row-sub">${esc(sub)}</span></span>` +
     '<span class="row-end">' +
     iconBtn('edit-channel', 'pencil', '编辑') +
     iconBtn('del-channel', 'trash', '删除', true) +
@@ -30,13 +51,23 @@ function ruleCatName(categoryId) {
   return '分类已删除';
 }
 
+// 规则整体不可达（ruleDeadReason：自身停用 / 分类停用或已删 / 渠道全不可用）时整行置灰、
+// 标题划线，且只保留不可达原因标签（分类/主播标签此时已无意义）；勾选状态不受影响，
+// 恢复引用对象即自动复原。生效主播标签用简称优先（空间受限，短名能留下更多枚），
+// uids 空 = 一枚「全部主播」标签；行宽不足时 fitRow 从尾部逐枚舍弃（标签须为 .row 直接子级）
 function ruleRowHtml(r) {
-  return `<div class="row" data-sid="${r.id}">` +
+  const dead = ruleDeadReason(r, ruleCats, chCache);
+  const uidsTags = r.uids.length === 0
+    ? '<span class="tag">全部主播</span>'
+    : r.uids.map(function (u) { return `<span class="tag">${esc(streamerName(u))}</span>`; }).join('');
+  const catTag = r.categoryId == null
+    ? '<span class="tag tag-mint">任意开播</span>'
+    : `<span class="tag tag-blue">${esc(ruleCatName(r.categoryId))}</span>`;
+  return `<div class="row${dead ? ' rule-dead' : ''}" data-sid="${r.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-push-rule"', r.enabled) +
     `<span class="row-title">${esc(r.name)}</span>` +
-    `<span class="tag">${esc(ruleCatName(r.categoryId))}</span>` +
-    `<span class="tag">${r.uids.length === 0 ? '全部主播' : r.uids.length + ' 位主播'}</span>` +
+    (dead ? `<span class="tag">${esc(dead)}</span>` : catTag + uidsTags) +
     '<span class="row-end">' +
     iconBtn('edit-push-rule', 'pencil', '编辑') +
     iconBtn('del-push-rule', 'trash', '删除', true) +
@@ -45,7 +76,7 @@ function ruleRowHtml(r) {
 
 export function loadPush() {
   return Promise.all([
-    api('/api/push'), api('/api/channels'), api('/api/rules'), api('/api/categories'),
+    api('/api/push'), api('/api/channels'), api('/api/rules'), api('/api/categories'), api('/api/streamers'),
   ]).then(function (rs) {
     const en = document.getElementById('push-enabled');
     if (en) en.checked = rs[0].enabled;
@@ -53,6 +84,7 @@ export function loadPush() {
     document.getElementById('channel-list').innerHTML = chCache.map(channelRowHtml).join('');
     ruleCache = rs[2].rules || [];
     ruleCats = rs[3].categories || [];
+    streamerCache = rs[4].streamers || [];
     document.getElementById('rule-list').innerHTML = ruleCache.map(ruleRowHtml).join('');
   }).catch(function (e) { toast(e.message, true); });
 }
@@ -68,7 +100,7 @@ CHANGES['toggle-channel'] = function (el) {
   const id = el.closest('.row').getAttribute('data-sid');
   const on = el.checked;
   api('/api/channels/' + id, 'PUT', { enabled: on })
-    .then(function () { toast(on ? '已启用' : '已停用'); })
+    .then(function () { toast(on ? '已启用' : '已停用'); loadPush(); }) // 刷新 chCache + 规则行/弹窗的渠道灰态
     .catch(function (e) { toast(e.message, true); loadPush(); });
 };
 
@@ -76,7 +108,7 @@ CHANGES['toggle-push-rule'] = function (el) {
   const id = el.closest('.row').getAttribute('data-sid');
   const on = el.checked;
   api('/api/rules/' + id, 'PUT', { enabled: on })
-    .then(function () { toast(on ? '已启用' : '已停用'); loadStreamers(); })
+    .then(function () { toast(on ? '已启用' : '已停用'); loadPush(); loadStreamers(); }) // loadPush：规则行「已停用」划线态
     .catch(function (e) { toast(e.message, true); loadPush(); });
 };
 
@@ -117,7 +149,7 @@ function openChannelSheet(id) {
   if (id !== null && !c) { toast('渠道数据未加载', true); return; }
   const selType = c ? (c.notifier === 'toast' ? 'toast' : c.targetType) : 'toast';
   openSheet(c ? '编辑渠道' : '新增渠道',
-    field('名称', `<input id="cn-name" placeholder="如：粉丝群" value="${c ? esc(c.name) : ''}">`) +
+    field('名称', `<input class="inp" id="cn-name" placeholder="如：粉丝群" value="${c ? esc(c.name) : ''}">`) +
     field('类型', dropdownHtml('cn-type', [
       { value: 'toast', label: '系统通知' },
       { value: 'group', label: 'QQ群' },
@@ -125,7 +157,7 @@ function openChannelSheet(id) {
     ], selType, 'cn-type-change')) +
     '<div class="field" id="cn-target-field">' +
       '<label class="field-label" id="cn-target-label">群号</label>' +
-      `<input id="cn-target" value="${c && c.targetId ? esc(c.targetId) : ''}">` +
+      `<input class="inp" id="cn-target" value="${c && c.targetId ? esc(c.targetId) : ''}">` +
     '</div>' +
     '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     `<button class="btn btn-primary" data-action="save-channel" data-id="${c ? c.id : ''}">保存</button></div>`);
@@ -170,70 +202,173 @@ ACTIONS['save-channel'] = function (el) {
   }).catch(function (e) { toast(e.message, true); });
 };
 
-// ---- 推送规则 新增/编辑 弹窗（一级 sheet；生效主播选择是二级 sheet） ----
+// ---- 推送规则 新增/编辑 弹窗（一级 sheet；生效主播挑选是二级 sheet） ----
 ACTIONS['add-push-rule'] = function () { openPushRuleSheet(null); };
 ACTIONS['edit-push-rule'] = function (el) {
   openPushRuleSheet(Number(el.closest('.row').getAttribute('data-sid')));
 };
 
-function uidsSummary(uids) {
-  return uids.length === 0 ? '全部主播（含未来新增）' : '已选 ' + uids.length + ' 位主播';
+// ---- 生效主播 3D 圆柱卡（形态照搬 v2：头像按圆柱面投影位置排布、正对观察者不随柱面旋转、
+// 只渲染正面可见弧 ±65°、两侧减半缩放、布局恒定单排最多 11 枚）----
+// 未选（全部主播）= 同一排布循环补位铺满可见弧 + 正中盖「全部主播」；已选 = 按草稿序从正中向两侧排开
+const CYL = { r: 240, ava: 46, gap: 2, thetaMax: 65, max: 11 };
+CYL.step = 2 * Math.asin((CYL.ava + CYL.gap) / (2 * CYL.r)) * 180 / Math.PI; // ≈11.5°（弦长 = 头像 46 + 缝 2）
+
+// 草稿 uid → 主播对象；已移出监听名单的 uid 给占位（同旧版摘要的「UID xxx」，不静默丢弃）
+function streamerOf(uid) {
+  for (let i = 0; i < streamerCache.length; i++) {
+    if (String(streamerCache[i].uid) === uid) return streamerCache[i];
+  }
+  return { uid: uid, uname: 'UID ' + uid, face: null };
+}
+
+function cylCardHtml() {
+  const all = streamerCache;
+  const isAll = ruleDraftUids.size === 0;
+  const list = isAll
+    ? (all.length ? Array.from({ length: CYL.max }, function (_, i) { return all[i % all.length]; }) : [])
+    : Array.from(ruleDraftUids).slice(0, CYL.max).map(streamerOf);
+  const items = list.map(function (s, i) {
+    const a = (i - (list.length - 1) / 2) * CYL.step;
+    const f = 1 - 0.55 * Math.pow(Math.abs(a) / CYL.thetaMax, 2); // 两侧减半：弧端缩至 ≈0.45
+    const x = (CYL.r * Math.sin(a * Math.PI / 180)).toFixed(2);
+    const z = (CYL.r * Math.cos(a * Math.PI / 180)).toFixed(2);
+    return `<span class="cyl-item" data-uid="${esc(String(s.uid))}" style="transform:translate3d(${x}px,0,${z}px) scale3d(${f.toFixed(3)},${f.toFixed(3)},1)">${avatarHtml(s.face, s.uname)}</span>`;
+  }).join('');
+  return `<button type="button" class="cyl-card" data-action="open-rule-streamers" aria-label="` +
+    (isAll ? '全部主播' : `已选 ${ruleDraftUids.size} 人`) + '，点击挑选">' +
+    '<span class="cyl-view" style="height:78px"><span class="cyl-stage">' + items + '</span>' +
+    (isAll ? '<span class="cyl-alltag">全部主播</span>' : '') +
+    '</span></button>';
+}
+
+// 挑选弹窗勾选 → 同步重画规则表单里的圆柱卡（sheet1 挂在 sheet2 弹窗后面，实时可见）。
+// 循环补位会产生重复 uid，重复时无法按键配对滑动，只能整体重建；否则按 uid 原地改 transform 滑位
+function renderRuleUids() {
+  const card = document.querySelector('#sheet-mask1 .cyl-card');
+  if (!card) return;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = cylCardHtml();
+  const next = tpl.content.firstElementChild;
+  const oldStage = card.querySelector('.cyl-stage');
+  const newStage = next.querySelector('.cyl-stage');
+  const uids = function (stage) {
+    return Array.prototype.map.call(stage.children, function (el) { return el.getAttribute('data-uid'); });
+  };
+  const keyed = function (stage) { const u = uids(stage); return new Set(u).size === u.length; };
+  if (oldStage && keyed(oldStage) && keyed(newStage)) {
+    const pool = new Map(Array.prototype.map.call(oldStage.children, function (el) {
+      return [el.getAttribute('data-uid'), el];
+    }));
+    Array.prototype.forEach.call(newStage.querySelectorAll('.cyl-item'), function (n) {
+      const uid = n.getAttribute('data-uid');
+      const old = pool.get(uid);
+      if (old) { old.style.transform = n.style.transform; pool.delete(uid); n.remove(); }
+      else n.classList.add('cyl-new');
+    });
+    pool.forEach(function (el) { el.remove(); });
+    Array.prototype.slice.call(newStage.children).forEach(function (n) { oldStage.appendChild(n); });
+    const tag = card.querySelector('.cyl-alltag'), ntag = next.querySelector('.cyl-alltag');
+    if (ntag && !tag) card.querySelector('.cyl-view').appendChild(ntag);
+    if (!ntag && tag) tag.remove();
+    card.setAttribute('aria-label', next.getAttribute('aria-label'));
+  } else {
+    card.innerHTML = next.innerHTML;
+  }
 }
 
 function openPushRuleSheet(id) {
   const r = id === null ? null : pushRuleById(id);
   if (id !== null && !r) { toast('规则数据未加载', true); return; }
-  ruleSheetUids = r ? r.uids.slice() : [];
+  ruleDraftUids = new Set((r ? r.uids : []).map(function (u) { return String(u); }));
   const catOptions = [{ value: '', label: '任意开播' }].concat(ruleCats.map(function (c) {
-    return { value: c.id, label: c.name };
+    return { value: c.id, label: c.name, off: c.enabled === false };
   }));
-  const chanRows = chCache.length === 0
+  // 渠道 = 胶囊并排多选（.chips）：已选 .on；停用渠道 .chip-dis（更浅灰 + 贯穿删除线，
+  // 保留勾选状态仍可切换，title 提示勾上也不生效）
+  const chips = chCache.length === 0
     ? ''
     : chCache.map(function (c) {
-        return checkRowHtml(`class="pr-ch" value="${c.id}"`, !!(r && (r.channels || []).indexOf(c.id) >= 0),
-          `<span class="row-title">${esc(c.name)}</span>` +
-          `<span class="tag">${esc(chanTypeName(c))}</span>`);
+        const on = !!(r && (r.channels || []).indexOf(c.id) >= 0);
+        const dis = !c.enabled;
+        return `<button type="button" class="chip pr-ch${on ? ' on' : ''}${dis ? ' chip-dis' : ''}"` +
+          ` data-action="rule-chip-toggle" data-chid="${c.id}"` +
+          (dis ? ' title="该渠道已停用：勾选不会生效"' : '') +
+          `><span class="chip-ic">${icon('check')}</span><span class="chip-txt">${esc(c.name)}</span></button>`;
       }).join('');
   openSheet(r ? '编辑规则' : '添加规则',
-    field('名称', `<input id="pr-name" placeholder="留空自动命名" value="${r ? esc(r.name) : ''}">`) +
+    field('名称', `<input class="inp" id="pr-name" placeholder="留空自动命名" value="${r ? esc(r.name) : ''}">`) +
     field('分类', dropdownHtml('pr-cat', catOptions, r ? r.categoryId : '')) +
-    field('生效主播', '<div class="row" data-action="open-rule-streamers">' +
-      `<span class="row-title" id="pr-uids-summary">${esc(uidsSummary(ruleSheetUids))}</span>` +
-      `<span class="row-end">${icon('chevron-right')}</span></div>`) +
-    '<div class="field"><label>渠道</label>' + (chanRows || '<span class="hint">还没有渠道</span>') + '</div>' +
-    field('推送词', `<input id="pr-tpl" placeholder="留空 = 默认推送词（{liver} 开播了）" value="` +
+    field('生效主播', cylCardHtml()) +
+    '<div class="field"><label class="field-label">渠道</label>' +
+      (chips ? `<div class="chips">${chips}</div>` : '<span class="hint">还没有渠道</span>') + '</div>' +
+    field('推送词', `<input class="inp" id="pr-tpl" placeholder="留空 = 默认推送词（{liver} 开播了）" value="` +
       (r ? esc(r.messageTemplate || '') : '') + '">') +
     '<div class="sheet-foot"><span id="rule-err" class="form-err"></span>' +
     '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     `<button class="btn btn-primary" data-action="save-push-rule" data-id="${r ? r.id : ''}">保存</button></div>`);
 }
 
-// 二级 sheet：生效主播勾选（全部不勾 = 全部主播含未来新增）
+// 渠道胶囊可勾可取消；停用渠道（.chip-dis）勾了也置灰划线提示「勾上也没用」，但状态照常切换
+ACTIONS['rule-chip-toggle'] = function (el) { el.classList.toggle('on'); };
+
+// ---- 二级 sheet：生效主播挑选（关注列表同款 pick-card 头像卡网格，无 UID）----
+// 整卡可点切换勾选（选中 = 浅蓝底 + 蓝色内嵌描边）；搜索只按昵称过滤（隐藏不重渲染、保留勾选态）；
+// 挑选即生效到内存草稿并实时同步一级表单的圆柱卡，点「完成」（或 × / 遮罩）关窗，保存规则时才落库。
+// 全部不选 = 对全部主播生效（含未来新增）
+function pickCountText() {
+  return ruleDraftUids.size ? `已选 ${ruleDraftUids.size} 人` : '未选 · 生效全部主播';
+}
+function updatePickCount() {
+  const el = document.querySelector('#sheet-mask2 .pick-count');
+  if (el) el.textContent = pickCountText();
+}
+
 ACTIONS['open-rule-streamers'] = function () {
   api('/api/streamers').then(function (j) {
     const list = j.streamers || [];
-    const rows = list.map(function (s) {
-      return checkRowHtml(`class="pr-uid" value="${esc(s.uid)}"`,
-        ruleSheetUids.indexOf(String(s.uid)) >= 0,
-        `<span class="row-title">${esc(s.alias || s.uname || s.uid)}</span>` +
-        `<span class="meta">UID ${esc(s.uid)}</span>`);
+    streamerCache = list; // 顺带刷新名称缓存（规则行标签/圆柱卡共用）
+    const cards = list.map(function (s) {
+      const nm = s.uname || String(s.uid);
+      const on = ruleDraftUids.has(String(s.uid));
+      return `<button type="button" class="follow-card pick-card${on ? ' on' : ''}" aria-pressed="${on}"` +
+        ` data-action="pick-toggle" data-uid="${esc(String(s.uid))}" data-name="${esc(nm)}">` +
+        avatarHtml(s.face, nm) + `<span class="f-name">${esc(nm)}</span></button>`;
     }).join('');
     openSheet('生效主播',
-      '<div class="hint">全部不勾 = 对全部主播生效（含未来新增）</div>' +
-      (rows || '<p class="hint">监听名单为空</p>') +
-      '<div class="sheet-foot"><button class="btn btn-primary" data-action="close-sheet" data-level="2">完成</button></div>',
-      2);
-    // 关窗（完成 / × / 遮罩）统一走 cleanup 同步选择回一级表单的摘要
-    sheetCleanups[2] = syncRuleUids;
+      '<div class="pick-head"><div class="search-box"><i>' + icon('search') + '</i>' +
+        '<input class="inp" placeholder="搜索主播昵称" data-input="pick-q"></div>' +
+        `<span class="pick-count">${pickCountText()}</span></div>` +
+      (cards
+        ? `<div class="pick-scroll"><div class="follow-grid">${cards}</div>` +
+          '<div class="pick-empty" hidden>没有匹配的主播</div></div>'
+        : '<p class="hint">监听名单为空</p>'),
+      2,
+      '<span class="sp"></span><button class="btn btn-primary" data-action="close-sheet" data-level="2">完成</button>');
   }).catch(function (e) { toast(e.message, true); });
 };
 
-function syncRuleUids() {
-  ruleSheetUids = Array.prototype.slice.call(document.querySelectorAll('#sheet-mask2 .pr-uid'))
-    .filter(function (x) { return x.checked; }).map(function (x) { return x.value; });
-  const el = document.getElementById('pr-uids-summary');
-  if (el) el.textContent = uidsSummary(ruleSheetUids);
-}
+ACTIONS['pick-toggle'] = function (el) {
+  const uid = el.getAttribute('data-uid');
+  const on = !ruleDraftUids.has(uid);
+  if (on) ruleDraftUids.add(uid); else ruleDraftUids.delete(uid);
+  el.classList.toggle('on', on);
+  el.setAttribute('aria-pressed', String(on));
+  updatePickCount();
+  renderRuleUids(); // 弹窗后面规则表单里的圆柱卡实时同步
+};
+
+INPUTS['pick-q'] = function (el) {
+  const q = el.value.trim();
+  let visible = 0;
+  document.querySelectorAll('#sheet-mask2 .pick-card').forEach(function (c) {
+    const hit = !q || (c.getAttribute('data-name') || '').indexOf(q) >= 0;
+    c.hidden = !hit;
+    if (hit) visible++;
+  });
+  const empty = document.querySelector('#sheet-mask2 .pick-empty');
+  if (empty) empty.hidden = visible > 0;
+};
 
 ACTIONS['save-push-rule'] = function (el) {
   const err = document.getElementById('rule-err');
@@ -243,9 +378,10 @@ ACTIONS['save-push-rule'] = function (el) {
   // name 空则不提交该字段：POST 由后端自动补「规则 N」，PUT 保留原名（显式空串会 400）
   const body = {
     categoryId: catVal === '' ? null : Number(catVal),
-    uids: ruleSheetUids,
+    uids: Array.from(ruleDraftUids),
     channels: Array.prototype.slice.call(document.querySelectorAll('#sheet-mask1 .pr-ch'))
-      .filter(function (x) { return x.checked; }).map(function (x) { return Number(x.value); }),
+      .filter(function (x) { return x.classList.contains('on'); })
+      .map(function (x) { return Number(x.getAttribute('data-chid')); }),
     messageTemplate: document.getElementById('pr-tpl').value.trim() || null,
   };
   if (name) body.name = name;
@@ -282,6 +418,16 @@ makeSortable(document.getElementById('rule-list'), {
       .catch(function (err) { toast(err.message, true); loadPush(); });
   },
 });
+
+// 主播详情弹窗的规则行（streamers.js 渲染，data-action 委托到这张表）：关详情弹窗 →
+// 切到设置视图 → 直接打开该规则的编辑弹窗（刷新缓存后开，规则已删则 toast 提示）
+ACTIONS['goto-push-rule'] = function (el) {
+  const rid = Number(el.getAttribute('data-rid'));
+  closeSheet(1);
+  const nav = document.querySelector('.nav-item[data-view="settings"]');
+  if (nav) nav.click();
+  loadPush().then(function () { openPushRuleSheet(rid); });
+};
 
 // ---- 推送设置（推送渠道卡底部按钮）：冷启动触发时机 2 项 ----
 function pushBoolRow(id, text, on) {

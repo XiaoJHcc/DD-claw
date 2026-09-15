@@ -216,10 +216,10 @@ test('admin：watch_streamer / unwatch_streamer / set_streamer', async (t) => {
   assert.equal(w.streamer.face, 'http://example.com/f.jpg');
   await assert.rejects(call(adm, 'watch_streamer', { uid: '33999142' }), /已在监听名单/);
 
-  await call(adm, 'set_streamer', { uid: '33999142', alias: '海子姐', notify: false });
+  await call(adm, 'set_streamer', { uid: '33999142', alias: '海子姐', profileNote: '测试备注' });
   const s = f.db.getStreamer('33999142')!;
   assert.equal(s.alias, '海子姐');
-  assert.equal(s.notify, false);
+  assert.equal(s.profileNote, '测试备注');
 
   await call(adm, 'unwatch_streamer', { uid: '33999142' });
   assert.equal(f.db.getStreamer('33999142')!.watch, false);
