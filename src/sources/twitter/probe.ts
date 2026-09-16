@@ -274,6 +274,39 @@ export interface XProbeReport {
   web: WebProbe | null;
 }
 
+/**
+ * 链路结论：**能抓到推文就算可用**——主路线是 Nitter RSS，它只需要代理到实例通，
+ * 不需要 x.com 本身可达（免登录回退与图片下载才需要）。
+ *
+ * 这条规则是实测逼出来的：2026-09-16 一次探测里 `x.com` 经代理瞬时 TLS 失败
+ * （代理探测 FAIL），但两个实例都取到了 20 条（走的是同一个代理，证明代理是通的）。
+ * 早先按「代理探测必须 OK」判，会把「能抓」误报成「不可用」。
+ */
+export function probeVerdict(r: Pick<XProbeReport, 'proxy' | 'instances' | 'web'>): {
+  usable: boolean;
+  message: string;
+} {
+  const okInstances = r.instances.filter((i) => i.ok);
+  if (okInstances.length > 0) {
+    const fallbackNote = r.proxy.ok
+      ? ''
+      : '（x.com 经代理不通：免登录回退与图片下载暂不可用，主路线不受影响）';
+    return {
+      usable: true,
+      message: `主路线可用：${okInstances.length}/${r.instances.length} 个实例能取到推文${fallbackNote}`,
+    };
+  }
+  if (r.web?.ok) {
+    return { usable: true, message: '实例全挂，但免登录回退可用（只能拿到原创，看不到转发）' };
+  }
+  return {
+    usable: false,
+    message: r.proxy.ok
+      ? '链路不可用：实例全挂，免登录回退也没拿到推文'
+      : `链路不可用：${r.proxy.message}`,
+  };
+}
+
 /** CLI 与面板共用的一次性总探测：代理 → 实例 → 免登录（依次，后面依赖前面通） */
 export async function probeAll(
   cfg: { proxyUrl: string; instances: string[] },
@@ -281,6 +314,7 @@ export async function probeAll(
 ): Promise<XProbeReport> {
   const proxy = await probeProxy(cfg.proxyUrl);
   const instances = await probeInstances(parseInstanceList(cfg.instances.join(',')), cfg.proxyUrl, screenName);
+  // x.com 不通就别白试免登录了（它整条路都压在 x.com 上）；实例结果不受影响
   const web = proxy.ok ? await probeWeb(screenName, cfg.proxyUrl) : null;
   return { proxy, instances, web };
 }

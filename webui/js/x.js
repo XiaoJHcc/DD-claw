@@ -224,10 +224,12 @@ ACTIONS['test-x-all'] = function () {
   testing = true;
   api('/api/x/test', 'POST', { target: 'all' }).then(function (r) {
     const okInst = (r.instances || []).filter(function (i) { return i.ok; }).length;
-    const usable = r.proxy && r.proxy.ok && (okInst > 0 || (r.web && r.web.ok));
-    toast(usable
-      ? '链路可用：' + (okInst > 0 ? okInst + ' 个实例' : '免登录回退') + '可用'
-      : '链路不可用：' + ((r.proxy && r.proxy.message) || '见 X 源设置'), !usable);
+    // 结论口径与后端 probeVerdict 一致：能抓到推文就算可用——主路线（实例 RSS）不需要 x.com 本身可达
+    const usable = okInst > 0 || (r.web && r.web.ok);
+    const detail = okInst > 0
+      ? okInst + ' 个实例能取到推文' + (r.proxy && r.proxy.ok ? '' : '（x.com 经代理不通：免登录回退与图片下载暂不可用）')
+      : (r.web && r.web.ok ? '免登录回退可用（看不到转发）' : ((r.proxy && r.proxy.message) || '见 X 源设置'));
+    toast((usable ? '链路可用：' : '链路不可用：') + detail, !usable);
     loadX();
   }).catch(function (e) { toast(e.message, true); }).then(function () { testing = false; });
 };

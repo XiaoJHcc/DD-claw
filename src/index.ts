@@ -43,7 +43,7 @@ import {
 } from './core/x-config.js';
 import { parseInstanceList } from './core/proxy.js';
 import {
-  DEFAULT_PROBE_SCREEN, probeAll, probeInstances, probeProxy, probeWeb,
+  DEFAULT_PROBE_SCREEN, probeAll, probeInstances, probeProxy, probeVerdict, probeWeb,
   type InstanceProbe, type ProxyProbe, type WebProbe,
 } from './sources/twitter/probe.js';
 import { TwitterFeedSource } from './sources/twitter/feed.js';
@@ -176,10 +176,10 @@ async function main(): Promise<void> {
     log.info(`  [代理]   ${report.proxy.ok ? 'OK  ' : 'FAIL'} ${report.proxy.message}`);
     for (const i of report.instances) log.info(`  [实例]   ${i.ok ? 'OK  ' : 'FAIL'} ${i.host} — ${i.message}`);
     if (report.web) log.info(`  [免登录] ${report.web.ok ? 'OK  ' : 'FAIL'} ${report.web.message}`);
-    else log.info('  [免登录] SKIP（代理不通，先解决出网再谈抓取）');
-    const usable = report.proxy.ok && (report.instances.some((i) => i.ok) || report.web?.ok === true);
-    log.info(usable ? '结论：X 链路可用（至少一条路线通）' : '结论：X 链路当前不可用');
-    if (!usable) process.exitCode = 1;
+    else log.info('  [免登录] SKIP（x.com 经代理不通；该路线整条压在 x.com 上，与实例路线相互独立）');
+    const verdict = probeVerdict(report);
+    log.info(`结论：${verdict.message}`);
+    if (!verdict.usable) process.exitCode = 1;
     return;
   }
 

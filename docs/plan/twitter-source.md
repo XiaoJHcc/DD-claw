@@ -171,6 +171,8 @@ CREATE TABLE IF NOT EXISTS post_rules (
 
 **命名与计划不符的一处**（如实记）：计划里写的是 `analysis/tasks/translate.ts`，实际落地为 `tasks/post-analysis.ts` + `post-analyzer.ts`——这一版把判定与翻译合并成一次调用，叫 translate 会误导。
 
+**收尾时按实测修掉的判定口径**：`probeVerdict` 早先要求「代理探测 OK」才算链路可用。2026-09-16 一次真机探测里 `x.com` 经代理瞬时 TLS 失败、而**两个 Nitter 实例都取到了 20 条**（走同一个代理，证明代理是通的）→ 主路线明明可用却被报成「不可用」。现口径为：**能抓到推文就算可用**（实例可用，或免登录回退可用），x.com 不通只影响免登录回退与图片下载，在结论里如实注明。CLI 与面板共用同一条规则（`probeVerdict`，含单测）。
+
 ## P2 已落地（2026-09-16）
 
 **X 推文现在真的会推到群里了。** 交付：
