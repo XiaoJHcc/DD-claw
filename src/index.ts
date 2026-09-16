@@ -38,6 +38,14 @@ import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
 import { seedOnboardingDefaults } from './core/onboarding.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
+import {
+  emptyXStatus, getXConfig, invalidateXStatus, isSavedConfigTest, saveXConfig, type XStatus,
+} from './core/x-config.js';
+import { parseInstanceList } from './core/proxy.js';
+import {
+  DEFAULT_PROBE_SCREEN, probeAll, probeInstances, probeProxy, probeWeb,
+  type InstanceProbe, type ProxyProbe, type WebProbe,
+} from './sources/twitter/probe.js';
 
 const log = makeLogger('main');
 
@@ -46,19 +54,29 @@ interface Args {
   testNotify: boolean;
   probe: boolean;
   probeLlm: boolean;
+  probeX: boolean;
+  /** --probe-x 的探测账号（免登录路线用），缺省用调研基准账号 */
+  probeScreen: string;
   napcatSetup: boolean;
   forceUids: string[];
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { dryRun: false, testNotify: false, probe: false, probeLlm: false, napcatSetup: false, forceUids: [] };
+  const args: Args = {
+    dryRun: false, testNotify: false, probe: false, probeLlm: false, probeX: false,
+    probeScreen: DEFAULT_PROBE_SCREEN, napcatSetup: false, forceUids: [],
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') args.dryRun = true;
     else if (a === '--test-notify') args.testNotify = true;
     else if (a === '--probe') args.probe = true;
     else if (a === '--probe-llm') args.probeLlm = true;
-    else if (a === '--napcat-setup') args.napcatSetup = true;
+    else if (a === '--probe-x') args.probeX = true;
+    else if (a === '--x-screen') {
+      const v = argv[++i];
+      if (v) args.probeScreen = v.trim().replace(/^@+/, '');
+    } else if (a === '--napcat-setup') args.napcatSetup = true;
     else if (a === '--force-uid') {
       const v = argv[++i];
       if (v) args.forceUids.push(...v.split(',').map((s) => s.trim()).filter(Boolean));
@@ -66,6 +84,12 @@ function parseArgs(argv: string[]): Args {
   }
   return args;
 }
+
+/**
+ * X 链路上次探测快照：`GET /api/x` 只读它，绝不在读取路径上打网络
+ * （面板会周期轮询这张卡，探测必须由「测试」按钮或 CLI 显式触发）。
+ */
+let xStatus: XStatus = emptyXStatus();
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -133,6 +157,25 @@ async function main(): Promise<void> {
       );
       log.info(`    keyframe: ${s.keyframe || '(无)'}`);
     }
+    return;
+  }
+
+  // --probe-x 验证 X/推特 这条独立链路：代理 → Nitter 实例 → 免登录回退路线。
+  // 只探测、不落库、不发信号。它是 docs/research/twitter.md §7 待验证清单的执行器：
+  // 实例存活与页面结构是本方案最大的时效性风险，「今天还能不能用」必须能一条命令回答。
+  if (args.probeX) {
+    const probeDb = new Db(secrets.dbPath);
+    const cfg = getXConfig(probeDb);
+    probeDb.close();
+    log.info(`X 探测：代理 ${cfg.proxyUrl || '(未配置)'} · 实例 ${cfg.instances.join(', ') || '(空)'} · 账号 @${args.probeScreen}`);
+    const report = await probeAll(cfg, args.probeScreen);
+    log.info(`  [代理]   ${report.proxy.ok ? 'OK  ' : 'FAIL'} ${report.proxy.message}`);
+    for (const i of report.instances) log.info(`  [实例]   ${i.ok ? 'OK  ' : 'FAIL'} ${i.host} — ${i.message}`);
+    if (report.web) log.info(`  [免登录] ${report.web.ok ? 'OK  ' : 'FAIL'} ${report.web.message}`);
+    else log.info('  [免登录] SKIP（代理不通，先解决出网再谈抓取）');
+    const usable = report.proxy.ok && (report.instances.some((i) => i.ok) || report.web?.ok === true);
+    log.info(usable ? '结论：X 链路可用（至少一条路线通）' : '结论：X 链路当前不可用');
+    if (!usable) process.exitCode = 1;
     return;
   }
 
@@ -553,6 +596,54 @@ async function main(): Promise<void> {
       },
       advanced: {
         onChanged: () => reconcileRuntime(),
+      },
+      // X / 推特 独立分页：连接设置 + 连通性测试（P0 无源，故 onChanged 暂无热生效对象）
+      x: {
+        info: () => ({ config: getXConfig(db), status: xStatus }),
+        save: (patch) => {
+          const prev = getXConfig(db);
+          saveXConfig(db, patch);
+          const next = getXConfig(db);
+          // 配置变了 → 相关旧结论失效（否则改好代理地址后，卡片仍配着上一轮的红点）
+          xStatus = invalidateXStatus(xStatus, prev, next);
+          return next;
+        },
+        test: async (testReq) => {
+          const cfg = getXConfig(db);
+          // 覆盖值优先：面板允许「先测后存」，输入框内容可以先验证再落库
+          const proxyUrl = testReq.proxyUrl !== undefined ? testReq.proxyUrl : cfg.proxyUrl;
+          const instances = testReq.instances !== undefined ? parseInstanceList(testReq.instances) : cfg.instances;
+          const screen = testReq.screenName ? testReq.screenName : DEFAULT_PROBE_SCREEN;
+          const want = testReq.target;
+          const proxyResult: ProxyProbe | null = want === 'all' || want === 'proxy' ? await probeProxy(proxyUrl) : null;
+          const instanceResults: InstanceProbe[] | null =
+            want === 'all' || want === 'instances' ? await probeInstances(instances, proxyUrl, screen) : null;
+          const webResult: WebProbe | null =
+            want === 'all' || want === 'web' ? await probeWeb(screen, proxyUrl) : null;
+
+          const nowSec = Math.floor(Date.now() / 1000);
+          // 只有「测的就是已保存配置」才更新卡片快照；未保存值的测试结果只在弹窗里就地显示
+          if (!isSavedConfigTest(testReq, cfg)) {
+            return { proxy: proxyResult, instances: instanceResults, web: webResult, status: xStatus };
+          }
+          const next: XStatus = { ...xStatus, updatedAt: nowSec };
+          if (proxyResult) next.proxy = { ok: proxyResult.ok, message: proxyResult.message, checkedAt: nowSec };
+          if (instanceResults) {
+            next.instances = instanceResults.map((i) => ({ host: i.host, ok: i.ok, message: i.message }));
+          }
+          if (webResult) next.web = { ok: webResult.ok, message: webResult.message, checkedAt: nowSec };
+          xStatus = next;
+
+          return {
+            proxy: proxyResult,
+            instances: instanceResults,
+            web: webResult,
+            status: next,
+          };
+        },
+        onChanged: () => {
+          // P0 还没有 X 源可启停；P1 接入 TwitterFeedSource 后在这里调 reconcileListen()
+        },
       },
       snapshots: { dir: keyframeDir },
       testPush: () => sendTestPush(),

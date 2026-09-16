@@ -12,7 +12,8 @@ import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
   HttpError, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseCategoryPatch, parseChannelPatch,
   parseNewCategory, parseNewChannel, parseNewRule, parseRulePatch, parseRuntimePatch,
-  parseStreamerPatch, parseUid, readJsonBody, sendJson, watchStreamer,
+  parseStreamerPatch, parseUid, parseXPatch, parseXTestRequest, readJsonBody, sendJson, watchStreamer,
+  type XTestRequest,
 } from './http-util.js';
 import { scheduleInfo } from './schedule.js';
 import { handleMcp } from '../mcp/handler.js';
@@ -34,6 +35,7 @@ import {
   getRuntimeConfig, saveRuntimeConfig,
 } from '../core/runtime-config.js';
 import { isPushEnabled, setPushEnabled } from '../core/push.js';
+import type { XConfig } from '../core/x-config.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 
@@ -115,6 +117,21 @@ export interface PanelDeps {
    *（重启间隔变化的源 / 重建 llm router / 热切换通知通道）。不注入则保存不触发热生效。
    */
   advanced?: {
+    onChanged: () => void;
+  };
+  /**
+   * X / 推特（独立分页，/api/x*）：连接设置 + 连通性测试。
+   * 状态快照由装配处持有（P0 尚无源，先只记「上次测试结果」，绝不在 GET 里打网络）；
+   * 不注入则 /api/x* 一律 404。X 与开播那套设置完全分开，互不影响。
+   */
+  x?: {
+    /** 当前配置 + 状态快照 */
+    info: () => unknown;
+    /** 保存连接设置（已校验）；返回最新配置 */
+    save: (patch: Partial<XConfig>) => unknown;
+    /** 连通性测试；允许传入尚未保存的覆盖值（先测后存） */
+    test: (req: XTestRequest) => Promise<unknown>;
+    /** 保存后回调：装配处热生效 */
     onChanged: () => void;
   };
   /** 关键帧缓存目录（/api/snapshot 按鼠标时间点取最近帧）；不注入则 /api/snapshot 一律 404 */
@@ -265,6 +282,25 @@ async function handle(
     saveRuntimeConfig(db, patch);
     deps.advanced?.onChanged();
     sendJson(res, 200, { ok: true, ...getRuntimeConfig(db) });
+    return;
+  }
+
+  // ---- X / 推特（独立分页；x dep 存在才挂）----
+  // GET 只回快照不打网络：面板会周期轮询这张卡片，探测必须由「测试」按钮显式触发。
+  if (deps.x && method === 'GET' && path === '/api/x') {
+    sendJson(res, 200, deps.x.info());
+    return;
+  }
+  if (deps.x && method === 'PUT' && path === '/api/x') {
+    const patch = parseXPatch(await readJsonBody(req));
+    deps.x.save(patch);
+    deps.x.onChanged();
+    sendJson(res, 200, deps.x.info());
+    return;
+  }
+  if (deps.x && method === 'POST' && path === '/api/x/test') {
+    const testReq = parseXTestRequest(await readJsonBody(req));
+    sendJson(res, 200, await deps.x.test(testReq));
     return;
   }
 

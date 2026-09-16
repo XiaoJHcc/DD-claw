@@ -16,6 +16,7 @@
 <button class="nav-item active" data-action="nav-view" data-view="schedule"><i data-icon="calendar"></i><span>时间表</span></button>
 <button class="nav-item" data-action="nav-view" data-view="streamers"><i data-icon="users"></i><span>主播列表</span></button>
 <button class="nav-item" data-action="nav-view" data-view="settings"><i data-icon="gear"></i><span>设置</span></button>
+<button class="nav-item" data-action="nav-view" data-view="x"><i data-icon="send"></i><span>X / 推特</span></button>
 </nav>
 <div class="side-foot">
 <span class="live-count"><i class="pulse"></i>在播 <b id="side-live-count">0</b></span>
@@ -110,6 +111,27 @@
 </div>
 <div id="follow-list" class="follow-grid">加载中…</div>
 </section>
+</div>
+
+<div class="view hidden" id="view-x">
+<div class="set-grid">
+<section class="card set-card acc-blue" id="card-x-conn">
+<div class="card-head"><span class="card-ic" data-icon="send"></span><h2>连接</h2></div>
+<div id="x-conn-rows">加载中…</div>
+<div class="card-actions">
+<button class="btn btn-ghost" data-action="test-x-all"><span data-icon="bolt"></span>测试全部</button>
+<button class="btn btn-line" data-action="open-x-settings"><span data-icon="sliders"></span>X 源设置</button>
+</div>
+</section>
+
+<section class="card set-card acc-cyan" id="card-x-listen">
+<div class="card-head"><span class="card-ic" data-icon="headphone"></span><h2>监听</h2></div>
+<div id="x-listen-rows">加载中…</div>
+<div class="card-actions">
+<span class="row-sub">抓取与规则在 P1/P2 接入（当前仅连通性）</span>
+</div>
+</section>
+</div>
 </div>
 </main>
 </div>

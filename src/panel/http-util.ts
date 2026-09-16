@@ -9,6 +9,10 @@ import type {
   CategoryInput, NewCategory, NewPushChannel, NewPushRule, PushChannelInput, PushRuleInput,
 } from '../core/push.js';
 import { NUM_SPECS, BOOL_SPECS, type RuntimeConfig } from '../core/runtime-config.js';
+import {
+  X_INTERVAL_MAX, X_INTERVAL_MIN, type XConfig,
+} from '../core/x-config.js';
+import { describeTunnelError, parseInstanceList, parseProxyUrl } from '../core/proxy.js';
 
 export class HttpError extends Error {
   constructor(
@@ -365,4 +369,85 @@ export function parseRuntimePatch(body: unknown): Partial<RuntimeConfig> {
   }
   if (Object.keys(patch).length === 0) throw new HttpError(400, '没有可保存的字段');
   return patch as Partial<RuntimeConfig>;
+}
+
+// ---- X / 推特（独立分页，/api/x*；与开播那套设置完全分开）----
+
+const X_KEYS = ['proxyUrl', 'instances', 'intervalSec', 'fallbackHtml'] as const;
+const X_TEST_TARGETS = ['all', 'proxy', 'instances', 'web'] as const;
+
+/** 实例 host 形状：host 或 host:port（不含协议，协议在 /api/x 保存时就该被剥掉） */
+const INSTANCE_HOST_RE = /^[a-z0-9][a-z0-9.-]*(:\d{1,5})?$/i;
+
+/**
+ * PUT /api/x 的部分更新体：代理地址（空串 = 不用代理）、实例列表、轮询间隔、回退开关。
+ * 代理地址在此就做一次形状校验——配置错误必须当场报，不能等到轮询时才炸。
+ */
+export function parseXPatch(body: unknown): Partial<XConfig> {
+  const o = asObject(body);
+  rejectUnknownKeys(o, X_KEYS);
+  const p: Partial<XConfig> = {};
+  if ('proxyUrl' in o) {
+    const v = o.proxyUrl;
+    if (typeof v !== 'string') throw new HttpError(400, 'proxyUrl 必须是字符串');
+    const s = v.trim();
+    if (s) {
+      try {
+        parseProxyUrl(s);
+      } catch (e) {
+        throw new HttpError(400, describeTunnelError(e));
+      }
+    }
+    p.proxyUrl = s;
+  }
+  if ('instances' in o) {
+    const raw = typeof o.instances === 'string'
+      ? [o.instances]
+      : asStringArray(o.instances, 'instances');
+    const list = raw.flatMap((x) => parseInstanceList(x));
+    for (const h of list) {
+      if (!INSTANCE_HOST_RE.test(h)) throw new HttpError(400, `实例格式不对（应为 host 或 host:port）: ${h}`);
+    }
+    p.instances = list;
+  }
+  if ('intervalSec' in o) {
+    const v = o.intervalSec;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < X_INTERVAL_MIN || v > X_INTERVAL_MAX) {
+      throw new HttpError(400, `推特抓取间隔必须是 ${X_INTERVAL_MIN}~${X_INTERVAL_MAX} 的整数`);
+    }
+    p.intervalSec = v;
+  }
+  if ('fallbackHtml' in o) p.fallbackHtml = asBoolean(o.fallbackHtml, 'fallbackHtml');
+  if (Object.keys(p).length === 0) throw new HttpError(400, '没有可保存的字段');
+  return p;
+}
+
+export interface XTestRequest {
+  target: 'all' | 'proxy' | 'instances' | 'web';
+  /** 覆盖值：允许「先测后存」——测试用的可以是还没保存的输入框内容 */
+  proxyUrl?: string;
+  instances?: string;
+  screenName?: string;
+}
+
+/** POST /api/x/test 的请求体：target 缺省 all；三个覆盖值都可省（省则用已保存配置） */
+export function parseXTestRequest(body: unknown): XTestRequest {
+  const o = asObject(body);
+  rejectUnknownKeys(o, ['target', 'proxyUrl', 'instances', 'screenName']);
+  const req: XTestRequest = {
+    target: 'target' in o ? asEnum(o.target, 'target', X_TEST_TARGETS) : 'all',
+  };
+  if ('proxyUrl' in o) {
+    if (typeof o.proxyUrl !== 'string') throw new HttpError(400, 'proxyUrl 必须是字符串');
+    req.proxyUrl = o.proxyUrl.trim();
+  }
+  if ('instances' in o) {
+    if (typeof o.instances !== 'string') throw new HttpError(400, 'instances 必须是字符串');
+    req.instances = o.instances;
+  }
+  if ('screenName' in o) {
+    if (typeof o.screenName !== 'string') throw new HttpError(400, 'screenName 必须是字符串');
+    req.screenName = o.screenName.trim();
+  }
+  return req;
 }

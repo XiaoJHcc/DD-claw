@@ -55,6 +55,7 @@ const store = {
   llmProviders: clone(defaults?.llmProviders ?? []),
   advanced: { ...M.mockAdvanced },
   napcat: clone(M.mockNapcat),
+  x: clone(M.mockX),
   pushEnabled: true,
   llmEnabled: true,
   biliLoggedIn: true,
@@ -63,6 +64,11 @@ const store = {
   biliQrStep: 0,
   weiboQrStep: 0,
 };
+
+// X 快照的时间戳也用冻结时刻（连接卡副行要显示「上次测试 x/x xx:xx」）
+store.x.status.proxy.checkedAt = nowSec;
+store.x.status.web.checkedAt = nowSec;
+store.x.status.updatedAt = nowSec;
 
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
@@ -171,6 +177,75 @@ function handle(method, path, q, rawBody) {
     const b = body();
     Object.assign(store.advanced, b);
     return ok({ ok: true, ...store.advanced });
+  }
+
+  // ---- X / 推特（独立分页；契约与真实后端同构：GET 只读快照，探测走 /test）----
+  if (path === '/api/x' && method === 'GET') {
+    return ok({ config: store.x.config, status: store.x.status });
+  }
+  if (path === '/api/x' && method === 'PUT') {
+    const b = body();
+    const prev = JSON.stringify(store.x.config);
+    if (typeof b.proxyUrl === 'string') store.x.config.proxyUrl = b.proxyUrl;
+    if (typeof b.instances === 'string') {
+      store.x.config.instances = b.instances.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (Number.isInteger(b.intervalSec)) store.x.config.intervalSec = b.intervalSec;
+    if (typeof b.fallbackHtml === 'boolean') store.x.config.fallbackHtml = b.fallbackHtml;
+    // 与真实后端 invalidateXStatus 同构：配置变了，相关旧结论作废（别让红点配着新地址）
+    const before = JSON.parse(prev);
+    const stale = { ok: false, message: '配置已改，请重新测试', checkedAt: null };
+    if (store.x.config.proxyUrl !== before.proxyUrl || store.x.config.fallbackHtml !== before.fallbackHtml) {
+      store.x.status.proxy = { ...stale };
+      store.x.status.web = { ...stale };
+    }
+    if (store.x.config.instances.join(',') !== before.instances.join(',')) {
+      store.x.status.instances = [];
+    }
+    return ok({ config: store.x.config, status: store.x.status });
+  }
+  if (path === '/api/x/test' && method === 'POST') {
+    const b = body();
+    const target = b.target || 'all';
+    const proxyUrl = typeof b.proxyUrl === 'string' && b.proxyUrl ? b.proxyUrl : store.x.config.proxyUrl;
+    const hosts = typeof b.instances === 'string' && b.instances
+      ? b.instances.split(',').map((s) => s.trim()).filter(Boolean)
+      : store.x.config.instances;
+    const out = {};
+    // 演示口径：代理与免登录恒通；实例按已知名单给「两通一限速」，未知实例按 404 不可用
+    if (target === 'all' || target === 'proxy') {
+      // 与真实 probeProxy 同构：非法代理形状不抛错，而是回一条可读的失败原因
+      const looksValid = !proxyUrl || /^(https?:\/\/)?[a-z0-9.-]+(:\d{1,5})?$/i.test(proxyUrl);
+      out.proxy = !proxyUrl
+        ? { ok: false, kind: 'unconfigured', target: 'https://x.com/robots.txt', status: null, ms: 0, message: '未配置代理；境内直连 x.com 会 TLS 被重置，X 功能不可用' }
+        : !looksValid
+          ? { ok: false, kind: 'error', target: 'https://x.com/robots.txt', status: null, ms: 0, message: '配置有误：代理只支持 http://（CONNECT），收到 ' + proxyUrl.split(':')[0] + '://' }
+          : { ok: true, kind: 'ok', target: 'https://x.com/robots.txt', status: 200, ms: 1780, message: '代理可达 · x.com 200 · 1780ms' };
+    }
+    if (target === 'all' || target === 'instances') {
+      out.instances = hosts.map(function (h) {
+        if (h === 'nitter.kareem.one') return { host: h, ok: false, kind: 'blocked', status: 429, ms: 620, items: 0, message: '429 被限速' };
+        if (h === 'nitter.jaydenha.uk') return { host: h, ok: true, kind: 'ok', status: 200, ms: 940, items: 20, message: '可用 · 20 条 · 940ms' };
+        if (h === 'x.n0g.xyz') return { host: h, ok: true, kind: 'ok', status: 200, ms: 1120, items: 20, message: '可用 · 20 条 · 1120ms' };
+        return { host: h, ok: false, kind: 'error', status: 404, ms: 510, items: 0, message: 'HTTP 404' };
+      });
+    }
+    if (target === 'all' || target === 'web') {
+      out.web = { ok: true, screenName: 'watase_yuzuki', status: 200, ms: 1980, tweetIds: 7, latestId: '2100025416010661982', latestAt: nowSec - 3600 * 10, message: '免登录可用 · 7 个 id' };
+    }
+    const now = Math.floor(Date.now() / 1000);
+    // 与真实后端 isSavedConfigTest 同构：测的是未保存的输入值 → 只回结果，不动卡片快照
+    const proxySame = b.proxyUrl === undefined || String(b.proxyUrl).trim() === store.x.config.proxyUrl.trim();
+    const instSame = b.instances === undefined
+      || String(b.instances).split(',').map((s) => s.trim()).filter(Boolean).join(',') === store.x.config.instances.join(',');
+    if (!(proxySame && instSame)) return ok({ ...out, status: store.x.status });
+    if (out.proxy) store.x.status.proxy = { ok: out.proxy.ok, message: out.proxy.message, checkedAt: now };
+    if (out.instances) {
+      store.x.status.instances = out.instances.map((i) => ({ host: i.host, ok: i.ok, message: i.message }));
+    }
+    if (out.web) store.x.status.web = { ok: out.web.ok, message: out.web.message, checkedAt: now };
+    store.x.status.updatedAt = now;
+    return ok({ ...out, status: store.x.status });
   }
 
   // ---- 快照 / 头像：demo 下不经本拦截器 ----

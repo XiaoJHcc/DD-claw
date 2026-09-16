@@ -11,6 +11,7 @@ import { createPanelServer, type PanelDeps, type PanelStatus } from './server.js
 import { createLlmRouter, listLlmProviders, saveLlmProviders, setLlmEnabled, dbKeysOf, type LlmRouter, type FetchLike } from '../analysis/providers.js';
 import type { LlmProviderConfig } from '../config/schema.js';
 import { saveNapcatConfig } from '../notify/napcat.js';
+import { getXConfig, saveXConfig } from '../core/x-config.js';
 
 interface Fixture {
   db: Db;
@@ -49,6 +50,8 @@ async function setup(
     avatar?: PanelDeps['avatar'];
     /** 注入 testPush dep（/api/push/test）；缺省不注入（404） */
     testPush?: PanelDeps['testPush'];
+    /** 注入 x dep（/api/x*）；缺省不注入（404） */
+    x?: PanelDeps['x'];
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -103,6 +106,7 @@ async function setup(
     snapshots: opts.snapshots,
     avatar: opts.avatar,
     testPush: opts.testPush,
+    x: opts.x,
     ...(opts.listen
       ? {
           listen: {
@@ -1639,4 +1643,118 @@ test('/api/avatar：坏 uid 400 / 无该主播或无头像 404 / 非白名单 ho
   assert.equal((await rawGet(base, '/api/avatar?uid=1002')).status, 404, '无头像 404');
   db.upsertStreamer({ uid: '1003', uname: '坏域名', face: 'https://evil.example.com/x.jpg' });
   assert.equal((await rawGet(base, '/api/avatar?uid=1003')).status, 400, '非白名单 host 400');
+});
+
+// ---- X / 推特 独立分页（/api/x*）----
+// 这几条守的是「X 与开播那套设置完全分开」：X 未注入时整组端点 404，
+// 注入后读写只碰 x_* 设置；探测走显式 POST，GET 绝不打网络（靠 onChanged/测试计数验证）。
+
+/** 生产装配形状的 x dep：配置落 settings，探测结果只更新内存快照 */
+function makeXDep(db: Db, calls: string[]): NonNullable<PanelDeps['x']> {
+  let status = {
+    proxy: { ok: false, message: '尚未测试', checkedAt: null as number | null },
+    instances: [] as { host: string; ok: boolean; message: string }[],
+    web: { ok: false, message: '尚未测试', checkedAt: null as number | null },
+    updatedAt: null as number | null,
+  };
+  return {
+    info: () => ({ config: getXConfig(db), status }),
+    save: (patch) => { saveXConfig(db, patch); return getXConfig(db); },
+    test: async (req) => {
+      calls.push(req.target);
+      const cfg = getXConfig(db);
+      const now = Math.floor(Date.now() / 1000);
+      const out: Record<string, unknown> = {};
+      if (req.target === 'all' || req.target === 'proxy') {
+        out.proxy = { ok: true, kind: 'ok', target: 'https://x.com/robots.txt', status: 200, ms: 12, message: '代理可达' };
+      }
+      if (req.target === 'all' || req.target === 'instances') {
+        out.instances = (req.instances !== undefined ? req.instances.split(',') : cfg.instances)
+          .map((h) => ({ host: h.trim(), ok: h.trim() === 'a.example', kind: 'ok', status: 200, ms: 5, message: '可用' }));
+      }
+      if (req.target === 'all' || req.target === 'web') {
+        out.web = { ok: true, screenName: 'watase_yuzuki', status: 200, ms: 9, tweetIds: 7, latestId: '1', latestAt: now, message: '免登录可用' };
+      }
+      if (out.proxy) status = { ...status, proxy: { ok: true, message: '代理可达', checkedAt: now } };
+      if (out.instances) {
+        status = { ...status, instances: (out.instances as { host: string; ok: boolean }[]).map((i) => ({ host: i.host, ok: i.ok, message: '可用' })) };
+      }
+      if (out.web) status = { ...status, web: { ok: true, message: '免登录可用', checkedAt: now } };
+      status = { ...status, updatedAt: now };
+      return { ...out, status };
+    },
+    onChanged: () => { calls.push('saved'); },
+  };
+}
+
+test('/api/x：未注入 x dep → 整组端点 404（与开播设置彻底分开）', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/x')).status, 404);
+  assert.equal((await api(base, '/api/x', 'PUT', { intervalSec: 300 })).status, 404);
+  assert.equal((await api(base, '/api/x/test', 'POST', { target: 'all' })).status, 404);
+});
+
+test('/api/x：GET 返回默认配置且不打网络；PUT 落 settings 并回调热生效', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, x: makeXDep(db, calls) });
+
+  const got = await api(base, '/api/x');
+  assert.equal(got.status, 200);
+  const config = got.json.config as Record<string, unknown>;
+  assert.equal(config.proxyUrl, 'http://127.0.0.1:7890', '默认代理');
+  assert.equal(config.intervalSec, 300);
+  assert.equal(config.fallbackHtml, true);
+  assert.deepEqual(config.instances, ['nitter.jaydenha.uk', 'x.n0g.xyz']);
+  assert.deepEqual(calls, [], 'GET 不得触发任何探测');
+
+  const put = await api(base, '/api/x', 'PUT', {
+    proxyUrl: '127.0.0.1:1080', instances: 'a.example, b.example', intervalSec: 600, fallbackHtml: false,
+  });
+  assert.equal(put.status, 200);
+  assert.equal((put.json.config as Record<string, unknown>).proxyUrl, '127.0.0.1:1080', '裸 host:port 被接受');
+  assert.equal(db.getSetting('x_proxy_url'), '127.0.0.1:1080', '落 settings 唯一信源');
+  assert.equal(db.getSetting('x_nitter_instances'), 'a.example,b.example');
+  assert.equal(db.getSetting('x_interval_sec'), '600');
+  assert.equal(db.getSetting('x_fallback_html'), '0');
+  assert.deepEqual(calls, ['saved'], '保存触发一次热生效回调');
+});
+
+test('/api/x：PUT 校验代理形状与间隔范围（配置错误当场报，不等轮询才炸）', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+  const bad = await api(base, '/api/x', 'PUT', { proxyUrl: 'socks5://127.0.0.1:1080' });
+  assert.equal(bad.status, 400);
+  assert.match(String(bad.json.error), /代理只支持 http/);
+  assert.equal((await api(base, '/api/x', 'PUT', { intervalSec: 10 })).status, 400, '低于下限');
+  assert.equal((await api(base, '/api/x', 'PUT', { intervalSec: 999999 })).status, 400, '高于上限');
+  assert.equal((await api(base, '/api/x', 'PUT', { instances: 'bad_host' })).status, 400, '实例含下划线（非法 host）');
+  assert.equal((await api(base, '/api/x', 'PUT', {})).status, 400, '空 patch');
+  assert.equal((await api(base, '/api/x', 'PUT', { nope: 1 })).status, 400, '未知字段');
+  assert.equal(db.getSetting('x_proxy_url'), null, '校验失败不落库');
+});
+
+test('/api/x/test：探测按 target 裁剪，且允许用未保存的输入值（先测后存）', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, x: makeXDep(db, calls) });
+
+  const only = await api(base, '/api/x/test', 'POST', { target: 'proxy' });
+  assert.equal(only.status, 200);
+  assert.ok(only.json.proxy, '只测代理时返回 proxy');
+  assert.equal(only.json.instances, undefined, '不越权测实例');
+  assert.deepEqual(calls, ['proxy']);
+
+  const inst = await api(base, '/api/x/test', 'POST', { target: 'instances', instances: 'a.example,b.example' });
+  const list = inst.json.instances as { host: string; ok: boolean }[];
+  assert.deepEqual(list.map((i) => i.host), ['a.example', 'b.example'], '用请求里的覆盖值而非库里的');
+  assert.equal(list[0]!.ok, true, 'a.example 模拟可用');
+
+  const bad = await api(base, '/api/x/test', 'POST', { target: 'nope' });
+  assert.equal(bad.status, 400, 'target 白名单');
+
+  const after = await api(base, '/api/x');
+  const status = after.json.status as { proxy: { ok: boolean }; instances: unknown[] };
+  assert.equal(status.proxy.ok, true, '测试结果写进快照供卡片显示');
+  assert.equal(status.instances.length, 2);
 });

@@ -6,6 +6,7 @@ import './llm.js';
 import './categories.js';
 import './push.js';
 import './napcat.js';
+import './x.js';
 import './streamers.js';
 import './follows.js';
 import { schedRelayout } from './schedule.js';

@@ -102,3 +102,24 @@ export const mockPlatforms = [
   { key: 'bili', name: 'B站', state: 'ok', mid: '10086' },
   { key: 'weibo', name: '微博', state: 'ok', mid: '9001' },
 ];
+
+// ---- X / 推特（独立分页）：demo 手写一份「刚测过、三实例两通一限速」的现场，
+// 让 ?demo=1 下连接卡的状态点、实例分类与测试结果都能被看见（含一条失败对照）----
+export const mockX = {
+  config: {
+    proxyUrl: 'http://127.0.0.1:7890',
+    instances: ['nitter.jaydenha.uk', 'x.n0g.xyz', 'nitter.kareem.one'],
+    intervalSec: 300,
+    fallbackHtml: true,
+  },
+  status: {
+    proxy: { ok: true, message: '代理可达 · x.com 200 · 1780ms', checkedAt: 0 },
+    instances: [
+      { host: 'nitter.jaydenha.uk', ok: true, message: '可用 · 20 条 · 940ms' },
+      { host: 'x.n0g.xyz', ok: true, message: '可用 · 20 条 · 1120ms' },
+      { host: 'nitter.kareem.one', ok: false, message: '429 被限速' },
+    ],
+    web: { ok: true, message: '免登录可用 · 7 个 id · 最新 2026-09-16T00:54:10.000Z', checkedAt: 0 },
+    updatedAt: 0,
+  },
+};

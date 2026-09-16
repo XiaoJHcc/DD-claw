@@ -16,6 +16,7 @@ B站关注列表全员监听（直播间 + 动态 + 微博）→ 持续追踪 �
 | 文档 | 内容 |
 |---|---|
 | [plan/agent-access.md](plan/agent-access.md) | **多前端接入统一计划**：一个能力面 N 种接线（Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连），信任模型矩阵 + 共享组件 + 分期 P1-P3 |
+| [plan/twitter-source.md](plan/twitter-source.md) | **X/推特图文来源计划**：免登录路线（Nitter RSS 主 + 免登录 HTML 备）、面板可配代理、机械筛选与可选 LLM 判定/翻译，分期 P0-P3 |
 
 （M1 落地计划已完成使命并归档删除，实施经验折叠进 boundaries.md 第 5 节；后续里程碑的实施计划在动手前按同样格式补写。）
 
@@ -37,6 +38,7 @@ B站关注列表全员监听（直播间 + 动态 + 微博）→ 持续追踪 �
 | [research/danmaku.md](research/danmaku.md) | 弹幕 WS 匿名可连，只需 WBI 签名 + UA |
 | [research/media-capture.md](research/media-capture.md) | keyframe 白嫖；需音频时走 FLV + ffmpeg 合并命令 |
 | [research/feeds.md](research/feeds.md) | 动态/微博匿名全灭，必须 cookie 或浏览器 |
+| [research/twitter.md](research/twitter.md) | 推特免登录能拿最新推文（**代理是硬前提**）；Nitter RSS 仍有活口且最适合机械筛选 |
 | [research/auth-cookie.md](research/auth-cookie.md) | 自动读 Chrome cookie 已死，手动导出是唯一正路 |
 | [research/llm.md](research/llm.md) | 文本为主路径；免费视觉首选 Gemini，备选 GLM-4V-Flash |
 | [research/notify.md](research/notify.md) | QQ 只剩 NapCat 一条活路；本机 Toast 走 powertoast |
@@ -57,3 +59,4 @@ B站关注列表全员监听（直播间 + 动态 + 微博）→ 持续追踪 �
 匿名可拿：开播状态（批量）、标题、分区、开播时间、keyframe 预览图、弹幕流、直播流截图与音频。
 需要凭据：关注列表（SESSDATA）、B站空间动态、微博时间线。
 故开播检测与弹幕内容分析可完全匿名运行；**cookie 是「规模化」（关注列表同步）与「预告时间表」的前置条件**。
+X/推特另开一路：**免登录即可拿到最新推文**（详见 research/twitter.md），但**必须先有可用代理**——境内直连 x.com 与图片 CDN 均不可达。

@@ -86,6 +86,8 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/onboarding.ts` — 首启默认值种入（一次性闸门）
 - `src/core/onboarding-defaults.gen.ts` — 构建期生成物（勿手改）
 - `src/core/concurrency.ts` — `mapLimit` 有界并发
+- `src/core/proxy.ts` — **隧道 fetch**（HTTP 代理 CONNECT；Node 22 原生 fetch 不认代理），X 链路唯一出网通道
+- `src/core/x-config.ts` — X/推特连接配置 + 探测状态快照（settings 唯一信源）
 - `src/config/index.ts` — 读 `.env` + `config.json`（只有 panel 段生效）
 - `src/config/schema.ts` — panel 校验 + provider schema + 默认配置
 - `src/logger.ts` — 极简结构化日志
@@ -108,6 +110,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/sources/weibo/qrcode.ts` — 微博扫码（generate 必须带 Referer）
 - `src/sources/weibo/auth.ts` — weibo-cookies + `X-Log-Uid` 心跳
 - `src/sources/weibo/resolve.ts` — 昵称→UID 匿名解析链
+- `src/sources/twitter/probe.ts` — **X 连通性探测**（代理 / 实例 RSS / 免登录回退），`npm run probe-x` 与 `/api/x/test` 共用
 
 ### analysis / rules
 
@@ -178,6 +181,7 @@ npm run webui:dev    # 静态服 webui/（改 UI 零重启，浏览器开 ?demo=
 npm test             # node --test（各 *.test.ts）
 npm run probe        # 只查一次开播状态，验证接口通不通
 npm run probe-llm    # 列 LLM provider 状态 + text 路由 ping
+npm run probe-x      # X/推特链路探测：代理 → Nitter 实例（RSS）→ 免登录回退（--x-screen 换账号）
 npm run test-notify  # 假事件走完整推送链路，验证 NapCat/Toast 配置
 npm run napcat-setup # 一次性创建 NapCat 最高权限计划任务（弹一次 UAC）并开启自动拉起
 npm run migrate:snapshots-path # 一次性迁移 snapshots.path（换机后跑一次；幂等）
@@ -190,6 +194,7 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 ## 实现现状
 
 - **已落地主干**：开播通知（NapCat/Toast 已实测）、规模化 + 内容判定（名单迁库 / 扫码登录 / 关注同步 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2）、时间轴统计、控制面板 v1+v2、MCP v1、NapCat 双平台托管
+- **X/推特（独立于 B站的一条路径）**：**P0 已落地**（隧道 fetch / X 配置 / 连通性探测 / `/api/x*` / 独立分页 `#view-x` / `npm run probe-x`）；待做 P1 免登录源 + 独立账号名单 `x_accounts`、P2 `post_rules` 图文帖规则与推送分支、P3 LLM 判定与翻译。计划见 `docs/plan/twitter-source.md`，调研见 `docs/research/twitter.md`
 - **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、面板 REST 收敛到能力面、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 
@@ -202,4 +207,5 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - `docs/modules/` — 模块实现笔记：core / sources / analysis / notify / panel（逐文件职责与「改前必知」）
 - `docs/mcp.md` — MCP 接口：令牌、角色权限、Host 配置、安全模型与 v2 预留（MaiBot 不直连）
 - `docs/plan/agent-access.md` — 多前端接入统一计划：一个能力面 N 种接线 + 信任模型矩阵 + 分期 P1-P3
-- `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、llm、notify、media-capture、auth-cookie、ts-stack）
+- `docs/plan/twitter-source.md` — X/推特图文来源计划：独立分页 + 独立账号名单 + 图文帖规则，P0 已落地
+- `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、**twitter**、llm、notify、media-capture、auth-cookie、ts-stack）

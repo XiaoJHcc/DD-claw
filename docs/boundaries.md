@@ -27,6 +27,18 @@
 | 直播原画画质 | [实测] `qn=10000` 静默降级到 250 | SESSDATA（本项目不需要） |
 | 动态评论区 | [文档] 需 `type=17` + 动态 id | 未跑通，见 feeds.md |
 
+### 需要代理出网（境内直连不可达）
+
+以下都是 **X / 推特** 的能力，2026-09-16 在本机实测：**免凭据可用，但必须先有可用 HTTP 代理**（直连 `x.com` TLS 被重置、`pbs.twimg.com` 直接超时）。详见 [research/twitter.md](research/twitter.md)。
+
+| 能力 | 接口 / 手段 | 验证 |
+|---|---|---|
+| **账号最新推文（含正文）** | 免登录 `x.com/<screen>` HTML 内嵌数据 | [实测] 拿到当天 00:54Z 的推文 |
+| 单推详情（时间/图片/正文） | `cdn.syndication.twimg.com/tweet-result?id=<id>&token=<任意非空>` | [实测] 200 完整 JSON |
+| 推文列表（100 条，但**非最新**） | `cdn.syndication.twimg.com/srv/timeline-profile/screen-name/<name>` | [实测] 100 条；限流 30 次/15 分钟 |
+| **原创/转发/带图/时间可判的订阅** | 存活 Nitter 实例的 `/<screen>/rss` | [实测] 20 条 = 10 转 + 10 原创，19 带图 |
+| 图片下载 | `pbs.twimg.com`（经代理） | [实测] 代理通、直连超时 |
+
 ### 明确做不到
 
 - **自动读取 Chrome/Edge 已登录 cookie** — Chrome 127+ App-Bound Encryption 封死。可绕过，但手段是进程注入 / process hollowing / COM 伪装，等同恶意软件技术，本项目不采用。
@@ -72,6 +84,8 @@
 | LLM 文本判定 | 免费额度内；L0/L1 规则层拦掉 60-80% |
 | LLM 视觉判定 | 免费额度更紧，仅文本信号矛盾时动用 |
 | 本地常驻 | Node 单进程 + 按需几路 WS；OCR/音频模型按需加载 |
+| 推特第三方 API（增量轮询 50 账号） | ≈$65–80/月（twitterapi.io）；官方 X API 去重后 ≈$37/月，**无去重 ≈$10,800/月** |
+| 推特免登录路线（HTML + syndication / Nitter RSS） | 0 元，代价是实例与页面结构随时可变 |
 
 ## 4. 时效性风险
 
@@ -85,6 +99,8 @@
 | Chrome cookie 加密机制 | ABE 仍在攻防迭代 |
 | NapCat 可用性 | 同类项目 go-cqhttp / Lagrange V1 / Shamrock 已相继失效 |
 | SESSDATA 有效期 | [待验证] 网传半年到一年，无官方声明；用心跳检测代替硬编码天数 |
+| Nitter 实例存活与 X 页面结构 | 公共实例随时被限速/被停止函打死；免登录 HTML 的字段随 X 改版变化（2026-09-16 实测可用） |
+| 本机代理的可用性 | X 全部能力都压在 `127.0.0.1:7890` 上，代理挂 = X 源全停（应做健康检查与告警） |
 
 ## 5. 已知踩坑清单
 
@@ -129,3 +145,15 @@
 25. 微博昵称→UID 匿名解析链（`src/sources/weibo/resolve.ts`）：`genvisitor` 拿 tid → `incarnate` 拿 SUB/SUBP → `m.weibo.cn/n/<昵称>` 302 到 `/u/<uid>`；cookie 模块级缓存、失效自动重建并重试一次，绝不进日志。[实测]
 26. B站 `x/relation/followings` 分页 **50/页**，按返回 total 翻页、短页到底；**无需 WBI 签名**（604 关注 13 页实测）。[实测]
 27. B站批量接口 `get_status_info_by_uids` 传入**非纯数字 uid** 会报 `65530 route_exception`，单 uid 拉取也必败——`listWatchedUids()` 只回 watch=1 且纯数字的 uid（防止 demo 演示数据混入）。[实测]
+
+以下来自 X/推特接入调研（2026-09-16）：
+
+28. **Node 22 原生 fetch 不认代理**：`HTTPS_PROXY` 环境变量无效（`NODE_USE_ENV_PROXY` 是 Node 24+ 才有），项目也未装 `undici`；`curl.exe -x` 在同一环境下同样打不通（`000`）。可行解只有一个——**手写 CONNECT 隧道 + 在隧道上 `tls.connect({servername})`**。请求务必带 `Connection: close`：HTTP/1.1 默认 keep-alive 会让读取端永不 `end`，表现为**假的 20 秒超时**（本次调研踩过，浪费两轮探测）。[实测]
+29. `cdn.syndication.twimg.com/tweet-result` 的 `token` 参数**只需存在且非空，值任意**（`abc` 与推文 id 都返回完整 JSON，与网传"由 id 派生"不符）；**缺 token 时返回 `200` + `{}`**——空对象必须当失败处理，不能当"没内容"。[实测]
+30. **免登录的两条 X 路线都过滤转发**：`x.com/<screen>` HTML 与 `syndication timeline-profile` 实测 `retweeted_status_results` 全为 `null`（同期 Nitter RSS 显示同一账号 20 条里 10 条是转发）。要转发就必须走 Nitter RSS / 持号路线 / API。[实测]
+31. `syndication timeline-profile` **给的不是「最新 100 条」而是抽样**（实测最新条目停在 4 个月前，而该账号当天有推文），且限流 `x-rate-limit-limit: 30`（15 分钟窗口，打满返 429 + 20 字节空体）→ 只能当回填源，不能当实时源。[实测]
+32. Nitter RSS 的 `<link>` 指向**原作者**的 `/status/<id>`（`RT by @xxx` 的 link 是原作者推文），按 link 去重会把"同一条推文被多次转发"折叠成一条；需要"每次转发都推"就必须另取 RT 自身 id。[实测]
+33. Nitter 系公共实例对脚本客户端大多不可用：`xcancel.com` 返回 **451**（法律下架），`nitter.net`/`nitter.poast.org` TLS 重置，`nitter.space`/`lightbrd.com` Cloudflare 403，`tiekoetter`/`privacyredirect` 挂 **Anubis 工作量证明**。实测可用仅 `nitter.jaydenha.uk`、`x.n0g.xyz`（RSS 各 20 条）与限速的 `nitter.kareem.one` → 只能"多实例轮询 + 失败即弃"。[实测]
+34. **Nitter 实例判活必须打 RSS 路径，不能打首页**："首页挂了 Anubis/Cloudflare" ≠ "实例不可用"。2026-09-16 实测 `x.n0g.xyz` 首页是 Anubis 挑战页，但 `/<user>/rss` 正常返回 20 条；按首页判活会把唯一能用的实例误杀成不可用。[实测]
+35. 公共实例会**分钟级抖动**：同一个 `nitter.jaydenha.uk` 前一次探测 TLS 被重置，几十秒后重试又正常返回 20 条。实例探测要带一次瞬时错误重试，并如实标注「已重试 1 次」——既不要把抖动读成死亡，也不要把抖动读成稳定。[实测]
+36. `127.0.0.1:7890` 这类本地代理在 Windows 上可能**只监听 IPv6 通配 `[::]:7890`**：`Get-NetTCPConnection -LocalPort 7890 -State Listen` 查不到（表现为「代理没在跑」），但 `net.connect(7890,'127.0.0.1')` 与 CONNECT 隧道都正常。查代理存活要以实际连接为准，不要只信端口枚举。[实测]
