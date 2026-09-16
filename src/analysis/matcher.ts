@@ -1,5 +1,6 @@
 import type { LiveEvent } from '../core/types.js';
 import type { Category, PushRule } from '../core/push.js';
+import type { PostFilters, PostRule } from '../core/post-rules.js';
 
 export interface CategoryMatch {
   matched: boolean;
@@ -60,4 +61,67 @@ export function renderTemplate(tpl: string, event: LiveEvent): string {
     .replaceAll('{liver}', event.uname || event.alias)
     .replaceAll('{uname}', event.uname)
     .replaceAll('{title}', event.title);
+}
+
+// ---- 图文帖（X/推特）：与开播规则平行的一套确定性判定 ----
+
+/** matcher 眼里的「一条帖子」——不依赖 Post 行，由 pipeline 从 feed_post 载荷组装 */
+export interface PostCandidate {
+  /** x_accounts.id（规则按它生效） */
+  accountId: number;
+  /** 被轮询的账号 screen name（不含 @） */
+  screenName: string;
+  /** 'tweet'（原创）| 'retweet' */
+  type: string;
+  text: string | null;
+  pics: string[];
+  pubTs: number;
+  url: string | null;
+  /** 只有免登录回退路线能识别引用；undefined = 未知（RSS 不标） */
+  isQuote?: boolean;
+  /** 可选关联主播的展示名（模板变量 {liver} 用） */
+  biliName?: string | null;
+}
+
+/**
+ * 机械筛选（纯确定性，零 LLM）：
+ *  · 原创 / 转发 二选一（都不勾 = 死规则，保存时已拒绝）
+ *  · 必须带图：勾上则 pics 非空
+ *  · 关键词：非空则正文需命中任一（大小写不敏感子串）
+ *  · quote：勾上则要求 isQuote === true —— 目前只有回退路线可能给出，RSS 帖永不命中
+ */
+export function matchPostFilters(f: PostFilters, post: PostCandidate): boolean {
+  const kindOk = post.type === 'retweet' ? f.retweet : f.original;
+  if (!kindOk) return false;
+  if (f.quote && post.isQuote !== true) return false;
+  if (f.media && post.pics.length === 0) return false;
+  if (f.keywords.length > 0) {
+    const text = (post.text ?? '').toLowerCase();
+    if (!f.keywords.some((k) => text.includes(k.toLowerCase()))) return false;
+  }
+  return true;
+}
+
+/**
+ * 图文帖规则命中判定：命中 =（accountIds 空 = 全部账号，或含该账号）且通过机械筛选。
+ * 返回全部命中规则（保持 sort 顺序）——所有命中规则独立生效，渠道取并集、推送词取首个非空。
+ */
+export function matchPostRules(rules: PostRule[], post: PostCandidate): PostRule[] {
+  const hits: PostRule[] = [];
+  for (const r of rules) {
+    if (r.accountIds.length > 0 && !r.accountIds.includes(post.accountId)) continue;
+    if (!matchPostFilters(r.filters, post)) continue;
+    hits.push(r);
+  }
+  return hits;
+}
+
+/** 渲染图文帖推送词变量：{author} = @账号，{text} = 正文，{url} = 链接，{liver} = 关联主播（缺省回退账号） */
+export function renderPostTemplate(tpl: string, post: PostCandidate): string {
+  return tpl
+    .replaceAll('{author}', `@${post.screenName}`)
+    .replaceAll('{screenName}', post.screenName)
+    .replaceAll('{text}', post.text ?? '')
+    .replaceAll('{url}', post.url ?? '')
+    .replaceAll('{liver}', post.biliName || `@${post.screenName}`);
 }

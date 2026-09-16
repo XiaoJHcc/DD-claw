@@ -22,6 +22,10 @@ import {
   normalizeScreenName, rowToXAccount,
   type XAccount, type XAccountFetchTouch, type XAccountInput, type XAccountRow,
 } from './x-accounts.js';
+import {
+  defaultPostFilters, rowToPostRule,
+  type NewPostRule, type PostFilters, type PostRule, type PostRuleInput, type PostRuleRow,
+} from './post-rules.js';
 
 const log = makeLogger('core/db');
 
@@ -156,6 +160,18 @@ CREATE TABLE IF NOT EXISTS x_accounts (
   last_ok_at    INTEGER,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS post_rules (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  name             TEXT    NOT NULL DEFAULT '',
+  account_ids      TEXT    NOT NULL DEFAULT '[]',
+  channels         TEXT    NOT NULL DEFAULT '[]',
+  filters          TEXT    NOT NULL DEFAULT '{}',
+  message_template TEXT,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  sort             INTEGER NOT NULL DEFAULT 0,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS live_segments (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -915,6 +931,84 @@ export class Db {
   reorderPushRules(ids: number[]): void {
     const tx = this.db.transaction(() => {
       const stmt = this.db.prepare('UPDATE push_rules SET sort = ?, updated_at = ? WHERE id = ?');
+      for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i]);
+    });
+    tx();
+  }
+
+  // ---- post_rules：图文帖规则（X/推特链路，与 push_rules 平行）----
+
+  /** 面板用：全量规则（含 disabled）。matcher 消费请用 listEnabledPostRules。 */
+  listPostRules(): PostRule[] {
+    const rows = this.db.prepare('SELECT * FROM post_rules ORDER BY sort, id').all() as PostRuleRow[];
+    return rows.map(rowToPostRule);
+  }
+
+  /** 全部启用规则，sort 升序（全部命中独立生效，渠道取并集） */
+  listEnabledPostRules(): PostRule[] {
+    const rows = this.db
+      .prepare('SELECT * FROM post_rules WHERE enabled = 1 ORDER BY sort, id')
+      .all() as PostRuleRow[];
+    return rows.map(rowToPostRule);
+  }
+
+  private getPostRule(id: number): PostRule | undefined {
+    const row = this.db.prepare('SELECT * FROM post_rules WHERE id = ?').get(id) as PostRuleRow | undefined;
+    return row ? rowToPostRule(row) : undefined;
+  }
+
+  /** 带 id 且存在 = 改行（未提供字段保留原值）；否则建行（空名补「图文帖规则 N」，排到末尾） */
+  upsertPostRule(input: PostRuleInput): number {
+    const prev = input.id !== undefined ? this.getPostRule(input.id) : undefined;
+    const filters: PostFilters = {
+      ...(prev?.filters ?? defaultPostFilters()),
+      ...(input.filters ?? {}),
+    };
+    const r: NewPostRule = {
+      name: input.name !== undefined ? input.name : prev?.name ?? '',
+      accountIds: input.accountIds ?? prev?.accountIds ?? [],
+      channels: input.channels ?? prev?.channels ?? [],
+      filters,
+      messageTemplate: input.messageTemplate !== undefined
+        ? input.messageTemplate : prev?.messageTemplate ?? null,
+      enabled: input.enabled ?? prev?.enabled ?? true,
+    };
+    if (prev) {
+      this.db
+        .prepare(
+          `UPDATE post_rules SET name=?, account_ids=?, channels=?, filters=?, message_template=?, enabled=?, updated_at=?
+           WHERE id=?`,
+        )
+        .run(r.name, JSON.stringify(r.accountIds), JSON.stringify(r.channels), JSON.stringify(r.filters),
+          r.messageTemplate, r.enabled ? 1 : 0, now(), prev.id);
+      return prev.id;
+    }
+    const t = now();
+    const { m } = this.db
+      .prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS m FROM post_rules')
+      .get() as { m: number };
+    const info = this.db
+      .prepare(
+        `INSERT INTO post_rules (name, account_ids, channels, filters, message_template, enabled, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(r.name, JSON.stringify(r.accountIds), JSON.stringify(r.channels), JSON.stringify(r.filters),
+        r.messageTemplate, r.enabled ? 1 : 0, m, t, t);
+    const id = Number(info.lastInsertRowid);
+    if (!r.name) {
+      this.db.prepare('UPDATE post_rules SET name = ?, updated_at = ? WHERE id = ?').run(`图文帖规则 ${id}`, t, id);
+    }
+    return id;
+  }
+
+  deletePostRule(id: number): boolean {
+    return this.db.prepare('DELETE FROM post_rules WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** 拖拽排序：ids 是全部规则的全排列，按数组顺序重写 sort */
+  reorderPostRules(ids: number[]): void {
+    const tx = this.db.transaction(() => {
+      const stmt = this.db.prepare('UPDATE post_rules SET sort = ?, updated_at = ? WHERE id = ?');
       for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i]);
     });
     tx();

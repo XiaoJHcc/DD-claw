@@ -11,7 +11,8 @@ import { createPanelServer, type PanelDeps, type PanelStatus } from './server.js
 import { createLlmRouter, listLlmProviders, saveLlmProviders, setLlmEnabled, dbKeysOf, type LlmRouter, type FetchLike } from '../analysis/providers.js';
 import type { LlmProviderConfig } from '../config/schema.js';
 import { saveNapcatConfig } from '../notify/napcat.js';
-import { getXConfig, saveXConfig } from '../core/x-config.js';
+import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
+import { defaultPostFilters } from '../core/post-rules.js';
 
 interface Fixture {
   db: Db;
@@ -1659,6 +1660,8 @@ function makeXDep(db: Db, calls: string[]): NonNullable<PanelDeps['x']> {
     proxy: { ok: false, message: '尚未测试', checkedAt: null as number | null },
     instances: [] as { host: string; ok: boolean; message: string }[],
     web: { ok: false, message: '尚未测试', checkedAt: null as number | null },
+    // 生产形状里恒有 feed（emptyXStatus 就带它），桩也照抄，免得测出一个生产不会出现的空态
+    feed: emptyXFeedSnapshot(),
     updatedAt: null as number | null,
   };
   return {
@@ -1869,4 +1872,80 @@ test('/api/listen：推特开关的 auto 判据是「代理已配置」，PUT �
   assert.equal((put2.json as { setting: string | null }).setting, null, '与 auto 一致 → 回 auto');
   info = await api(base, '/api/listen');
   assert.equal((info.json.rows as Record<string, { enabled: boolean }>).twitter!.enabled, true);
+});
+
+// ---- 图文帖规则（X/推特；与推送规则平行的另一张表）----
+
+test('/api/post-rules：CRUD + 引用校验 + 死规则拒绝 + 排序', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+  const channelId = db.upsertPushChannel({
+    name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001', enabled: true,
+  });
+  const accId = db.upsertXAccount({
+    screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true,
+  });
+
+  assert.deepEqual(((await api(base, '/api/post-rules')).json.rules as unknown[]).length, 0, '初始无规则');
+
+  const created = await api(base, '/api/post-rules', 'POST', {
+    name: '只推带图原创', accountIds: [accId], channels: [channelId], filters: { media: true },
+  });
+  assert.equal(created.status, 201);
+  const id = (created.json as { id: number }).id;
+  const list = (await api(base, '/api/post-rules')).json.rules as Array<{
+    filters: { original: boolean; retweet: boolean; media: boolean }; accountIds: number[];
+  }>;
+  assert.equal(list[0]!.filters.original, true, '未提供的筛选回落默认（只推原创）');
+  assert.equal(list[0]!.filters.media, true);
+  assert.deepEqual(list[0]!.accountIds, [accId]);
+
+  // 「原创/转发都不勾」= 永不命中的死规则，当场拒绝
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { filters: { original: false, retweet: false } })).status,
+    400,
+    '死规则拒绝',
+  );
+  assert.equal((await api(base, '/api/post-rules', 'POST', { channels: [999] })).status, 400, '渠道不存在');
+  assert.equal((await api(base, '/api/post-rules', 'POST', { accountIds: [999] })).status, 400, 'X 账号不存在');
+  assert.equal((await api(base, '/api/post-rules', 'POST', { filters: { nope: true } })).status, 400, '未知筛选字段');
+  assert.equal((await api(base, '/api/post-rules', 'POST', { filters: { media: 'yes' } })).status, 400, '筛选类型错');
+
+  // PUT：只改 filters 时账号/渠道沿用旧值 → 合并后仍要可用
+  assert.equal(
+    (await api(base, `/api/post-rules/${id}`, 'PUT', { filters: { original: false, retweet: false } })).status,
+    400,
+    '合并后成了死规则也要拒',
+  );
+  assert.equal((await api(base, `/api/post-rules/${id}`, 'PUT', { enabled: false })).status, 200);
+  assert.equal(db.listPostRules()[0]!.enabled, false);
+  assert.equal((await api(base, `/api/post-rules/${id}`, 'PUT', {})).status, 400, '空 patch');
+
+  // 排序：ids 必须是全排列
+  const id2 = db.upsertPostRule({
+    name: 'r2', accountIds: [], channels: [], filters: defaultPostFilters(),
+    messageTemplate: null, enabled: true,
+  });
+  assert.equal((await api(base, '/api/post-rules/order', 'PUT', { ids: [id2, id] })).status, 200);
+  assert.deepEqual(db.listPostRules().map((r) => r.id), [id2, id], '顺序按传入重写');
+  assert.equal((await api(base, '/api/post-rules/order', 'PUT', { ids: [id] })).status, 400, '必须全排列');
+
+  assert.equal((await api(base, `/api/post-rules/${id}`, 'DELETE')).status, 200);
+  assert.equal((await api(base, `/api/post-rules/${id}`, 'DELETE')).status, 404, '再删一次 404');
+});
+
+test('/api/x/recent：回推文归档（不含 raw）+ 源运行状态', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+  db.insertPosts([
+    { platform: 'twitter', uid: 'watase_yuzuki', itemId: '1', type: 'tweet', text: 'a', pics: [], pubTs: 2000, url: null, raw: '{"x":1}' },
+    { platform: 'bili_dynamic', uid: '1', itemId: '2', type: 'DYNAMIC_TYPE_WORD', text: 'b', pics: [], pubTs: 3000, url: null, raw: null },
+  ]);
+  const r = await api(base, '/api/x/recent');
+  assert.equal(r.status, 200);
+  const posts = r.json.posts as Array<{ platform: string; raw?: unknown }>;
+  assert.equal(posts.length, 1, '只回 X 归档');
+  assert.equal(posts[0]!.platform, 'twitter');
+  assert.equal(posts[0]!.raw, undefined, 'raw 不下发');
+  assert.ok(r.json.feed !== null, '带上源运行状态（验收面板要看「抓到了什么」）');
 });

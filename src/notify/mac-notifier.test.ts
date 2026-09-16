@@ -29,7 +29,8 @@ test('参数：title/message 必有，subtitle/url/image 可选', () => {
 // ---------- macNotifierBinaryPath ----------
 
 test('二进制路径在 DD-claw.app/Contents/MacOS 下', () => {
-  assert.equal(macNotifierBinaryPath('/data'), '/data/DD-claw.app/Contents/MacOS/DD-claw');
+  // 期望值用 join 拼：产物在 macOS 上跑，但断言不该因在 Windows 上执行而假失败
+  assert.equal(macNotifierBinaryPath('/data'), join('/data', 'DD-claw.app', 'Contents', 'MacOS', 'DD-claw'));
 });
 
 // ---------- ensureMacNotifier ----------
@@ -55,7 +56,7 @@ test('首次：写 Info.plist + swiftc 编译，返回二进制路径', async ()
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.cmd, 'swiftc');
   assert.ok(calls[0]!.args.includes('-O'));
-  assert.ok(calls[0]!.args.some((a) => a.endsWith('scripts/mac-notify.swift')));
+  assert.ok(calls[0]!.args.some((a) => a.endsWith(join('scripts', 'mac-notify.swift')) || a.endsWith('scripts/mac-notify.swift')));
   assert.ok(calls[0]!.args.includes('-o'));
   // Info.plist 已写入且带身份字段
   const plist = readFileSync(join(dir, 'DD-claw.app', 'Contents', 'Info.plist'), 'utf8');

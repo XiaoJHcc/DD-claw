@@ -368,3 +368,49 @@ test('search_posts：platform=twitter 可检索 X 归档；set_listen 支持 twi
   assert.equal(set.enabled, false, '推特开关经 MCP 可关');
   assert.equal(f.db.getSetting('listen_twitter'), '0');
 });
+
+test('图文帖规则工具：list/upsert/delete + 引用校验 + 死规则拒绝 + 合并后校验', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const { groupChannelId } = seedBase(f.db);
+  const accId = f.db.upsertXAccount({
+    screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true,
+  });
+
+  assert.deepEqual(((await call(adm, 'list_post_rules')) as { rules: unknown[] }).rules, []);
+
+  const created = (await call(adm, 'upsert_post_rule', {
+    name: '只推带图原创', accountIds: [accId], channels: [groupChannelId], filters: { media: true },
+  })) as { id: number };
+  const listed = (await call(adm, 'list_post_rules')) as {
+    rules: Array<{ filters: { original: boolean; media: boolean }; channels: number[]; accountIds: number[] }>;
+  };
+  assert.equal(listed.rules[0]!.filters.original, true, '未提供的筛选回落默认');
+  assert.equal(listed.rules[0]!.filters.media, true);
+  assert.deepEqual(listed.rules[0]!.channels, [groupChannelId]);
+  assert.deepEqual(listed.rules[0]!.accountIds, [accId]);
+
+  await assert.rejects(
+    () => call(adm, 'upsert_post_rule', { filters: { original: false, retweet: false } }),
+    /至少要勾一个/,
+  );
+  await assert.rejects(() => call(adm, 'upsert_post_rule', { channels: [9999] }), /渠道不存在/);
+  await assert.rejects(() => call(adm, 'upsert_post_rule', { accountIds: [9999] }), /X 账号不存在/);
+
+  // 更新：只改推送词，账号/渠道沿用旧值（合并后仍要校验通过）
+  await call(adm, 'upsert_post_rule', { id: created.id, messageTemplate: '{author} 更新了' });
+  assert.equal(f.db.listPostRules()[0]!.messageTemplate, '{author} 更新了');
+
+  await call(adm, 'delete_post_rule', { id: created.id });
+  assert.equal(f.db.listPostRules().length, 0);
+  await assert.rejects(() => call(adm, 'delete_post_rule', { id: created.id }), /不存在/);
+});
+
+test('图文帖规则：gateway 能看不能改（list 共享、写是 admin 专属）', async (t) => {
+  const f = await setup(t);
+  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const tools = (await gw.listTools()).tools.map((x) => x.name);
+  assert.equal(tools.includes('list_post_rules'), true, '只读对群友可见');
+  assert.equal(tools.includes('upsert_post_rule'), false, '写是 admin 专属');
+  assert.equal(tools.includes('delete_post_rule'), false);
+});

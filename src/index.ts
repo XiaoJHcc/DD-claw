@@ -338,6 +338,9 @@ async function main(): Promise<void> {
     ),
     rule: new OncePerSessionRule(db),
     dispatcher,
+    // X 图必须先经代理落到本地（NapCat 在同一墙内网络里拉不到 pbs.twimg.com）——
+    // 与 toast 的自有缓存分开，避免两边的过期策略互相打架
+    imageCacheDir: join(dirname(secrets.dbPath), 'cache', 'images'),
   });
   pipeline.attach();
 

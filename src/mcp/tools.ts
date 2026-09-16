@@ -13,10 +13,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { makeLogger } from '../logger.js';
 import type { PanelDeps } from '../panel/server.js';
 import {
-  HttpError, checkCategoryConditions, checkChannelShape, checkRuleRefs,
-  parseCategoryPatch, parseChannelPatch, parseNewCategory, parseNewChannel,
-  parseNewRule, parseNewXAccount, parseRulePatch, parseRuntimePatch, parseStreamerPatch,
-  parseXAccountPatch, parseXPatch, watchStreamer,
+  HttpError, checkCategoryConditions, checkChannelShape, checkPostFiltersUsable, checkPostRuleRefs,
+  checkRuleRefs, parseCategoryPatch, parseChannelPatch, parseNewCategory, parseNewChannel,
+  parseNewPostRule, parseNewRule, parseNewXAccount, parsePostRulePatch, parseRulePatch, parseRuntimePatch,
+  parseStreamerPatch, parseXAccountPatch, parseXPatch, watchStreamer,
 } from '../panel/http-util.js';
 import { scheduleInfo } from '../panel/schedule.js';
 import { setPushEnabled } from '../core/push.js';
@@ -189,6 +189,13 @@ const sharedTools: McpToolDef[] = [
         return { ...a, biliName: bili ? (bili.alias || bili.uname || a.biliUid) : null };
       }),
     }),
+  },
+  {
+    name: 'list_post_rules',
+    description: '图文帖规则列表（X/推特链路；与开播推送规则平行的另一套，渠道共用 push_channels）',
+    schema: {},
+    role: 'shared',
+    handler: (deps) => ({ rules: deps.db.listPostRules() }),
   },
 ];
 
@@ -386,6 +393,57 @@ const adminTools: McpToolDef[] = [
     handler: (deps, args) => {
       if (!deps.db.deleteXAccount(Number(args.id))) throw new HttpError(404, 'X 账号不存在');
       deps.x?.onChanged();
+      return { ok: true };
+    },
+  },
+  {
+    name: 'upsert_post_rule',
+    description: '新建/更新图文帖规则（X 推文 → 渠道推送）。带 id = 更新（未提供字段保留原值），不带 = 新建；「原创」「转发」至少要勾一个',
+    schema: {
+      id: idSchema.optional(),
+      name: z.string().optional(),
+      accountIds: z.array(idSchema).optional().describe('生效 X 账号 id（见 list_x_accounts）；空 = 全部账号'),
+      channels: z.array(idSchema).optional().describe('推送渠道 id（与开播规则共用 push_channels）'),
+      filters: z.object({
+        original: z.boolean().optional().describe('原创'),
+        retweet: z.boolean().optional().describe('转发'),
+        quote: z.boolean().optional().describe('引用（当前无来源可识别，勾上等于不推）'),
+        media: z.boolean().optional().describe('必须带图'),
+        keywords: z.array(z.string()).optional().describe('正文关键词，命中任一即可'),
+      }).optional(),
+      messageTemplate: z.string().nullable().optional().describe('推送词，可用 {author} {text} {url} {liver}'),
+      enabled: z.boolean().optional(),
+    },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const keys = ['name', 'accountIds', 'channels', 'filters', 'messageTemplate', 'enabled'] as const;
+      if (args.id === undefined) {
+        const rule = parseNewPostRule(pickBody(args, keys));
+        checkPostRuleRefs(deps.db, rule);
+        return { id: deps.db.upsertPostRule(rule) };
+      }
+      const id = Number(args.id);
+      const prev = deps.db.listPostRules().find((r) => r.id === id);
+      if (!prev) throw new HttpError(404, '图文帖规则不存在');
+      const patch = parsePostRulePatch(pickBody(args, keys));
+      checkPostRuleRefs(deps.db, {
+        accountIds: patch.accountIds ?? prev.accountIds,
+        channels: patch.channels ?? prev.channels,
+      });
+      checkPostFiltersUsable({ ...prev.filters, ...(patch.filters ?? {}) });
+      deps.db.upsertPostRule({ id, ...patch });
+      return { id };
+    },
+  },
+  {
+    name: 'delete_post_rule',
+    description: '删除图文帖规则',
+    schema: { id: idSchema },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      if (!deps.db.deletePostRule(Number(args.id))) throw new HttpError(404, '图文帖规则不存在');
       return { ok: true };
     },
   },

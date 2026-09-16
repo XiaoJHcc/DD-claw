@@ -1,5 +1,7 @@
+import { pathToFileURL } from 'node:url';
 import { makeLogger } from '../logger.js';
 import type { PushMessage, PushTarget } from '../core/types.js';
+import { isLocalImage } from './image-cache.js';
 import { type Notifier, type NotifyResult } from './types.js';
 
 const log = makeLogger('notify/onebot');
@@ -100,8 +102,9 @@ export class OneBotNotifier implements Notifier {
     const text = `${msg.title}\n${msg.body}` + (msg.attribution ? `\n${msg.attribution}` : '');
     const segs: Segment[] = [{ type: 'text', data: { text } }];
     if (withImage && msg.image) {
-      // 直接用B站 CDN 的公网 URL，NapCat 自己去拉，我们不落盘不 base64
-      segs.push({ type: 'image', data: { file: msg.image } });
+      // B站 CDN 是公网可达的，直接给 URL 让 NapCat 自己拉，不落盘不 base64；
+      // 本地路径（X 图经代理下载后的形态）转成 file:// —— NapCat 与本进程同机，只能取本地。
+      segs.push({ type: 'image', data: { file: isLocalImage(msg.image) ? pathToFileURL(msg.image).href : msg.image } });
     }
     if (msg.url) segs.push({ type: 'text', data: { text: `\n${msg.url}` } });
     return segs;

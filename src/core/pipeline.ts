@@ -1,9 +1,11 @@
 import { makeLogger } from '../logger.js';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
-import { liveEventToMessage } from '../notify/message.js';
-import { matchPushRules, renderTemplate } from '../analysis/matcher.js';
+import { liveEventToMessage, postToMessage } from '../notify/message.js';
+import { matchPostRules, matchPushRules, renderPostTemplate, renderTemplate, type PostCandidate } from '../analysis/matcher.js';
 import { isPushEnabled } from './push.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
+import { localizeImageViaProxy } from '../notify/image-cache.js';
+import { getXConfig } from './x-config.js';
 import { isNotifyOnFirstRun, isNotifyOnNewSubscription } from './runtime-config.js';
 import type { Bus } from './bus.js';
 import type { Db } from './db.js';
@@ -24,6 +26,20 @@ export interface PipelineDeps {
   queue: AnalysisQueue;
   rule: DecisionRule;
   dispatcher: NotifyDispatcher;
+  /** 图片本地化缓存目录（X 图必须经代理下载成本地文件再推）；缺省 = 图文帖不带图 */
+  imageCacheDir?: string;
+}
+
+/** feed_post 的载荷形状（X 源产出；微博源同用 kind 但平台不同，见 handleFeedPost） */
+interface FeedPostPayload {
+  platform?: string;
+  itemId?: string;
+  type?: string;
+  text?: string | null;
+  pics?: string[];
+  pubTs?: number;
+  url?: string | null;
+  isQuote?: boolean;
 }
 
 interface HealthAlertPayload {
@@ -88,6 +104,8 @@ export class Pipeline {
 
   private async handle(signal: Signal): Promise<void> {
     if (signal.kind === 'health_alert') return this.handleHealthAlert(signal);
+    // 图文帖（X/推特）：与开播完全平行的一条路径，不进 LLM、不看直播状态
+    if (signal.kind === 'feed_post') return this.handleFeedPost(signal);
     if (!signal.status) {
       log.debug(`忽略无状态的信号 [${signal.kind}]（${signal.source}）`);
       return;
@@ -197,6 +215,77 @@ export class Pipeline {
     const tpl = templateOverride ?? '{liver} 开播了';
     const text = renderTemplate(tpl, event).trim();
     return { ...base, title: text || base.title, channels: channelIds.map(String) };
+  }
+
+  /**
+   * 图文帖（feed_post）路径：机械筛选 → 图文帖规则 → 带图推送。与开播路径完全平行：
+   *  · 不过决策规则（`DecisionRule` 是「每场直播推一次」那类防抖，帖子没有场次概念，
+   *    去重由 posts 的 UNIQUE(platform,item_id) 兜住）；
+   *  · 不进 LLM（P3 才有规则级判定/翻译）；
+   *  · 目前只处理 X：微博源的 feed_post 走同一条总线但平台不同，这里明确跳过，
+   *    免得将来误把微博帖按 X 规则匹配。
+   */
+  private async handleFeedPost(signal: Signal): Promise<void> {
+    const { db, dispatcher } = this.deps;
+    const p = signal.payload as FeedPostPayload | undefined;
+    if (!p || p.platform !== 'twitter') {
+      log.debug(`忽略 feed_post（平台 ${p?.platform ?? '未知'}）：图文帖推送目前只支持 X`);
+      return;
+    }
+    if (!isPushEnabled(db)) {
+      log.debug(`不推送 feed_post @${signal.uid}: 推送总开关已关`);
+      return;
+    }
+    const account = db.getXAccountByScreenName(signal.uid);
+    if (!account) {
+      log.warn(`feed_post 来自不在名单里的账号 @${signal.uid}，忽略`);
+      return;
+    }
+    const bili = account.biliUid ? db.getStreamer(account.biliUid) : undefined;
+    const post: PostCandidate = {
+      accountId: account.id,
+      screenName: account.screenName,
+      type: p.type ?? 'tweet',
+      text: p.text ?? null,
+      pics: p.pics ?? [],
+      pubTs: p.pubTs ?? 0,
+      url: p.url ?? null,
+      ...(p.isQuote !== undefined ? { isQuote: p.isQuote } : {}),
+      biliName: bili ? (bili.alias || bili.uname) : null,
+    };
+
+    const hits = matchPostRules(db.listEnabledPostRules(), post);
+    if (hits.length === 0) {
+      log.info(`不推送 @${account.screenName}: 无命中图文帖规则`);
+      return;
+    }
+    const channelIds: number[] = [];
+    let templateOverride: string | null = null;
+    for (const r of hits) {
+      for (const id of r.channels) {
+        if (!channelIds.includes(id)) channelIds.push(id);
+      }
+      templateOverride ??= r.messageTemplate;
+    }
+    if (channelIds.length === 0) {
+      log.info(`不推送 @${account.screenName}: 命中 ${hits.length} 条规则但都未勾选渠道`);
+      return;
+    }
+
+    // 图片：经代理下载成本地文件再推。X 图床在墙内直连不通，NapCat 与本进程同网络也拉不到，
+    // 所以「先落本地、再给本地路径」是唯一可行形态；下载失败就按无图发，不阻塞通知。
+    let image: string | undefined;
+    if (post.pics.length > 0 && this.deps.imageCacheDir) {
+      image = (await localizeImageViaProxy(post.pics[0]!, this.deps.imageCacheDir, getXConfig(db).proxyUrl)) ?? undefined;
+    }
+
+    const tpl = templateOverride ?? '{author} 发了新推文';
+    const msg: PushMessage = {
+      ...postToMessage({ post, title: renderPostTemplate(tpl, post), image }),
+      channels: channelIds.map(String),
+    };
+    log.info(`推送 feed_post @${account.screenName} — 命中规则 ${hits.map((r) => `#${r.id}`).join('/')}`);
+    await dispatcher.broadcast(msg);
   }
 
   private async handleHealthAlert(signal: Signal): Promise<void> {

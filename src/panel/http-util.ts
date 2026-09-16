@@ -12,6 +12,7 @@ import { NUM_SPECS, BOOL_SPECS, type RuntimeConfig } from '../core/runtime-confi
 import {
   X_INTERVAL_MAX, X_INTERVAL_MIN, type XConfig,
 } from '../core/x-config.js';
+import { defaultPostFilters, type NewPostRule, type PostFilters, type PostRuleInput } from '../core/post-rules.js';
 import { isValidScreenName, normalizeScreenName } from '../core/x-accounts.js';
 import { describeTunnelError, parseInstanceList, parseProxyUrl } from '../core/proxy.js';
 
@@ -498,4 +499,85 @@ export function parseXAccountPatch(body: unknown): {
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
   if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
   return p;
+}
+
+// ---- 图文帖规则（X/推特；与推送规则平行的一张表）----
+
+const POST_RULE_KEYS = ['name', 'accountIds', 'channels', 'filters', 'messageTemplate', 'enabled'] as const;
+const POST_FILTER_KEYS = ['original', 'retweet', 'quote', 'media', 'keywords'] as const;
+
+/** filters 只认已知字段；非法类型一律 400（配置错误当场报，别等推送时才发现规则是死的） */
+function parsePostFiltersField(v: unknown): Partial<PostFilters> {
+  const o = asObject(v);
+  rejectUnknownKeys(o, POST_FILTER_KEYS);
+  const f: Partial<PostFilters> = {};
+  for (const k of ['original', 'retweet', 'quote', 'media'] as const) {
+    if (k in o) f[k] = asBoolean(o[k], `filters.${k}`);
+  }
+  if ('keywords' in o) {
+    const arr = asStringArray(o.keywords, 'filters.keywords');
+    f.keywords = arr.map((s) => s.trim()).filter(Boolean);
+  }
+  return f;
+}
+
+function parsePostRuleFields(o: Record<string, unknown>, p: PostRuleInput): void {
+  if ('name' in o) {
+    if (typeof o.name !== 'string') throw new HttpError(400, 'name 必须是字符串');
+    const name = o.name.trim();
+    if (!name) throw new HttpError(400, '规则名称不能为空');
+    p.name = name;
+  }
+  if ('accountIds' in o) p.accountIds = asIdArray(o.accountIds, 'accountIds');
+  if ('channels' in o) p.channels = asIdArray(o.channels, 'channels');
+  if ('filters' in o) p.filters = parsePostFiltersField(o.filters);
+  if ('messageTemplate' in o) p.messageTemplate = parseMessageTemplate(o.messageTemplate);
+  if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
+}
+
+/** 「原创/转发都不勾」= 永不命中的死规则，拒绝保存 */
+export function checkPostFiltersUsable(f: PostFilters): void {
+  if (!f.original && !f.retweet) {
+    throw new HttpError(400, '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中');
+  }
+}
+
+/** POST /api/post-rules：全部可省，缺省 = 只推原创 / 全部账号 / 无渠道 / 默认推送词 */
+export function parseNewPostRule(body: unknown): NewPostRule {
+  const o = asObject(body);
+  rejectUnknownKeys(o, POST_RULE_KEYS);
+  const p: PostRuleInput = {};
+  parsePostRuleFields(o, p);
+  const filters: PostFilters = { ...defaultPostFilters(), ...(p.filters ?? {}) };
+  checkPostFiltersUsable(filters);
+  return {
+    name: p.name ?? '',
+    accountIds: p.accountIds ?? [],
+    channels: p.channels ?? [],
+    filters,
+    messageTemplate: p.messageTemplate ?? null,
+    enabled: p.enabled ?? true,
+  };
+}
+
+/** PUT /api/post-rules/:id 的部分更新体；至少一个字段。filters 合并后是否可用由路由层判 */
+export function parsePostRulePatch(body: unknown): PostRuleInput {
+  const o = asObject(body);
+  rejectUnknownKeys(o, POST_RULE_KEYS);
+  const p: PostRuleInput = {};
+  parsePostRuleFields(o, p);
+  if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
+  return p;
+}
+
+/** 图文帖规则引用存在性校验：渠道（共用 push_channels）与 X 账号都必须存在 */
+export function checkPostRuleRefs(db: Db, r: { accountIds: number[]; channels: number[] }): void {
+  const channelIds = new Set(db.listPushChannels().map((c) => c.id));
+  for (const id of r.channels) {
+    if (!channelIds.has(id)) throw new HttpError(400, `渠道不存在: ${id}`);
+  }
+  const accountIds = new Set(db.listXAccounts().map((a) => a.id));
+  for (const id of r.accountIds) {
+    if (!accountIds.has(id)) throw new HttpError(400, `X 账号不存在: ${id}`);
+  }
 }

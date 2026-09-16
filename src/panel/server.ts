@@ -11,7 +11,8 @@ import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
   HttpError, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseCategoryPatch, parseChannelPatch,
-  parseNewCategory, parseNewChannel, parseNewRule, parseNewXAccount, parseRulePatch, parseRuntimePatch,
+  parseNewCategory, parseNewChannel, parseNewRule, parseNewXAccount, parsePostRulePatch, parseRulePatch, parseRuntimePatch,
+  checkPostFiltersUsable, checkPostRuleRefs, parseNewPostRule,
   parseStreamerPatch, parseUid, parseXAccountPatch, parseXPatch, parseXTestRequest, readJsonBody, sendJson,
   watchStreamer, type XTestRequest,
 } from './http-util.js';
@@ -317,6 +318,16 @@ async function handle(
     return;
   }
 
+  // 最近抓到的推文（验收面板）：让「抓到了什么」肉眼可见，也便于区分「抓不到」与「没新推文」
+  if (deps.x && method === 'GET' && path === '/api/x/recent') {
+    const info = deps.x.info() as { status?: { feed?: unknown } } | null;
+    sendJson(res, 200, {
+      posts: db.searchPosts({ platform: 'twitter', limit: 20 }).map(({ raw: _raw, ...p }) => p),
+      feed: info?.status?.feed ?? null,
+    });
+    return;
+  }
+
   // ---- X 关注账号（独立名单：不要求对应 B站主播，biliUid 只是可选关联）----
   if (deps.x && method === 'GET' && path === '/api/x/accounts') {
     sendJson(res, 200, { accounts: xAccountList(db) });
@@ -559,6 +570,23 @@ async function handle(
     return;
   }
 
+  // ---- 图文帖规则（X/推特；与推送规则平行的一张表，渠道共用设置页那份）----
+  if (method === 'GET' && path === '/api/post-rules') {
+    sendJson(res, 200, { rules: db.listPostRules() });
+    return;
+  }
+  if (method === 'POST' && path === '/api/post-rules') {
+    const rule = parseNewPostRule(await readJsonBody(req));
+    checkPostRuleRefs(db, rule);
+    sendJson(res, 201, { id: db.upsertPostRule(rule) });
+    return;
+  }
+  // 拖拽排序（在 :id 通配之前匹配）
+  if (method === 'PUT' && path === '/api/post-rules/order') {
+    sendJson(res, 200, putPostRuleOrder(db, await readJsonBody(req)));
+    return;
+  }
+
   // ---- 扫码登录（auth dep 存在才挂）----
   if (deps.auth && method === 'POST' && path === '/api/auth/bili/qrcode') {
     const qr = deps.auth.qrcode ?? { generateQrcode, pollQrcode };
@@ -677,6 +705,30 @@ async function handle(
     }
   }
 
+  const prm = path.match(/^\/api\/post-rules\/([^/]+)$/);
+  if (prm) {
+    const id = Number(parseUid(prm[1], 'id'));
+    if (method === 'PUT') {
+      const patch = parsePostRulePatch(await readJsonBody(req));
+      const prev = db.listPostRules().find((r) => r.id === id);
+      if (!prev) throw new HttpError(404, '图文帖规则不存在');
+      // 校验要对「合并后」的形状做（只改 filters 时账号/渠道沿用旧值）
+      checkPostRuleRefs(db, {
+        accountIds: patch.accountIds ?? prev.accountIds,
+        channels: patch.channels ?? prev.channels,
+      });
+      checkPostFiltersUsable({ ...prev.filters, ...(patch.filters ?? {}) });
+      db.upsertPostRule({ id, ...patch });
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (method === 'DELETE') {
+      if (!db.deletePostRule(id)) throw new HttpError(404, '图文帖规则不存在');
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+  }
+
   // ---- MCP 端点（Bearer token 鉴权；工具面按角色过滤，见 src/mcp/）----
   if (path === '/mcp') {
     await handleMcp(deps, req, res);
@@ -786,6 +838,19 @@ function putRuleOrder(db: Db, body: unknown): unknown {
     throw new HttpError(400, 'ids 必须与现有规则一一对应');
   }
   db.reorderPushRules(ids);
+  return { ok: true };
+}
+
+function putPostRuleOrder(db: Db, body: unknown): unknown {
+  const ids = (body as Record<string, unknown> | null)?.ids;
+  if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
+    throw new HttpError(400, 'ids 必须是正整数 id 数组');
+  }
+  const existing = new Set(db.listPostRules().map((r) => r.id));
+  if (ids.length !== existing.size || new Set(ids).size !== ids.length || ids.some((id) => !existing.has(id))) {
+    throw new HttpError(400, 'ids 必须与现有图文帖规则一一对应');
+  }
+  db.reorderPostRules(ids);
   return { ok: true };
 }
 

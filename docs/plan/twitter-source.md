@@ -155,6 +155,29 @@ CREATE TABLE IF NOT EXISTS post_rules (
 - **筛选默认值两处一致**：建表默认与 UI 默认都是 `{original:true, retweet:false, quote:false, media:false}`；`filters` 为空的旧行按默认值处理（防御式）。
 - 类型与 JSON 序列化照 `push.ts` 惯例，集中在新 `core/x-accounts.ts` / `core/post-rules.ts`。
 
+## P2 已落地（2026-09-16）
+
+**X 推文现在真的会推到群里了。** 交付：
+
+| 交付 | 位置 | 说明 |
+|---|---|---|
+| 图文帖规则表（第 15 张表） | `core/post-rules.ts` + `db.ts` | 与 push_rules 平行：`account_ids` / `channels` / `filters` / `message_template` / `sort`；渠道共用设置页那份 |
+| 机械筛选与规则匹配 | `analysis/matcher.ts`（`matchPostFilters` / `matchPostRules` / `renderPostTemplate`） | 纯确定性；原创/转发二选一、必须带图、关键词任一 |
+| `feed_post` 推送分支 | `core/pipeline.ts`（`handleFeedPost`） | 与开播路径完全平行：不过决策规则、不进 LLM；显式跳过非 X 平台的 `feed_post`（微博源也发同一种信号） |
+| 推文消息 | `notify/message.ts`（`postToMessage`） | 默认「@账号 发了新推文」；副行 `X · @账号 · 时间 [· 共 N 张图]` |
+| X 图本地化 | `notify/image-cache.ts`（`localizeImageViaProxy`）+ `notify/onebot.ts` | 经代理下载成**本地文件**，onebot 转 `file://` 交 NapCat（它在本机、拉不到 pbs.twimg.com）；下载失败按无图发 |
+| 面板 | `/api/post-rules` CRUD + order、`/api/x/recent`；X 页「图文帖规则」「最近推文」两张卡 | 浏览器实测：加/改/删/启停/排序、死规则就地报错、"未选渠道（不会推）"提示 |
+| 轴 B | `list_post_rules`（shared）+ `upsert_post_rule` / `delete_post_rule`（admin） | gateway 可见只读、不可写 |
+
+**实现中确认/修正的点**（以本节为准）：
+
+1. **「引用」不在 UI 出现**：免登录两条路线都识别不了引用推文（RSS 不标、回退的单推接口没取 `quoted_tweet`）。数据模型保留 `quote` 字段并在 matcher 里实现判定（`isQuote === true` 才命中），但 P2 不出这个勾——放一个永远不命中的控件是骗人。等有来源能识别再出（P3 顺带）。
+2. **规则行用双行档而不是行内标签**：`fitRow`（core.js）会在行宽不足时从尾部整枚隐藏 `.tag`，这张卡的行偏窄 → 筛选条件会被"自适应"掉，用户看不出规则推什么。改为 `.row-2` 副行写 `原创 · 带图 · 全部账号 · 粉丝群`。
+3. **「原创/转发都不勾」= 死规则**：POST/PUT（合并后）都校验，直接 400，避免存下一条永不命中的规则；面板与 MCP 共用同一条校验。
+4. **图文帖不 markNotified、也不走 `DecisionRule`**：帖子没有"场次"概念，去重由 `posts` 的 `UNIQUE(platform,item_id)` 兜住（`decision rule` 是"每场直播推一次"那类防抖）。
+5. **图片必须落本地**：`msg.image` 对 X 帖是本地路径（toast 直接用；onebot 转 `file://`）。同时给 toast 的本地化加了"已是本地路径就别再下载"的语义（它本来就用 `/^https?:/` 判过，无需改动，但要在文档里记住这条约定）。
+6. **顺手修了两个既有平台相关断言**（与本任务无关但会污染 `npm test`）：mac-notifier / napcat 的测试在 Windows 上跑 macOS 路径断言，`join()` 给的是反斜杠 → 期望值改用 `join` 拼。修完**全量 499/499 通过（41 个文件）**。
+
 ## P1 已落地（2026-09-16）
 
 | 交付 | 位置 | 验收 |

@@ -129,7 +129,6 @@ export const mockX = {
 };
 
 // ---- X 关注账号（独立名单：不要求对应 B站主播；留一个停用项做对照）----
-// 时间戳留 0，由 mock-api 在冻结时刻后统一填（同 mockX.status 的处理）
 export const mockXAccounts = [
   {
     id: 1, screenName: 'watase_yuzuki', displayName: '渡 結月', biliUid: null, enabled: true,
@@ -142,5 +141,41 @@ export const mockXAccounts = [
   {
     id: 3, screenName: 'hololive_en', displayName: 'hololive English', biliUid: null, enabled: false,
     lastTweetId: null, lastTweetAt: null, lastOkAt: null, createdAt: 0, updatedAt: 0,
+  },
+];
+
+// ---- 图文帖规则（与开播推送规则平行的另一套；渠道引用上面 mockChannels 的 id）----
+// 两条演示不同筛选：一条「带图原创 → 粉丝群」，一条停用的「转发 → 系统通知」
+export const mockPostRules = [
+  {
+    id: 1, name: '带图原创', accountIds: [], channels: [2],
+    filters: { original: true, retweet: false, quote: false, media: true, keywords: [] },
+    messageTemplate: null, enabled: true, sort: 0, createdAt: 1, updatedAt: 1,
+  },
+  {
+    id: 2, name: '转发也看', accountIds: [2], channels: [1],
+    filters: { original: false, retweet: true, quote: false, media: false, keywords: ['live'] },
+    messageTemplate: '{author} 转发了', enabled: false, sort: 1, createdAt: 1, updatedAt: 1,
+  },
+];
+
+// ---- 最近推文（验收卡的演示数据；pubTs 由 mock-api 在冻结时刻后填）----
+export const mockTwitterPosts = [
+  {
+    id: 1, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2100138324883280168', type: 'tweet',
+    text: '【 お知らせ͛📢⋆ 】オープンワールドモンスター収集RPG 『 Aniimo（アニモ） 』 ソニア 役として出演させていただきます！',
+    pics: ['https://pbs.twimg.com/media/HSUrcDJbYAAkpoV.jpg'],
+    pubTs: 1, url: 'https://x.com/watase_yuzuki/status/2100138324883280168', createdAt: 1,
+  },
+  {
+    id: 2, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2100147931877929308', type: 'retweet',
+    text: '⋰⋆໒꒱ ⋰⋱⋰ 𝕃𝕪𝕣𝕚𝕔𝕒𝕝 𝕃𝕚𝕝𝕪 𝟞𝕥𝕙 𝕃𝕀𝕍𝔼 「渋谷とは魔境でございますか？」 グッズ事前販売中！',
+    pics: ['https://pbs.twimg.com/media/HSUrcDJbYAAkpoV.jpg', 'https://pbs.twimg.com/media/HSUrdJBagAA0d5g.jpg'],
+    pubTs: 1, url: 'https://x.com/d4dj_pj/status/2100147931877929308', createdAt: 1,
+  },
+  {
+    id: 3, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2100064559860216302', type: 'tweet',
+    text: 'この時の渡瀬のカラコン何使ってたのか気になりすぎる',
+    pics: [], pubTs: 1, url: 'https://x.com/watase_yuzuki/status/2100064559860216302', createdAt: 1,
   },
 ];

@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { matchCategory, matchPushRules, renderTemplate } from './matcher.js';
+import {
+  matchCategory, matchPostFilters, matchPostRules, matchPushRules, renderPostTemplate, renderTemplate,
+  type PostCandidate,
+} from './matcher.js';
 import type { LiveEvent } from '../core/types.js';
 import type { Category, PushRule } from '../core/push.js';
+import { defaultPostFilters, type PostRule } from '../core/post-rules.js';
 
 function category(over: Partial<Category> = {}): Category {
   return {
@@ -140,4 +144,86 @@ test('模板变量 {liver} {uname} {title} 渲染（{liver} 用原名）', () =>
 
 test('uname 为空时 {liver} 回退简称', () => {
   assert.equal(renderTemplate('{liver}开播', event({ uname: '' })), '阿梓开播');
+});
+
+// ---- 图文帖（X/推特）：与开播规则平行的确定性判定 ----
+
+function post(over: Partial<PostCandidate> = {}): PostCandidate {
+  return {
+    accountId: 1, screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
+    pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
+    ...over,
+  };
+}
+
+function postRule(over: Partial<PostRule> = {}): PostRule {
+  return {
+    id: 1, name: 'r', accountIds: [], channels: [1],
+    filters: defaultPostFilters(), messageTemplate: null, enabled: true, sort: 0,
+    createdAt: 0, updatedAt: 0,
+    ...over,
+  };
+}
+
+test('matchPostFilters：默认只推原创，转发不命中；勾了转发反过来', () => {
+  const def = defaultPostFilters();
+  assert.equal(matchPostFilters(def, post()), true);
+  assert.equal(matchPostFilters(def, post({ type: 'retweet' })), false);
+
+  const onlyRt = { ...def, original: false, retweet: true };
+  assert.equal(matchPostFilters(onlyRt, post({ type: 'retweet' })), true);
+  assert.equal(matchPostFilters(onlyRt, post()), false, '只推转发时原创不推');
+});
+
+test('matchPostFilters：原创与转发都勾 = 两类都推', () => {
+  const both = { ...defaultPostFilters(), retweet: true };
+  assert.equal(matchPostFilters(both, post()), true);
+  assert.equal(matchPostFilters(both, post({ type: 'retweet' })), true);
+});
+
+test('matchPostFilters：必须带图 / 关键词（任一命中）/ 大小写不敏感', () => {
+  const media = { ...defaultPostFilters(), media: true };
+  assert.equal(matchPostFilters(media, post({ pics: [] })), false);
+  assert.equal(matchPostFilters(media, post({ pics: ['https://pbs.twimg.com/media/a.jpg'] })), true);
+
+  const kw = { ...defaultPostFilters(), keywords: ['歌回', 'LIVE'] };
+  assert.equal(matchPostFilters(kw, post({ text: '今天休息' })), false);
+  assert.equal(matchPostFilters(kw, post({ text: '今晚歌回！' })), true);
+  assert.equal(matchPostFilters(kw, post({ text: 'going live now' })), true, '大小写不敏感');
+  assert.equal(matchPostFilters(kw, post({ text: null })), false, '无正文不命中关键词');
+});
+
+test('matchPostFilters：quote 勾上要求来源确实标了引用（RSS 帖永不命中）', () => {
+  const q = { ...defaultPostFilters(), quote: true };
+  assert.equal(matchPostFilters(q, post()), false, '未知引用 = 不命中');
+  assert.equal(matchPostFilters(q, post({ isQuote: false })), false);
+  assert.equal(matchPostFilters(q, post({ isQuote: true })), true);
+});
+
+test('matchPostRules：账号范围 + 筛选，返回全部命中（保持 sort 顺序）', () => {
+  const rules = [
+    postRule({ id: 1, sort: 0, accountIds: [] }),
+    postRule({ id: 2, sort: 1, accountIds: [1], filters: { ...defaultPostFilters(), media: true } }),
+    postRule({ id: 3, sort: 2, accountIds: [99] }),
+  ];
+  assert.deepEqual(matchPostRules(rules, post()).map((r) => r.id), [1], '账号 99 的规则不命中，带图规则也不命中');
+  assert.deepEqual(
+    matchPostRules(rules, post({ pics: ['https://pbs.twimg.com/media/a.jpg'] })).map((r) => r.id),
+    [1, 2],
+    '有图时两条都命中，顺序按 sort',
+  );
+});
+
+test('renderPostTemplate：{author} {text} {url} {liver}', () => {
+  assert.equal(
+    renderPostTemplate('{author}｜{text}｜{url}', post()),
+    '@watase_yuzuki｜今晚有直播｜https://x.com/watase_yuzuki/status/9001',
+  );
+  assert.equal(renderPostTemplate('{liver} 发帖了', post({ biliName: '阿梓' })), '阿梓 发帖了');
+  assert.equal(
+    renderPostTemplate('{liver} 发帖了', post()),
+    '@watase_yuzuki 发帖了',
+    '没关联主播时回退账号',
+  );
+  assert.equal(renderPostTemplate('{text}', post({ text: null })), '', '无正文渲染成空串');
 });

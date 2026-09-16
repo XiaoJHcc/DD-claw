@@ -1,4 +1,5 @@
 import type { LiveEvent, PushMessage } from '../core/types.js';
+import type { PostCandidate } from '../analysis/matcher.js';
 
 /**
  * LiveEvent → 推送层通用载荷。notify 各通道只认识 PushMessage。
@@ -24,5 +25,38 @@ export function liveEventToMessage(e: LiveEvent): PushMessage {
     url: e.roomUrl,
     priority: 'normal',
     ref: { roomId: e.roomId, liveTime: e.liveTime },
+  };
+}
+
+export interface PostMessageInput {
+  post: PostCandidate;
+  /** 已渲染的标题（图文帖规则的推送词产物）；缺省「@账号 发了新推文」 */
+  title?: string;
+  /**
+   * 已本地化的图片路径（X 图必须经代理下载成**本地文件**再传：NapCat 在同一个墙内
+   * 网络里拉不到 pbs.twimg.com，`file://` 才是它真能取到的形态）。缺省 = 无图。
+   */
+  image?: string;
+}
+
+/**
+ * 推文 → 推送层通用载荷。不用 emoji（同 liveEventToMessage：QQ iOS 气泡渲染器会把
+ * 增补平面 emoji 拆成方框）。正文为空（纯图推文）时给一句占位，别让 QQ 里出现空消息。
+ */
+export function postToMessage(input: PostMessageInput): PushMessage {
+  const { post } = input;
+  const when = post.pubTs > 0
+    ? new Date(post.pubTs * 1000).toLocaleString('zh-CN', {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+      })
+    : '';
+  const extra = post.pics.length > 1 ? `  ·  共 ${post.pics.length} 张图` : '';
+  return {
+    title: input.title?.trim() || `@${post.screenName} 发了新推文`,
+    body: (post.text ?? '').trim() || '（仅图片，无正文）',
+    image: input.image,
+    attribution: `X  ·  @${post.screenName}` + (when ? `  ·  ${when}` : '') + extra,
+    url: post.url ?? undefined,
+    priority: 'normal',
   };
 }

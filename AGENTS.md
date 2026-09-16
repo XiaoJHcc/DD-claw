@@ -76,8 +76,8 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/bus.ts` — 类型化信号总线（handler 异常隔离）
 - `src/core/state.ts` — `diffRoom → Signal`；轮播=未开播；title_change=标题/分区变更
 - `src/core/scheduler.ts` — `PeriodicTask` 通用周期任务器
-- `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送）
-- `src/core/db.ts` — SQLite 十四表 + 仓储；`ensureColumn` 在线补列
+- `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送；`feed_post` 是与之平行的图文帖分支）
+- `src/core/db.ts` — SQLite 十五表 + 仓储；`ensureColumn` 在线补列
 - `src/core/streamers.ts` — streamers / follows 行类型与映射
 - `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
 - `src/core/posts.ts` — posts 行类型与映射（pics JSON）
@@ -89,6 +89,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/proxy.ts` — **隧道 fetch**（HTTP 代理 CONNECT；Node 22 原生 fetch 不认代理），X 链路唯一出网通道
 - `src/core/x-config.ts` — X/推特连接配置 + 探测状态快照（settings 唯一信源）
 - `src/core/x-accounts.ts` — X 独立关注名单（行类型/映射/归一化；表在 db.ts，独立于 streamers）
+- `src/core/post-rules.ts` — 图文帖规则（X 链路，与 push_rules 平行的一张表 + filters 语义）
 - `src/config/index.ts` — 读 `.env` + `config.json`（只有 panel 段生效）
 - `src/config/schema.ts` — panel 校验 + provider schema + 默认配置
 - `src/logger.ts` — 极简结构化日志
@@ -123,21 +124,21 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/analysis/queue.ts` — 分析队列（限流并发 2）
 - `src/analysis/providers.ts` — LLM provider（路由/熔断/多 key/双协议）
 - `src/analysis/tasks/classify.ts` — 单次批量 LLM 分类任务
-- `src/analysis/matcher.ts` — 确定性匹配（`matchCategory` / `matchPushRules` / `renderTemplate`）
+- `src/analysis/matcher.ts` — 确定性匹配（`matchCategory` / `matchPushRules` / `matchPostRules` / `renderTemplate` / `renderPostTemplate`）
 - `src/rules/types.ts` — `DecisionRule` / `NotifyDecision`
 - `src/rules/once-per-session.ts` — 每场直播推一次
 
 ### notify — 推送
 
 - `src/notify/types.ts` — `Notifier` 接口
-- `src/notify/message.ts` — `liveEventToMessage()`（不用 emoji）
+- `src/notify/message.ts` — `liveEventToMessage()` / `postToMessage()`（推文，不用 emoji）
 - `src/notify/dispatcher.ts` — fan-out + 渠道路由 + `alertAll`
 - `src/notify/onebot.ts` — NapCat OneBot 11 HTTP（串行 + 1.2s；无 alert）
 - `src/notify/napcat.ts` — NapCat 通道 + 失活自动拉起（双平台、端口条目自管）
 - `src/notify/toast.ts` — 本机通知（健康告警唯一通道）
 - `src/notify/mac-notifier.ts` — macOS 原生 helper（失败回落 osascript）
 - `src/notify/aumid.ts` — Win32 AUMID 注册
-- `src/notify/image-cache.ts` — toast 图片本地化
+- `src/notify/image-cache.ts` — 图片本地化（B站直连 / **X 图经代理隧道下载**，后者给 NapCat 用 file://）
 
 ### panel / mcp
 
@@ -198,7 +199,7 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 ## 实现现状
 
 - **已落地主干**：开播通知（NapCat/Toast 已实测）、规模化 + 内容判定（名单迁库 / 扫码登录 / 关注同步 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2）、时间轴统计、控制面板 v1+v2、MCP v1、NapCat 双平台托管
-- **X/推特（独立于 B站的一条路径）**：**P0+P1 已落地**（隧道 fetch / X 配置 / 连通性探测 / `/api/x*` / 独立分页 `#view-x` / 免登录源 Nitter RSS + 回退 / `x_accounts` 独立名单 / 监听开关 `listen_twitter` / MCP X 工具 / `npm run probe-x`）；待做 P2 `post_rules` 图文帖规则与 `feed_post` 推送分支、P3 LLM 判定与翻译。计划见 `docs/plan/twitter-source.md`，调研见 `docs/research/twitter.md`
+- **X/推特（独立于 B站的一条路径）**：**P0+P1+P2 已落地**（隧道 fetch / X 配置 / 连通性探测 / `/api/x*` / 独立分页 `#view-x` / 免登录源 Nitter RSS + 回退 / `x_accounts` 独立名单 / 监听开关 `listen_twitter` / `post_rules` 图文帖规则与 `feed_post` 推送分支（X 图经代理本地化后交 NapCat 用 file://）/ MCP 工具 / `npm run probe-x`）；待做 P3 LLM 判定与翻译。计划见 `docs/plan/twitter-source.md`，调研见 `docs/research/twitter.md`
 - **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、面板 REST 收敛到能力面、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 
@@ -211,5 +212,5 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - `docs/modules/` — 模块实现笔记：core / sources / analysis / notify / panel（逐文件职责与「改前必知」）
 - `docs/mcp.md` — MCP 接口：令牌、角色权限、Host 配置、安全模型与 v2 预留（MaiBot 不直连）
 - `docs/plan/agent-access.md` — 多前端接入统一计划：一个能力面 N 种接线 + 信任模型矩阵 + 分期 P1-P3
-- `docs/plan/twitter-source.md` — X/推特图文来源计划：独立分页 + 独立账号名单 + 图文帖规则，P0+P1 已落地
+- `docs/plan/twitter-source.md` — X/推特图文来源计划：独立分页 + 独立账号名单 + 图文帖规则，P0+P1+P2 已落地
 - `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、**twitter**、llm、notify、media-capture、auth-cookie、ts-stack）

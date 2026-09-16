@@ -7,6 +7,8 @@ import { OncePerSessionRule } from '../rules/once-per-session.js';
 import type { AnalysisContext, Classification, Classifier } from '../analysis/types.js';
 import type { PushMessage, Signal } from './types.js';
 import type { PushChannel, PushRule } from './push.js';
+import { defaultPostFilters, type PostRule } from './post-rules.js';
+import type { XAccount } from './x-accounts.js';
 import type { RoomStatus } from '../sources/bili/types.js';
 import type { AppConfig } from '../config/schema.js';
 
@@ -66,6 +68,16 @@ class FakeDb {
   }
   listPushChannels() { return this.channels; }
   getSetting(key: string) { return this.settings.get(key) ?? null; }
+
+  // ---- X / 图文帖（P2 起 pipeline 的 feed_post 分支要用）----
+  postRules: PostRule[] = [];
+  xAccounts = new Map<string, XAccount>();
+  listEnabledPostRules() {
+    return this.postRules.filter((r) => r.enabled).sort((a, b) => a.sort - b.sort || a.id - b.id);
+  }
+  getXAccountByScreenName(screenName: string) {
+    return this.xAccounts.get(screenName);
+  }
 }
 
 function rule(over: Partial<PushRule> = {}): PushRule {
@@ -78,6 +90,47 @@ function rule(over: Partial<PushRule> = {}): PushRule {
 
 function classification(categoryId: number): Classification {
   return { categoryId, name: `分类 ${categoryId}`, source: 'rule', confidence: null, evidence: '' };
+}
+
+// ---- X / 图文帖 fixture ----
+
+function xAccount(over: Partial<XAccount> = {}): XAccount {
+  return {
+    id: 1, screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true,
+    lastTweetId: null, lastTweetAt: null, lastOkAt: null, createdAt: 0, updatedAt: 0,
+    ...over,
+  };
+}
+
+function postRule(over: Partial<PostRule> = {}): PostRule {
+  return {
+    id: 1, name: '图文帖规则 1', accountIds: [], channels: [1],
+    filters: defaultPostFilters(), messageTemplate: null, enabled: true, sort: 0,
+    createdAt: 0, updatedAt: 0,
+    ...over,
+  };
+}
+
+/** feed_post 信号（X 源产出）：无 status，载荷是推文快照 */
+function feedSig(over: {
+  payload?: Record<string, unknown>; uid?: string;
+} = {}): Signal {
+  return {
+    source: 'twitter/feed', kind: 'feed_post', uid: over.uid ?? 'watase_yuzuki', roomId: '', ts: 0,
+    payload: {
+      platform: 'twitter', itemId: '9001', type: 'tweet', text: '今晚有直播',
+      pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
+      ...(over.payload ?? {}),
+    },
+  };
+}
+
+/** 装好 X 名单与图文帖规则的 harness（feed_post 分支专用） */
+function feedHarness(rules: PostRule[], accounts: XAccount[] = [xAccount()]) {
+  const h = harness();
+  for (const a of accounts) h.db.xAccounts.set(a.screenName, a);
+  h.db.postRules = rules;
+  return h;
 }
 
 class FakeDispatcher {
@@ -432,4 +485,140 @@ test('信号处理并发但上限 4', async () => {
   assert.equal(h.disp.sent.length, 12);
   assert.ok(h.disp.concurrentPeak > 1, `应并发处理，实测峰值 ${h.disp.concurrentPeak}`);
   assert.ok(h.disp.concurrentPeak <= 4, `并发峰值应受限，实测峰值 ${h.disp.concurrentPeak}`);
+});
+
+// ---- feed_post 分支（X/推特图文帖）：与开播路径完全平行 ----
+
+test('feed_post 命中图文帖规则 → 推送到规则渠道（默认只推原创）', async () => {
+  const h = feedHarness([postRule({ channels: [1] })]);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+
+  assert.equal(h.disp.sent.length, 1);
+  const m = h.disp.sent[0]!;
+  assert.equal(m.title, '@watase_yuzuki 发了新推文', '默认推送词');
+  assert.equal(m.body, '今晚有直播');
+  assert.equal(m.url, 'https://x.com/watase_yuzuki/status/9001');
+  assert.match(m.attribution ?? '', /@watase_yuzuki/, '副行标注来源账号');
+  assert.deepEqual(m.channels, ['1'], '按规则渠道路由');
+  assert.equal(m.image, undefined, '未配图片缓存目录时不带图');
+  assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
+});
+
+test('机械筛选：默认只命中原创；转发帖要靠规则显式勾「转发」', async () => {
+  // 只推原创（默认 filters）
+  const h1 = feedHarness([postRule()]);
+  h1.bus.emit(feedSig({ payload: { type: 'retweet' } }));
+  await h1.pipeline.whenIdle();
+  assert.equal(h1.disp.sent.length, 0, '转发帖不命中「只推原创」');
+
+  // 只推转发
+  const h2 = feedHarness([postRule({ filters: { ...defaultPostFilters(), original: false, retweet: true } })]);
+  h2.bus.emit(feedSig({ payload: { type: 'retweet' } }));
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 1, '勾了转发才推');
+});
+
+test('机械筛选：必须带图 / 关键词', async () => {
+  const mediaRule = postRule({ filters: { ...defaultPostFilters(), media: true } });
+  const h1 = feedHarness([mediaRule]);
+  h1.bus.emit(feedSig({ payload: { pics: [] } }));
+  await h1.pipeline.whenIdle();
+  assert.equal(h1.disp.sent.length, 0, '无图不命中「必须带图」');
+
+  const h2 = feedHarness([mediaRule]);
+  h2.bus.emit(feedSig({ payload: { pics: ['https://pbs.twimg.com/media/a.jpg'] } }));
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 1, '有图命中');
+
+  const kwRule = postRule({ filters: { ...defaultPostFilters(), keywords: ['直播', '歌回'] } });
+  const h3 = feedHarness([kwRule]);
+  h3.bus.emit(feedSig({ payload: { text: '今天休息' } }));
+  await h3.pipeline.whenIdle();
+  assert.equal(h3.disp.sent.length, 0, '关键词都不中');
+
+  const h4 = feedHarness([kwRule]);
+  h4.bus.emit(feedSig({ payload: { text: '今晚有歌回！' } }));
+  await h4.pipeline.whenIdle();
+  assert.equal(h4.disp.sent.length, 1, '命中任一关键词即推');
+});
+
+test('规则按账号生效：指定名单外的账号不推', async () => {
+  const h = feedHarness(
+    [postRule({ accountIds: [2] })],
+    [xAccount({ id: 1, screenName: 'watase_yuzuki' }), xAccount({ id: 2, screenName: 'd4dj_pj' })],
+  );
+  h.bus.emit(feedSig({ uid: 'watase_yuzuki' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0, '规则只对账号 2 生效');
+
+  h.bus.emit(feedSig({ uid: 'd4dj_pj' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '账号 2 命中');
+});
+
+test('无命中规则 / 规则未勾渠道 / 账号不在名单 / 平台不是 X → 都不推且不炸', async () => {
+  // 无规则
+  const h1 = feedHarness([]);
+  h1.bus.emit(feedSig());
+  await h1.pipeline.whenIdle();
+  assert.equal(h1.disp.sent.length, 0);
+
+  // 规则存在但没勾渠道
+  const h2 = feedHarness([postRule({ channels: [] })]);
+  h2.bus.emit(feedSig());
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 0);
+
+  // 账号不在名单（源与名单不同步时不该炸，也不该推）
+  const h3 = feedHarness([postRule()], []);
+  h3.bus.emit(feedSig());
+  await h3.pipeline.whenIdle();
+  assert.equal(h3.disp.sent.length, 0);
+
+  // 微博源的 feed_post：同一条总线，但平台不同 → 明确跳过
+  const h4 = feedHarness([postRule()]);
+  h4.bus.emit(feedSig({ payload: { platform: 'weibo' } }));
+  await h4.pipeline.whenIdle();
+  assert.equal(h4.disp.sent.length, 0, '图文帖推送目前只支持 X');
+});
+
+test('推送总开关关闭 → feed_post 也不推（与开播同一条总闸）', async () => {
+  const h = feedHarness([postRule()]);
+  h.db.settings.set('push_enabled', '0');
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0);
+});
+
+test('推送词模板：{author} {text} {url} 渲染；纯图帖正文给占位', async () => {
+  const h = feedHarness([postRule({ messageTemplate: '{author}｜{text}｜{url}' })]);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(
+    h.disp.sent[0]!.title,
+    '@watase_yuzuki｜今晚有直播｜https://x.com/watase_yuzuki/status/9001',
+  );
+
+  const h2 = feedHarness([postRule()]);
+  h2.bus.emit(feedSig({ payload: { text: null, pics: ['https://pbs.twimg.com/media/a.jpg'] } }));
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent[0]!.body, '（仅图片，无正文）', '空正文别让 QQ 里出现空消息');
+  assert.match(h2.disp.sent[0]!.attribution ?? '', /@watase_yuzuki/);
+});
+
+test('多条命中规则：渠道取并集、推送词取首个非空（与开播规则同一套语义）', async () => {
+  const h = feedHarness([
+    postRule({ id: 1, sort: 0, channels: [1], messageTemplate: null }),
+    postRule({ id: 2, sort: 1, channels: [2], messageTemplate: '{author} 更新了' }),
+  ]);
+  h.db.channels.push({
+    id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001',
+    enabled: true, createdAt: 0, updatedAt: 0,
+  });
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  assert.deepEqual(h.disp.sent[0]!.channels, ['1', '2'], '渠道并集去重保序');
+  assert.equal(h.disp.sent[0]!.title, '@watase_yuzuki 更新了', '首个非空模板生效');
 });

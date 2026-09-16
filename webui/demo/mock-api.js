@@ -58,6 +58,9 @@ const store = {
   x: clone(M.mockX),
   xAccounts: clone(M.mockXAccounts),
   xAccountSeq: M.mockXAccounts.length,
+  postRules: clone(M.mockPostRules),
+  postRuleSeq: M.mockPostRules.length,
+  twitterPosts: clone(M.mockTwitterPosts),
   pushEnabled: true,
   llmEnabled: true,
   biliLoggedIn: true,
@@ -131,7 +134,13 @@ function handle(method, path, q, rawBody) {
     });
   }
 
-  // ---- 监听开关 ----
+  // 最近推文的时间戳也用冻结时刻（验收卡要显示「x/x xx:xx」）
+for (const p of store.twitterPosts) {
+  p.pubTs = nowSec - 1800 * p.id;
+  p.createdAt = nowSec;
+}
+
+// ---- 监听开关 ----
   if (path === '/api/listen' && method === 'GET') {
     // X 没有登录态：它的「运行前提」是代理已配置（与真实后端 listenReady 同构）
     const ready = (feature) => feature === 'dynamic' ? store.biliLoggedIn
@@ -169,6 +178,73 @@ function handle(method, path, q, rawBody) {
         setting: store.listenSettings[feature],
       });
     }
+  }
+
+  // ---- 图文帖规则（X/推特；与推送规则平行的另一张表）----
+  if (path === '/api/post-rules' && method === 'GET') {
+    return ok({ rules: clone(store.postRules) });
+  }
+  if (path === '/api/post-rules' && method === 'POST') {
+    const b = body();
+    const filters = Object.assign(
+      { original: true, retweet: false, quote: false, media: false, keywords: [] },
+      b.filters || {},
+    );
+    if (!filters.original && !filters.retweet) {
+      return json(400, { error: '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中' });
+    }
+    if (Array.isArray(b.channels) && b.channels.some((id) => !store.channels.some((c) => c.id === id))) {
+      return json(400, { error: '渠道不存在' });
+    }
+    if (Array.isArray(b.accountIds) && b.accountIds.some((id) => !store.xAccounts.some((a) => a.id === id))) {
+      return json(400, { error: 'X 账号不存在' });
+    }
+    const rule = {
+      id: ++store.postRuleSeq,
+      name: b.name || `图文帖规则 ${store.postRuleSeq}`,
+      accountIds: b.accountIds || [], channels: b.channels || [], filters,
+      messageTemplate: b.messageTemplate ?? null, enabled: b.enabled !== false,
+      sort: store.postRules.length, createdAt: nowSec, updatedAt: nowSec,
+    };
+    store.postRules.push(rule);
+    return ok({ id: rule.id });
+  }
+  if (path === '/api/post-rules/order' && method === 'PUT') {
+    const ids = body().ids || [];
+    if (ids.length !== store.postRules.length) return json(400, { error: 'ids 必须与现有图文帖规则一一对应' });
+    store.postRules.sort((a, b2) => ids.indexOf(a.id) - ids.indexOf(b2.id));
+    store.postRules.forEach((r, i) => { r.sort = i; });
+    return ok({ ok: true });
+  }
+  {
+    const prm = path.match(/^\/api\/post-rules\/(\d+)$/);
+    if (prm) {
+      const rule = store.postRules.find((r) => r.id === Number(prm[1]));
+      if (!rule) return json(404, { error: '图文帖规则不存在' });
+      if (method === 'PUT') {
+        const b = body();
+        if (b.name !== undefined) rule.name = b.name;
+        if (b.accountIds !== undefined) rule.accountIds = b.accountIds;
+        if (b.channels !== undefined) rule.channels = b.channels;
+        if (b.filters !== undefined) Object.assign(rule.filters, b.filters);
+        if (!rule.filters.original && !rule.filters.retweet) {
+          return json(400, { error: '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中' });
+        }
+        if (b.messageTemplate !== undefined) rule.messageTemplate = b.messageTemplate;
+        if (typeof b.enabled === 'boolean') rule.enabled = b.enabled;
+        rule.updatedAt = nowSec;
+        return ok({ ok: true });
+      }
+      if (method === 'DELETE') {
+        store.postRules = store.postRules.filter((r) => r.id !== rule.id);
+        return ok({ ok: true });
+      }
+    }
+  }
+
+  // 最近推文（验收卡）：归档 + 源运行状态
+  if (path === '/api/x/recent' && method === 'GET') {
+    return ok({ posts: clone(store.twitterPosts), feed: store.x.status.feed });
   }
 
   // ---- NapCat ----
