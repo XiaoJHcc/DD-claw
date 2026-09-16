@@ -120,6 +120,27 @@ export const mockX = {
       { host: 'nitter.kareem.one', ok: false, message: '429 被限速' },
     ],
     web: { ok: true, message: '免登录可用 · 7 个 id · 最新 2026-09-16T00:54:10.000Z', checkedAt: 0 },
+    feed: {
+      running: true, lastRunAt: 0, lastOkAt: 0,
+      via: 'nitter', host: 'nitter.jaydenha.uk', accounts: 3, okAccounts: 3, lastError: null,
+    },
     updatedAt: 0,
   },
 };
+
+// ---- X 关注账号（独立名单：不要求对应 B站主播；留一个停用项做对照）----
+// 时间戳留 0，由 mock-api 在冻结时刻后统一填（同 mockX.status 的处理）
+export const mockXAccounts = [
+  {
+    id: 1, screenName: 'watase_yuzuki', displayName: '渡 結月', biliUid: null, enabled: true,
+    lastTweetId: '2100138324883280168', lastTweetAt: 1, lastOkAt: 1, createdAt: 1, updatedAt: 1,
+  },
+  {
+    id: 2, screenName: 'd4dj_pj', displayName: 'D4DJ公式', biliUid: null, enabled: true,
+    lastTweetId: '2100147931877929308', lastTweetAt: 1, lastOkAt: 1, createdAt: 1, updatedAt: 1,
+  },
+  {
+    id: 3, screenName: 'hololive_en', displayName: 'hololive English', biliUid: null, enabled: false,
+    lastTweetId: null, lastTweetAt: null, lastOkAt: null, createdAt: 0, updatedAt: 0,
+  },
+];

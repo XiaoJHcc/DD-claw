@@ -11,15 +11,12 @@
  */
 import { mapLimit } from '../../core/concurrency.js';
 import { parseInstanceList, parseProxyUrl, tunnelFetch, TunnelError, describeTunnelError } from '../../core/proxy.js';
+import { normalizeScreenName } from '../../core/x-accounts.js';
 
 /** 探测用的代理可达性目标：极小、稳定、无风控语义 */
 const PROXY_TARGET = 'https://x.com/robots.txt';
 /** 免登录探测默认账号（调研基准账号，仅作 CLI 默认值） */
 export const DEFAULT_PROBE_SCREEN = 'Watase_Yuzuki';
-
-export function normalizeScreenName(raw: string): string {
-  return raw.trim().replace(/^@+/, '').toLowerCase();
-}
 
 export interface ProxyProbe {
   ok: boolean;

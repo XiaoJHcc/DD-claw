@@ -18,6 +18,10 @@ import {
   rowToPost,
   type NewPost, type Post, type PostRow,
 } from './posts.js';
+import {
+  normalizeScreenName, rowToXAccount,
+  type XAccount, type XAccountFetchTouch, type XAccountInput, type XAccountRow,
+} from './x-accounts.js';
 
 const log = makeLogger('core/db');
 
@@ -141,6 +145,18 @@ CREATE TABLE IF NOT EXISTS posts (
   UNIQUE(platform, item_id)
 );
 CREATE INDEX IF NOT EXISTS idx_posts_uid_ts ON posts (uid, pub_ts);
+CREATE TABLE IF NOT EXISTS x_accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  screen_name   TEXT    NOT NULL UNIQUE,
+  display_name  TEXT,
+  bili_uid      TEXT,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  last_tweet_id TEXT,
+  last_tweet_at INTEGER,
+  last_ok_at    INTEGER,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS live_segments (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id         TEXT    NOT NULL,
@@ -1001,6 +1017,84 @@ export class Db {
                 ORDER BY pub_ts DESC, id DESC LIMIT ?`)
       .all(...args, limit) as PostRow[];
     return rows.map(rowToPost);
+  }
+
+  // ---- x_accounts：X/推特独立关注名单（独立于 streamers/follows，见 core/x-accounts.ts）----
+
+  /** 名单（enabled 升序无意义，按 screen_name 稳定排序方便面板对照） */
+  listXAccounts(onlyEnabled = false): XAccount[] {
+    const sql = 'SELECT * FROM x_accounts' + (onlyEnabled ? ' WHERE enabled = 1' : '') + ' ORDER BY screen_name';
+    return (this.db.prepare(sql).all() as XAccountRow[]).map(rowToXAccount);
+  }
+
+  getXAccount(id: number): XAccount | undefined {
+    const row = this.db.prepare('SELECT * FROM x_accounts WHERE id = ?').get(id) as XAccountRow | undefined;
+    return row ? rowToXAccount(row) : undefined;
+  }
+
+  getXAccountByScreenName(screenName: string): XAccount | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM x_accounts WHERE screen_name = ?')
+      .get(normalizeScreenName(screenName)) as XAccountRow | undefined;
+    return row ? rowToXAccount(row) : undefined;
+  }
+
+  /**
+   * 带 id 且存在 = 改行（未提供字段保留原值）；否则按 screen_name 建行。
+   * screen_name 撞 UNIQUE（同一账号加两遍）时抛错，由面板转成 409——不做静默合并，
+   * 免得用户以为改动生效了其实改的是另一行。返回名单行 id。
+   */
+  upsertXAccount(input: XAccountInput): number {
+    const prev = input.id !== undefined ? this.getXAccount(input.id) : undefined;
+    const screenName = normalizeScreenName(input.screenName ?? prev?.screenName ?? '');
+    if (prev) {
+      this.db
+        .prepare(
+          `UPDATE x_accounts SET screen_name=?, display_name=?, bili_uid=?, enabled=?, updated_at=? WHERE id=?`,
+        )
+        .run(
+          screenName,
+          input.displayName !== undefined ? input.displayName : prev.displayName,
+          input.biliUid !== undefined ? input.biliUid : prev.biliUid,
+          (input.enabled ?? prev.enabled) ? 1 : 0,
+          now(),
+          prev.id,
+        );
+      return prev.id;
+    }
+    const t = now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO x_accounts
+           (screen_name, display_name, bili_uid, enabled, last_tweet_id, last_tweet_at, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+      )
+      .run(
+        screenName,
+        input.displayName ?? null,
+        input.biliUid ?? null,
+        (input.enabled ?? true) ? 1 : 0,
+        t,
+        t,
+      );
+    return Number(info.lastInsertRowid);
+  }
+
+  deleteXAccount(id: number): boolean {
+    return this.db.prepare('DELETE FROM x_accounts WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** 抓取回写：只更新传入的字段（游标只往前推由调用方保证） */
+  touchXAccount(id: number, touch: XAccountFetchTouch): void {
+    const sets: string[] = [];
+    const args: Array<string | number | null> = [];
+    if (touch.lastTweetId !== undefined) { sets.push('last_tweet_id = ?'); args.push(touch.lastTweetId); }
+    if (touch.lastTweetAt !== undefined) { sets.push('last_tweet_at = ?'); args.push(touch.lastTweetAt); }
+    if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
+    if (sets.length === 0) return;
+    sets.push('updated_at = ?');
+    args.push(now(), id);
+    this.db.prepare(`UPDATE x_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...args);
   }
 
   // ---- settings：kv（push_enabled / listen_* / llm_* / napcat_* 等）----

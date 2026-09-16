@@ -46,6 +46,9 @@ import {
   DEFAULT_PROBE_SCREEN, probeAll, probeInstances, probeProxy, probeWeb,
   type InstanceProbe, type ProxyProbe, type WebProbe,
 } from './sources/twitter/probe.js';
+import { TwitterFeedSource } from './sources/twitter/feed.js';
+import { verifyAccount } from './sources/twitter/web.js';
+import { emptyXFeedSnapshot } from './core/x-config.js';
 
 const log = makeLogger('main');
 
@@ -446,7 +449,38 @@ async function main(): Promise<void> {
   const weiboLoggedIn = (): boolean =>
     weiboCookieImported && (weiboLogin === null ? true : weiboLogin.loggedIn);
 
-  // 动态 / 微博 两个源的启停唯一入口：面板监听开关 + cookie 存在共同决定
+  // X/推特源（独立分页 + 独立名单）：X 没有登录态，它的运行前提是「代理已配置」。
+  // 参数指纹一变就重启——代理/实例/回退/间隔/名单任何一项改动都要立刻生效。
+  let xFeedSrc: TwitterFeedSource | null = null;
+  let xFeedKey = '';
+  const xProxyConfigured = (): boolean => getXConfig(db).proxyUrl.trim() !== '';
+  const xConfigKey = (): string => {
+    const c = getXConfig(db);
+    return [c.proxyUrl, c.instances.join(','), String(c.fallbackHtml), String(c.intervalSec)].join('|');
+  };
+  const startXFeed = (): void => {
+    const cfg = getXConfig(db);
+    xFeedSrc?.stop();
+    xFeedSrc = new TwitterFeedSource({
+      proxyUrl: cfg.proxyUrl,
+      instances: cfg.instances,
+      fallbackHtml: cfg.fallbackHtml,
+      intervalSec: cfg.intervalSec,
+      jitterSec: eff.pollJitterSec,
+      healthAlertAfterFailures: eff.healthAlertAfterFailures,
+      onStatus: (s) => { xStatus = { ...xStatus, feed: s }; },
+    });
+    xFeedSrc.start({ bus, db, config: eff });
+    xFeedKey = xConfigKey();
+  };
+  const stopXFeed = (): void => {
+    xFeedSrc?.stop();
+    xFeedSrc = null;
+    xFeedKey = '';
+    xStatus = { ...xStatus, feed: { ...emptyXFeedSnapshot(), running: false } };
+  };
+
+  // 动态 / 微博 / X 三个源的启停唯一入口：面板监听开关 + 各自运行前提共同决定
   const reconcileListen = (): void => {
     if (shouldRunListen(db, 'dynamic', biliCookieHdr !== null)) {
       if (!dynamicSrc) {
@@ -465,6 +499,20 @@ async function main(): Promise<void> {
     } else if (weiboFeedSrc) {
       log.info('微博时间线已停止（面板开关关闭 / 无 cookie）');
       stopWeiboFeed();
+    }
+    // X：开关 × 代理已配置 × 名单非空；参数变了就地重启
+    const xAccounts = db.listXAccounts(true).length;
+    if (shouldRunListen(db, 'twitter', xProxyConfigured()) && xAccounts > 0) {
+      if (!xFeedSrc) {
+        log.info(`X 时间线：${xAccounts} 个账号，间隔 ${getXConfig(db).intervalSec}s`);
+        startXFeed();
+      } else if (xFeedKey !== xConfigKey()) {
+        log.info('X 时间线参数已热更新（代理 / 实例 / 回退 / 间隔）');
+        startXFeed();
+      }
+    } else if (xFeedSrc) {
+      log.info('X 时间线已停止（面板开关关闭 / 未配置代理 / 名单为空）');
+      stopXFeed();
     }
   };
 
@@ -591,7 +639,7 @@ async function main(): Promise<void> {
         },
       },
       listen: {
-        login: () => ({ bili: biliLoggedIn(), weibo: weiboLoggedIn() }),
+        login: () => ({ bili: biliLoggedIn(), weibo: weiboLoggedIn(), twitter: xProxyConfigured() }),
         onChanged: () => reconcileListen(),
       },
       advanced: {
@@ -642,8 +690,10 @@ async function main(): Promise<void> {
           };
         },
         onChanged: () => {
-          // P0 还没有 X 源可启停；P1 接入 TwitterFeedSource 后在这里调 reconcileListen()
+          // 连接设置或账号名单变了 → 走同一个启停入口（参数指纹变化会就地重启源）
+          reconcileListen();
         },
+        verify: (screenName) => verifyAccount(screenName, getXConfig(db).proxyUrl),
       },
       snapshots: { dir: keyframeDir },
       testPush: () => sendTestPush(),

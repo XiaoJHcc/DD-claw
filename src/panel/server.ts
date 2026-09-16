@@ -11,9 +11,9 @@ import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
   HttpError, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseCategoryPatch, parseChannelPatch,
-  parseNewCategory, parseNewChannel, parseNewRule, parseRulePatch, parseRuntimePatch,
-  parseStreamerPatch, parseUid, parseXPatch, parseXTestRequest, readJsonBody, sendJson, watchStreamer,
-  type XTestRequest,
+  parseNewCategory, parseNewChannel, parseNewRule, parseNewXAccount, parseRulePatch, parseRuntimePatch,
+  parseStreamerPatch, parseUid, parseXAccountPatch, parseXPatch, parseXTestRequest, readJsonBody, sendJson,
+  watchStreamer, type XTestRequest,
 } from './http-util.js';
 import { scheduleInfo } from './schedule.js';
 import { handleMcp } from '../mcp/handler.js';
@@ -30,7 +30,7 @@ import {
 } from '../sources/weibo/auth.js';
 import { llmProviderSchema, type LlmProviderConfig } from '../config/schema.js';
 import { deriveRoutes, isLlmEnabled, setLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
-import { isListenEnabled, listenSetting, setListen, type ListenFeature } from '../core/listen.js';
+import { isListenEnabled, listenReadyFor, listenSetting, setListen, type ListenFeature } from '../core/listen.js';
 import {
   getRuntimeConfig, saveRuntimeConfig,
 } from '../core/runtime-config.js';
@@ -40,6 +40,14 @@ import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 
 const log = makeLogger('panel');
+
+/** X 账号存在性校验结果：`kind` 决定面板怎么处理（not-found 拒绝 / link 照收并提示） */
+export interface XAccountVerify {
+  checked: boolean;
+  ok: boolean;
+  kind: 'ok' | 'not-found' | 'link';
+  message: string;
+}
 
 export interface PlatformStatus {
   key: 'bili' | 'weibo';
@@ -107,8 +115,8 @@ export interface PanelDeps {
    * 动态需 B站登录、微博需微博登录，未登录默认关、登录成功自动开、手动设置为准。
    */
   listen?: {
-    /** 平台登录态（联动开关默认值用）：bili=动态、weibo=微博 */
-    login: () => { bili: boolean; weibo: boolean };
+    /** 运行前提（联动开关默认值用）：bili=动态、weibo=微博、twitter=代理已配置（X 无登录态） */
+    login: () => { bili: boolean; weibo: boolean; twitter: boolean };
     /** 面板改开关后回调：装配处热启停对应源 */
     onChanged: () => void;
   };
@@ -131,6 +139,11 @@ export interface PanelDeps {
     save: (patch: Partial<XConfig>) => unknown;
     /** 连通性测试；允许传入尚未保存的覆盖值（先测后存） */
     test: (req: XTestRequest) => Promise<unknown>;
+    /**
+     * X 账号存在性校验（走免登录探测）。链路不通时也如实返回 kind='link'——
+     * 由路由决定「账号不存在」拒绝、「链路不通」照收并回报。
+     */
+    verify: (screenName: string) => Promise<XAccountVerify>;
     /** 保存后回调：装配处热生效 */
     onChanged: () => void;
   };
@@ -219,12 +232,12 @@ async function handle(
     sendJson(res, 200, deps.status());
     return;
   }
-  // ---- 监听功能开关（listen dep 存在才挂）：动态（B站）/ 微博 ----
+  // ---- 监听功能开关（listen dep 存在才挂）：动态（B站）/ 微博 / 推特（X 独立分页）----
   if (deps.listen && method === 'GET' && path === '/api/listen') {
     sendJson(res, 200, listenInfo(deps));
     return;
   }
-  const lm = path.match(/^\/api\/listen\/(dynamic|weibo)$/);
+  const lm = path.match(/^\/api\/listen\/(dynamic|weibo|twitter)$/);
   if (deps.listen && lm && method === 'PUT') {
     sendJson(res, 200, putListen(deps, lm[1] as ListenFeature, await readJsonBody(req)));
     return;
@@ -301,6 +314,52 @@ async function handle(
   if (deps.x && method === 'POST' && path === '/api/x/test') {
     const testReq = parseXTestRequest(await readJsonBody(req));
     sendJson(res, 200, await deps.x.test(testReq));
+    return;
+  }
+
+  // ---- X 关注账号（独立名单：不要求对应 B站主播，biliUid 只是可选关联）----
+  if (deps.x && method === 'GET' && path === '/api/x/accounts') {
+    sendJson(res, 200, { accounts: xAccountList(db) });
+    return;
+  }
+  if (deps.x && method === 'POST' && path === '/api/x/accounts') {
+    const input = parseNewXAccount(await readJsonBody(req));
+    if (db.getXAccountByScreenName(input.screenName)) {
+      throw new HttpError(409, `@${input.screenName} 已在名单里`);
+    }
+    checkXBiliUid(db, input.biliUid);
+    // 存在性校验：能校验就校验。「账号不存在」是硬错误（多半敲错了）；
+    // 链路原因（代理不通 / 限流）照收——不能因为代理没开就让人加不了账号，
+    // 把原因回给面板显示即可（这是区分「我填错了」与「链路断了」的唯一手段）。
+    const verify = await deps.x.verify(input.screenName);
+    if (verify.checked && !verify.ok && verify.kind === 'not-found') {
+      throw new HttpError(400, `X 账号不存在：@${input.screenName}`);
+    }
+    const id = db.upsertXAccount(input);
+    deps.x.onChanged();
+    sendJson(res, 200, { account: xAccountInfo(db, id), verify });
+    return;
+  }
+  const xa = path.match(/^\/api\/x\/accounts\/(\d+)$/);
+  if (deps.x && xa && method === 'PUT') {
+    const id = Number(xa[1]);
+    if (!db.getXAccount(id)) throw new HttpError(404, 'X 账号不存在');
+    const patch = parseXAccountPatch(await readJsonBody(req));
+    if (patch.screenName !== undefined) {
+      const dup = db.getXAccountByScreenName(patch.screenName);
+      if (dup && dup.id !== id) throw new HttpError(409, `@${patch.screenName} 已在名单里`);
+    }
+    if (patch.biliUid !== undefined) checkXBiliUid(db, patch.biliUid);
+    db.upsertXAccount({ ...patch, id });
+    deps.x.onChanged();
+    sendJson(res, 200, { account: xAccountInfo(db, id) });
+    return;
+  }
+  if (deps.x && xa && method === 'DELETE') {
+    const id = Number(xa[1]);
+    if (!db.deleteXAccount(id)) throw new HttpError(404, 'X 账号不存在');
+    deps.x.onChanged();
+    sendJson(res, 200, { ok: true });
     return;
   }
 
@@ -852,21 +911,24 @@ async function pollWeiboQrcodeRoute(
   return { status: 'confirmed', uid };
 }
 
-// ---- 监听功能开关（面板「监听」卡片）----
+// ---- 监听功能开关（面板「监听」卡片 / X 分页的「监听」卡）----
 function listenInfo(deps: PanelDeps): unknown {
   const login = deps.listen!.login();
-  const row = (feature: ListenFeature, loggedIn: boolean) => ({
+  const row = (feature: ListenFeature) => ({
     feature,
     setting: listenSetting(deps.db, feature),
-    enabled: isListenEnabled(deps.db, feature, loggedIn),
+    enabled: isListenEnabled(deps.db, feature, listenReadyFor(feature, login)),
   });
   return {
     biliLoggedIn: login.bili,
     weiboLoggedIn: login.weibo,
+    /** X 没有登录态：这里是「代理已配置」 */
+    xProxyConfigured: login.twitter,
     platforms: deps.status().platforms,
     rows: {
-      dynamic: row('dynamic', login.bili),
-      weibo: row('weibo', login.weibo),
+      dynamic: row('dynamic'),
+      weibo: row('weibo'),
+      twitter: row('twitter'),
     },
   };
 }
@@ -875,10 +937,32 @@ function putListen(deps: PanelDeps, feature: ListenFeature, body: unknown): unkn
   const b = (body ?? {}) as Record<string, unknown>;
   if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
   const login = deps.listen!.login();
-  const loggedIn = feature === 'dynamic' ? login.bili : login.weibo;
-  const enabled = setListen(deps.db, feature, b.enabled, loggedIn);
+  const enabled = setListen(deps.db, feature, b.enabled, listenReadyFor(feature, login));
   deps.listen!.onChanged();
   return { feature, enabled, setting: listenSetting(deps.db, feature) };
+}
+
+// ---- X 关注账号（独立名单）辅助 ----
+
+/** 名单行的面板视图：附上关联主播的展示名（空间受限处优先简称，同 streamers.alias 约定） */
+function xAccountView(db: Db, a: ReturnType<Db['listXAccounts']>[number]): unknown {
+  const bili = a.biliUid ? db.getStreamer(a.biliUid) : undefined;
+  return { ...a, biliName: bili ? (bili.alias || bili.uname || a.biliUid) : null };
+}
+
+function xAccountList(db: Db): unknown[] {
+  return db.listXAccounts().map((a) => xAccountView(db, a));
+}
+
+function xAccountInfo(db: Db, id: number): unknown {
+  const a = db.getXAccount(id);
+  if (!a) throw new HttpError(404, 'X 账号不存在');
+  return xAccountView(db, a);
+}
+
+/** 关联主播必须存在于监听名单（避免留下悬空引用） */
+function checkXBiliUid(db: Db, uid: string | null): void {
+  if (uid && !db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
 }
 
 // ---- LLM key 管理（settings 表 llm_key:<providerName>；本机面板，值可回显/编辑）----

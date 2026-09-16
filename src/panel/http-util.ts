@@ -12,6 +12,7 @@ import { NUM_SPECS, BOOL_SPECS, type RuntimeConfig } from '../core/runtime-confi
 import {
   X_INTERVAL_MAX, X_INTERVAL_MIN, type XConfig,
 } from '../core/x-config.js';
+import { isValidScreenName, normalizeScreenName } from '../core/x-accounts.js';
 import { describeTunnelError, parseInstanceList, parseProxyUrl } from '../core/proxy.js';
 
 export class HttpError extends Error {
@@ -450,4 +451,51 @@ export function parseXTestRequest(body: unknown): XTestRequest {
     req.screenName = o.screenName.trim();
   }
   return req;
+}
+
+// ---- X 关注账号（独立名单，不挂 B站主播；biliUid 仅可选关联）----
+
+const X_ACCOUNT_KEYS = ['screenName', 'biliUid', 'displayName', 'enabled'] as const;
+
+/** screen name 归一化 + 形状校验（`@abc` / `ABC` 都收，统一成小写） */
+function asScreenName(v: unknown, field = 'screenName'): string {
+  if (typeof v !== 'string') throw new HttpError(400, `${field} 必须是字符串`);
+  const s = normalizeScreenName(v);
+  if (!isValidScreenName(s)) {
+    throw new HttpError(400, 'X 账号格式不对（字母 / 数字 / 下划线，1~15 位）');
+  }
+  return s;
+}
+
+/** POST /api/x/accounts：screenName 必填；biliUid 可选（存在性在路由层校验）；enabled 缺省 true */
+export function parseNewXAccount(body: unknown): { screenName: string; biliUid: string | null; enabled: boolean } {
+  const o = asObject(body);
+  rejectUnknownKeys(o, X_ACCOUNT_KEYS);
+  if (!('screenName' in o)) throw new HttpError(400, 'screenName 必填');
+  const out: { screenName: string; biliUid: string | null; enabled: boolean } = {
+    screenName: asScreenName(o.screenName),
+    biliUid: null,
+    enabled: true,
+  };
+  if ('biliUid' in o && o.biliUid !== null) out.biliUid = parseUid(o.biliUid, 'biliUid');
+  // enabled 必须被采纳：显式传 false 却被静默忽略会让人以为停用生效了
+  if ('enabled' in o) out.enabled = asBoolean(o.enabled, 'enabled');
+  return out;
+}
+
+/** PUT /api/x/accounts/:id 的部分更新体；至少一个字段 */
+export function parseXAccountPatch(body: unknown): {
+  screenName?: string; biliUid?: string | null; displayName?: string | null; enabled?: boolean;
+} {
+  const o = asObject(body);
+  rejectUnknownKeys(o, X_ACCOUNT_KEYS);
+  const p: {
+    screenName?: string; biliUid?: string | null; displayName?: string | null; enabled?: boolean;
+  } = {};
+  if ('screenName' in o) p.screenName = asScreenName(o.screenName);
+  if ('biliUid' in o) p.biliUid = o.biliUid === null ? null : parseUid(o.biliUid, 'biliUid');
+  if ('displayName' in o) p.displayName = asNullableString(o.displayName, 'displayName');
+  if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
+  if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
+  return p;
 }

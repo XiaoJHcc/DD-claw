@@ -56,11 +56,13 @@ const store = {
   advanced: { ...M.mockAdvanced },
   napcat: clone(M.mockNapcat),
   x: clone(M.mockX),
+  xAccounts: clone(M.mockXAccounts),
+  xAccountSeq: M.mockXAccounts.length,
   pushEnabled: true,
   llmEnabled: true,
   biliLoggedIn: true,
   weiboLoggedIn: true,
-  listenSettings: { dynamic: 'auto', weibo: 'auto' },
+  listenSettings: { dynamic: 'auto', weibo: 'auto', twitter: 'auto' },
   biliQrStep: 0,
   weiboQrStep: 0,
 };
@@ -69,6 +71,14 @@ const store = {
 store.x.status.proxy.checkedAt = nowSec;
 store.x.status.web.checkedAt = nowSec;
 store.x.status.updatedAt = nowSec;
+store.x.status.feed.lastRunAt = nowSec - 120;
+store.x.status.feed.lastOkAt = nowSec - 120;
+for (const a of store.xAccounts) {
+  if (a.lastTweetAt) a.lastTweetAt = nowSec - 4200;
+  if (a.lastOkAt) a.lastOkAt = nowSec - 120;
+  a.createdAt = nowSec;
+  a.updatedAt = nowSec;
+}
 
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
@@ -123,31 +133,39 @@ function handle(method, path, q, rawBody) {
 
   // ---- 监听开关 ----
   if (path === '/api/listen' && method === 'GET') {
-    const row = (feature, loggedIn) => ({
+    // X 没有登录态：它的「运行前提」是代理已配置（与真实后端 listenReady 同构）
+    const ready = (feature) => feature === 'dynamic' ? store.biliLoggedIn
+      : feature === 'weibo' ? store.weiboLoggedIn
+      : Boolean(store.x.config.proxyUrl);
+    const row = (feature) => ({
       feature,
       setting: store.listenSettings[feature],
-      enabled: loggedIn && (store.listenSettings[feature] !== '0'),
+      enabled: ready(feature) && (store.listenSettings[feature] !== '0'),
     });
     return ok({
       biliLoggedIn: store.biliLoggedIn,
       weiboLoggedIn: store.weiboLoggedIn,
+      xProxyConfigured: Boolean(store.x.config.proxyUrl),
       platforms: M.mockPlatforms,
       rows: {
-        dynamic: row('dynamic', store.biliLoggedIn),
-        weibo: row('weibo', store.weiboLoggedIn),
+        dynamic: row('dynamic'),
+        weibo: row('weibo'),
+        twitter: row('twitter'),
       },
     });
   }
   {
-    const lm = path.match(/^\/api\/listen\/(dynamic|weibo)$/);
+    const lm = path.match(/^\/api\/listen\/(dynamic|weibo|twitter)$/);
     if (lm && method === 'PUT') {
       const b = body();
       const feature = lm[1];
-      const loggedIn = feature === 'dynamic' ? store.biliLoggedIn : store.weiboLoggedIn;
-      store.listenSettings[feature] = b.enabled === !loggedIn ? (b.enabled ? '1' : '0') : 'auto';
+      const ready = feature === 'dynamic' ? store.biliLoggedIn
+        : feature === 'weibo' ? store.weiboLoggedIn
+        : Boolean(store.x.config.proxyUrl);
+      store.listenSettings[feature] = b.enabled === !ready ? (b.enabled ? '1' : '0') : 'auto';
       return ok({
         feature,
-        enabled: loggedIn && (store.listenSettings[feature] !== '0'),
+        enabled: ready && (store.listenSettings[feature] !== '0'),
         setting: store.listenSettings[feature],
       });
     }
@@ -182,6 +200,45 @@ function handle(method, path, q, rawBody) {
   // ---- X / 推特（独立分页；契约与真实后端同构：GET 只读快照，探测走 /test）----
   if (path === '/api/x' && method === 'GET') {
     return ok({ config: store.x.config, status: store.x.status });
+  }
+  // X 关注账号：独立名单 CRUD（关联主播名由 /api/streamers 侧提供，这里只回 biliUid）
+  if (path === '/api/x/accounts' && method === 'GET') {
+    return ok({ accounts: store.xAccounts.map((a) => clone(a)) });
+  }
+  if (path === '/api/x/accounts' && method === 'POST') {
+    const b = body();
+    const screenName = String(b.screenName || '').trim().replace(/^@+/, '').toLowerCase();
+    if (!/^[a-z0-9_]{1,15}$/.test(screenName)) return json(400, { error: 'X 账号格式不对（字母 / 数字 / 下划线，1~15 位）' });
+    if (store.xAccounts.some((a) => a.screenName === screenName)) return json(409, { error: `@${screenName} 已在名单里` });
+    // 演示口径：名单里已有 3 个 + nhk_news 算「存在」，其余给「账号不存在」，便于看 400 那条路
+    const known = ['watase_yuzuki', 'd4dj_pj', 'hololive_en', 'nhk_news'].includes(screenName);
+    if (!known) return json(400, { error: `X 账号不存在：@${screenName}` });
+    const row = {
+      id: ++store.xAccountSeq, screenName, displayName: null,
+      biliUid: b.biliUid ? String(b.biliUid) : null, enabled: true,
+      lastTweetId: null, lastTweetAt: null, lastOkAt: null, createdAt: nowSec, updatedAt: nowSec,
+    };
+    store.xAccounts.push(row);
+    return ok({ account: clone(row), verify: { checked: true, ok: true, kind: 'ok', message: '账号存在（页面含 7 条推文）' } });
+  }
+  {
+    const xa = path.match(/^\/api\/x\/accounts\/(\d+)$/);
+    if (xa && method === 'PUT') {
+      const row = store.xAccounts.find((a) => a.id === Number(xa[1]));
+      if (!row) return json(404, { error: 'X 账号不存在' });
+      const b = body();
+      if (typeof b.screenName === 'string') row.screenName = b.screenName.trim().replace(/^@+/, '').toLowerCase();
+      if (b.biliUid !== undefined) row.biliUid = b.biliUid === null ? null : String(b.biliUid);
+      if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
+      row.updatedAt = nowSec;
+      return ok({ account: clone(row) });
+    }
+    if (xa && method === 'DELETE') {
+      const i = store.xAccounts.findIndex((a) => a.id === Number(xa[1]));
+      if (i < 0) return json(404, { error: 'X 账号不存在' });
+      store.xAccounts.splice(i, 1);
+      return ok({ ok: true });
+    }
   }
   if (path === '/api/x' && method === 'PUT') {
     const b = body();

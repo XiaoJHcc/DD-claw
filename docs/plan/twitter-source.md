@@ -155,6 +155,26 @@ CREATE TABLE IF NOT EXISTS post_rules (
 - **筛选默认值两处一致**：建表默认与 UI 默认都是 `{original:true, retweet:false, quote:false, media:false}`；`filters` 为空的旧行按默认值处理（防御式）。
 - 类型与 JSON 序列化照 `push.ts` 惯例，集中在新 `core/x-accounts.ts` / `core/post-rules.ts`。
 
+## P1 已落地（2026-09-16）
+
+| 交付 | 位置 | 验收 |
+|---|---|---|
+| Nitter RSS 解析（主路线） | `src/sources/twitter/nitter.ts` + `nitter.test.ts` | 8/8；转发/实体/图片还原/缺 id 跳过 |
+| 免登录回退（HTML 发现 id + 单推补详情） | `src/sources/twitter/web.ts` | 真机：13 个 id → 单推 JSON |
+| X 时间线源 | `src/sources/twitter/feed.ts` + `feed.test.ts` | 8/8；真机两轮：首轮静默归档 20 条 → 新推文发 `feed_post` → 去重零信号 |
+| `x_accounts` 独立名单 | `src/core/x-accounts.ts` + `db.ts`（第 14 张表） | 面板与 MCP 同一套校验（`http-util` 的 `parseNewXAccount`/`parseXAccountPatch`） |
+| 监听开关 | `core/listen.ts`（`ListenFeature` 加 `twitter` + `listenReadyFor`） | 前提 = 代理已配置；面板/MCP 共用一份映射 |
+| 面板 X 分页 | `webui/js/x.js` + `index.html` + mock 同构 | 浏览器实测：开关 / 来源与最近一轮 / 账号增删改与就地报错 |
+| 轴 B 能力面 | `mcp/tools.ts`：`list_x_accounts`、`get_x_config`、`update_x_config`、`upsert_x_account`、`delete_x_account`；`set_listen` 收 `twitter`；`search_posts` 收 `platform='twitter'` | mcp.test 13/13（含 gateway 看不到 admin 专属 X 工具） |
+
+**实现中确认/修正的点**（以本节为准）：
+
+1. **RSS 的 `<guid>` 就是推文 id**，比解析 `<link>` 可靠；转发时 `guid` 与 `dc:creator` **都是原作者**——"同一推文被多次转发折叠成一条"因此是结构性事实，不是 bug。
+2. **图片是实例代理 URL**（`http://<实例>/pic/media%2FXXX.jpg`）→ 一律还原成 `https://pbs.twimg.com/media/XXX.jpg` 存档：实例会死，CDN 形态才长期可用。
+3. **回退路线的分工**：HTML 只用来"发现 id"（React Flight 载荷里 id 与正文配对不可靠），详情一律走单推接口；这条路**看不到转发**（`retweeted_status_results` 恒 null），所以用回退时"转发"筛选永不命中——需要转发就得让 Nitter 活着。
+4. **监听开关的 auto 判据 = 代理已配置**（不是"代理已验证可用"）：默认配置自带 `http://127.0.0.1:7890`，所以 auto 一开始就是开；冷启动不因为"还没测过"就把开关显示成关（源本身在名单为空/代理为空时不会起）。
+5. **`enabled` 必须被采纳**（MCP 测试抓到的真 bug）：新建账号时 `parseNewXAccount` 漏了 `enabled`，`enabled:false` 被静默忽略、建出来仍是启用——面板与 MCP 都会中招，已在源头修掉。
+
 ## P0 已落地（2026-09-16）
 
 代码已在仓库里，全部经真实网络与 UI 验收：

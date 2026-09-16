@@ -14,6 +14,7 @@ import { createPanelServer, type PanelDeps, type PanelStatus } from '../panel/se
 import { saveMcpTokens } from '../mcp/auth.js';
 import { resetMcpWriteLimiter } from '../mcp/rate-limit.js';
 import { saveLlmProviders, listLlmProviders } from '../analysis/providers.js';
+import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 
 const ADMIN_TOKEN = 'ddc_test_admin';
 const GATEWAY_TOKEN = 'ddc_test_gateway';
@@ -51,12 +52,26 @@ async function setup(
   };
   const listenChanged = { count: 0 };
   const advancedChanged = { count: 0 };
+  // X 分页 dep（生产装配形状）：配置落 settings，探测/校验走网络（测试里不触发）
+  const xChanged = { count: 0 };
   const deps: PanelDeps = {
     db,
     status: () => status,
-    listen: { login: () => ({ bili: true, weibo: true }), onChanged: () => listenChanged.count++ },
+    listen: {
+      login: () => ({ bili: true, weibo: true, twitter: getXConfig(db).proxyUrl.trim() !== '' }),
+      onChanged: () => listenChanged.count++,
+    },
     advanced: { onChanged: () => advancedChanged.count++ },
     llm: { store: { list: () => listLlmProviders(db), save: (ps) => saveLlmProviders(db, ps) } },
+    x: {
+      info: () => ({ config: getXConfig(db), status: { proxy: { ok: false, message: '尚未测试', checkedAt: null }, instances: [], web: { ok: false, message: '尚未测试', checkedAt: null }, feed: emptyXFeedSnapshot(), updatedAt: null } }),
+      save: (patch) => { saveXConfig(db, patch); return getXConfig(db); },
+      test: async () => ({ status: 'not-called' }),
+      verify: async (screenName) => (screenName.includes('ghost')
+        ? { checked: true, ok: false, kind: 'not-found' as const, message: '账号不存在' }
+        : { checked: true, ok: true, kind: 'ok' as const, message: '账号存在' }),
+      onChanged: () => xChanged.count++,
+    },
   };
   const server: Server = createPanelServer(deps);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -114,8 +129,10 @@ test('未配置 token → 503；坏 token / 无 token → 401', async (t) => {
   assert.equal(r1.status, 503);
 
   const f = await setup(t);
-  for (const headers of [{}, { authorization: 'Bearer wrong-token' }]) {
-    const r = await fetch(`${f.base}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{}' });
+  const headerCases: Record<string, string>[] = [{}, { authorization: 'Bearer wrong-token' }];
+  for (const extra of headerCases) {
+    const headers: Record<string, string> = { 'content-type': 'application/json', ...extra };
+    const r = await fetch(`${f.base}/mcp`, { method: 'POST', headers, body: '{}' });
     assert.equal(r.status, 401);
   }
 });
@@ -279,4 +296,75 @@ test('search_posts：keyword/uid 过滤 + limit 上限 + raw 不下发', async (
   // LIKE 通配符按字面处理（% 不炸库也不放大匹配）
   const wild = (await call(adm, 'search_posts', { keyword: '%' })) as unknown[];
   assert.equal(wild.length, 0);
+});
+
+// ---- X / 推特（轴 B：新能力先进注册表，MCP 与面板共用同一套校验与 Db 方法）----
+
+test('X 工具：list/upsert/delete 账号与配置读写走注册表，写路径与面板同语义', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  const empty = (await call(adm, 'list_x_accounts')) as { accounts: unknown[] };
+  assert.deepEqual(empty.accounts, [], '初始空名单');
+
+  const created = (await call(adm, 'upsert_x_account', { screenName: '@Watase_Yuzuki' })) as {
+    id: number; account: { screenName: string; enabled: boolean };
+  };
+  assert.equal(created.account.screenName, 'watase_yuzuki', '归一化与面板一致');
+  assert.equal(f.db.listXAccounts().length, 1);
+
+  // 重名 409（错误消息透传到 MCP 客户端）
+  await assert.rejects(() => call(adm, 'upsert_x_account', { screenName: 'watase_yuzuki' }), /已在名单里/);
+
+  // 关联主播必须存在
+  await assert.rejects(() => call(adm, 'upsert_x_account', { screenName: 'd4dj_pj', biliUid: '9999' }), /不在监听名单/);
+  f.db.upsertStreamer({ uid: '1001', uname: '阿梓', watch: true });
+  await call(adm, 'upsert_x_account', { screenName: 'd4dj_pj', biliUid: '1001', enabled: false });
+
+  const listed = (await call(adm, 'list_x_accounts')) as { accounts: Array<{ screenName: string; biliName: string | null; enabled: boolean }> };
+  assert.deepEqual(listed.accounts.map((a) => a.screenName), ['d4dj_pj', 'watase_yuzuki']);
+  assert.equal(listed.accounts[0]!.biliName, '阿梓', '回显关联主播展示名');
+  assert.equal(listed.accounts[0]!.enabled, false, '停用状态可见');
+
+  // 更新（带 id）
+  await call(adm, 'upsert_x_account', { id: created.id, enabled: false });
+  assert.equal(f.db.getXAccount(created.id)!.enabled, false);
+
+  // 配置读写
+  await call(adm, 'update_x_config', { intervalSec: 600, fallbackHtml: false });
+  assert.equal(f.db.getSetting('x_interval_sec'), '600');
+  const got = (await call(adm, 'get_x_config')) as { config: { intervalSec: number; fallbackHtml: boolean } };
+  assert.equal(got.config.intervalSec, 600);
+  assert.equal(got.config.fallbackHtml, false);
+
+  // 删除
+  await call(adm, 'delete_x_account', { id: created.id });
+  assert.equal(f.db.listXAccounts().length, 1);
+  await assert.rejects(() => call(adm, 'delete_x_account', { id: created.id }), /X 账号不存在/);
+});
+
+test('X 工具：gateway 角色看不到（配置含代理地址，属运维面）', async (t) => {
+  const f = await setup(t);
+  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const tools = (await gw.listTools()).tools.map((x) => x.name);
+  assert.equal(tools.includes('get_x_config'), false, 'admin 专属');
+  assert.equal(tools.includes('upsert_x_account'), false, 'admin 专属');
+  assert.equal(tools.includes('list_x_accounts'), true, '只读名单对群友可见');
+});
+
+test('search_posts：platform=twitter 可检索 X 归档；set_listen 支持 twitter', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  f.db.insertPosts([
+    { platform: 'twitter', uid: 'watase_yuzuki', itemId: '9001', type: 'retweet', text: '转发的推文', pics: ['https://pbs.twimg.com/media/a.jpg'], pubTs: 5000, url: 'https://x.com/a/status/9001', raw: '{"b":2}' },
+  ]);
+  const only = (await call(adm, 'search_posts', { platform: 'twitter' })) as Array<{ itemId: string; pics: string[] }>;
+  assert.equal(only.length, 1);
+  assert.equal(only[0]!.itemId, '9001', 'X 帖也能按平台检索');
+  assert.equal(only[0]!.pics.length, 1);
+
+  const set = (await call(adm, 'set_listen', { feature: 'twitter', enabled: false })) as { feature: string; enabled: boolean };
+  assert.equal(set.feature, 'twitter');
+  assert.equal(set.enabled, false, '推特开关经 MCP 可关');
+  assert.equal(f.db.getSetting('listen_twitter'), '0');
 });

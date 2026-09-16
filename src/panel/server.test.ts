@@ -38,8 +38,8 @@ async function setup(
       };
     };
     llmFetch?: FetchLike;
-    /** 注入 listen dep；缺省不注入（/api/listen* 404） */
-    listen?: { bili?: boolean; weibo?: boolean };
+    /** 注入 listen dep；缺省不注入（/api/listen* 404）。twitter 可传函数 = 动态判据（代理配置会变） */
+    listen?: { bili?: boolean; weibo?: boolean; twitter?: boolean | (() => boolean) };
     /** 注入 napcat dep；缺省不注入（/api/napcat* 404） */
     napcat?: PanelDeps['napcat'];
     /** 注入 advanced dep（onChanged 热生效回调）；缺省则保存只落库 */
@@ -110,7 +110,11 @@ async function setup(
     ...(opts.listen
       ? {
           listen: {
-            login: () => ({ bili: opts.listen!.bili ?? false, weibo: opts.listen!.weibo ?? false }),
+            login: () => ({
+              bili: opts.listen!.bili ?? false,
+              weibo: opts.listen!.weibo ?? false,
+              twitter: typeof opts.listen!.twitter === 'function' ? opts.listen!.twitter() : (opts.listen!.twitter ?? false),
+            }),
             onChanged: () => { listenChangedCount++; },
           },
         }
@@ -1683,6 +1687,12 @@ function makeXDep(db: Db, calls: string[]): NonNullable<PanelDeps['x']> {
       status = { ...status, updatedAt: now };
       return { ...out, status };
     },
+    // 存在性校验桩：名字里带 ghost 的算「不存在」，其余算存在（链路原因那条路在下面单独测）
+    verify: async (screenName) => (screenName.includes('ghost')
+      ? { checked: true, ok: false, kind: 'not-found' as const, message: 'x.com 提示该账号不存在' }
+      : screenName.includes('offline')
+        ? { checked: true, ok: false, kind: 'link' as const, message: '代理不可达（ECONNREFUSED）' }
+        : { checked: true, ok: true, kind: 'ok' as const, message: '账号存在（页面含 7 条推文）' }),
     onChanged: () => { calls.push('saved'); },
   };
 }
@@ -1757,4 +1767,106 @@ test('/api/x/test：探测按 target 裁剪，且允许用未保存的输入值�
   const status = after.json.status as { proxy: { ok: boolean }; instances: unknown[] };
   assert.equal(status.proxy.ok, true, '测试结果写进快照供卡片显示');
   assert.equal(status.instances.length, 2);
+});
+
+// ---- X 关注账号（独立名单）：CRUD + 存在性校验的两类失败 ----
+
+test('/api/x/accounts：空名单 / 新增成功（含校验回报）/ 重名 409 / 非法格式 400', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, x: makeXDep(db, calls) });
+
+  assert.deepEqual(((await api(base, '/api/x/accounts')).json.accounts as unknown[]).length, 0, '初始为空');
+
+  const created = await api(base, '/api/x/accounts', 'POST', { screenName: '@Watase_Yuzuki' });
+  assert.equal(created.status, 200);
+  const acc = created.json.account as { id: number; screenName: string; enabled: boolean };
+  assert.equal(acc.screenName, 'watase_yuzuki', 'screen name 归一化（去 @ 转小写）');
+  assert.equal(acc.enabled, true, '新增默认启用');
+  assert.equal((created.json.verify as { ok: boolean }).ok, true, '回报校验结果');
+  assert.deepEqual(calls, ['saved'], '新增触发一次热生效回调');
+
+  assert.equal((await api(base, '/api/x/accounts', 'POST', { screenName: 'watase_yuzuki' })).status, 409, '重名');
+  assert.equal((await api(base, '/api/x/accounts', 'POST', { screenName: 'bad name!' })).status, 400, '格式非法');
+  assert.equal((await api(base, '/api/x/accounts', 'POST', {})).status, 400, '缺 screenName');
+
+  const list = (await api(base, '/api/x/accounts')).json.accounts as { screenName: string }[];
+  assert.equal(list.length, 1);
+});
+
+test('/api/x/accounts：账号不存在 → 400；链路不通 → 照收并回报原因（代理没开也能加）', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+
+  const ghost = await api(base, '/api/x/accounts', 'POST', { screenName: 'ghost_user' });
+  assert.equal(ghost.status, 400, '账号不存在是硬错误');
+  assert.match(String(ghost.json.error), /账号不存在/);
+  assert.equal(db.listXAccounts().length, 0, '拒绝时不落库');
+
+  const offline = await api(base, '/api/x/accounts', 'POST', { screenName: 'offline_guy' });
+  assert.equal(offline.status, 200, '链路原因不拦，照收');
+  assert.equal((offline.json.verify as { ok: boolean }).ok, false);
+  assert.match(String((offline.json.verify as { message: string }).message), /代理不可达/);
+  assert.equal(db.listXAccounts().length, 1, '照收时确实入库');
+});
+
+test('/api/x/accounts：关联主播必须存在；编辑/启停/删除与 404', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+  db.upsertStreamer({ uid: '1001', uname: '阿梓' });
+  const id = db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true });
+
+  assert.equal(
+    (await api(base, '/api/x/accounts', 'POST', { screenName: 'd4dj_pj', biliUid: '9999' })).status, 400,
+    '关联主播不在监听名单 → 400',
+  );
+  const withBili = await api(base, '/api/x/accounts', 'POST', { screenName: 'd4dj_pj', biliUid: '1001' });
+  assert.equal(withBili.status, 200);
+  assert.equal((withBili.json.account as { biliName: string }).biliName, '阿梓', '回显关联主播展示名');
+
+  const put = await api(base, '/api/x/accounts/' + id, 'PUT', { enabled: false });
+  assert.equal(put.status, 200);
+  assert.equal((put.json.account as { enabled: boolean }).enabled, false, '启停生效');
+
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'PUT', { screenName: 'd4dj_pj' })).status, 409, '改成已存在的名字 409');
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'PUT', {})).status, 400, '空 patch');
+  assert.equal((await api(base, '/api/x/accounts/99999', 'PUT', { enabled: true })).status, 404);
+
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'DELETE')).status, 200);
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'DELETE')).status, 404, '再删一次 404');
+  assert.equal(db.listXAccounts().length, 1, '只剩 d4dj_pj');
+});
+
+test('/api/listen：推特开关的 auto 判据是「代理已配置」，PUT 可落手动值', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, {
+    db, x: makeXDep(db, calls),
+    listen: { bili: true, weibo: true, twitter: () => getXConfig(db).proxyUrl.trim() !== '' },
+  });
+
+  // 默认配置自带代理地址（http://127.0.0.1:7890）→ 前提满足 → auto 开
+  let info = await api(base, '/api/listen');
+  const rows = info.json.rows as Record<string, { enabled: boolean; setting: string | null }>;
+  assert.equal(rows.twitter!.enabled, true, '默认代理已配置 → auto 开');
+  assert.equal(info.json.xProxyConfigured, true);
+  assert.equal(rows.twitter!.setting, null, 'auto 模式无手动设置');
+
+  // 显式清空代理（墙外部署「不用代理」）→ 前提不满足 → auto 关
+  saveXConfig(db, { proxyUrl: '' });
+  info = await api(base, '/api/listen');
+  assert.equal((info.json.rows as Record<string, { enabled: boolean }>).twitter!.enabled, false, '无代理 → auto 关');
+
+  // 前提不满足也允许手动开：UI 显示开，源实际不跑（由 shouldRunListen 拦）
+  const put = await api(base, '/api/listen/twitter', 'PUT', { enabled: true });
+  assert.equal(put.status, 200);
+  assert.equal((put.json as { enabled: boolean }).enabled, true);
+  assert.equal(db.getSetting('listen_twitter'), '1');
+
+  // 配好代理 → 前提满足；此时手动开 == auto，开关应回 auto（settings key 被删）
+  saveXConfig(db, { proxyUrl: 'http://127.0.0.1:7890' });
+  const put2 = await api(base, '/api/listen/twitter', 'PUT', { enabled: true });
+  assert.equal((put2.json as { setting: string | null }).setting, null, '与 auto 一致 → 回 auto');
+  info = await api(base, '/api/listen');
+  assert.equal((info.json.rows as Record<string, { enabled: boolean }>).twitter!.enabled, true);
 });

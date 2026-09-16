@@ -1,19 +1,20 @@
 // 面板前端 · X / 推特 分页（独立于 B站/微博的开播链路）。
 // 卡片1「连接」：代理 / Nitter 实例 / 免登录回退 + 一键测试；
-// 卡片2「监听」：抓取间隔 / 链路状态。
-// P0 只有连接与探测——X 源（抓取、关注账号、图文帖规则）在 P1/P2 接进来。
-// 纪律：GET /api/x 只读后端快照（后端绝不在读取路径打网络），探测一律由「测试」显式触发；
+// 卡片2「监听」：监听开关 / 抓取间隔 / 数据来源与最近一轮；
+// 卡片3「关注账号」：X 独立名单（不要求对应 B站主播，关联主播只是可选）。
+// 纪律：GET 只读后端快照（后端绝不在读取路径打网络），探测一律由「测试」显式触发；
 // 「测试」允许用输入框里还没保存的值（先测后存），否则用户得先存一个错配置才知道它错。
-import { api, toast, ACTIONS, CHANGES, esc, field, checkRowHtml, openSheet, closeSheet } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, field, checkRowHtml, dropdownHtml, openSheet, closeSheet, switchHtml, iconBtn } from './core.js';
 
 let xState = null;
+let listenState = null;
+let accountCache = [];
+let streamerCache = [];
 let testing = false;
 
 function stateRows() {
   const s = xState || {};
-  const cfg = s.config || {};
-  const st = s.status || {};
-  return { cfg, st };
+  return { cfg: s.config || {}, st: s.status || {} };
 }
 
 function dotFor(tested, ok) {
@@ -33,38 +34,102 @@ function fmtTime(sec) {
   return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/** 加载：一次取连接快照 + 监听开关 + 账号名单 + 主播列表（关联主播下拉用） */
 function loadX() {
-  return api('/api/x').then(function (s) {
-    xState = s;
-    const { cfg, st } = stateRows();
-    const proxy = st.proxy || {};
-    const inst = st.instances || [];
-    const okInst = inst.filter(function (i) { return i.ok; }).length;
-    const instSub = (cfg.instances && cfg.instances.length)
-      ? cfg.instances.join(', ') + (inst.length ? ' · ' + okInst + '/' + inst.length + ' 可用' : ' · 未测试')
-      : '未配置（只剩免登录回退路线）';
-    const conn = document.getElementById('x-conn-rows');
-    if (conn) {
-      conn.innerHTML = [
-        rowHtml(dotFor(proxy.checkedAt, proxy.ok), '代理', (cfg.proxyUrl || '未配置') + ' · ' + (proxy.message || '尚未测试')),
-        rowHtml(dotFor(inst.length > 0, okInst > 0), 'Nitter 实例', instSub),
-        rowHtml('', '免登录回退', cfg.fallbackHtml ? '已开启（Nitter 全挂时用 x.com HTML）' : '已关闭'),
-      ].join('');
-    }
-    const listen = document.getElementById('x-listen-rows');
-    if (listen) {
-      const web = st.web || {};
-      const stale = st.updatedAt ? '上次测试 ' + fmtTime(st.updatedAt) : '尚未测试';
-      listen.innerHTML = [
-        rowHtml('', '抓取间隔', (cfg.intervalSec || '—') + ' 秒'),
-        rowHtml(dotFor(web.checkedAt, web.ok), '免登录路线', web.message || '尚未测试'),
-        rowHtml('', '链路状态', stale),
-      ].join('');
-    }
+  return Promise.all([
+    api('/api/x'), api('/api/listen'), api('/api/x/accounts'), api('/api/streamers'),
+  ]).then(function (rs) {
+    xState = rs[0];
+    listenState = rs[1];
+    accountCache = rs[2].accounts || [];
+    streamerCache = rs[3].streamers || [];
+    renderConn();
+    renderListen();
+    renderAccounts();
   }).catch(function (e) { toast(e.message, true); });
 }
 
-// 测试结果就地渲染（sheet 内）：一行一个目标，成功/失败都写出可读原因
+function renderConn() {
+  const { cfg, st } = stateRows();
+  const proxy = st.proxy || {};
+  const inst = st.instances || [];
+  const okInst = inst.filter(function (i) { return i.ok; }).length;
+  const instSub = (cfg.instances && cfg.instances.length)
+    ? cfg.instances.join(', ') + (inst.length ? ' · ' + okInst + '/' + inst.length + ' 可用' : ' · 未测试')
+    : '未配置（只剩免登录回退路线）';
+  const conn = document.getElementById('x-conn-rows');
+  if (!conn) return;
+  conn.innerHTML = [
+    rowHtml(dotFor(proxy.checkedAt, proxy.ok), '代理', (cfg.proxyUrl || '未配置') + ' · ' + (proxy.message || '尚未测试')),
+    rowHtml(dotFor(inst.length > 0, okInst > 0), 'Nitter 实例', instSub),
+    rowHtml('', '免登录回退', cfg.fallbackHtml ? '已开启（Nitter 全挂时用 x.com HTML）' : '已关闭'),
+  ].join('');
+}
+
+function renderListen() {
+  const { cfg, st } = stateRows();
+  const feed = st.feed || {};
+  const row = listenState && listenState.rows ? listenState.rows.twitter : null;
+  const box = document.getElementById('x-listen-rows');
+  if (!box) return;
+  const viaText = feed.via === 'nitter' ? 'Nitter ' + (feed.host || '')
+    : feed.via === 'web' ? '免登录回退' : '—';
+  const runText = feed.accounts
+    ? `${feed.okAccounts}/${feed.accounts} 个账号成功 · 数据来自 ${viaText}`
+    : (feed.running ? '尚未跑完第一轮' : '源未运行');
+  box.innerHTML = [
+    '<div class="row"><span class="row-main"><span class="row-line"><span class="row-title">监听推特</span>' +
+      '<span class="row-sub">' + (cfg.proxyUrl ? '代理已配置' : '先配置代理才会运行') + '</span></span></span>' +
+      '<span class="row-end">' + switchHtml('data-change="toggle-x-listen"', row ? row.enabled : false) + '</span></div>',
+    rowHtml(dotFor(feed.lastRunAt, feed.okAccounts > 0), '数据来源', runText),
+    rowHtml('', '抓取间隔', (cfg.intervalSec || '—') + ' 秒'),
+    rowHtml('', '最近一轮', (feed.lastRunAt ? fmtTime(feed.lastRunAt) : '尚未运行') +
+      (feed.lastOkAt ? ' · 上次成功 ' + fmtTime(feed.lastOkAt) : '')),
+    ...(feed.lastError ? [rowHtml('<span class="dot bad"></span>', '最近错误', feed.lastError)] : []),
+  ].join('');
+}
+
+function streamerName(uid) {
+  for (let i = 0; i < streamerCache.length; i++) {
+    if (String(streamerCache[i].uid) === String(uid)) {
+      return streamerCache[i].alias || streamerCache[i].uname || String(uid);
+    }
+  }
+  return 'UID ' + uid;
+}
+
+function renderAccounts() {
+  const box = document.getElementById('x-account-rows');
+  if (!box) return;
+  if (accountCache.length === 0) {
+    box.innerHTML = '<p class="hint">名单为空——添加 X 账号后，新推文会按「图文帖规则」推送</p>';
+    return;
+  }
+  box.innerHTML = accountCache.map(function (a) {
+    const sub = (a.lastTweetAt ? '最近推文 ' + fmtTime(a.lastTweetAt) : '还没抓到推文') +
+      (a.biliUid ? ' · 关联 ' + streamerName(a.biliUid) : '') +
+      (a.lastOkAt ? '' : ' · 尚未成功抓取');
+    return '<div class="row row-2" data-sid="' + a.id + '">' +
+      '<span class="dot ' + (a.enabled ? (a.lastOkAt ? 'ok' : 'none') : 'none') + '"></span>' +
+      '<span class="row-main"><span class="row-line"><span class="row-title">@' + esc(a.screenName) + '</span></span>' +
+      '<span class="row-sub">' + esc(sub) + '</span></span>' +
+      '<span class="row-end">' +
+      iconBtn('edit-x-account', 'pencil', '编辑') +
+      iconBtn('del-x-account', 'trash', '删除', true) +
+      '</span></div>';
+  }).join('');
+}
+
+// ---- 监听开关（复用 listen_<feature> 机制；X 的 auto 判据是「代理已配置」）----
+CHANGES['toggle-x-listen'] = function (el) {
+  const on = el.checked;
+  api('/api/listen/twitter', 'PUT', { enabled: on }).then(function () {
+    toast(on ? '已开启' : '已关闭');
+    loadX();
+  }).catch(function (e) { toast(e.message, true); loadX(); });
+};
+
+// ---- 测试结果就地渲染（sheet 内）----
 function renderTestOut(title, lines) {
   const box = document.getElementById('x-test-out');
   if (!box) return;
@@ -169,6 +234,68 @@ ACTIONS['save-x-settings'] = function () {
     toast('已保存');
     loadX();
   }).catch(function (e) { if (err) err.textContent = e.message; });
+};
+
+// ---- 关注账号：新增 / 编辑 / 删除 ----
+function accountById(id) {
+  for (let i = 0; i < accountCache.length; i++) if (String(accountCache[i].id) === String(id)) return accountCache[i];
+  return null;
+}
+
+ACTIONS['add-x-account'] = function () { openAccountSheet(null); };
+ACTIONS['edit-x-account'] = function (el) {
+  openAccountSheet(accountById(el.closest('.row').getAttribute('data-sid')));
+};
+
+function openAccountSheet(a) {
+  const opts = streamerCache.map(function (s) {
+    return { value: String(s.uid), label: s.alias || s.uname || String(s.uid) };
+  });
+  openSheet(a ? '编辑 X 账号' : '添加 X 账号',
+    field('X 账号', `<input class="inp" id="xa-name" placeholder="@Watase_Yuzuki（@ 可省）" value="${a ? esc(a.screenName) : ''}">`) +
+    field('关联主播（可选）', dropdownHtml('xa-bili', [{ value: '', label: '不关联' }].concat(opts), a && a.biliUid ? String(a.biliUid) : '')) +
+    '<p class="hint">X 账号是独立名单，不要求它对应某位 B站主播；关联只是为了让推送文案和列表更好认。</p>' +
+    '<div id="xa-out"></div>',
+    1,
+    '<span id="xa-err" class="form-err"></span>' +
+    '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
+    `<button class="btn btn-primary" data-action="save-x-account" data-id="${a ? a.id : ''}">保存</button>`);
+}
+
+ACTIONS['save-x-account'] = function (el) {
+  const err = document.getElementById('xa-err');
+  if (err) err.textContent = '';
+  const name = document.getElementById('xa-name').value.trim();
+  if (!name) { if (err) err.textContent = '请填 X 账号'; return; }
+  const biliVal = document.getElementById('xa-bili').value;
+  const body = { screenName: name, biliUid: biliVal === '' ? null : biliVal };
+  const idAttr = el.getAttribute('data-id');
+  const req = idAttr ? api('/api/x/accounts/' + idAttr, 'PUT', body) : api('/api/x/accounts', 'POST', body);
+  req.then(function (r) {
+    closeSheet(1);
+    // 校验结果分三类：存在 / 账号不存在（已被后端 400 拦下）/ 链路不通（照收但要提示）
+    if (!idAttr && r.verify && r.verify.checked && !r.verify.ok) {
+      toast('已添加，但未能校验：' + r.verify.message, true);
+    } else {
+      toast(idAttr ? '已保存' : '已添加');
+    }
+    loadX();
+  }).catch(function (e) {
+    const box = document.getElementById('xa-out');
+    if (box) box.innerHTML = '';
+    if (err) err.textContent = e.message;
+  });
+};
+
+ACTIONS['del-x-account'] = function (el) {
+  const row = el.closest('.row');
+  const a = accountById(row.getAttribute('data-sid'));
+  if (!a) return;
+  if (!confirm('从 X 名单里移除 @' + a.screenName + '？已归档的推文保留。')) return;
+  api('/api/x/accounts/' + a.id, 'DELETE').then(function () {
+    toast('已移除');
+    loadX();
+  }).catch(function (e) { toast(e.message, true); });
 };
 
 loadX();

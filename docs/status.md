@@ -52,14 +52,14 @@
 | `src/analysis/triggers.ts` | **分析触发**：哪些信号送进 LLM（开播 / 新动态 / 直播中抽查 / 定时全量） |
 | `src/analysis/context.ts` | 按房间聚合时间窗内多源数据 → 一份 context（喂给分类 prompt） |
 | `src/analysis/tasks/schedule-extract.ts` | 预告解析 → schedules 表（置信度入库，阈值过滤） |
-| `src/sources/twitter/{nitter,web,feed}.ts` | **X/推特图文源**（免登录路线，模子 = weibo/feed）；`probe.ts`（连通性探测）已落地，源本身待 P1；计划见 [plan/twitter-source.md](plan/twitter-source.md) |
-| `src/core/x-accounts.ts` / `src/core/post-rules.ts` | X 独立关注名单表与图文帖规则表（P1/P2） |
+| `src/sources/twitter/{nitter,web,feed}.ts` | ~~**X/推特图文源**~~ **P1 已落地**（Nitter RSS 主 + 免登录回退 `web.ts` + 源 `feed.ts`）；计划见 [plan/twitter-source.md](plan/twitter-source.md) |
+| `src/core/post-rules.ts` | 图文帖规则表（P2）；`x-accounts.ts`（X 独立名单）已落地 |
 | `src/analysis/tasks/translate.ts` | 推文翻译（`LlmTask`），X 链路可选判定 |
 
 **未落地能力**
 
 - `schedules` 表未建（目标）；`signals` 表已放弃（见 `design.md` §11）
-- **X/推特：P0 已落地**（`core/proxy.ts` 隧道 fetch、`core/x-config.ts` 配置、`sources/twitter/probe.ts` 探测、面板 `/api/x*` 与独立分页 `webui/js/x.js`、`npm run probe-x`）；**待做**：P1 免登录源 + `x_accounts` 独立名单，P2 `post_rules` 图文帖规则与推送分支，P3 LLM 判定/翻译
+- **X/推特：P0+P1 已落地**（隧道 fetch、`/api/x*`、独立分页、免登录源 Nitter RSS + 回退、`x_accounts` 独立名单、监听开关 `listen_twitter`、MCP X 工具）；**待做**：P2 `post_rules` 图文帖规则与 `feed_post` 推送分支、P3 LLM 判定/翻译
 - verdicts 总览 UI；预告半透明条与「预定时间到」推送
 - dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）：待产品方案，机制不预设
 - 其余已放弃 / 不采用方案见 `design.md` §11

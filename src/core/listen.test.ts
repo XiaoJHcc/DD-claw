@@ -40,7 +40,7 @@ test('setListen 与 auto 一致则回 auto：删除手动设置的 key', () => {
   assert.equal(isListenEnabled(db, 'dynamic', false), false, '回 auto 后未登录又关');
 });
 
-test('shouldRunListen：auto 有 cookie 就跑；手动关不跑；无 cookie 不跑', () => {
+test('shouldRunListen：auto 前提满足就跑；手动关不跑；前提不满足不跑', () => {
   const db = new Db(':memory:');
   // auto + 有 cookie → 跑
   assert.equal(shouldRunListen(db, 'dynamic', true), true);
@@ -49,8 +49,24 @@ test('shouldRunListen：auto 有 cookie 就跑；手动关不跑；无 cookie �
   // 手动关 + 有 cookie → 不跑
   setListen(db, 'weibo', false, true);
   assert.equal(shouldRunListen(db, 'weibo', true), false);
-  // config 关 → 不跑
-  assert.equal(shouldRunListen(db, 'dynamic', true, false), false);
+  // 手动开但前提不满足（无 cookie）→ 源照样不跑（UI 显示开，由这条拦住）
+  setListen(db, 'dynamic', true, false);
+  assert.equal(isListenEnabled(db, 'dynamic', false), true, 'UI 显示开');
+  assert.equal(shouldRunListen(db, 'dynamic', false), false, '源不跑');
+});
+
+test('X（推特）：运行前提是「代理已配置」，不是登录态', () => {
+  const db = new Db(':memory:');
+  assert.equal(isListenEnabled(db, 'twitter', true), true, 'auto + 代理已配置 → 开');
+  assert.equal(isListenEnabled(db, 'twitter', false), false, 'auto + 未配置代理 → 关');
+  // 未配置代理也能手动开：UI 显示开，但源不跑（提醒用户去填代理，而不是把开关变灰）
+  assert.equal(setListen(db, 'twitter', true, false), true);
+  assert.equal(listenSetting(db, 'twitter'), '1');
+  assert.equal(shouldRunListen(db, 'twitter', false), false, '前提不满足 → 源不跑');
+  assert.equal(shouldRunListen(db, 'twitter', true), true, '前提满足 + 手动开 → 跑');
+  // 手动关优先于前提
+  assert.equal(setListen(db, 'twitter', false, true), false);
+  assert.equal(shouldRunListen(db, 'twitter', true), false, '手动关优先');
 });
 
 test('auto 下登录过期不自动停：shouldRunListen 只看 cookie 不看登录态', () => {

@@ -64,7 +64,37 @@ export interface XStatus {
   proxy: { ok: boolean; message: string; checkedAt: number | null };
   instances: { host: string; ok: boolean; message: string }[];
   web: { ok: boolean; message: string; checkedAt: number | null };
+  /** X 源的运行状态（sources/twitter/feed.ts 每轮回写） */
+  feed: XFeedSnapshot;
   updatedAt: number | null;
+}
+
+/** X 源运行状态：面板「监听」卡显示的就是它 */
+export interface XFeedSnapshot {
+  running: boolean;
+  lastRunAt: number | null;
+  lastOkAt: number | null;
+  /** 最近一轮生效的路线：nitter（主）/ web（回退） */
+  via: 'nitter' | 'web' | null;
+  /** 走 Nitter 时命中的实例 */
+  host: string | null;
+  /** 本轮轮询账号数 / 其中成功的 */
+  accounts: number;
+  okAccounts: number;
+  lastError: string | null;
+}
+
+export function emptyXFeedSnapshot(): XFeedSnapshot {
+  return {
+    running: false,
+    lastRunAt: null,
+    lastOkAt: null,
+    via: null,
+    host: null,
+    accounts: 0,
+    okAccounts: 0,
+    lastError: null,
+  };
 }
 
 export function emptyXStatus(): XStatus {
@@ -72,6 +102,7 @@ export function emptyXStatus(): XStatus {
     proxy: { ok: false, message: '尚未测试', checkedAt: null },
     instances: [],
     web: { ok: false, message: '尚未测试', checkedAt: null },
+    feed: emptyXFeedSnapshot(),
     updatedAt: null,
   };
 }
