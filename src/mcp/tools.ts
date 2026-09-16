@@ -13,10 +13,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { makeLogger } from '../logger.js';
 import type { PanelDeps } from '../panel/server.js';
 import {
-  HttpError, checkCategoryConditions, checkChannelShape, checkPostFiltersUsable, checkPostRuleRefs,
-  checkRuleRefs, parseCategoryPatch, parseChannelPatch, parseNewCategory, parseNewChannel,
-  parseNewPostRule, parseNewRule, parseNewXAccount, parsePostRulePatch, parseRulePatch, parseRuntimePatch,
-  parseStreamerPatch, parseXAccountPatch, parseXPatch, watchStreamer,
+  HttpError, checkCategoryConditions, checkChannelShape, checkPostFiltersUsable, checkPostJudgeUsable,
+  checkPostRuleRefs, checkRuleRefs, parseCategoryPatch, parseChannelPatch, parseNewCategory,
+  parseNewChannel, parseNewPostRule, parseNewRule, parseNewXAccount, parsePostRulePatch, parseRulePatch,
+  parseRuntimePatch, parseStreamerPatch, parseXAccountPatch, parseXPatch, watchStreamer,
 } from '../panel/http-util.js';
 import { scheduleInfo } from '../panel/schedule.js';
 import { setPushEnabled } from '../core/push.js';
@@ -412,12 +412,18 @@ const adminTools: McpToolDef[] = [
         keywords: z.array(z.string()).optional().describe('正文关键词，命中任一即可'),
       }).optional(),
       messageTemplate: z.string().nullable().optional().describe('推送词，可用 {author} {text} {url} {liver}'),
+      llmJudge: z.boolean().optional().describe('交给 LLM 判定「要不要推」（须同时给 judgePrompt）'),
+      judgePrompt: z.string().nullable().optional().describe('判定标准（人填口径）；llmJudge=true 时必填'),
+      llmTranslate: z.boolean().optional().describe('推送时附上 LLM 译文'),
       enabled: z.boolean().optional(),
     },
     role: 'admin',
     write: true,
     handler: (deps, args) => {
-      const keys = ['name', 'accountIds', 'channels', 'filters', 'messageTemplate', 'enabled'] as const;
+      const keys = [
+        'name', 'accountIds', 'channels', 'filters', 'messageTemplate',
+        'llmJudge', 'judgePrompt', 'llmTranslate', 'enabled',
+      ] as const;
       if (args.id === undefined) {
         const rule = parseNewPostRule(pickBody(args, keys));
         checkPostRuleRefs(deps.db, rule);
@@ -432,6 +438,10 @@ const adminTools: McpToolDef[] = [
         channels: patch.channels ?? prev.channels,
       });
       checkPostFiltersUsable({ ...prev.filters, ...(patch.filters ?? {}) });
+      checkPostJudgeUsable(
+        patch.llmJudge ?? prev.llmJudge,
+        patch.judgePrompt !== undefined ? patch.judgePrompt : prev.judgePrompt,
+      );
       deps.db.upsertPostRule({ id, ...patch });
       return { id };
     },

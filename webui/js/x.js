@@ -342,6 +342,14 @@ function filterSummary(f) {
   return parts.join(' · ');
 }
 
+/** LLM 用法的标记：判定（拦不拦）/ 译文，让用户一眼看出这条规则的额外行为 */
+function llmSummary(r) {
+  const parts = [];
+  if (r.llmJudge) parts.push('LLM 判定');
+  if (r.llmTranslate) parts.push('译文');
+  return parts.length ? ' · ' + parts.join('+') : '';
+}
+
 function renderPostRules() {
   const box = document.getElementById('x-rule-rows');
   if (!box) return;
@@ -360,7 +368,7 @@ function renderPostRules() {
       gripHtml() +
       checkDotHtml('data-change="toggle-post-rule"', r.enabled) +
       '<span class="row-main"><span class="row-line"><span class="row-title">' + esc(r.name) + '</span></span>' +
-      '<span class="row-sub">' + esc(filterSummary(r.filters) + ' · ' + accText + ' · ' + chText) + '</span></span>' +
+      '<span class="row-sub">' + esc(filterSummary(r.filters) + ' · ' + accText + ' · ' + chText + llmSummary(r)) + '</span></span>' +
       '<span class="row-end">' +
       iconBtn('edit-post-rule', 'pencil', '编辑') +
       iconBtn('del-post-rule', 'trash', '删除', true) +
@@ -429,7 +437,11 @@ function renderRuleDraft() {
       chip('rule-filter-toggle', 'media', '必须带图', f.media, 'data-kind="f"') +
     '</div><span class="row-sub">原创 / 转发至少要勾一个；「引用」暂不提供——当前两条免登录路线都识别不了引用推文</span></div>' +
     '<div class="field"><label class="field-label">生效账号（不勾 = 全部账号）</label><div class="chips">' + accChips + '</div></div>' +
-    '<div class="field"><label class="field-label">渠道</label><div class="chips">' + chChips + '</div></div>';
+    '<div class="field"><label class="field-label">渠道</label><div class="chips">' + chChips + '</div></div>' +
+    '<div class="field"><label class="field-label">LLM（默认关；关着或调用失败一律按上面的机械筛选照推）</label><div class="chips">' +
+      chip('rule-llm-toggle', 'judge', 'LLM 判定要不要推', ruleDraft.llmJudge, 'data-kind="llm"') +
+      chip('rule-llm-toggle', 'translate', '附上译文', ruleDraft.llmTranslate, 'data-kind="llm"') +
+    '</div></div>';
 }
 
 function openPostRuleSheet(r) {
@@ -442,11 +454,14 @@ function openPostRuleSheet(r) {
       retweet: r ? r.filters.retweet : false,
       media: r ? r.filters.media : false,
     },
+    llmJudge: r ? r.llmJudge : false,
+    llmTranslate: r ? r.llmTranslate : false,
   };
   openSheet(r ? '编辑图文帖规则' : '添加图文帖规则',
     field('名称', `<input class="inp" id="pr-name" placeholder="留空自动命名" value="${r ? esc(r.name) : ''}">`) +
     '<div id="pr-draft"></div>' +
     field('关键词（逗号分隔，命中任一即可）', `<input class="inp" id="pr-kw" placeholder="留空 = 不限" value="${r && r.filters.keywords.length ? esc(r.filters.keywords.join(',')) : ''}">`) +
+    field('LLM 判定标准（开了「LLM 判定」时必填）', `<input class="inp" id="pr-judge" placeholder="如：只推与直播预告、新曲发布相关的推文" value="${r && r.judgePrompt ? esc(r.judgePrompt) : ''}">`) +
     field('推送词', `<input class="inp" id="pr-tpl" placeholder="留空 = 默认（{author} 发了新推文）" value="${r ? esc(r.messageTemplate || '') : ''}">`) +
     '<span class="row-sub">可用变量：{author} {text} {url} {liver}（{liver} = 关联主播，未关联时回退账号）</span>',
     1,
@@ -455,6 +470,12 @@ function openPostRuleSheet(r) {
     `<button class="btn btn-primary" data-action="save-post-rule" data-id="${r ? r.id : ''}">保存</button>`);
   renderRuleDraft();
 }
+
+ACTIONS['rule-llm-toggle'] = function (el) {
+  if (el.getAttribute('data-value') === 'judge') ruleDraft.llmJudge = !ruleDraft.llmJudge;
+  else ruleDraft.llmTranslate = !ruleDraft.llmTranslate;
+  renderRuleDraft();
+};
 
 ACTIONS['rule-filter-toggle'] = function (el) {
   const k = el.getAttribute('data-value');
@@ -482,6 +503,7 @@ ACTIONS['save-post-rule'] = function (el) {
   if (err) err.textContent = '';
   const name = document.getElementById('pr-name').value.trim();
   const kw = document.getElementById('pr-kw').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  const judgePrompt = document.getElementById('pr-judge').value.trim();
   const body = {
     accountIds: ruleDraft.accountIds,
     channels: ruleDraft.channels,
@@ -491,6 +513,9 @@ ACTIONS['save-post-rule'] = function (el) {
       media: ruleDraft.filters.media,
       keywords: kw,
     },
+    llmJudge: ruleDraft.llmJudge,
+    judgePrompt: judgePrompt || null,
+    llmTranslate: ruleDraft.llmTranslate,
     messageTemplate: document.getElementById('pr-tpl').value.trim() || null,
   };
   if (name) body.name = name;

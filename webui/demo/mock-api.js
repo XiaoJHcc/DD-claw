@@ -193,6 +193,9 @@ for (const p of store.twitterPosts) {
     if (!filters.original && !filters.retweet) {
       return json(400, { error: '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中' });
     }
+    if (b.llmJudge && !String(b.judgePrompt || '').trim()) {
+      return json(400, { error: '开启「LLM 判定」必须填判定提示词' });
+    }
     if (Array.isArray(b.channels) && b.channels.some((id) => !store.channels.some((c) => c.id === id))) {
       return json(400, { error: '渠道不存在' });
     }
@@ -203,7 +206,11 @@ for (const p of store.twitterPosts) {
       id: ++store.postRuleSeq,
       name: b.name || `图文帖规则 ${store.postRuleSeq}`,
       accountIds: b.accountIds || [], channels: b.channels || [], filters,
-      messageTemplate: b.messageTemplate ?? null, enabled: b.enabled !== false,
+      messageTemplate: b.messageTemplate ?? null,
+      llmJudge: b.llmJudge === true,
+      judgePrompt: b.judgePrompt ?? null,
+      llmTranslate: b.llmTranslate === true,
+      enabled: b.enabled !== false,
       sort: store.postRules.length, createdAt: nowSec, updatedAt: nowSec,
     };
     store.postRules.push(rule);
@@ -229,6 +236,12 @@ for (const p of store.twitterPosts) {
         if (b.filters !== undefined) Object.assign(rule.filters, b.filters);
         if (!rule.filters.original && !rule.filters.retweet) {
           return json(400, { error: '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中' });
+        }
+        if (b.llmJudge !== undefined) rule.llmJudge = b.llmJudge === true;
+        if (b.judgePrompt !== undefined) rule.judgePrompt = b.judgePrompt;
+        if (b.llmTranslate !== undefined) rule.llmTranslate = b.llmTranslate === true;
+        if (rule.llmJudge && !String(rule.judgePrompt || '').trim()) {
+          return json(400, { error: '开启「LLM 判定」必须填判定提示词' });
         }
         if (b.messageTemplate !== undefined) rule.messageTemplate = b.messageTemplate;
         if (typeof b.enabled === 'boolean') rule.enabled = b.enabled;

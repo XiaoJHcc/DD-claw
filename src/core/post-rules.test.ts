@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  defaultPostFilters, filtersAreUsable, parseFilters, rowToPostRule, type PostRuleRow,
+  defaultPostFilters, filtersAreUsable, judgeIsUsable, parseFilters, rowToPostRule, type PostRuleRow,
 } from './post-rules.js';
 
 test('默认筛选：只推原创、不论有没有图', () => {
@@ -40,7 +40,9 @@ test('rowToPostRule：JSON 列还原成数组/对象，布尔列还原成 boolea
   const row: PostRuleRow = {
     id: 7, name: '只推带图原创', account_ids: '[1,2]', channels: '[3]',
     filters: JSON.stringify({ original: true, retweet: false, media: true, keywords: ['live'] }),
-    message_template: '{author} 更新了', enabled: 0, sort: 5, created_at: 100, updated_at: 200,
+    message_template: '{author} 更新了',
+    llm_judge: 1, judge_prompt: '只推直播预告', llm_translate: 1,
+    enabled: 0, sort: 5, created_at: 100, updated_at: 200,
   };
   const r = rowToPostRule(row);
   assert.deepEqual(r.accountIds, [1, 2]);
@@ -49,6 +51,17 @@ test('rowToPostRule：JSON 列还原成数组/对象，布尔列还原成 boolea
   assert.equal(r.filters.quote, false, '未存的字段回落默认');
   assert.deepEqual(r.filters.keywords, ['live']);
   assert.equal(r.messageTemplate, '{author} 更新了');
+  assert.equal(r.llmJudge, true);
+  assert.equal(r.judgePrompt, '只推直播预告');
+  assert.equal(r.llmTranslate, true);
   assert.equal(r.enabled, false);
   assert.equal(r.sort, 5);
+});
+
+test('judgeIsUsable：开了判定就必须有标准（口径由人填）', () => {
+  assert.equal(judgeIsUsable(false, null), true, '没开判定就不需要标准');
+  assert.equal(judgeIsUsable(true, null), false);
+  assert.equal(judgeIsUsable(true, ''), false);
+  assert.equal(judgeIsUsable(true, '   '), false, '全空白不算填了');
+  assert.equal(judgeIsUsable(true, '只推直播预告'), true);
 });

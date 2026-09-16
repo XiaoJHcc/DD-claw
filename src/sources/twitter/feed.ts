@@ -184,6 +184,7 @@ export class TwitterFeedSource implements Source {
     }
     for (const i of inserted) {
       const p = posts[i]!;
+      const src = fetched.tweets[i]; // posts 与 tweets 同序（posts 就是 tweets.map 出来的）
       const sig: Signal = {
         source: this.name,
         kind: 'feed_post',
@@ -193,6 +194,8 @@ export class TwitterFeedSource implements Source {
         payload: {
           platform: p.platform, itemId: p.itemId, type: p.type,
           text: p.text, pics: p.pics, pubTs: p.pubTs, url: p.url,
+          // 引用只在免登录回退路线可知；RSS 帖缺省 = 未知（规则里的 quote 筛选据此不命中）
+          ...(src?.isQuote !== undefined ? { isQuote: src.isQuote } : {}),
         },
       };
       ctx.bus.emit(sig);

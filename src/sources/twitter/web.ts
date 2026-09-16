@@ -116,6 +116,8 @@ interface SyndicationTweet {
   text?: string;
   lang?: string;
   possibly_sensitive?: boolean;
+  is_quote_status?: boolean;
+  quoted_tweet?: unknown;
   user?: SyndicationUser;
   mediaDetails?: SyndicationMedia[];
   photos?: SyndicationPhoto[];
@@ -172,6 +174,8 @@ export async function fetchTweetDetail(
     pics,
     pubTs: Number.isNaN(parsed) ? 0 : Math.floor(parsed / 1000),
     url: `https://x.com/${author || 'i'}/status/${j.id_str}`,
+    // 引用识别：RSS 给不了，这条路能给（`quoted_tweet` 有内容或 is_quote_status=true）
+    isQuote: Boolean(j.quoted_tweet) || j.is_quote_status === true,
   };
 }
 

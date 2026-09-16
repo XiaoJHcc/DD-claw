@@ -5,6 +5,8 @@ import { matchPostRules, matchPushRules, renderPostTemplate, renderTemplate, typ
 import { isPushEnabled } from './push.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 import { localizeImageViaProxy } from '../notify/image-cache.js';
+import { ruleNeedsLlm, type PostAnalysis, type PostAnalyzer } from '../analysis/post-analyzer.js';
+import type { PostRule } from './post-rules.js';
 import { getXConfig } from './x-config.js';
 import { isNotifyOnFirstRun, isNotifyOnNewSubscription } from './runtime-config.js';
 import type { Bus } from './bus.js';
@@ -28,6 +30,8 @@ export interface PipelineDeps {
   dispatcher: NotifyDispatcher;
   /** 图片本地化缓存目录（X 图必须经代理下载成本地文件再推）；缺省 = 图文帖不带图 */
   imageCacheDir?: string;
+  /** 图文帖 LLM 判定/翻译（规则级开关）；缺省 = 规则里的 LLM 开关一律当关 */
+  postAnalyzer?: PostAnalyzer;
 }
 
 /** feed_post 的载荷形状（X 源产出；微博源同用 kind 但平台不同，见 handleFeedPost） */
@@ -259,9 +263,42 @@ export class Pipeline {
       log.info(`不推送 @${account.screenName}: 无命中图文帖规则`);
       return;
     }
+
+    // LLM 判定 / 翻译（规则级，默认关）：判定语义 = 「这条规则是否还贡献渠道」——
+    // 开了判定且模型说不推的规则不贡献渠道（与「命中规则独立生效、渠道取并集」一致），
+    // 没开判定的规则照常贡献。LLM 不可用/失败一律按机械筛选放行（post-analyzer 内部处理）。
+    const contributing: PostRule[] = [];
+    let translated: string | null = null;
+    const analyzed = new Map<string, PostAnalysis>();
+    for (const r of hits) {
+      if (!ruleNeedsLlm(r) || !this.deps.postAnalyzer) {
+        contributing.push(r);
+        continue;
+      }
+      // 同（判定标准 + 是否翻译）只调一次 LLM：多数场景就一条这类规则
+      const key = `${r.llmJudge ? 1 : 0}|${r.judgePrompt ?? ''}|${r.llmTranslate ? 1 : 0}`;
+      let a = analyzed.get(key);
+      if (!a) {
+        a = await this.deps.queue.run(() => this.deps.postAnalyzer!.analyze(post, r));
+        analyzed.set(key, a);
+      }
+      if (r.llmJudge && a.source === 'llm' && !a.pass) {
+        log.info(
+          `LLM 判定不推 @${account.screenName}（规则 #${r.id}）：${a.reason || '模型未给理由'}`,
+        );
+        continue;
+      }
+      contributing.push(r);
+      if (r.llmTranslate && a.translation && !translated) translated = a.translation;
+    }
+    if (contributing.length === 0) {
+      log.info(`不推送 @${account.screenName}: 命中 ${hits.length} 条规则，但都被 LLM 判定拦下`);
+      return;
+    }
+
     const channelIds: number[] = [];
     let templateOverride: string | null = null;
-    for (const r of hits) {
+    for (const r of contributing) {
       for (const id of r.channels) {
         if (!channelIds.includes(id)) channelIds.push(id);
       }
@@ -281,10 +318,13 @@ export class Pipeline {
 
     const tpl = templateOverride ?? '{author} 发了新推文';
     const msg: PushMessage = {
-      ...postToMessage({ post, title: renderPostTemplate(tpl, post), image }),
+      ...postToMessage({ post, title: renderPostTemplate(tpl, post), image, translation: translated }),
       channels: channelIds.map(String),
     };
-    log.info(`推送 feed_post @${account.screenName} — 命中规则 ${hits.map((r) => `#${r.id}`).join('/')}`);
+    log.info(
+      `推送 feed_post @${account.screenName} — 命中规则 ${contributing.map((r) => `#${r.id}`).join('/')}` +
+      (translated ? '（含译文）' : ''),
+    );
     await dispatcher.broadcast(msg);
   }
 

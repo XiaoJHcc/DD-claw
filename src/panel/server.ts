@@ -12,7 +12,7 @@ import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
   HttpError, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseCategoryPatch, parseChannelPatch,
   parseNewCategory, parseNewChannel, parseNewRule, parseNewXAccount, parsePostRulePatch, parseRulePatch, parseRuntimePatch,
-  checkPostFiltersUsable, checkPostRuleRefs, parseNewPostRule,
+  checkPostFiltersUsable, checkPostJudgeUsable, checkPostRuleRefs, parseNewPostRule,
   parseStreamerPatch, parseUid, parseXAccountPatch, parseXPatch, parseXTestRequest, readJsonBody, sendJson,
   watchStreamer, type XTestRequest,
 } from './http-util.js';
@@ -718,6 +718,10 @@ async function handle(
         channels: patch.channels ?? prev.channels,
       });
       checkPostFiltersUsable({ ...prev.filters, ...(patch.filters ?? {}) });
+      checkPostJudgeUsable(
+        patch.llmJudge ?? prev.llmJudge,
+        patch.judgePrompt !== undefined ? patch.judgePrompt : prev.judgePrompt,
+      );
       db.upsertPostRule({ id, ...patch });
       sendJson(res, 200, { ok: true });
       return;

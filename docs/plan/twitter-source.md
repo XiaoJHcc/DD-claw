@@ -155,6 +155,22 @@ CREATE TABLE IF NOT EXISTS post_rules (
 - **筛选默认值两处一致**：建表默认与 UI 默认都是 `{original:true, retweet:false, quote:false, media:false}`；`filters` 为空的旧行按默认值处理（防御式）。
 - 类型与 JSON 序列化照 `push.ts` 惯例，集中在新 `core/x-accounts.ts` / `core/post-rules.ts`。
 
+## P3 已落地（2026-09-16）
+
+至此计划的 P0–P3 全部完成。
+
+| 交付 | 位置 | 说明 |
+|---|---|---|
+| LLM 任务（判定 + 翻译**一次调用**） | `analysis/tasks/post-analysis.ts` | 两者吃同一段正文，分开调就是两倍延迟与额度；没开判定时明确要求模型 `pass` 恒 true、没开翻译时要求 `translation` 恒 null（不让模型替我们决定） |
+| 分析编排与降级 | `analysis/post-analyzer.ts` | LLM 总开关关 / 无 provider / 调用失败 / 解析失败 → `source='fallback'`，**判定视为通过、不附译文**，按机械筛选照推 |
+| 队列复用 | `analysis/queue.ts` 新增 `run<T>()` | 任何含 LLM 的任务都过同一条并发闸门；不把 `Classifier` 抽象撑成「所有 LLM 任务」 |
+| 规则级开关 | `post_rules` 新增 `llm_judge` / `judge_prompt` / `llm_translate`（`ensureColumn` 在线补列，旧库不用迁移） | 默认全关；**开了判定必须有判定标准**（没标准 = 让模型自由发挥），面板与 MCP 同一条校验 |
+| 管线语义 | `pipeline.handleFeedPost` | 判定 = 「这条规则是否还贡献渠道」：模型说不推的规则不贡献渠道，没开判定的规则照常贡献（与"命中规则独立生效、渠道取并集"一致）；同（判定标准+翻译开关）只调一次 LLM |
+| 引用识别 | `sources/twitter/web.ts`（`quoted_tweet` / `is_quote_status`）+ feed 信号带 `isQuote` | 数据侧补齐（数据模型与 matcher 都已支持），但**UI 仍不出这个勾**：主路线（Nitter RSS）识别不了，摆出来只会误导 |
+| 面板 / MCP | 规则表单两个 LLM 开关 + 判定标准输入 + 规则行 `LLM 判定+译文` 标记；`upsert_post_rule` 收三个字段 | 浏览器实测：开关回显、清空标准就地 400、关掉判定即可清空标准 |
+
+**命名与计划不符的一处**（如实记）：计划里写的是 `analysis/tasks/translate.ts`，实际落地为 `tasks/post-analysis.ts` + `post-analyzer.ts`——这一版把判定与翻译合并成一次调用，叫 translate 会误导。
+
 ## P2 已落地（2026-09-16）
 
 **X 推文现在真的会推到群里了。** 交付：

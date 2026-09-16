@@ -47,6 +47,7 @@ import {
   type InstanceProbe, type ProxyProbe, type WebProbe,
 } from './sources/twitter/probe.js';
 import { TwitterFeedSource } from './sources/twitter/feed.js';
+import { PostAnalyzer } from './analysis/post-analyzer.js';
 import { verifyAccount } from './sources/twitter/web.js';
 import { emptyXFeedSnapshot } from './core/x-config.js';
 
@@ -341,6 +342,8 @@ async function main(): Promise<void> {
     // X 图必须先经代理落到本地（NapCat 在同一墙内网络里拉不到 pbs.twimg.com）——
     // 与 toast 的自有缓存分开，避免两边的过期策略互相打架
     imageCacheDir: join(dirname(secrets.dbPath), 'cache', 'images'),
+    // 图文帖的 LLM 判定/翻译：与分类器共用同一个 router getter 与总开关
+    postAnalyzer: new PostAnalyzer(() => llmDep.router ?? null, () => isLlmEnabled(db)),
   });
   pipeline.attach();
 

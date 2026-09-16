@@ -1934,6 +1934,38 @@ test('/api/post-rules：CRUD + 引用校验 + 死规则拒绝 + 排序', async (
   assert.equal((await api(base, `/api/post-rules/${id}`, 'DELETE')).status, 404, '再删一次 404');
 });
 
+test('/api/post-rules：开了 LLM 判定就必须填判定标准（口径由人填）', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { llmJudge: true })).status, 400,
+    '开了判定却没标准 → 拒绝（不让模型自由发挥）',
+  );
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { llmJudge: true, judgePrompt: '   ' })).status, 400,
+    '全空白不算填了',
+  );
+
+  const created = await api(base, '/api/post-rules', 'POST', {
+    name: 'LLM 判定规则', llmJudge: true, judgePrompt: '只推与直播预告相关的推文', llmTranslate: true,
+  });
+  assert.equal(created.status, 201);
+  const r = db.listPostRules()[0]!;
+  assert.equal(r.llmJudge, true);
+  assert.equal(r.judgePrompt, '只推与直播预告相关的推文');
+  assert.equal(r.llmTranslate, true, '翻译开关落库');
+
+  // PUT 对「合并后」的形状校验：只清标准、判定仍开 → 400
+  assert.equal((await api(base, `/api/post-rules/${r.id}`, 'PUT', { judgePrompt: null })).status, 400);
+  // 同时关掉判定就可以清空标准
+  assert.equal(
+    (await api(base, `/api/post-rules/${r.id}`, 'PUT', { llmJudge: false, judgePrompt: null })).status, 200,
+  );
+  assert.equal(db.listPostRules()[0]!.judgePrompt, null);
+  assert.equal(db.listPostRules()[0]!.llmTranslate, true, '没动的字段保留');
+});
+
 test('/api/x/recent：回推文归档（不含 raw）+ 源运行状态', async (t) => {
   const db = new Db(':memory:');
   const { base } = await setup(t, { db, x: makeXDep(db, []) });

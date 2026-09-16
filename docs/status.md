@@ -54,12 +54,12 @@
 | `src/analysis/tasks/schedule-extract.ts` | 预告解析 → schedules 表（置信度入库，阈值过滤） |
 | `src/sources/twitter/{nitter,web,feed}.ts` | ~~**X/推特图文源**~~ **P1 已落地**（Nitter RSS 主 + 免登录回退 `web.ts` + 源 `feed.ts`）；计划见 [plan/twitter-source.md](plan/twitter-source.md) |
 | `src/core/post-rules.ts` | ~~图文帖规则表~~ **P2 已落地**（与 push_rules 平行的第 15 张表 + filters 语义） |
-| `src/analysis/tasks/translate.ts` | 推文翻译（`LlmTask`），X 链路可选判定（P3） |
+| `src/analysis/tasks/post-analysis.ts` + `src/analysis/post-analyzer.ts` | ~~推文翻译~~ **P3 已落地**（判定 + 翻译合并一次 LLM 调用，含失败回退机械筛选） |
 
 **未落地能力**
 
 - `schedules` 表未建（目标）；`signals` 表已放弃（见 `design.md` §11）
-- **X/推特：P0+P1+P2 已落地**（隧道 fetch、`/api/x*`、独立分页、免登录源 Nitter RSS + 回退、`x_accounts` 独立名单、监听开关 `listen_twitter`、`post_rules` 图文帖规则 + `feed_post` 推送分支（X 图经代理本地化后交 NapCat）、MCP 工具）；**待做**：P3 LLM 判定/翻译（规则级开关、失败回退机械筛选）
+- **X/推特：P0–P3 全部落地**（隧道 fetch、`/api/x*`、独立分页、免登录源 Nitter RSS + 回退、`x_accounts` 独立名单、监听开关 `listen_twitter`、`post_rules` 图文帖规则 + `feed_post` 推送分支（X 图经代理本地化后交 NapCat）、规则级 LLM 判定/翻译（失败回退机械筛选）、MCP 工具）；计划见 [plan/twitter-source.md](plan/twitter-source.md)
 - verdicts 总览 UI；预告半透明条与「预定时间到」推送
 - dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）：待产品方案，机制不预设
 - 其余已放弃 / 不采用方案见 `design.md` §11

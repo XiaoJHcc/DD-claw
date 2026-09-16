@@ -70,3 +70,14 @@ test('postToMessage：无图 / 无 url / pubTs=0 时不写这些字段', () => {
   assert.equal(m.url, undefined);
   assert.equal(m.attribution, 'X  ·  @watase_yuzuki', '没有时间就不拼时间');
 });
+
+test('postToMessage：有译文时正文下方拼【译】块；空译文不拼', () => {
+  const withTr = postToMessage({ post: post(), translation: '今晚有直播' });
+  assert.equal(withTr.body, '今晚有直播\n\n【译】今晚有直播');
+
+  const blank = postToMessage({ post: post(), translation: '   ' });
+  assert.equal(blank.body, '今晚有直播', '空白译文不该拼出空块');
+
+  const none = postToMessage({ post: post({ text: null, pics: ['a'] }), translation: null });
+  assert.equal(none.body, '（仅图片，无正文）');
+});

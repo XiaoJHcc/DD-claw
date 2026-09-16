@@ -401,6 +401,19 @@ test('图文帖规则工具：list/upsert/delete + 引用校验 + 死规则拒�
   await call(adm, 'upsert_post_rule', { id: created.id, messageTemplate: '{author} 更新了' });
   assert.equal(f.db.listPostRules()[0]!.messageTemplate, '{author} 更新了');
 
+  // LLM 判定：开了就必须给标准（与面板同一条校验）
+  await assert.rejects(
+    () => call(adm, 'upsert_post_rule', { id: created.id, llmJudge: true }),
+    /必须填判定提示词/,
+  );
+  await call(adm, 'upsert_post_rule', {
+    id: created.id, llmJudge: true, judgePrompt: '只推直播预告', llmTranslate: true,
+  });
+  const withLlm = f.db.listPostRules()[0]!;
+  assert.equal(withLlm.llmJudge, true);
+  assert.equal(withLlm.judgePrompt, '只推直播预告');
+  assert.equal(withLlm.llmTranslate, true);
+
   await call(adm, 'delete_post_rule', { id: created.id });
   assert.equal(f.db.listPostRules().length, 0);
   await assert.rejects(() => call(adm, 'delete_post_rule', { id: created.id }), /不存在/);

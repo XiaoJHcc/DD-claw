@@ -12,7 +12,7 @@ import { NUM_SPECS, BOOL_SPECS, type RuntimeConfig } from '../core/runtime-confi
 import {
   X_INTERVAL_MAX, X_INTERVAL_MIN, type XConfig,
 } from '../core/x-config.js';
-import { defaultPostFilters, type NewPostRule, type PostFilters, type PostRuleInput } from '../core/post-rules.js';
+import { defaultPostFilters, judgeIsUsable, type NewPostRule, type PostFilters, type PostRuleInput } from '../core/post-rules.js';
 import { isValidScreenName, normalizeScreenName } from '../core/x-accounts.js';
 import { describeTunnelError, parseInstanceList, parseProxyUrl } from '../core/proxy.js';
 
@@ -503,7 +503,10 @@ export function parseXAccountPatch(body: unknown): {
 
 // ---- 图文帖规则（X/推特；与推送规则平行的一张表）----
 
-const POST_RULE_KEYS = ['name', 'accountIds', 'channels', 'filters', 'messageTemplate', 'enabled'] as const;
+const POST_RULE_KEYS = [
+  'name', 'accountIds', 'channels', 'filters', 'messageTemplate',
+  'llmJudge', 'judgePrompt', 'llmTranslate', 'enabled',
+] as const;
 const POST_FILTER_KEYS = ['original', 'retweet', 'quote', 'media', 'keywords'] as const;
 
 /** filters 只认已知字段；非法类型一律 400（配置错误当场报，别等推送时才发现规则是死的） */
@@ -532,6 +535,9 @@ function parsePostRuleFields(o: Record<string, unknown>, p: PostRuleInput): void
   if ('channels' in o) p.channels = asIdArray(o.channels, 'channels');
   if ('filters' in o) p.filters = parsePostFiltersField(o.filters);
   if ('messageTemplate' in o) p.messageTemplate = parseMessageTemplate(o.messageTemplate);
+  if ('llmJudge' in o) p.llmJudge = asBoolean(o.llmJudge, 'llmJudge');
+  if ('judgePrompt' in o) p.judgePrompt = asNullableString(o.judgePrompt, 'judgePrompt');
+  if ('llmTranslate' in o) p.llmTranslate = asBoolean(o.llmTranslate, 'llmTranslate');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
 }
 
@@ -542,7 +548,14 @@ export function checkPostFiltersUsable(f: PostFilters): void {
   }
 }
 
-/** POST /api/post-rules：全部可省，缺省 = 只推原创 / 全部账号 / 无渠道 / 默认推送词 */
+/** 开了 LLM 判定却没填判定标准 = 让模型自由发挥，拒绝保存（口径必须由人填） */
+export function checkPostJudgeUsable(llmJudge: boolean, judgePrompt: string | null): void {
+  if (!judgeIsUsable(llmJudge, judgePrompt)) {
+    throw new HttpError(400, '开启「LLM 判定」必须填判定提示词');
+  }
+}
+
+/** POST /api/post-rules：全部可省，缺省 = 只推原创 / 全部账号 / 无渠道 / 默认推送词 / LLM 全关 */
 export function parseNewPostRule(body: unknown): NewPostRule {
   const o = asObject(body);
   rejectUnknownKeys(o, POST_RULE_KEYS);
@@ -550,12 +563,18 @@ export function parseNewPostRule(body: unknown): NewPostRule {
   parsePostRuleFields(o, p);
   const filters: PostFilters = { ...defaultPostFilters(), ...(p.filters ?? {}) };
   checkPostFiltersUsable(filters);
+  const llmJudge = p.llmJudge ?? false;
+  const judgePrompt = p.judgePrompt ?? null;
+  checkPostJudgeUsable(llmJudge, judgePrompt);
   return {
     name: p.name ?? '',
     accountIds: p.accountIds ?? [],
     channels: p.channels ?? [],
     filters,
     messageTemplate: p.messageTemplate ?? null,
+    llmJudge,
+    judgePrompt,
+    llmTranslate: p.llmTranslate ?? false,
     enabled: p.enabled ?? true,
   };
 }

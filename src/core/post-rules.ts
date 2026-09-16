@@ -33,6 +33,9 @@ export interface PostRuleRow {
   channels: string;
   filters: string;
   message_template: string | null;
+  llm_judge: number;
+  judge_prompt: string | null;
+  llm_translate: number;
   enabled: number;
   sort: number;
   created_at: number;
@@ -48,6 +51,12 @@ export interface PostRule {
   channels: number[];
   filters: PostFilters;
   messageTemplate: string | null;
+  /** 交给 LLM 判定「要不要推」（口径 = judgePrompt，由人填） */
+  llmJudge: boolean;
+  /** 判定标准；llmJudge=true 时必填（没有标准的判定等于让模型自由发挥） */
+  judgePrompt: string | null;
+  /** 推送时附上 LLM 译文 */
+  llmTranslate: boolean;
   enabled: boolean;
   /** 全局顺序 = 匹配优先级 */
   sort: number;
@@ -63,6 +72,9 @@ export interface PostRuleInput {
   channels?: number[];
   filters?: Partial<PostFilters>;
   messageTemplate?: string | null;
+  llmJudge?: boolean;
+  judgePrompt?: string | null;
+  llmTranslate?: boolean;
   enabled?: boolean;
 }
 
@@ -72,6 +84,9 @@ export interface NewPostRule {
   channels: number[];
   filters: PostFilters;
   messageTemplate: string | null;
+  llmJudge: boolean;
+  judgePrompt: string | null;
+  llmTranslate: boolean;
   enabled: boolean;
 }
 
@@ -101,6 +116,11 @@ export function filtersAreUsable(f: PostFilters): boolean {
   return f.original || f.retweet;
 }
 
+/** 开了 LLM 判定就必须填判定标准：没有标准的判定等于让模型自由发挥（口径必须由人填） */
+export function judgeIsUsable(llmJudge: boolean, judgePrompt: string | null): boolean {
+  return !llmJudge || Boolean(judgePrompt && judgePrompt.trim());
+}
+
 export function rowToPostRule(r: PostRuleRow): PostRule {
   return {
     id: r.id,
@@ -109,6 +129,9 @@ export function rowToPostRule(r: PostRuleRow): PostRule {
     channels: JSON.parse(r.channels) as number[],
     filters: parseFilters(r.filters),
     messageTemplate: r.message_template,
+    llmJudge: r.llm_judge === 1,
+    judgePrompt: r.judge_prompt,
+    llmTranslate: r.llm_translate === 1,
     enabled: r.enabled === 1,
     sort: r.sort,
     createdAt: r.created_at,

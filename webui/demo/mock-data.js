@@ -150,12 +150,16 @@ export const mockPostRules = [
   {
     id: 1, name: '带图原创', accountIds: [], channels: [2],
     filters: { original: true, retweet: false, quote: false, media: true, keywords: [] },
-    messageTemplate: null, enabled: true, sort: 0, createdAt: 1, updatedAt: 1,
+    messageTemplate: null,
+    llmJudge: true, judgePrompt: '只推与直播预告、新曲发布相关的推文', llmTranslate: true,
+    enabled: true, sort: 0, createdAt: 1, updatedAt: 1,
   },
   {
     id: 2, name: '转发也看', accountIds: [2], channels: [1],
     filters: { original: false, retweet: true, quote: false, media: false, keywords: ['live'] },
-    messageTemplate: '{author} 转发了', enabled: false, sort: 1, createdAt: 1, updatedAt: 1,
+    messageTemplate: '{author} 转发了',
+    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    enabled: false, sort: 1, createdAt: 1, updatedAt: 1,
   },
 ];
 

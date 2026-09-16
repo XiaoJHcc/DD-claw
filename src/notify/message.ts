@@ -37,6 +37,8 @@ export interface PostMessageInput {
    * 网络里拉不到 pbs.twimg.com，`file://` 才是它真能取到的形态）。缺省 = 无图。
    */
   image?: string;
+  /** LLM 译文（规则开了翻译且调用成功时才有）；拼在正文下方，带「【译】」标记 */
+  translation?: string | null;
 }
 
 /**
@@ -51,9 +53,11 @@ export function postToMessage(input: PostMessageInput): PushMessage {
       })
     : '';
   const extra = post.pics.length > 1 ? `  ·  共 ${post.pics.length} 张图` : '';
+  const text = (post.text ?? '').trim() || '（仅图片，无正文）';
+  const translation = input.translation?.trim();
   return {
     title: input.title?.trim() || `@${post.screenName} 发了新推文`,
-    body: (post.text ?? '').trim() || '（仅图片，无正文）',
+    body: translation ? `${text}\n\n【译】${translation}` : text,
     image: input.image,
     attribution: `X  ·  @${post.screenName}` + (when ? `  ·  ${when}` : '') + extra,
     url: post.url ?? undefined,

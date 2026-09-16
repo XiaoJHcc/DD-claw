@@ -168,6 +168,9 @@ CREATE TABLE IF NOT EXISTS post_rules (
   channels         TEXT    NOT NULL DEFAULT '[]',
   filters          TEXT    NOT NULL DEFAULT '{}',
   message_template TEXT,
+  llm_judge        INTEGER NOT NULL DEFAULT 0,
+  judge_prompt     TEXT,
+  llm_translate    INTEGER NOT NULL DEFAULT 0,
   enabled          INTEGER NOT NULL DEFAULT 1,
   sort             INTEGER NOT NULL DEFAULT 0,
   created_at       INTEGER NOT NULL,
@@ -295,6 +298,10 @@ export class Db {
     this.ensureColumn('push_channels', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
     // push_rules 创建来源（MCP 群自助规则标记 'mcp'，权限隔离用；面板/人工规则为 NULL）
     this.ensureColumn('push_rules', 'created_by', 'created_by TEXT');
+    // post_rules 的 LLM 字段（P3）：判定 / 判定标准 / 翻译；旧库在线补列，默认关
+    this.ensureColumn('post_rules', 'llm_judge', 'llm_judge INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('post_rules', 'judge_prompt', 'judge_prompt TEXT');
+    this.ensureColumn('post_rules', 'llm_translate', 'llm_translate INTEGER NOT NULL DEFAULT 0');
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -971,16 +978,21 @@ export class Db {
       filters,
       messageTemplate: input.messageTemplate !== undefined
         ? input.messageTemplate : prev?.messageTemplate ?? null,
+      llmJudge: input.llmJudge ?? prev?.llmJudge ?? false,
+      judgePrompt: input.judgePrompt !== undefined ? input.judgePrompt : prev?.judgePrompt ?? null,
+      llmTranslate: input.llmTranslate ?? prev?.llmTranslate ?? false,
       enabled: input.enabled ?? prev?.enabled ?? true,
     };
     if (prev) {
       this.db
         .prepare(
-          `UPDATE post_rules SET name=?, account_ids=?, channels=?, filters=?, message_template=?, enabled=?, updated_at=?
+          `UPDATE post_rules SET name=?, account_ids=?, channels=?, filters=?, message_template=?,
+             llm_judge=?, judge_prompt=?, llm_translate=?, enabled=?, updated_at=?
            WHERE id=?`,
         )
         .run(r.name, JSON.stringify(r.accountIds), JSON.stringify(r.channels), JSON.stringify(r.filters),
-          r.messageTemplate, r.enabled ? 1 : 0, now(), prev.id);
+          r.messageTemplate, r.llmJudge ? 1 : 0, r.judgePrompt, r.llmTranslate ? 1 : 0,
+          r.enabled ? 1 : 0, now(), prev.id);
       return prev.id;
     }
     const t = now();
@@ -989,11 +1001,14 @@ export class Db {
       .get() as { m: number };
     const info = this.db
       .prepare(
-        `INSERT INTO post_rules (name, account_ids, channels, filters, message_template, enabled, sort, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO post_rules
+           (name, account_ids, channels, filters, message_template,
+            llm_judge, judge_prompt, llm_translate, enabled, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(r.name, JSON.stringify(r.accountIds), JSON.stringify(r.channels), JSON.stringify(r.filters),
-        r.messageTemplate, r.enabled ? 1 : 0, m, t, t);
+        r.messageTemplate, r.llmJudge ? 1 : 0, r.judgePrompt, r.llmTranslate ? 1 : 0,
+        r.enabled ? 1 : 0, m, t, t);
     const id = Number(info.lastInsertRowid);
     if (!r.name) {
       this.db.prepare('UPDATE post_rules SET name = ?, updated_at = ? WHERE id = ?').run(`图文帖规则 ${id}`, t, id);

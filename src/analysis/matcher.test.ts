@@ -159,7 +159,9 @@ function post(over: Partial<PostCandidate> = {}): PostCandidate {
 function postRule(over: Partial<PostRule> = {}): PostRule {
   return {
     id: 1, name: 'r', accountIds: [], channels: [1],
-    filters: defaultPostFilters(), messageTemplate: null, enabled: true, sort: 0,
+    filters: defaultPostFilters(), messageTemplate: null,
+    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    enabled: true, sort: 0,
     createdAt: 0, updatedAt: 0,
     ...over,
   };

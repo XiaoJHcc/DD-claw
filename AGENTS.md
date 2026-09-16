@@ -121,9 +121,11 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 
 - `src/analysis/types.ts` — `Classifier` / `Classification` / `AnalysisContext` / `LlmTask`
 - `src/analysis/classifier.ts` — `RulesClassifier`（LLM 优先 + 确定性回退，入 verdicts）
-- `src/analysis/queue.ts` — 分析队列（限流并发 2）
+- `src/analysis/queue.ts` — 分析队列（限流并发 2；`run()` 是图文帖等非分类任务的通用入口）
 - `src/analysis/providers.ts` — LLM provider（路由/熔断/多 key/双协议）
 - `src/analysis/tasks/classify.ts` — 单次批量 LLM 分类任务
+- `src/analysis/tasks/post-analysis.ts` — 图文帖任务：判定 + 翻译合并成一次调用
+- `src/analysis/post-analyzer.ts` — 图文帖分析编排（LLM 不可用/失败一律回退机械筛选）
 - `src/analysis/matcher.ts` — 确定性匹配（`matchCategory` / `matchPushRules` / `matchPostRules` / `renderTemplate` / `renderPostTemplate`）
 - `src/rules/types.ts` — `DecisionRule` / `NotifyDecision`
 - `src/rules/once-per-session.ts` — 每场直播推一次
@@ -199,7 +201,7 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 ## 实现现状
 
 - **已落地主干**：开播通知（NapCat/Toast 已实测）、规模化 + 内容判定（名单迁库 / 扫码登录 / 关注同步 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2）、时间轴统计、控制面板 v1+v2、MCP v1、NapCat 双平台托管
-- **X/推特（独立于 B站的一条路径）**：**P0+P1+P2 已落地**（隧道 fetch / X 配置 / 连通性探测 / `/api/x*` / 独立分页 `#view-x` / 免登录源 Nitter RSS + 回退 / `x_accounts` 独立名单 / 监听开关 `listen_twitter` / `post_rules` 图文帖规则与 `feed_post` 推送分支（X 图经代理本地化后交 NapCat 用 file://）/ MCP 工具 / `npm run probe-x`）；待做 P3 LLM 判定与翻译。计划见 `docs/plan/twitter-source.md`，调研见 `docs/research/twitter.md`
+- **X/推特（独立于 B站的一条路径）**：**P0–P3 全部落地**（隧道 fetch / X 配置 / 连通性探测 / `/api/x*` / 独立分页 `#view-x` / 免登录源 Nitter RSS + 回退 / `x_accounts` 独立名单 / 监听开关 `listen_twitter` / `post_rules` 图文帖规则与 `feed_post` 推送分支（X 图经代理本地化后交 NapCat 用 file://）/ 规则级 LLM 判定与翻译（失败回退机械筛选）/ MCP 工具 / `npm run probe-x`）。计划见 `docs/plan/twitter-source.md`，调研见 `docs/research/twitter.md`
 - **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、面板 REST 收敛到能力面、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 
@@ -212,5 +214,5 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - `docs/modules/` — 模块实现笔记：core / sources / analysis / notify / panel（逐文件职责与「改前必知」）
 - `docs/mcp.md` — MCP 接口：令牌、角色权限、Host 配置、安全模型与 v2 预留（MaiBot 不直连）
 - `docs/plan/agent-access.md` — 多前端接入统一计划：一个能力面 N 种接线 + 信任模型矩阵 + 分期 P1-P3
-- `docs/plan/twitter-source.md` — X/推特图文来源计划：独立分页 + 独立账号名单 + 图文帖规则，P0+P1+P2 已落地
+- `docs/plan/twitter-source.md` — X/推特图文来源计划：独立分页 + 独立账号名单 + 图文帖规则，P0–P3 全部落地
 - `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、**twitter**、llm、notify、media-capture、auth-cookie、ts-stack）

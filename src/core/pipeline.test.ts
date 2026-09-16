@@ -9,6 +9,8 @@ import type { PushMessage, Signal } from './types.js';
 import type { PushChannel, PushRule } from './push.js';
 import { defaultPostFilters, type PostRule } from './post-rules.js';
 import type { XAccount } from './x-accounts.js';
+import type { PostCandidate } from '../analysis/matcher.js';
+import type { PostAnalysis } from '../analysis/post-analyzer.js';
 import type { RoomStatus } from '../sources/bili/types.js';
 import type { AppConfig } from '../config/schema.js';
 
@@ -105,7 +107,9 @@ function xAccount(over: Partial<XAccount> = {}): XAccount {
 function postRule(over: Partial<PostRule> = {}): PostRule {
   return {
     id: 1, name: '图文帖规则 1', accountIds: [], channels: [1],
-    filters: defaultPostFilters(), messageTemplate: null, enabled: true, sort: 0,
+    filters: defaultPostFilters(), messageTemplate: null,
+    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    enabled: true, sort: 0,
     createdAt: 0, updatedAt: 0,
     ...over,
   };
@@ -126,12 +130,26 @@ function feedSig(over: {
 }
 
 /** 装好 X 名单与图文帖规则的 harness（feed_post 分支专用） */
-function feedHarness(rules: PostRule[], accounts: XAccount[] = [xAccount()]) {
-  const h = harness();
+function feedHarness(rules: PostRule[], accounts: XAccount[] = [xAccount()], analyzer?: FakePostAnalyzer) {
+  const h = harness({}, 0, [], analyzer);
   for (const a of accounts) h.db.xAccounts.set(a.screenName, a);
   h.db.postRules = rules;
   return h;
 }
+
+/** 假图文帖分析器：记录调用，按注入的策略给结论 */
+class FakePostAnalyzer {
+  calls: Array<{ ruleId: number; text: string | null }> = [];
+  constructor(private readonly decide: (post: PostCandidate, rule: PostRule) => PostAnalysis) {}
+  async analyze(post: PostCandidate, rule: PostRule): Promise<PostAnalysis> {
+    this.calls.push({ ruleId: rule.id, text: post.text });
+    return this.decide(post, rule);
+  }
+}
+
+const judgeRule = (over: Partial<PostRule> = {}) => postRule({
+  llmJudge: true, judgePrompt: '只推直播预告', ...over,
+});
 
 class FakeDispatcher {
   sent: PushMessage[] = [];
@@ -162,7 +180,12 @@ function config(over: Partial<AppConfig> = {}): AppConfig {
   } as AppConfig;
 }
 
-function harness(over: Partial<AppConfig> = {}, dispatchDelayMs = 0, classifications: Classification[] = []) {
+function harness(
+  over: Partial<AppConfig> = {},
+  dispatchDelayMs = 0,
+  classifications: Classification[] = [],
+  postAnalyzer?: unknown,
+) {
   const bus = new Bus();
   const db = new FakeDb();
   // 冷启动推送开关的事实来源是 settings（面板推送渠道卡「推送设置」）；
@@ -182,6 +205,7 @@ function harness(over: Partial<AppConfig> = {}, dispatchDelayMs = 0, classificat
     queue: new AnalysisQueue(classifier),
     rule: new OncePerSessionRule(db),
     dispatcher: disp as never,
+    ...(postAnalyzer ? { postAnalyzer: postAnalyzer as never } : {}),
   });
   pipeline.attach();
   return { bus, db, disp, pipeline, classifier };
@@ -621,4 +645,77 @@ test('多条命中规则：渠道取并集、推送词取首个非空（与开�
   assert.equal(h.disp.sent.length, 1);
   assert.deepEqual(h.disp.sent[0]!.channels, ['1', '2'], '渠道并集去重保序');
   assert.equal(h.disp.sent[0]!.title, '@watase_yuzuki 更新了', '首个非空模板生效');
+});
+
+// ---- 图文帖的 LLM 判定 / 翻译（规则级开关，默认关；失败一律回退机械筛选）----
+
+test('LLM 判定拦下 → 不推；判定通过 → 照推', async () => {
+  const deny = new FakePostAnalyzer(() => ({ source: 'llm', pass: false, reason: '只是闲聊', translation: null }));
+  const h1 = feedHarness([judgeRule()], [xAccount()], deny);
+  h1.bus.emit(feedSig());
+  await h1.pipeline.whenIdle();
+  assert.equal(h1.disp.sent.length, 0, '模型说不推就不推');
+  assert.equal(deny.calls.length, 1, '确实问过模型');
+
+  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '是预告', translation: null }));
+  const h2 = feedHarness([judgeRule()], [xAccount()], allow);
+  h2.bus.emit(feedSig());
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 1);
+});
+
+test('LLM 不可用/失败回退 → 判定视为通过，推文照发（不能因为模型抖动让它消失）', async () => {
+  const fallback = new FakePostAnalyzer(() => ({
+    source: 'fallback', pass: true, reason: 'LLM 未启用', translation: null,
+  }));
+  const h = feedHarness([judgeRule()], [xAccount()], fallback);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '回退机械筛选：照推');
+});
+
+test('未装配分析器时规则里的 LLM 开关一律当关（老装配/测试桩不会因此丢推文）', async () => {
+  const h = feedHarness([judgeRule()]);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+});
+
+test('翻译：开了翻译且模型给了译文 → 正文下方带【译】', async () => {
+  const tr = new FakePostAnalyzer(() => ({
+    source: 'llm', pass: true, reason: '', translation: '今晚有直播',
+  }));
+  const h = feedHarness([postRule({ llmTranslate: true })], [xAccount()], tr);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent[0]!.body, '今晚有直播\n\n【译】今晚有直播');
+});
+
+test('多条命中：一条被判定拦下、另一条没开判定 → 仍推，且渠道只来自没被拦的那条', async () => {
+  const deny = new FakePostAnalyzer(() => ({ source: 'llm', pass: false, reason: '不行', translation: null }));
+  const h = feedHarness([
+    judgeRule({ id: 1, sort: 0, channels: [1] }),
+    postRule({ id: 2, sort: 1, channels: [2] }),
+  ], [xAccount()], deny);
+  h.db.channels.push({
+    id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001',
+    enabled: true, createdAt: 0, updatedAt: 0,
+  });
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '无判定的规则照常生效');
+  assert.deepEqual(h.disp.sent[0]!.channels, ['2'], '被判定拦下的规则不贡献渠道');
+  assert.equal(deny.calls.length, 1);
+});
+
+test('同一（判定标准 + 翻译开关）只问模型一次：两条同配置规则共用一次调用', async () => {
+  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '', translation: null }));
+  const h = feedHarness([
+    judgeRule({ id: 1, sort: 0, channels: [1] }),
+    judgeRule({ id: 2, sort: 1, channels: [1] }),
+  ], [xAccount()], allow);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  assert.equal(allow.calls.length, 1, '同配置合并成一次调用（省额度与延迟）');
 });

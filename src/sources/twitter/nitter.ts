@@ -31,6 +31,11 @@ export interface ParsedTweet {
   pubTs: number;
   /** 规范链接（指向 x.com 原文） */
   url: string;
+  /**
+   * 是否引用推文。**RSS 给不了**（Nitter 的 RSS 不标引用）→ undefined = 未知；
+   * 免登录回退路线的单推接口能给出 true/false。规则里的 quote 筛选据此判定。
+   */
+  isQuote?: boolean;
 }
 
 /** 常见 HTML 实体 + 数字实体（RSS 正文里 `&#39;` `&amp;` 很常见） */
