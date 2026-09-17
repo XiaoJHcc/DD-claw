@@ -68,6 +68,14 @@ claude mcp add --transport http dd-claw http://127.0.0.1:8787/mcp \
 要锁死「每个群只能操作本群」，必须在调用方事件层钉死群身份——即 MaiBot 插件方案
 （见 [plan/agent-access.md](plan/agent-access.md) P2 详案）。
 
+> **2026-09-16 已定**（[plan/agent-access.md](plan/agent-access.md)「能力层调用域」方案 A）：渠道从 LLM 可见参数改为
+> **令牌绑定的 scope**——`mcp_tokens` 条目增可选 `channelId`（一渠道一条 gateway 令牌，`npm run mcp-token add <名字> gateway --channel <id>`），
+> 服务端由令牌解析 scope，届时上面的残留风险由**服务端**消除。配套三处现码改动：
+> ① `remove_group_push_rule` 补**渠道归属校验**（现只校验 `created_by='mcp'`，跨渠道可删，`src/mcp/tools.ts:603`）；
+> ② 写限流从「每令牌」改为「每渠道」（现 `src/mcp/rate-limit.ts` 按令牌名分桶，MaiBot 单令牌 = 全群共桶）；
+> ③ 读侧 `list_push_rules` 等按 scope 在服务端裁剪，不再依赖插件过滤；④ `add_group_push_rule` 去掉 `channelId` 参数。
+> **鉴权口径同日拍板**：`/mcp` 永远要令牌，免 token 仅 `/api/*`（本页现状描述即为最终口径）。上述改动落地前，本页描述仍成立。
+
 ## 工具一览（细节以 tools/list 的 description 为准）
 
 - **只读（两角色共享）**：`get_status` / `get_live_now` / `get_schedule` / `list_streamers` /

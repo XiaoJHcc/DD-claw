@@ -15,7 +15,7 @@ B站关注列表全员监听（直播间 + 动态 + 微博）→ 持续追踪 �
 
 | 文档 | 内容 |
 |---|---|
-| [plan/agent-access.md](plan/agent-access.md) | **多前端接入统一计划**：一个能力面 N 种接线（Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连），信任模型矩阵 + 共享组件 + 分期 P1-P3 |
+| [plan/agent-access.md](plan/agent-access.md) | **多前端接入统一计划**：一个能力面 N 种接线（Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连），信任模型矩阵 + 共享组件 + 分期 **P0-P3** + 能力层调用域（scope，已定令牌绑定渠道）+ 拍板记录 |
 
 （M1 落地计划已完成使命并归档删除，实施经验折叠进 boundaries.md 第 5 节；后续里程碑的实施计划在动手前按同样格式补写。）
 

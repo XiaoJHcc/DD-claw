@@ -49,8 +49,8 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 ```
 
 - **能力层与传输层解耦**：注册表是纯数据结构（工具名 + zod schema + handler + role），前端直接消费；`/mcp` 只是「进程外 Host」接线。
-- **角色在能力层标注（admin/gateway），身份在接入层确权**：localhost = 主人；Bearer token → 角色；OneBot 事件身份天然可信；**LLM 生成的参数永不可信**。
-- 目标重构：面板 REST 收敛到注册表，使「唯一能力信源」成立。计划见 `docs/plan/agent-access.md`，已落地见 `docs/mcp.md`。
+- **角色在能力层标注（admin/gateway），身份在接入层确权**：localhost 绑定（`/api/*`）= 主人；Bearer token → 角色；OneBot 事件身份天然可信；**LLM 生成的参数永不可信**。**`/mcp` 永远要令牌**（缺失/无效 401、零令牌 503），**不设回环免 token**（已定 2026-09-16）；QQ 渠道经 **gateway 令牌的 `channelId` 绑定**在服务端解析 scope，身份字段不进任何工具参数。
+- 目标重构：面板 REST 收敛到注册表，使「唯一能力信源」成立。计划见 `docs/plan/agent-access.md`（**先做 P0 地基：`runTool` + 写快照/撤销 + REST 收敛 + 鉴权口径**），已落地见 `docs/mcp.md`。
 
 ## 关键接口
 
@@ -190,7 +190,7 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 ## 实现现状
 
 - **已落地主干**：开播通知（NapCat/Toast 已实测）、规模化 + 内容判定（名单迁库 / 扫码登录 / 关注同步 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2）、时间轴统计、控制面板 v1+v2、MCP v1、NapCat 双平台托管
-- **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、面板 REST 收敛到能力面、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
+- **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、**能力面 P0 地基（`runTool` + 写快照/撤销 + 面板 REST 收敛 + `/mcp` 鉴权口径）**、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 
 
@@ -201,5 +201,5 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - `docs/boundaries.md` — 能力边界：匿名可得 / 需凭据 / 做不到，已知踩坑清单
 - `docs/modules/` — 模块实现笔记：core / sources / analysis / notify / panel（逐文件职责与「改前必知」）
 - `docs/mcp.md` — MCP 接口：令牌、角色权限、Host 配置、安全模型与 v2 预留（MaiBot 不直连）
-- `docs/plan/agent-access.md` — 多前端接入统一计划：一个能力面 N 种接线 + 信任模型矩阵 + 分期 P1-P3
+- `docs/plan/agent-access.md` — 多前端接入统一计划：一个能力面 N 种接线 + 信任模型矩阵 + 分期 **P0-P3** + 能力层调用域（scope，**已定令牌绑定渠道**）+ 拍板记录
 - `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、llm、notify、media-capture、auth-cookie、ts-stack）
