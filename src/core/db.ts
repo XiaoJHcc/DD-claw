@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS x_accounts (
   last_tweet_id TEXT,
   last_tweet_at INTEGER,
   last_ok_at    INTEGER,
+  avatar        TEXT,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
@@ -302,6 +303,8 @@ export class Db {
     this.ensureColumn('post_rules', 'llm_judge', 'llm_judge INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('post_rules', 'judge_prompt', 'judge_prompt TEXT');
     this.ensureColumn('post_rules', 'llm_translate', 'llm_translate INTEGER NOT NULL DEFAULT 0');
+    // x_accounts 头像（抓取时顺手抠 X 头像 → 代理下载到 cache/x-avatars，存文件名；旧库在线补列）
+    this.ensureColumn('x_accounts', 'avatar', 'avatar TEXT');
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -1200,6 +1203,7 @@ export class Db {
     if (touch.lastTweetId !== undefined) { sets.push('last_tweet_id = ?'); args.push(touch.lastTweetId); }
     if (touch.lastTweetAt !== undefined) { sets.push('last_tweet_at = ?'); args.push(touch.lastTweetAt); }
     if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
+    if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
     args.push(now(), id);

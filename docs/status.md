@@ -59,7 +59,7 @@
 **未落地能力**
 
 - `schedules` 表未建（目标）；`signals` 表已放弃（见 `design.md` §11）
-- **X/推特：P0–P3 全部落地**（隧道 fetch、`/api/x*`、独立分页、免登录源 Nitter RSS + 回退、`x_accounts` 独立名单、监听开关 `listen_twitter`、`post_rules` 图文帖规则 + `feed_post` 推送分支（X 图经代理本地化后交 NapCat）、规则级 LLM 判定/翻译（失败回退机械筛选）、MCP 工具）；计划见 [plan/twitter-source.md](plan/twitter-source.md)
+- **X/推特：P0–P3 全部落地**（隧道 fetch、`/api/x*`、图文分页 `#view-x`（X + 微博：设置条 + 账号卡片墙，规则针对单账号、推文段入卡）、免登录源 Nitter RSS + 回退、`x_accounts` 独立名单、监听开关 `listen_twitter`、`post_rules` 图文帖规则 + `feed_post` 推送分支（X 图经代理本地化后交 NapCat）、规则级 LLM 判定/翻译（失败回退机械筛选）、账号头像（抓取顺手抠 channel image / og:image → 代理落盘 cache/x-avatars，卡片展示兜底关联主播 B站头像）、MCP 工具）；计划见 [plan/twitter-source.md](plan/twitter-source.md)
 - verdicts 总览 UI；预告半透明条与「预定时间到」推送
 - dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）：待产品方案，机制不预设
 - 其余已放弃 / 不采用方案见 `design.md` §11

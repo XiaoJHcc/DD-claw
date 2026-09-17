@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  decodeEntities, instancePicToCdn, parseNitterItem, parseNitterRss,
+  decodeEntities, instancePicToCdn, parseNitterAvatar, parseNitterItem, parseNitterRss,
 } from './nitter.js';
 
 function item(opts: {
@@ -75,10 +75,16 @@ test('实体解码：数字实体 / &amp; / &quot; 都还原', () => {
   assert.equal(decodeEntities('a&#39;b &amp; c &quot;d&quot; &#x4E2D;'), "a'b & c \"d\" 中");
 });
 
-test('instancePicToCdn：只认 /pic/ 前缀，relative 与越界返回 null', () => {
+test('instancePicToCdn：路径形态与完整 URL 形态都还原；越界/异域拒绝', () => {
   assert.equal(instancePicToCdn('http://n/pic/media%2Fx.jpg'), 'https://pbs.twimg.com/media/x.jpg');
   assert.equal(instancePicToCdn('/pic/media%2Fx.jpg'), 'https://pbs.twimg.com/media/x.jpg');
+  assert.equal(
+    instancePicToCdn('http://n/pic/https%3A%2F%2Fpbs.twimg.com%2Fprofile_images%2F1%2Fa_400x400.jpg'),
+    'https://pbs.twimg.com/profile_images/1/a_400x400.jpg',
+    '频道头像的完整 URL 编码形态（2026-09-17 真机实测）',
+  );
   assert.equal(instancePicToCdn('https://pbs.twimg.com/media/x.jpg'), null, '已经是 CDN 形态就不动');
+  assert.equal(instancePicToCdn('http://n/pic/https%3A%2F%2Fevil.example.com%2Fx.jpg'), null, '完整 URL 但非 CDN 域');
   assert.equal(instancePicToCdn('http://n/user/pic/..%2F..%2Fetc'), null, '含 .. 一律拒绝');
   assert.equal(instancePicToCdn(''), null);
 });
@@ -108,4 +114,27 @@ test('parseNitterRss：空 feed / 非 RSS 内容都返回空数组（不抛错�
   assert.deepEqual(parseNitterRss('<rss><channel></channel></rss>'), []);
   assert.deepEqual(parseNitterRss('<html>挑战页</html>'), []);
   assert.deepEqual(parseNitterRss(''), []);
+});
+
+test('parseNitterAvatar：频道头 image/url → CDN 头像；没有 image 或认不出的形态 → null', () => {
+  // 真实频道头格式（2026-09-17 真机 nitter.jaydenha.uk 核对）：完整 URL 编码
+  const withAvatar = '<rss><channel><title>@a</title>' +
+    '<image><title>@a</title><url>http://nitter.x/pic/https%3A%2F%2Fpbs.twimg.com%2Fprofile_images%2F123%2Fabc_400x400.jpg</url></image>' +
+    item({ title: 'x', creator: '@a', link: 'http://n/a/status/1000000000000000001#m', guid: '1000000000000000001', date: 'Wed, 16 Sep 2026 01:00:00 GMT' }) +
+    '</channel></rss>';
+  assert.equal(
+    parseNitterAvatar(withAvatar),
+    'https://pbs.twimg.com/profile_images/123/abc_400x400.jpg',
+    '完整 URL 编码形态还原成 CDN 直链',
+  );
+
+  const noImage = '<rss><channel><title>@a</title>' +
+    item({ title: 'x', creator: '@a', link: 'http://n/a/status/1000000000000000001#m', guid: '1000000000000000001', date: 'Wed, 16 Sep 2026 01:00:00 GMT' }) +
+    '</channel></rss>';
+  assert.equal(parseNitterAvatar(noImage), null, '实例没给频道图');
+
+  const odd = '<rss><channel><image><url>http://nitter.x/static/logo.png</url></image></channel></rss>';
+  assert.equal(parseNitterAvatar(odd), null, '非 /pic/ 前缀（认不出来的形态）丢弃');
+
+  assert.equal(parseNitterAvatar(''), null);
 });

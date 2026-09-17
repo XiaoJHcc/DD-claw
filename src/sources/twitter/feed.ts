@@ -23,6 +23,7 @@ import { emptyXFeedSnapshot, type XFeedSnapshot } from '../../core/x-config.js';
 import type { Source, SourceContext } from '../types.js';
 import { fetchFromAnyInstance, type NitterFetchResult, type ParsedTweet } from './nitter.js';
 import { fetchWebTimeline } from './web.js';
+import { cacheXAvatar } from './avatar.js';
 
 const log = makeLogger('twitter/feed');
 
@@ -33,6 +34,8 @@ export interface TimelineFetch {
   tweets: ParsedTweet[];
   via: TwitterRoute;
   host: string | null;
+  /** 顺手抠到的账号头像 URL（pbs.twimg.com 形态）；两条路线都可能给不了 → null */
+  avatarUrl: string | null;
 }
 
 export interface TwitterFeedSourceOpts {
@@ -43,9 +46,13 @@ export interface TwitterFeedSourceOpts {
   intervalSec: number;
   jitterSec?: number;
   healthAlertAfterFailures?: number;
+  /** 头像本地缓存目录（cache/x-avatars）；不注入则只抠 URL 不落盘 */
+  avatarCacheDir?: string;
+  /** 头像落盘注入点（单测用；默认 cacheXAvatar 走代理隧道下载） */
+  avatarSaver?: (url: string, dir: string, proxyUrl: string) => Promise<string | null>;
   /** 注入点（单测用；默认走真实网络） */
   rssFetcher?: (hosts: string[], screen: string) => Promise<NitterFetchResult>;
-  webFetcher?: (screen: string, sinceId: string | null) => Promise<{ tweets: ParsedTweet[]; bytes: number; ms: number }>;
+  webFetcher?: (screen: string, sinceId: string | null) => Promise<{ tweets: ParsedTweet[]; avatarUrl?: string | null; bytes: number; ms: number }>;
   onStatus?: (s: XFeedSnapshot) => void;
 }
 
@@ -162,6 +169,7 @@ export class TwitterFeedSource implements Source {
     }
     this.onSuccess(screenName);
 
+    const acc = ctx.db.getXAccountByScreenName(screenName)!;
     const posts = fetched.tweets.map((t) => tweetToPost(t, screenName, fetched.via, fetched.host));
     const inserted = ctx.db.insertPosts(posts);
     const firstRound = !this.polled.has(screenName);
@@ -169,39 +177,47 @@ export class TwitterFeedSource implements Source {
 
     // 游标只往前推（按数值比较，不用时间戳——时间戳会被置顶/编辑搅乱）
     const newest = fetched.tweets.reduce<ParsedTweet | null>(
-      (acc, t) => (acc === null || BigInt(t.id) > BigInt(acc.id) ? t : acc),
+      (acc2, t) => (acc2 === null || BigInt(t.id) > BigInt(acc2.id) ? t : acc2),
       null,
     );
     const nowSec = Math.floor(Date.now() / 1000);
-    ctx.db.touchXAccount(ctx.db.getXAccountByScreenName(screenName)!.id, {
+    ctx.db.touchXAccount(acc.id, {
       lastOkAt: nowSec,
       ...(newest ? { lastTweetId: newest.id, lastTweetAt: newest.pubTs } : {}),
     });
 
-    if (firstRound) {
+    if (!firstRound) {
+      for (const i of inserted) {
+        const p = posts[i]!;
+        const src = fetched.tweets[i]; // posts 与 tweets 同序（posts 就是 tweets.map 出来的）
+        const sig: Signal = {
+          source: this.name,
+          kind: 'feed_post',
+          uid: screenName,
+          roomId: '',
+          ts: nowSec,
+          payload: {
+            platform: p.platform, itemId: p.itemId, type: p.type,
+            text: p.text, pics: p.pics, pubTs: p.pubTs, url: p.url,
+            // 引用只在免登录回退路线可知；RSS 帖缺省 = 未知（规则里的 quote 筛选据此不命中）
+            ...(src?.isQuote !== undefined ? { isQuote: src.isQuote } : {}),
+          },
+        };
+        ctx.bus.emit(sig);
+      }
+      if (inserted.length > 0) {
+        log.info(`@${screenName} 新推文 ${inserted.length} 条（via ${fetched.via}${fetched.host ? ' ' + fetched.host : ''}）`);
+      }
+    } else {
       log.info(`@${screenName} 首轮归档 ${inserted.length} 条（静默，不发信号）`);
-      return { ok: true, via: fetched.via, host: fetched.host };
     }
-    for (const i of inserted) {
-      const p = posts[i]!;
-      const src = fetched.tweets[i]; // posts 与 tweets 同序（posts 就是 tweets.map 出来的）
-      const sig: Signal = {
-        source: this.name,
-        kind: 'feed_post',
-        uid: screenName,
-        roomId: '',
-        ts: nowSec,
-        payload: {
-          platform: p.platform, itemId: p.itemId, type: p.type,
-          text: p.text, pics: p.pics, pubTs: p.pubTs, url: p.url,
-          // 引用只在免登录回退路线可知；RSS 帖缺省 = 未知（规则里的 quote 筛选据此不命中）
-          ...(src?.isQuote !== undefined ? { isQuote: src.isQuote } : {}),
-        },
-      };
-      ctx.bus.emit(sig);
-    }
-    if (inserted.length > 0) {
-      log.info(`@${screenName} 新推文 ${inserted.length} 条（via ${fetched.via}${fetched.host ? ' ' + fetched.host : ''}）`);
+
+    // 头像最后做：下载慢也不能挡 feed_post 信号。账号还没有本地头像且这轮抠到了 URL
+    // → 经代理落盘缓存，回写文件名；失败静默，下轮再试（已有头像不重复下载）。
+    if (!acc.avatar && fetched.avatarUrl && this.opts.avatarCacheDir) {
+      const saver = this.opts.avatarSaver ?? cacheXAvatar;
+      const avatar = await saver(fetched.avatarUrl, this.opts.avatarCacheDir, this.opts.proxyUrl);
+      if (avatar) ctx.db.touchXAccount(acc.id, { avatar });
     }
     return { ok: true, via: fetched.via, host: fetched.host };
   }
@@ -218,7 +234,7 @@ export class TwitterFeedSource implements Source {
         const rss = this.opts.rssFetcher
           ? await this.opts.rssFetcher(instances, screenName)
           : await fetchFromAnyInstance(instances, screenName, proxyUrl);
-        return { tweets: rss.tweets, via: 'nitter', host: rss.host };
+        return { tweets: rss.tweets, via: 'nitter', host: rss.host, avatarUrl: rss.avatarCdn ?? null };
       } catch (e) {
         rssError = e instanceof Error ? e.message : String(e);
       }
@@ -230,7 +246,7 @@ export class TwitterFeedSource implements Source {
       const web = this.opts.webFetcher
         ? await this.opts.webFetcher(screenName, sinceId)
         : await fetchWebTimeline(screenName, proxyUrl, { sinceId });
-      return { tweets: web.tweets, via: 'web', host: null };
+      return { tweets: web.tweets, via: 'web', host: null, avatarUrl: web.avatarUrl ?? null };
     } catch (e) {
       const webError = e instanceof Error ? e.message : String(e);
       throw new Error(rssError ? `Nitter 失败（${rssError}）；回退也失败（${webError}）` : `回退路线失败（${webError}）`);

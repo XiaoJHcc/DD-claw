@@ -468,17 +468,21 @@ function asScreenName(v: unknown, field = 'screenName'): string {
   return s;
 }
 
-/** POST /api/x/accounts：screenName 必填；biliUid 可选（存在性在路由层校验）；enabled 缺省 true */
-export function parseNewXAccount(body: unknown): { screenName: string; biliUid: string | null; enabled: boolean } {
+/** POST /api/x/accounts：screenName 必填；biliUid / displayName 可选（存在性在路由层校验）；enabled 缺省 true */
+export function parseNewXAccount(body: unknown): {
+  screenName: string; displayName: string | null; biliUid: string | null; enabled: boolean;
+} {
   const o = asObject(body);
   rejectUnknownKeys(o, X_ACCOUNT_KEYS);
   if (!('screenName' in o)) throw new HttpError(400, 'screenName 必填');
-  const out: { screenName: string; biliUid: string | null; enabled: boolean } = {
+  const out: { screenName: string; displayName: string | null; biliUid: string | null; enabled: boolean } = {
     screenName: asScreenName(o.screenName),
+    displayName: null,
     biliUid: null,
     enabled: true,
   };
   if ('biliUid' in o && o.biliUid !== null) out.biliUid = parseUid(o.biliUid, 'biliUid');
+  if ('displayName' in o) out.displayName = asNullableString(o.displayName, 'displayName');
   // enabled 必须被采纳：显式传 false 却被静默忽略会让人以为停用生效了
   if ('enabled' in o) out.enabled = asBoolean(o.enabled, 'enabled');
   return out;

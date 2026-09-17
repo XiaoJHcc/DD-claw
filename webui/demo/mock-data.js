@@ -129,18 +129,23 @@ export const mockX = {
 };
 
 // ---- X 关注账号（独立名单：不要求对应 B站主播；留一个停用项做对照）----
+// avatar = X 链路抓到的本地缓存文件名；demo 由 webui-dev 把 /api/x-avatar 映射到
+// data/cache/x-avatars，这里的文件名对应该目录下真实存在的缓存文件
 export const mockXAccounts = [
   {
-    id: 1, screenName: 'watase_yuzuki', displayName: '渡 結月', biliUid: null, enabled: true,
-    lastTweetId: '2100138324883280168', lastTweetAt: 1, lastOkAt: 1, createdAt: 1, updatedAt: 1,
+    id: 1, screenName: 'watase_yuzuki', displayName: '渡濑结月', biliUid: null, enabled: true,
+    lastTweetId: '2100138324883280168', lastTweetAt: 1, lastOkAt: 1,
+    avatar: '59727ee6f349a652ad7d4a8c1a24da0a.jpg', createdAt: 1, updatedAt: 1,
   },
   {
     id: 2, screenName: 'd4dj_pj', displayName: 'D4DJ公式', biliUid: null, enabled: true,
-    lastTweetId: '2100147931877929308', lastTweetAt: 1, lastOkAt: 1, createdAt: 1, updatedAt: 1,
+    lastTweetId: '2100147931877929308', lastTweetAt: 1, lastOkAt: 1,
+    avatar: 'dadfc48258084559799a396b55dad345.png', createdAt: 1, updatedAt: 1,
   },
   {
     id: 3, screenName: 'hololive_en', displayName: 'hololive English', biliUid: null, enabled: false,
-    lastTweetId: null, lastTweetAt: null, lastOkAt: null, createdAt: 0, updatedAt: 0,
+    lastTweetId: null, lastTweetAt: null, lastOkAt: null,
+    avatar: 'a57dc1efff44d79e3ca2b5d9b3144013.png', createdAt: 0, updatedAt: 0,
   },
 ];
 
@@ -163,7 +168,7 @@ export const mockPostRules = [
   },
 ];
 
-// ---- 最近推文（验收卡的演示数据；pubTs 由 mock-api 在冻结时刻后填）----
+// ---- 最近推文（账号卡推文段的演示数据；按 uid 归到各账号卡，pubTs 由 mock-api 在冻结时刻后填）----
 export const mockTwitterPosts = [
   {
     id: 1, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2100138324883280168', type: 'tweet',
@@ -181,5 +186,11 @@ export const mockTwitterPosts = [
     id: 3, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2100064559860216302', type: 'tweet',
     text: 'この時の渡瀬のカラコン何使ってたのか気になりすぎる',
     pics: [], pubTs: 1, url: 'https://x.com/watase_yuzuki/status/2100064559860216302', createdAt: 1,
+  },
+  {
+    id: 4, platform: 'twitter', uid: 'd4dj_pj', itemId: '2100147931877929309', type: 'tweet',
+    text: '「D4DJ D4 FES. XROSS∞BEAT」DAY1 ありがとうございました！明日の DAY2 もお楽しみに！',
+    pics: ['https://pbs.twimg.com/media/HSUrdJBagAA0d5g.jpg'],
+    pubTs: 1, url: 'https://x.com/d4dj_pj/status/2100147931877929309', createdAt: 1,
   },
 ];

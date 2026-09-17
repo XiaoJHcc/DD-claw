@@ -18,8 +18,20 @@ const TWEET_RESULT_HOST = 'cdn.syndication.twimg.com';
 
 export interface WebIdsResult {
   ids: string[];
+  /** 页面 `og:image` 抠出的账号头像（pbs.twimg.com 直链）；抠不到为 null */
+  avatarUrl: string | null;
   bytes: number;
   ms: number;
+}
+
+/** 免登录 HTML → `og:image` 内容（meta 属性顺序不固定，先定位标签再取 content） */
+export function parseOgImage(html: string): string | null {
+  const tagM = html.match(/<meta[^>]*(?:property|name)="og:image"[^>]*>/);
+  if (!tagM) return null;
+  const content = tagM[0].match(/content="([^"]+)"/);
+  if (!content) return null;
+  const url = content[1]!.replace(/&amp;/g, '&').trim();
+  return /^https?:\/\//.test(url) ? url : null;
 }
 
 /** 免登录 HTML → 推文 id 列表（降序）。返回空数组 = 页面结构变了或没有推文 */
@@ -44,7 +56,7 @@ export async function fetchWebTweetIds(
   if (res.status !== 200) throw new Error(`x.com HTTP ${res.status}`);
   const ids = [...new Set([...res.text.matchAll(/rest_id:"(\d{15,25})"/g)].map((m) => m[1]!))]
     .sort((a, b) => (BigInt(b) > BigInt(a) ? 1 : -1));
-  return { ids, bytes: res.body.length, ms: Date.now() - started };
+  return { ids, avatarUrl: parseOgImage(res.text), bytes: res.body.length, ms: Date.now() - started };
 }
 
 export interface AccountVerify {
@@ -188,7 +200,7 @@ export async function fetchWebTimeline(
   screen: string,
   proxyUrl: string,
   opts: { sinceId?: string | null; maxDetails?: number; timeoutMs?: number } = {},
-): Promise<{ tweets: ParsedTweet[]; bytes: number; ms: number }> {
+): Promise<{ tweets: ParsedTweet[]; avatarUrl: string | null; bytes: number; ms: number }> {
   const started = Date.now();
   const listed = await fetchWebTweetIds(screen, proxyUrl, opts);
   const since = opts.sinceId && /^\d+$/.test(opts.sinceId) ? BigInt(opts.sinceId) : null;
@@ -208,5 +220,5 @@ export async function fetchWebTimeline(
   if (tweets.length === 0 && failures.length > 0) {
     throw new Error(`单推详情全部失败：${failures.join('；')}`);
   }
-  return { tweets: tweets.sort((a, b) => b.pubTs - a.pubTs), bytes: listed.bytes, ms: Date.now() - started };
+  return { tweets: tweets.sort((a, b) => b.pubTs - a.pubTs), avatarUrl: listed.avatarUrl, bytes: listed.bytes, ms: Date.now() - started };
 }

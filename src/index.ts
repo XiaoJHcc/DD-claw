@@ -457,12 +457,16 @@ async function main(): Promise<void> {
 
   // X/推特源（独立分页 + 独立名单）：X 没有登录态，它的运行前提是「代理已配置」。
   // 参数指纹一变就重启——代理/实例/回退/间隔/名单任何一项改动都要立刻生效。
+  // 头像缓存目录跟随 data 约定（与 toast/关键帧缓存同法拼），面板经 /api/x-avatar 读
+  const xAvatarDir = join(dirname(secrets.dbPath), 'cache', 'x-avatars');
   let xFeedSrc: TwitterFeedSource | null = null;
   let xFeedKey = '';
   const xProxyConfigured = (): boolean => getXConfig(db).proxyUrl.trim() !== '';
   const xConfigKey = (): string => {
     const c = getXConfig(db);
-    return [c.proxyUrl, c.instances.join(','), String(c.fallbackHtml), String(c.intervalSec)].join('|');
+    // 名单（启用账号的 screen name）也在指纹里：加/删/停用账号 → 重启源，PeriodicTask 首轮立即跑
+    const accounts = db.listXAccounts(true).map((a) => a.screenName).join(',');
+    return [c.proxyUrl, c.instances.join(','), String(c.fallbackHtml), String(c.intervalSec), accounts].join('|');
   };
   const startXFeed = (): void => {
     const cfg = getXConfig(db);
@@ -474,6 +478,7 @@ async function main(): Promise<void> {
       intervalSec: cfg.intervalSec,
       jitterSec: eff.pollJitterSec,
       healthAlertAfterFailures: eff.healthAlertAfterFailures,
+      avatarCacheDir: xAvatarDir,
       onStatus: (s) => { xStatus = { ...xStatus, feed: s }; },
     });
     xFeedSrc.start({ bus, db, config: eff });
@@ -513,7 +518,7 @@ async function main(): Promise<void> {
         log.info(`X 时间线：${xAccounts} 个账号，间隔 ${getXConfig(db).intervalSec}s`);
         startXFeed();
       } else if (xFeedKey !== xConfigKey()) {
-        log.info('X 时间线参数已热更新（代理 / 实例 / 回退 / 间隔）');
+        log.info('X 时间线参数已热更新（代理 / 实例 / 回退 / 间隔 / 名单）');
         startXFeed();
       }
     } else if (xFeedSrc) {
@@ -702,6 +707,7 @@ async function main(): Promise<void> {
         verify: (screenName) => verifyAccount(screenName, getXConfig(db).proxyUrl),
       },
       snapshots: { dir: keyframeDir },
+      xAvatars: { dir: xAvatarDir },
       testPush: () => sendTestPush(),
       napcat: {
         effective: () => ({ ...getNapcatConfig(db), dir: effectiveNapcatDir(db) }),

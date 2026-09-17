@@ -752,3 +752,43 @@ input:disabled{opacity:.5;background:var(--fill)}
 .sched-pop-src{color:var(--text-2);font-size:var(--fs-xs)}
 .sched-pop-ev{flex-basis:100%;color:var(--text-2);font-size:var(--fs-xs)}
 .sched-pop-body>.sched-pop-ev{margin-top:6px}
+
+/* ============================================================
+   图文分页（X / 推特 + 微博）：设置条 + 账号卡片墙
+   账号卡 = st-card 同族（同栅格、同 hover 浮起），无封面横幅，交互同主播卡：
+   卡面纯展示（st-mid 身份段 + st-rules 规则摘要行 + st-posts 推文段，全部复用无新增规则），
+   整卡可点，账号字段与规则管理全在点击后的浮窗（规则编辑开二级浮窗）
+   ============================================================ */
+/* 源设置弹窗：输入框 + 右侧方 icon 测试按钮（icon-btn 36×36 与输入框同高；常态描边成「钮」） */
+.field-inline{display:flex;gap:var(--sp-2);align-items:center}
+.field-inline .inp{flex:1;min-width:0}
+.field-inline .icon-btn{border:1px solid var(--separator);background:var(--card-bg)}
+.field-inline .icon-btn:hover{border-color:var(--blue);color:var(--blue);background:#fff}
+
+/* 停用的账号卡整卡压灰（meta 里也有「已停用」字样，视觉只是加强） */
+.x-card.x-off{opacity:.55}
+.x-card.x-off:hover{opacity:.85}
+/* 账号浮窗规则区底部的「添加规则」：通宽 ghost，与规则行 8px 缝 */
+.x-add-rule{width:100%;margin-top:8px}
+
+/* 栅格末尾的虚线「添加账号」卡：无阴影无底色，hover 仍随 st-card 浮起 */
+.x-add-card{align-items:center;justify-content:center;gap:8px;min-height:220px;
+  border:1.5px dashed var(--separator);background:transparent;box-shadow:none;
+  color:var(--text-2);font-size:var(--fs-base);font-weight:600;cursor:pointer}
+.x-add-card svg{width:22px;height:22px}
+
+/* 源设置弹窗：测试钮三态（结果并入按钮，不插文字块、不动布局）——
+   测试中 = 图标旋转；成功 = 绿勾 / 失败 = 红叉（描边同色），逐条原因进按钮 title（hover 提示） */
+.field-inline .check-row{flex:1;min-width:0;margin:0}
+.icon-btn:disabled{opacity:.6;cursor:default}
+.icon-btn.testing svg{animation:x-test-spin 1s linear infinite}
+@keyframes x-test-spin{to{transform:rotate(360deg)}}
+.icon-btn.test-ok{color:var(--mint);border-color:rgba(47,189,155,.55)}
+.icon-btn.test-ok:hover{color:var(--mint);border-color:var(--mint)}
+.icon-btn.test-bad{color:var(--red);border-color:rgba(229,72,77,.55)}
+.icon-btn.test-bad:hover{color:var(--red);border-color:var(--red)}
+
+/* 账号卡身份行：左头像名称、右上角监听开关（卡面唯一控件；点击有守卫不触发整卡开浮窗） */
+.x-id-row{display:flex;align-items:center;gap:var(--sp-3)}
+.x-id-row .st-id{flex:1;min-width:0}
+.x-id-row .switch{flex:none}

@@ -134,7 +134,7 @@ function handle(method, path, q, rawBody) {
     });
   }
 
-  // 最近推文的时间戳也用冻结时刻（验收卡要显示「x/x xx:xx」）
+  // 最近推文的时间戳也用冻结时刻（账号卡推文段要显示「x 小时前」）
 for (const p of store.twitterPosts) {
   p.pubTs = nowSec - 1800 * p.id;
   p.createdAt = nowSec;
@@ -255,11 +255,6 @@ for (const p of store.twitterPosts) {
     }
   }
 
-  // 最近推文（验收卡）：归档 + 源运行状态
-  if (path === '/api/x/recent' && method === 'GET') {
-    return ok({ posts: clone(store.twitterPosts), feed: store.x.status.feed });
-  }
-
   // ---- NapCat ----
   if (path === '/api/napcat' && method === 'GET') {
     return ok({ ...store.napcat });
@@ -290,9 +285,20 @@ for (const p of store.twitterPosts) {
   if (path === '/api/x' && method === 'GET') {
     return ok({ config: store.x.config, status: store.x.status });
   }
-  // X 关注账号：独立名单 CRUD（关联主播名由 /api/streamers 侧提供，这里只回 biliUid）
+  // X 关注账号：独立名单 CRUD；视图 = 名单行 + 关联主播展示名 + 最近 3 条推文
+  // （与真实后端 server.ts 的 xAccountView 同构，账号卡身份段/推文段都读它）
+  const xAccountView = (a) => {
+    const bili = a.biliUid != null
+      ? store.streamers.find((s) => String(s.uid) === String(a.biliUid)) : null;
+    const posts = store.twitterPosts
+      .filter((p) => p.uid === a.screenName)
+      .sort((x2, y2) => y2.pubTs - x2.pubTs)
+      .slice(0, 3)
+      .map((p) => clone(p));
+    return { ...clone(a), biliName: bili ? (bili.alias || bili.uname || String(a.biliUid)) : null, biliFace: bili ? (bili.face ?? null) : null, posts };
+  };
   if (path === '/api/x/accounts' && method === 'GET') {
-    return ok({ accounts: store.xAccounts.map((a) => clone(a)) });
+    return ok({ accounts: store.xAccounts.map(xAccountView) });
   }
   if (path === '/api/x/accounts' && method === 'POST') {
     const b = body();
@@ -303,12 +309,12 @@ for (const p of store.twitterPosts) {
     const known = ['watase_yuzuki', 'd4dj_pj', 'hololive_en', 'nhk_news'].includes(screenName);
     if (!known) return json(400, { error: `X 账号不存在：@${screenName}` });
     const row = {
-      id: ++store.xAccountSeq, screenName, displayName: null,
-      biliUid: b.biliUid ? String(b.biliUid) : null, enabled: true,
-      lastTweetId: null, lastTweetAt: null, lastOkAt: null, createdAt: nowSec, updatedAt: nowSec,
+      id: ++store.xAccountSeq, screenName, displayName: b.displayName ? String(b.displayName) : null,
+      biliUid: b.biliUid ? String(b.biliUid) : null, enabled: b.enabled !== false,
+      lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null, createdAt: nowSec, updatedAt: nowSec,
     };
     store.xAccounts.push(row);
-    return ok({ account: clone(row), verify: { checked: true, ok: true, kind: 'ok', message: '账号存在（页面含 7 条推文）' } });
+    return ok({ account: xAccountView(row), verify: { checked: true, ok: true, kind: 'ok', message: '账号存在（页面含 7 条推文）' } });
   }
   {
     const xa = path.match(/^\/api\/x\/accounts\/(\d+)$/);
@@ -318,9 +324,10 @@ for (const p of store.twitterPosts) {
       const b = body();
       if (typeof b.screenName === 'string') row.screenName = b.screenName.trim().replace(/^@+/, '').toLowerCase();
       if (b.biliUid !== undefined) row.biliUid = b.biliUid === null ? null : String(b.biliUid);
+      if (b.displayName !== undefined) row.displayName = b.displayName === null ? null : String(b.displayName);
       if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
       row.updatedAt = nowSec;
-      return ok({ account: clone(row) });
+      return ok({ account: xAccountView(row) });
     }
     if (xa && method === 'DELETE') {
       const i = store.xAccounts.findIndex((a) => a.id === Number(xa[1]));

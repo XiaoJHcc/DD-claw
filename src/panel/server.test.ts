@@ -47,6 +47,8 @@ async function setup(
     advanced?: PanelDeps['advanced'];
     /** 注入 snapshots dep（/api/snapshot 缓存关键帧）；缺省不注入（404） */
     snapshots?: PanelDeps['snapshots'];
+    /** 注入 xAvatars dep（/api/x-avatar X 头像缓存）；缺省不注入（404） */
+    xAvatars?: PanelDeps['xAvatars'];
     /** 注入头像代理 fetch（/api/avatar 测试用）；缺省用全局 fetch */
     avatar?: PanelDeps['avatar'];
     /** 注入 testPush dep（/api/push/test）；缺省不注入（404） */
@@ -105,6 +107,7 @@ async function setup(
     napcat: opts.napcat,
     advanced: opts.advanced,
     snapshots: opts.snapshots,
+    xAvatars: opts.xAvatars,
     avatar: opts.avatar,
     testPush: opts.testPush,
     x: opts.x,
@@ -1650,6 +1653,41 @@ test('/api/avatar：坏 uid 400 / 无该主播或无头像 404 / 非白名单 ho
   assert.equal((await rawGet(base, '/api/avatar?uid=1003')).status, 400, '非白名单 host 400');
 });
 
+// ---- /api/x-avatar X 头像本地缓存 ----
+
+test('/api/x-avatar：按文件名读缓存目录，jpg/png 类型与长缓存头正确', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-xava-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { base } = await setup(t, { xAvatars: { dir } });
+
+  const jpgName = 'a'.repeat(32) + '.jpg';
+  const jpgData = Buffer.from('fake-x-avatar-jpg');
+  writeFileSync(join(dir, jpgName), jpgData);
+  const r1 = await rawGet(base, `/api/x-avatar?file=${jpgName}`);
+  assert.equal(r1.status, 200);
+  assert.deepEqual(r1.body, jpgData);
+  assert.equal(r1.headers.get('content-type'), 'image/jpeg');
+  assert.equal(r1.headers.get('cache-control'), 'max-age=86400', 'md5 文件名随内容变，长缓存');
+
+  const pngName = 'b'.repeat(32) + '.png';
+  writeFileSync(join(dir, pngName), Buffer.from('fake-x-avatar-png'));
+  assert.equal((await rawGet(base, `/api/x-avatar?file=${pngName}`)).headers.get('content-type'), 'image/png');
+});
+
+test('/api/x-avatar：坏文件名 400（白名单即防穿越）、缺文件 404、无 dep 404', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-xava-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { base } = await setup(t, { xAvatars: { dir } });
+
+  assert.equal((await rawGet(base, '/api/x-avatar?file=../../.env')).status, 400, '穿越字符 400');
+  assert.equal((await rawGet(base, '/api/x-avatar?file=not-md5.jpg')).status, 400, '非 md5 名 400');
+  assert.equal((await rawGet(base, '/api/x-avatar')).status, 400, '缺 file 400');
+  assert.equal((await rawGet(base, `/api/x-avatar?file=${'c'.repeat(32)}.jpg`)).status, 404, '文件不存在 404');
+
+  const bare = await setup(t);
+  assert.equal((await rawGet(bare.base, `/api/x-avatar?file=${'c'.repeat(32)}.jpg`)).status, 404, '无 dep 404');
+});
+
 // ---- X / 推特 独立分页（/api/x*）----
 // 这几条守的是「X 与开播那套设置完全分开」：X 未注入时整组端点 404，
 // 注入后读写只碰 x_* 设置；探测走显式 POST，GET 绝不打网络（靠 onChanged/测试计数验证）。
@@ -1966,18 +2004,21 @@ test('/api/post-rules：开了 LLM 判定就必须填判定标准（口径由人
   assert.equal(db.listPostRules()[0]!.llmTranslate, true, '没动的字段保留');
 });
 
-test('/api/x/recent：回推文归档（不含 raw）+ 源运行状态', async (t) => {
+test('/api/x/accounts：名单行携带最近 3 条推文（不含 raw）+ 关联主播展示名', async (t) => {
   const db = new Db(':memory:');
   const { base } = await setup(t, { db, x: makeXDep(db, []) });
+  db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true });
   db.insertPosts([
     { platform: 'twitter', uid: 'watase_yuzuki', itemId: '1', type: 'tweet', text: 'a', pics: [], pubTs: 2000, url: null, raw: '{"x":1}' },
-    { platform: 'bili_dynamic', uid: '1', itemId: '2', type: 'DYNAMIC_TYPE_WORD', text: 'b', pics: [], pubTs: 3000, url: null, raw: null },
+    { platform: 'twitter', uid: 'watase_yuzuki', itemId: '2', type: 'retweet', text: 'b', pics: [], pubTs: 3000, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '1', itemId: '3', type: 'DYNAMIC_TYPE_WORD', text: 'c', pics: [], pubTs: 4000, url: null, raw: null },
+    { platform: 'twitter', uid: 'd4dj_pj', itemId: '4', type: 'tweet', text: 'd', pics: [], pubTs: 5000, url: null, raw: null },
   ]);
-  const r = await api(base, '/api/x/recent');
+  const r = await api(base, '/api/x/accounts');
   assert.equal(r.status, 200);
-  const posts = r.json.posts as Array<{ platform: string; raw?: unknown }>;
-  assert.equal(posts.length, 1, '只回 X 归档');
-  assert.equal(posts[0]!.platform, 'twitter');
-  assert.equal(posts[0]!.raw, undefined, 'raw 不下发');
-  assert.ok(r.json.feed !== null, '带上源运行状态（验收面板要看「抓到了什么」）');
+  const accounts = r.json.accounts as Array<{ screenName: string; posts: Array<{ pubTs: number; raw?: unknown }> }>;
+  assert.equal(accounts.length, 1);
+  assert.equal(accounts[0]!.posts.length, 2, '只带本账号的 X 归档');
+  assert.deepEqual(accounts[0]!.posts.map((p) => p.pubTs), [3000, 2000], '按发布时间倒序');
+  assert.equal(accounts[0]!.posts[0]!.raw, undefined, 'raw 不下发');
 });

@@ -115,7 +115,8 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/sources/twitter/probe.ts` — **X 连通性探测**（代理 / 实例 RSS / 免登录回退），`npm run probe-x` 与 `/api/x/test` 共用
 - `src/sources/twitter/nitter.ts` — Nitter RSS 解析（主路线：唯一能区分原创/转发）；多实例轮询
 - `src/sources/twitter/web.ts` — 免登录回退：`x.com` HTML 发现 id + 单推接口补详情；账号存在性校验
-- `src/sources/twitter/feed.ts` — `TwitterFeedSource`：轮询 `x_accounts` → posts → `feed_post`（模子 = weibo/feed）
+- `src/sources/twitter/feed.ts` — `TwitterFeedSource`：轮询 `x_accounts` → posts → `feed_post`（模子 = weibo/feed）；顺手抠头像 URL 落盘回写
+- `src/sources/twitter/avatar.ts` — X 头像本地化（代理隧道下载 → cache/x-avatars，md5 文件名入库；面板经 `/api/x-avatar` 读）
 
 ### analysis / rules
 
@@ -201,7 +202,7 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 ## 实现现状
 
 - **已落地主干**：开播通知（NapCat/Toast 已实测）、规模化 + 内容判定（名单迁库 / 扫码登录 / 关注同步 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2）、时间轴统计、控制面板 v1+v2、MCP v1、NapCat 双平台托管
-- **X/推特（独立于 B站的一条路径）**：**P0–P3 全部落地**（隧道 fetch / X 配置 / 连通性探测 / `/api/x*` / 独立分页 `#view-x` / 免登录源 Nitter RSS + 回退 / `x_accounts` 独立名单 / 监听开关 `listen_twitter` / `post_rules` 图文帖规则与 `feed_post` 推送分支（X 图经代理本地化后交 NapCat 用 file://）/ 规则级 LLM 判定与翻译（失败回退机械筛选）/ MCP 工具 / `npm run probe-x`）。计划见 `docs/plan/twitter-source.md`，调研见 `docs/research/twitter.md`
+- **X/推特（独立于 B站的一条路径）**：**P0–P3 全部落地**（隧道 fetch / X 配置 / 连通性探测 / `/api/x*` / 图文分页 `#view-x`（X + 微博，账号卡片墙：身份段 + 针对本账号的图文帖规则 + 推文段）/ 免登录源 Nitter RSS + 回退 / `x_accounts` 独立名单 / 监听开关 `listen_twitter` / `post_rules` 图文帖规则与 `feed_post` 推送分支（X 图经代理本地化后交 NapCat 用 file://）/ 规则级 LLM 判定与翻译（失败回退机械筛选）/ MCP 工具 / `npm run probe-x`）。计划见 `docs/plan/twitter-source.md`，调研见 `docs/research/twitter.md`
 - **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、面板 REST 收敛到能力面、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 

@@ -53,8 +53,11 @@ export function decodeEntities(s: string): string {
 
 /**
  * 实例代理图片 URL → 原图 CDN URL。
- * `http://nitter.x/pic/media%2FHSU.jpg` → `https://pbs.twimg.com/media/HSU.jpg`；
- * 无法识别（相对路径、非 /pic/ 前缀）返回 null，由调用方丢弃——宁可不带图，也不存一个会随实例消失的链接。
+ * 两种实测形态（2026-09-17 真机核对）：
+ *  · `/pic/media%2FHSU.jpg`（正文图，路径形态）→ `https://pbs.twimg.com/media/HSU.jpg`
+ *  · `/pic/https%3A%2F%2Fpbs.twimg.com%2Fprofile_images%2F…`（频道头像，完整 URL 编码形态）→ 解出即直链
+ * 无法识别（相对路径、非 /pic/ 前缀、完整 URL 但不是 pbs.twimg.com）返回 null，
+ * 由调用方丢弃——宁可不带图，也不存一个会随实例消失或来路不明的链接。
  */
 export function instancePicToCdn(src: string): string | null {
   const m = src.match(/\/pic\/([^"'\s]+)$/);
@@ -66,6 +69,10 @@ export function instancePicToCdn(src: string): string | null {
     return null;
   }
   if (!decoded || decoded.includes('..')) return null;
+  // 完整 URL 形态：只信 pbs.twimg.com（统一成 https），其他 host 丢弃
+  const full = decoded.match(/^https?:\/\/pbs\.twimg\.com\/(.+)$/);
+  if (full) return `https://pbs.twimg.com/${full[1]}`;
+  if (/^https?:\/\//.test(decoded)) return null;
   return `https://pbs.twimg.com/${decoded.replace(/^\/+/, '')}`;
 }
 
@@ -131,9 +138,24 @@ export function parseNitterRss(xml: string): ParsedTweet[] {
   return out.sort((a, b) => b.pubTs - a.pubTs);
 }
 
+/**
+ * 频道头 `<image><url>` → 账号头像 CDN URL。
+ * 实测形态是完整 URL 编码（`/pic/https%3A%2F%2Fpbs.twimg.com%2Fprofile_images%2F…`），
+ * 与正文图的路径形态不同——都交给 instancePicToCdn 还原；
+ * 拿不到（实例没给 / 结构变了）返回 null，调用方按「无头像」处理。
+ */
+export function parseNitterAvatar(xml: string): string | null {
+  const channel = xml.split('<item>')[0] ?? '';
+  const m = channel.match(/<image>[\s\S]*?<url>([\s\S]*?)<\/url>[\s\S]*?<\/image>/);
+  if (!m) return null;
+  return instancePicToCdn(decodeEntities(m[1]!.trim()));
+}
+
 export interface NitterFetchResult {
   host: string;
   tweets: ParsedTweet[];
+  /** 频道头抠出的账号头像（pbs.twimg.com 形态）；实例没给为 null */
+  avatarCdn: string | null;
   bytes: number;
   ms: number;
 }
@@ -165,6 +187,7 @@ export async function fetchNitterTimeline(
   return {
     host,
     tweets: parseNitterRss(res.text),
+    avatarCdn: parseNitterAvatar(res.text),
     bytes: res.body.length,
     ms: Date.now() - started,
   };

@@ -17,6 +17,7 @@ export interface XAccountRow {
   last_tweet_id: string | null;
   last_tweet_at: number | null;
   last_ok_at: number | null;
+  avatar: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -35,6 +36,8 @@ export interface XAccount {
   lastTweetAt: number | null;
   /** 最近一次成功抓取（健康可视化：面板按它区分「抓过」与「从没成功」） */
   lastOkAt: number | null;
+  /** 本地头像缓存文件名（cache/x-avatars 下，md5 命名）；未抓到为 null，前端回退关联主播头像 */
+  avatar: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -59,6 +62,8 @@ export interface XAccountFetchTouch {
   lastTweetId?: string | null;
   lastTweetAt?: number | null;
   lastOkAt?: number;
+  /** 本地头像缓存文件名（已下载成功才传） */
+  avatar?: string | null;
 }
 
 /**
@@ -84,6 +89,7 @@ export function rowToXAccount(r: XAccountRow): XAccount {
     lastTweetId: r.last_tweet_id,
     lastTweetAt: r.last_tweet_at,
     lastOkAt: r.last_ok_at,
+    avatar: r.avatar,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

@@ -47,6 +47,8 @@ interface HarnessOpts {
   fallbackHtml?: boolean;
   accounts?: Array<{ screenName: string; enabled?: boolean }>;
   instances?: string[];
+  avatarCacheDir?: string;
+  avatarSaver?: TwitterFeedSourceOpts['avatarSaver'];
 }
 
 function harness(opts: HarnessOpts = {}) {
@@ -65,6 +67,8 @@ function harness(opts: HarnessOpts = {}) {
     intervalSec: 300,
     rssFetcher: opts.rssFetcher,
     webFetcher: opts.webFetcher,
+    avatarCacheDir: opts.avatarCacheDir,
+    avatarSaver: opts.avatarSaver,
     onStatus: (s) => { statuses.push(s); },
   });
   src.bind({ bus, db, config: cfg() });
@@ -79,13 +83,13 @@ function harness(opts: HarnessOpts = {}) {
 }
 
 const okRss = (tweets: ParsedTweet[], host = 'nitter.a.example') =>
-  async (): Promise<NitterFetchResult> => ({ host, tweets, bytes: 100, ms: 5 });
+  async (): Promise<NitterFetchResult> => ({ host, tweets, avatarCdn: null, bytes: 100, ms: 5 });
 
 test('首轮静默归档不发信号；第二轮新帖逐条 emit feed_post；重复轮询零信号（去重）', async (t) => {
   let round = [tweet({ id: '100' }), tweet({ id: '101', isRetweet: true, retweetedBy: SCREEN, author: 'd4dj_pj' })];
   // 注意闭包里读的是「当前」的 round（不是创建 harness 时那一份快照）
   const h = harness({
-    rssFetcher: async () => ({ host: 'nitter.a.example', tweets: round, bytes: 100, ms: 5 }),
+    rssFetcher: async () => ({ host: 'nitter.a.example', tweets: round, avatarCdn: null, bytes: 100, ms: 5 }),
   });
   t.after(h.cleanup);
 
@@ -129,6 +133,67 @@ test('游标只往前推：lastTweetId / lastTweetAt / lastOkAt 回写', async (
   assert.equal(h.account().lastTweetId, '300', '取数值最大的 id，不看 pubTs 顺序');
   assert.equal(h.account().lastTweetAt, 1_700_000_500);
   assert.ok(h.account().lastOkAt !== null, '成功抓取记 lastOkAt（面板据此区分“抓过”与“从没成功”）');
+});
+
+test('头像：抠到 URL 且账号无头像 → avatarSaver 落盘后回写文件名；已回写过不重复下载', async (t) => {
+  const saves: string[] = [];
+  const avatarCdn: string | null = 'https://pbs.twimg.com/profile_images/1/a.jpg';
+  const h = harness({
+    rssFetcher: async (): Promise<NitterFetchResult> => ({
+      host: 'nitter.a.example', tweets: [tweet({ id: '600' })], avatarCdn, bytes: 1, ms: 1,
+    }),
+    avatarCacheDir: '/tmp/ddclaw-test-xavatars',
+    avatarSaver: async (url, dir, proxy) => {
+      saves.push(`${url}|${dir}|${proxy}`);
+      return 'a'.repeat(32) + '.jpg';
+    },
+  });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(saves.length, 1, '无头像 + 抠到 URL → 落盘一次');
+  assert.ok(saves[0]!.startsWith('https://pbs.twimg.com/profile_images/1/a.jpg|'), '传的是 CDN URL');
+  assert.equal(h.account().avatar, 'a'.repeat(32) + '.jpg', '文件名回写 x_accounts.avatar');
+
+  await h.src.pollOnce();
+  assert.equal(saves.length, 1, '已有头像不再下载');
+});
+
+test('头像：抠不到 URL / saver 失败 → 不写库，下轮再试', async (t) => {
+  let saverCalls = 0;
+  let avatarCdn: string | null = null;
+  const h = harness({
+    rssFetcher: async (): Promise<NitterFetchResult> => ({
+      host: 'nitter.a.example', tweets: [tweet({ id: '601' })], avatarCdn, bytes: 1, ms: 1,
+    }),
+    avatarCacheDir: '/tmp/ddclaw-test-xavatars',
+    avatarSaver: async () => { saverCalls++; return null; },
+  });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(saverCalls, 0, '没抠到 URL 不调 saver');
+  assert.equal(h.account().avatar, null);
+
+  avatarCdn = 'https://pbs.twimg.com/profile_images/1/b.jpg';
+  await h.src.pollOnce();
+  assert.equal(saverCalls, 1, '抠到了但下载失败');
+  assert.equal(h.account().avatar, null, '失败不写库（下轮重试）');
+});
+
+test('头像：不注入 avatarCacheDir 则只抠 URL 不落盘', async (t) => {
+  let saverCalls = 0;
+  const h = harness({
+    rssFetcher: async (): Promise<NitterFetchResult> => ({
+      host: 'nitter.a.example', tweets: [tweet({ id: '603' })],
+      avatarCdn: 'https://pbs.twimg.com/profile_images/1/c.jpg', bytes: 1, ms: 1,
+    }),
+    avatarSaver: async () => { saverCalls++; return 'x.jpg'; },
+  });
+  t.after(h.cleanup);
+  await h.src.pollOnce();
+  assert.equal(saverCalls, 0);
+  assert.equal(h.account().avatar, null);
 });
 
 test('Nitter 全挂 → 回退免登录路线；via 记为 web 且 host 为空', async (t) => {

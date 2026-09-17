@@ -9,6 +9,7 @@ import { resolve, sep, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(import.meta.url), '..', '..', 'webui');
+const XAVATARS = resolve(ROOT, '..', 'data', 'cache', 'x-avatars');
 const PORT = process.env.WEBUI_PORT ? Number(process.env.WEBUI_PORT) : 8788;
 
 const TYPES = {
@@ -23,6 +24,18 @@ const TYPES = {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   let pathname = decodeURIComponent(url.pathname);
+  // demo 专用的 /api/x-avatar：生产由后端从 cache/x-avatars 读，dev 静态服映射同一目录
+  if (pathname === '/api/x-avatar') {
+    const name = (url.searchParams.get('file') ?? '').replace(/[^a-z0-9.]/gi, '');
+    const file = resolve(XAVATARS, name);
+    if (!file.startsWith(XAVATARS + sep) || !existsSync(file)) {
+      res.writeHead(404).end('not found');
+      return;
+    }
+    res.writeHead(200, { 'content-type': file.endsWith('.png') ? 'image/png' : 'image/jpeg' });
+    res.end(readFileSync(file));
+    return;
+  }
   if (pathname === '/') pathname = '/index.html';
   // 路径安全：`./` + 请求路径 再 resolve 到 ROOT 下，防 ../ 穿越
   let file = resolve(ROOT, '.' + pathname);

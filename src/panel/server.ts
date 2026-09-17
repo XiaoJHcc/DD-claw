@@ -5,7 +5,7 @@
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
@@ -150,6 +150,10 @@ export interface PanelDeps {
   };
   /** 关键帧缓存目录（/api/snapshot 按鼠标时间点取最近帧）；不注入则 /api/snapshot 一律 404 */
   snapshots?: {
+    dir: string;
+  };
+  /** X 头像本地缓存目录（/api/x-avatar 按文件名读）；不注入则 /api/x-avatar 一律 404 */
+  xAvatars?: {
     dir: string;
   };
   /** 测试推送（假消息走完整推送链路）；不注入则 POST /api/push/test 一律 404 */
@@ -318,16 +322,6 @@ async function handle(
     return;
   }
 
-  // 最近抓到的推文（验收面板）：让「抓到了什么」肉眼可见，也便于区分「抓不到」与「没新推文」
-  if (deps.x && method === 'GET' && path === '/api/x/recent') {
-    const info = deps.x.info() as { status?: { feed?: unknown } } | null;
-    sendJson(res, 200, {
-      posts: db.searchPosts({ platform: 'twitter', limit: 20 }).map(({ raw: _raw, ...p }) => p),
-      feed: info?.status?.feed ?? null,
-    });
-    return;
-  }
-
   // ---- X 关注账号（独立名单：不要求对应 B站主播，biliUid 只是可选关联）----
   if (deps.x && method === 'GET' && path === '/api/x/accounts') {
     sendJson(res, 200, { accounts: xAccountList(db) });
@@ -410,6 +404,27 @@ async function handle(
   // ---- 头像代理（恒挂载）：按 uid 反代主播头像，规避 B站图床无 CORS 的画布污染 ----
   if (method === 'GET' && path === '/api/avatar') {
     await sendAvatar(deps, url, res);
+    return;
+  }
+
+  // ---- X 头像本地缓存（xAvatars dep 存在才挂）：按文件名读 cache/x-avatars ----
+  if (method === 'GET' && path === '/api/x-avatar') {
+    if (!deps.xAvatars) throw new HttpError(404, '未装配 X 头像缓存目录');
+    const name = url.searchParams.get('file') ?? '';
+    // 文件名就是 md5+扩展名（avatar.ts 落盘形式），白名单校验天然防路径穿越
+    if (!/^[a-f0-9]{32}\.(jpg|png)$/.test(name)) throw new HttpError(400, 'file 参数不对');
+    let data: Buffer;
+    try {
+      data = readFileSync(join(deps.xAvatars.dir, name));
+    } catch {
+      throw new HttpError(404, '头像缓存不存在');
+    }
+    res.writeHead(200, {
+      'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
+      // 文件名随内容变（md5），长缓存安全
+      'cache-control': 'max-age=86400',
+    });
+    res.end(data);
     return;
   }
 
@@ -1013,10 +1028,19 @@ function putListen(deps: PanelDeps, feature: ListenFeature, body: unknown): unkn
 
 // ---- X 关注账号（独立名单）辅助 ----
 
-/** 名单行的面板视图：附上关联主播的展示名（空间受限处优先简称，同 streamers.alias 约定） */
+/** 名单行的面板视图：附关联主播展示名（简称优先，同 streamers.alias 约定）+ 最近 3 条推文（卡片动态段）。
+ *  biliFace 是头像兜底：X 链路还没抓到头像时，卡片先用关联主播的 B站头像。 */
 function xAccountView(db: Db, a: ReturnType<Db['listXAccounts']>[number]): unknown {
   const bili = a.biliUid ? db.getStreamer(a.biliUid) : undefined;
-  return { ...a, biliName: bili ? (bili.alias || bili.uname || a.biliUid) : null };
+  const posts = db
+    .searchPosts({ platform: 'twitter', uid: a.screenName, limit: 3 })
+    .map(({ raw: _raw, ...p }) => p);
+  return {
+    ...a,
+    biliName: bili ? (bili.alias || bili.uname || a.biliUid) : null,
+    biliFace: bili?.face ?? null,
+    posts,
+  };
 }
 
 function xAccountList(db: Db): unknown[] {
