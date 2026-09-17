@@ -186,6 +186,35 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
 5. **`/api/*` 响应形状与状态码不变**（201 vs 200、`{id}` vs `{ok:true,id}` 等前端契约保持，webui 无回归；`webui/demo/mock-api.js` 同步，AGENTS.md 强制）；
 6. **撤销路径触发热生效回调**（撤 runtime config → `reconcileRuntime`、撤 listen → `reconcileListen`、撤 provider → 重建 router，与面板手写等价）。
 
+#### 已落地（2026-09-17，`mcp-interface` 分支；均为新文件或安全集文件）
+
+| 项 | 落点 | 说明 |
+|---|---|---|
+| ✅ `runTool()` 共享执行器 | 新 `src/mcp/run-tool.ts` + 测试 | zod 再校验（第二个适配器绕不过）/ 审计（带角色与渠道、llm key 打码）/ 中文错误归一（`text` 与改造前 `/mcp` 逐字一致，`status` 供 REST 映射）/ `beforeWrite` 快照钩子（抛错即不写库）/ `scopeChannelId()` |
+| ✅ 调用域解析 | `src/mcp/auth.ts` | `mcp_tokens` 条目支持可选 `channelId`；`McpAuth` 增 `scope: { channelId? }`；`resolveMcpAuth` 由令牌解析（非法值 = 未绑定）；`readChannelId` 正整数校验 |
+| ✅ 令牌 CLI 渠道参数 | `src/tools/mcp-token.ts` | `add <名字> <admin\|gateway> [--channel <id>]`；`list` 增渠道列；admin + `--channel` 拒绝；gateway 未绑渠道给提示 |
+| ✅ 缺口清单机械化 | 新 `src/panel/write-path-inventory.test.ts` | 从 `server.ts` 提取写路由 × `tools.ts` 工具名，**新增未分类的写路由即测试失败**；「缺口清单」的单一信源由本表移到该测试（本文件的手抄表格会过期） |
+| ✅ 快照 + 撤销引擎 | 新 `src/core/undo.ts` + 测试（19 例） | `capture(meta, write)` 把「读前像 → 写 → 读后像 → 落记录」包进**同一事务**；差分出受影响行；`undo(scope)` 逐行比对后像==当前值否则**中止且一行不动**；栈式逆序、每渠道一栈；历史全量保留（只标记 undone）；LLM key 不落明文（撤销=清空+refill 提示） |
+| ✅ 会话存储 | 新 `src/core/chat-store.ts` + 测试（8 例） | `chat_sessions` / `chat_messages` 两张表；会话键 = 来源渠道（与撤销栈同一套 scope 字符串），不同群/私聊/面板**完全隔离**；**不自动裁剪**，`usage()` 给用量与 `needsResetHint`（40 条 / 8k 字符）；`reset()` 只清消息、保留会话行 |
+| ✅ `completeChat`（双协议 tools） | `src/analysis/providers.ts`（**纯新增**，既有 `complete`/`completeJson` 行为不变，旧测试 20 例全绿）+ 测试（12 例） | chat/completions 走 `tools` + `tool_calls` 回填；responses 走顶层 `{type:'function',name,parameters}` + `function_call` / `function_call_output`(`call_id`)；熔断/路由与 `completeJson` 同源；端点不支持原生 tools（HTTP 4xx 且报文点名 tool/function）→ **就地 JSON 模拟降级且不记熔断**；模拟产出的 arguments 与原生一样只做透传，**必须过 `runTool` 校验**（已用测试钉住） |
+| ✅ 工具面转换 + 暴露策略 | 新 `src/agent/tool-schema.ts` + 测试（6 例） | `z.toJSONSchema()` 转 function 参数（剥 `$schema`）；**暴露策略是生产侧常量** `AGENT_EXCLUDED_TOOLS`（排序类 + `test_*` 副作用类），与清单测试互补校验——「哪些进 agent 工具面」只有一处信源 |
+
+**`completeChat` 的 `responses` 分支尚未真机验证**：形状按上面写的实现并有离线测试钉住，但「真实端点是否逐字如此」（尤其 `function_call_output` + `call_id` 往返、`instructions` 与 `tools` 能否共存）只有接上真端点才能确认。第一次接真端点时先跑一次单轮工具往返再放量。
+
+**快照实现取向（对「写操作快照与撤销」一节的落实方式，2026-09-17）**：采用**表级前像快照 + 差分**，而不是让每条写路径自己声明「影响了哪些行」。理由是计划里点名的五种形状（级联停用 N 条 / 排序整表重写 / 新建 `sort=MAX+1` / settings 删除式写 / provider 复合写两行）在差分下**自动收敛为同一种记录**，且顺带拿到后像——撤销插入/删除才做得出来；代价是每次配置写整表 SELECT 一遍，但这只发生在配置写路径（面板点一下 / 一次 MCP 调用），配置表几十到几百行，绝不进轮询循环。两个附带决定：① `streamers` **暂不纳入**快照表——它是配置与归档的混合体（面板改 watch/alias，关注源同时覆写 uname/face），纳入后撤销比对会被轮询写频繁打断，撤不掉反而更常见，收敛其写路径时再裁决；② 除 LLM key 外**不做其它隐私例外**，即 `mcp_tokens` 的值会被快照（同库已有明文，未新增暴露面，且换来「撤销令牌轮换」能还原旧令牌）；若要求同口径打码，改一行 `redact` 判定即可。
+
+**有意未接线**（都在被 `main` 在制品占用的文件里，接线各 1–5 行）：`registerTools` 未改走 `runTool`（需动 `tools.ts` 尾部）；
+鉴权口径启动日志（判据 4）未加（需动 `index.ts`）；面板 REST 收敛与撤销栈未开工（需动 `server.ts` / `db.ts` / `index.ts`）；
+`UndoStore` / `ChatStore` 需要 `Db` 暴露原始句柄（现 `src/core/db.ts:239` 是 `private readonly db`）后才好接线；
+`completeChat` 与 `agentToolSpecs` 目前**没有任何调用方**（agent loop 尚未写），所以对现有链路是零行为变化。
+快照与写入的**同事务**保证不在 `runTool` 内（better-sqlite3 事务不能跨 await），属收敛每条写路径时的工作。
+
+**顺带修正的过期内容**（动手前先按最新代码复核）：
+
+- 缺口清单「29 处写分支」在 `main` 上已是 **38 处**（新增 `/api/x`、`/api/x/test`、`/api/x/accounts`、`/api/post-rules`、`/api/post-rules/order` 等）；微博来源落地后还会再涨——这正是把清单改成测试的原因。
+- P1 的「面板新增第四个视图」与 `main` 现状冲突（已是 时间表 / 主播列表 / 设置 / 图文 四个视图）。
+- **P0 宜拆两段**：P0a = 后端地基（`runTool` + 撤销 + scope + REST 收敛，与面板布局正交，因为 `/api/*` 形状由判据 5 冻结）；P0b = 设置页底部变更历史 UI + `webui/demo/mock-api.js` 同步（等面板改版定稿再做，否则与「移动老功能位置」互相踩）。
+
 估算：**~800–1000 行（含测试与表）**，跨 3–4 天；含 `Db` 公开 transaction 包装与删分类级联事务化；REST 收敛按缺口清单逐条推进，非一次性大重构。
 
 #### 配置写路径缺口清单（REST 收敛的真实范围）
