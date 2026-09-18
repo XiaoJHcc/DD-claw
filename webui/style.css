@@ -3,7 +3,9 @@
  * （2026-09，取代旧 macOS 风格双主题版）：统一令牌为骨 + 克制彩色，浅色单主题（不做深色移植）。
  * 文末「生产兼容增补」段 = 卡片模块未改版前的过渡样式（旧类名映射到 v2 令牌）+ 时间表迁移。
  *
- * 间距唯一四档：--sp-1:4 / --sp-2:8 / --sp-3:12 / --sp-4:20（=--pad）；弹窗窗口内边距单列一档 --sheet-pad:28。
+ * 间距五档：--sp-1:4 / --sp-2:8 / --sp-3:12 / --sp-4:20（=--pad）/ --sp-5:40（分段与壳层大间距——
+ * 比卡片间距宽两档，只用于页面分段处（如图文页大 segnav 上方）与边栏↔主容器间隙，组件内部禁用）；
+ * 弹窗窗口内边距单列一档 --sheet-pad:28。
  * 字号四档：--fs-xs:11 标签 / --fs-sm:12 次要 / --fs-base:14 正文 / --fs-xl:16 标题。
  * 圆角三级：--r-lg:24 页面级（卡片/弹窗/边栏） / --r-inset:16 卡片内嵌块（卡片头/行/拖拽浮行） /
  * --r-md:10 控件（按钮/输入框/tag），正圆形（头像/状态点/勾选框）与开关胶囊为形态豁免。
@@ -24,10 +26,11 @@
  */
 *{box-sizing:border-box}
 :root{
-  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:20px;--pad:var(--sp-4);--sheet-pad:28px;
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:20px;--sp-5:40px;--pad:var(--sp-4);--sheet-pad:28px;
   --fs-xs:11px;--fs-sm:12px;--fs-base:14px;--fs-xl:16px;
   --r-lg:24px;--r-md:10px;--r-inset:16px;--inset:8px;
   --ctl-h:36px;--row-h:48px;--row-h2:64px;--icon:16px;
+  --segnav-h-lg:48px;--segnav-h-sm:36px;
   --blue:#4C8DFF;--blue-deep:#3D7BF0;--blue-soft:rgba(76,141,255,.10);
   --pink:#FF5C8A;--red:#E5484D;
   --mint:#2FBD9B;--purple:#8B7CF6;--amber:#E8A13A;--cyan:#3FA9C9;
@@ -85,13 +88,14 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 /* 滚动容器恒在自身 padding box 处裁切（overflow-y:auto ⇒ 横向一样裁），内部无论怎么加
    padding/负 margin 都改变不了「卡片到裁切线的距离 = 视图内边距」。根治 = 让滚动口左右各伸出
    一段透明翼区（host 加宽 + 对称 padding，裁切线推到内容列之外的页底区），卡片阴影与
-   3D 变换的落笔空间不再依赖视图内边距，三视图间距得以统一为 --pad。
+   3D 变换的落笔空间不再依赖视图内边距，三视图间距得以统一（上右下 = --pad，
+   左 = --sp-5，边栏与主容器之间的壳层大间距）。
    左翼区伸进边栏右侧：边栏 .sidenav 以 z-index 压在 host 之上，导航点击不受影响，
    阴影没入边栏下方的部分 = 被边栏遮挡的自然观感；上下裁切线即窗口物理边缘。 */
 .view-host{flex:0 1 auto;min-width:0;width:calc(1280px + 96px);padding:0 48px;margin-left:-48px;
   height:100vh;overflow-y:auto;scrollbar-width:none}
 .view-host::-webkit-scrollbar{display:none}
-.view{max-width:1280px;padding:var(--pad)}
+.view{max-width:1280px;padding:var(--pad) var(--pad) var(--pad) var(--sp-5)}
 
 /* ---- 卡片：两段式内嵌。卡片头 = 内嵌圆角矩形（左右/下边距 --inset，顶距由卡片 padding-top 提供——
    头部 margin-top 会穿透塌陷到卡片外（.card 非 BFC），导致头部探出卡片顶缘）。
@@ -372,6 +376,26 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .chip-dis.on,.chip-dis.on:hover{background:rgba(0,0,0,.12);color:#B5B5B5}
 .chip-dis.on .chip-ic::before{opacity:0}
 .chip-dis.on .chip-ic svg{opacity:1}
+
+/* ---- 胶囊分段导航（segnav，通用单选切换条）：灰轨道 + 白色滑块横滑（iOS 分段控件形态）。
+   占满容器宽度、选项均分（flex:1）。两档尺寸：lg = 页面级筛选条（高 --segnav-h-lg）/
+   sm = 弹窗内切换（高 --segnav-h-sm）。
+   滑块位置由 JS 量出（offsetLeft/offsetWidth），.noanim 供首渲/尺寸跟随时瞬移 ---- */
+.segnav{position:relative;display:flex;align-items:center;flex:none;width:100%;padding:3px;
+  border-radius:999px;background:var(--fill)}
+.segnav-lg{height:var(--segnav-h-lg)}
+.segnav-sm{height:var(--segnav-h-sm)}
+.segnav-thumb{position:absolute;top:3px;bottom:3px;left:3px;width:0;border-radius:999px;
+  background:var(--card-bg);box-shadow:0 1px 3px rgba(0,0,0,.12),0 2px 8px rgba(0,0,0,.06);
+  transition:left .28s cubic-bezier(.22,1,.36,1),width .28s cubic-bezier(.22,1,.36,1)}
+.segnav.noanim .segnav-thumb{transition:none}
+.segnav-item{position:relative;z-index:1;flex:1;min-width:0;border:none;background:transparent;cursor:pointer;
+  border-radius:999px;font:inherit;font-weight:600;color:var(--text-2);white-space:nowrap;
+  text-align:center;transition:color .18s ease}
+.segnav-lg .segnav-item{height:calc(var(--segnav-h-lg) - 6px);padding:0 18px;font-size:var(--fs-base)}
+.segnav-sm .segnav-item{height:calc(var(--segnav-h-sm) - 6px);padding:0 12px;font-size:var(--fs-sm)}
+.segnav-item:hover{color:var(--text)}
+.segnav-item.on{color:var(--blue-deep)}
 
 /* ---- sheet 弹窗（两级同款） ---- */
 .sheet-mask{position:fixed;inset:0;background:var(--mask);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
@@ -762,6 +786,11 @@ input:disabled{opacity:.5;background:var(--fill)}
 /* 源设置弹窗：输入框 + 右侧方 icon 测试按钮（icon-btn 36×36 与输入框同高；常态描边成「钮」） */
 .field-inline{display:flex;gap:var(--sp-2);align-items:center}
 .field-inline .inp{flex:1;min-width:0}
+/* 添加账号浮窗的并排行（微博「昵称 / uid」、X「用户名 / 昵称」）：行自身承担字段纵向外边距、
+   行内字段 margin 清零——否则行内 margin 不参与折叠，「行 → 显示名」会比「显示名 → 关联主播」宽一倍 */
+#acct-form .field-row{margin:var(--sp-2) 0}
+#acct-form .field-row .field{margin:0;min-width:0}
+#acct-form .field-row .field-uid{flex:none;width:148px}
 .field-inline .icon-btn{border:1px solid var(--separator);background:var(--card-bg)}
 .field-inline .icon-btn:hover{border-color:var(--blue);color:var(--blue);background:#fff}
 
@@ -771,11 +800,17 @@ input:disabled{opacity:.5;background:var(--fill)}
 /* 账号浮窗规则区底部的「添加规则」：通宽 ghost，与规则行 8px 缝 */
 .x-add-rule{width:100%;margin-top:8px}
 
-/* 栅格末尾的虚线「添加账号」卡：无阴影无底色，hover 仍随 st-card 浮起 */
-.x-add-card{align-items:center;justify-content:center;gap:8px;min-height:220px;
-  border:1.5px dashed var(--separator);background:transparent;box-shadow:none;
-  color:var(--text-2);font-size:var(--fs-base);font-weight:600;cursor:pointer}
-.x-add-card svg{width:22px;height:22px}
+/* 圆形「添加账号」钮：账号墙头部右端，与大 segnav 同高（--segnav-h-lg），
+   蓝渐变填充白加号（呼应边栏导航选中态），hover 微浮起 */
+.x-add-btn{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:var(--segnav-h-lg);height:var(--segnav-h-lg);border:none;border-radius:50%;cursor:pointer;color:#fff;
+  background:linear-gradient(135deg,#7AA5FF,#2F6FEB);box-shadow:0 3px 8px rgba(47,111,235,.26);
+  transition:transform .18s ease,box-shadow .18s ease}
+.x-add-btn:hover{transform:translateY(-1px);box-shadow:0 5px 12px rgba(47,111,235,.34)}
+.x-add-btn svg{width:18px;height:18px;display:block}
+
+/* 添加账号浮窗顶部的小 segnav（X/微博平台切换）：与下方表单拉开间距 */
+.acct-platnav{margin-bottom:var(--sp-3)}
 
 /* 源设置弹窗：测试钮三态（结果并入按钮，不插文字块、不动布局）——
    测试中 = 图标旋转；成功 = 绿勾 / 失败 = 红叉（描边同色），逐条原因进按钮 title（hover 提示） */
@@ -795,7 +830,9 @@ input:disabled{opacity:.5;background:var(--fill)}
 
 /* 单墙混排：两块平台各自的账号卡在同一张网格里，靠身份段前的平台角标与筛选胶囊区分
    （角标不是装饰——两张名单的账号在同一屏时，用户必须一眼看出规则会落在哪个平台） */
-.x-accounts-head{display:flex;align-items:center;gap:var(--sp-3);margin:var(--pad) 0 var(--sp-3)}
+.x-accounts-head{display:flex;align-items:center;gap:var(--sp-3);margin:var(--sp-5) 0 var(--pad)}
+/* 筛选 segnav 占满圆形添加钮之外的剩余宽度（segnav 自身 width:100%，容器必须给 flex:1 才有得占） */
+#x-account-filter{flex:1;min-width:0}
 .x-plat{display:inline-flex;align-items:center;gap:4px;height:18px;padding:0 7px;border-radius:5px;
   font-size:var(--fs-xs);font-weight:700;letter-spacing:.2px;flex:none}
 .x-plat-x{background:rgba(0,0,0,.06);color:#3A3A3C}

@@ -14,6 +14,7 @@ export interface WeiboAccountRow {
   id: number;
   uid: string;
   nickname: string | null;
+  display_name: string | null;
   bili_uid: string | null;
   enabled: number;
   last_post_id: string | null;
@@ -30,6 +31,8 @@ export interface WeiboAccount {
   uid: string;
   /** 微博昵称（抓到时回写；也可人填） */
   nickname: string | null;
+  /** 自定义显示名（卡片优先展示；留空 = 用昵称，同 X 的 displayName 语义） */
+  displayName: string | null;
   /** 可选关联主播（引用 streamers.uid；仅展示、文案与主播卡第三栏混排用） */
   biliUid: string | null;
   enabled: boolean;
@@ -55,6 +58,7 @@ export interface WeiboAccountInput {
   id?: number;
   uid?: string;
   nickname?: string | null;
+  displayName?: string | null;
   biliUid?: string | null;
   enabled?: boolean;
 }
@@ -78,6 +82,11 @@ export function normalizeWeiboUid(raw: string): string {
   return s.replace(/^u\//i, '').replace(/\D+/g, '');
 }
 
+/** 昵称归一化：去空白、剥开头的 @（微博的 @ 只是提及语法，昵称本身不含 @；用户常会习惯性打上） */
+export function normalizeWeiboNick(raw: string): string {
+  return raw.trim().replace(/^@+/, '');
+}
+
 /** 形状校验：微博 uid 是数字串（截图里是 10 位，但老账号有更短的，故只约束长度上界） */
 export function isValidWeiboUid(s: string): boolean {
   return /^\d{1,20}$/.test(s);
@@ -88,6 +97,7 @@ export function rowToWeiboAccount(r: WeiboAccountRow): WeiboAccount {
     id: r.id,
     uid: r.uid,
     nickname: r.nickname,
+    displayName: r.display_name,
     biliUid: r.bili_uid,
     enabled: r.enabled === 1,
     lastPostId: r.last_post_id,

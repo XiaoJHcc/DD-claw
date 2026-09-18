@@ -114,7 +114,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/sources/weibo/avatar.ts` — 微博头像本地化（**直连下载**，sinaimg 境内可达；md5 文件名入库，面板经 `/api/weibo-avatar` 读）
 - `src/sources/weibo/qrcode.ts` — 微博扫码（generate 必须带 Referer）
 - `src/sources/weibo/auth.ts` — weibo-cookies + `X-Log-Uid` 心跳
-- `src/sources/weibo/resolve.ts` — 昵称→UID 匿名解析链
+- `src/sources/weibo/resolve.ts` — 昵称↔UID 匿名解析链（昵称→uid 实测；uid→昵称走 getIndex userInfo）
 - `src/sources/twitter/probe.ts` — **X 连通性探测**（代理 / 实例 RSS / 免登录回退），`npm run probe-x` 与 `/api/x/test` 共用
 - `src/sources/twitter/nitter.ts` — Nitter RSS 解析（主路线：唯一能区分原创/转发）；多实例轮询
 - `src/sources/twitter/web.ts` — 免登录回退：`x.com` HTML 发现 id + 单推接口补详情；账号存在性校验

@@ -43,7 +43,7 @@
 - 「这条微博属于哪个主播」不再靠 `posts.uid`：由 `weibo_accounts.bili_uid`（可选关联）反查，面板主播卡第三栏走 `db.listRecentPostsMixed`；未关联任何主播的独立博主不会串进主播卡。
 - `src/sources/weibo/qrcode.ts` — passport sso/v2 扫码客户端：`generateQrcode`（**必须带 `Referer: https://weibo.com/` 否则 403**，image 是 png 直链面板直接 `<img src>`）/ `pollQrcode`（retcode 归一化：20000000=confirmed、50114001=waiting 已实测；50114002=scanned、其他 50114xxx=expired 防御式映射）/ `exchangeCookies`（confirmed 的 data.url 起跟 302 链收集 Set-Cookie 换全套 cookie，3xx 时 res.ok=false 勿当错误）；fetch 可注入。
 - `src/sources/weibo/auth.ts` — weibo-cookies.json 管理：`loadWeiboCookies`（坏 JSON 启动即失败）/ `saveWeiboCookies`（merge：新值覆盖、旧值兜底）/ `weiboCookieHeader` / `fetchWeiboSelf`（`ajax/log/action` 看 X-Log-Uid 响应头，异常与缺头归一化为未登录）。
-- `src/sources/weibo/resolve.ts` — 昵称→UID 解析（匿名访客通道：genvisitor 拿 tid → incarnate 拿 SUB/SUBP → `m.weibo.cn/n/<昵称>` 302 /u/<uid>；cookie 模块级缓存、失效自动重建重试一次；fetch 可注入）。
+- `src/sources/weibo/resolve.ts` — 昵称↔UID 解析（匿名访客通道：genvisitor 拿 tid → incarnate 拿 SUB/SUBP → 昵称→uid 走 `m.weibo.cn/n/<昵称>` 302 /u/<uid>（已实测），uid→昵称走 `m.weibo.cn/api/container/getIndex?type=uid&value=` 的 userInfo.screen_name；cookie 模块级缓存、失效自动重建重试一次；fetch 可注入）。
 
 ## 媒体
 

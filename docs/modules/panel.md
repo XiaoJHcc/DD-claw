@@ -37,7 +37,8 @@
 | /mcp | MCP 端点（Bearer token 鉴权 + 按角色注册工具面），实现委托 src/mcp/ |
 | GET/PUT /api/x · POST /api/x/test | X 连接配置与探测（GET **只读快照、绝不打网络**；POST 测试允许未保存的输入值「先测后存」，只有测已保存配置才更新快照；配置变了相关旧结论作废） |
 | /api/x/accounts · /:id | X 独立名单 CRUD；新建时走免登录存在性校验（账号不存在 400 / 链路不通照收并回报 `verify`）；`biliUid` 必须在监听名单 |
-| /api/weibo · /api/weibo/accounts · /:id | 微博运行状态快照（GET 只读；**面板当前不消费**，保留给后续可视化）+ 微博独立名单 CRUD；POST 时 `uid` 与 `nickname` 二选一（只填昵称走匿名解析链补 uid），重名 409、非数字 uid 400 |
+| /api/weibo · /api/weibo/accounts · /:id | 微博运行状态快照（GET 只读；**面板当前不消费**，保留给后续可视化）+ 微博独立名单 CRUD；POST 时 `uid` 与 `nickname` 二选一（只填昵称走匿名解析链补 uid），重名 409、非数字 uid 400；`displayName` 为自定义显示名（卡片优先展示，留空 = 用昵称） |
+| GET /api/weibo/resolve?nick · ?uid | 昵称 ↔ uid 即时互查（添加浮窗「填一个解析另一个」用；与新建补 uid 同一条匿名解析链；找不到 404、解析失败 400） |
 | /api/x-avatar · /api/weibo-avatar?file= | 按文件名读本地头像缓存（md5+扩展名白名单，天然防穿越；长缓存） |
 | /api/post-rules · /:id · /order | 图文帖规则 CRUD：**`platform` 决定 `accountIds` 查哪份名单**；微博规则拒 `filters.quote` 与 `llmTranslate`；换平台未带新名单则清空 `accountIds`；「原创/转发都不勾」400；开了 LLM 判定必须填判定标准 |
 
@@ -58,14 +59,14 @@
 | 文件 | 职责 |
 |---|---|
 | index.html | 壳：左边栏（浮动卡片：logo + 三视图导航 + 在播计数胶囊）+ 右内容区三视图（时间表 / 主播列表 / 设置） |
-| style.css | v2 设计系统（间距 4/8/12/20、圆角三级、控件恒 36 高、按钮四语义色；浅色单主题，深色已删） |
+| style.css | v2 设计系统（间距 4/8/12/20/40〔40 = 分段与边栏↔主容器的壳层大间距〕、圆角三级、控件恒 36 高、按钮四语义色；浅色单主题，深色已删） |
 | js/boot.js | 入口：`?demo=1` 时先装 demo/mock-api.js fetch 拦截器再进 app，真实部署零影响 |
 | js/app.js | 装配各卡模块 + 边栏视图切换 |
-| js/core.js | 共享件（全部显式 export）：esc/api/toast/sheet/switchHtml/checkboxHtml/iconBtn/**makeSortable 拖拽排序**/**事件委托 ACTIONS·CHANGES·INPUTS 三张表**（禁用内联 on\* 与字符串拼接转义，防属性注入 XSS）/fitRow 行宽适配/avatarHtml 头像+首字占位/relTime/dropdownHtml/data-icon |
+| js/core.js | 共享件（全部显式 export）：esc/api/toast/sheet/switchHtml/checkboxHtml/iconBtn/**makeSortable 拖拽排序**/**事件委托 ACTIONS·CHANGES·INPUTS 三张表**（禁用内联 on\* 与字符串拼接转义，防属性注入 XSS）/fitRow 行宽适配/avatarHtml 头像+首字占位/relTime/dropdownHtml/**segnav 胶囊分段导航（lg/sm 两档，滑块横滑动效）**/data-icon |
 | js/icons.js | `icon(name)`：消费本地节选的 lucide 官方节点数据（js/lucide-icons.js），按官网同款 SVG 属性输出，离线可用 |
 | js/qr-lib.js | qrcode-generator 真实 JS，扫码登录弹窗用 |
 | js/{listen,llm,categories,push,napcat,streamers,follows,schedule}.js | 九卡模块；streamers 导出 loadStreamers、push 导出 loadPush 供跨卡 import，无循环依赖 |
-| js/x.js | **图文分页**（X / 推特 + 微博）：两张来源卡（X 卡 = 连接可达性行；微博卡 = 登录态行，**保持原样不加行**）+「源设置/抓取设置」弹窗 + **单墙混排的账号卡片墙**（平台筛选胶囊 + 平台角标；卡面 = 身份段 + 图文规则摘要 + 帖子段，整卡可点开账号浮窗，规则编辑开二级浮窗） |
+| js/x.js | **图文分页**（X / 推特 + 微博）：两张来源卡（X 卡 = 连接可达性行；微博卡 = 登录态行，**保持原样不加行**）+「源设置/抓取设置」弹窗 + **单墙混排的账号卡片墙**（顶部大 segnav 筛选 + 右端圆形添加钮，与 segnav 同高；平台角标；卡面 = 身份段 + 图文规则摘要 + 帖子段，整卡可点开账号浮窗——添加态顶部小 segnav 切平台，规则编辑开二级浮窗） |
 
 ### v2 设计要点（只记非显而易见的机制）
 
@@ -73,7 +74,7 @@
 - **主播列表**：竖版三段式 .st-card（关键帧横幅头 / 主播信息段 / 动态段），在播优先再按 lastLiveAt 排序；**主播三开关已删**（名单内即监听中，watch 仍是名单机制，关注列表「取消监听」= PUT watch:false）。
 - **设置视图**：六设置卡（acc 主题色区分）+ 关注列表候选池；运行时参数收纳进对应卡底部按钮的 sheet（监听「抓取设置」/ LLM「高级」/ 推送渠道「推送设置」），settings 唯一信源、保存即热生效。
 - **时间表**：5 天滑动窗口（点击居中 + 滚轮按天步进）；**泳道行高 JS 解算**——0-1-2 级权重制，按「当天道数 × 级权重 1/2」水装填分配余高、解成 flex-basis 像素值，每道下限 single 16px / center 32px，放不下按三步降级（去首末两天 → 相邻天降 mini → 当天降单行），全程 px→px 连续过渡；相邻 ±1 步窗口后台预取，命中立即渲染再后台纠偏；hover 图优先 /api/snapshot 最近缓存帧，404 回退远程 keyframe ?? cover，再挂移除 img。
-- **图文分页（#view-x）**：单墙混排 + 平台筛选胶囊（全部 / X / 微博，带计数）——两张名单的自增 id 会撞、规则又按 `platform` 分流，所以卡片必须带平台角标、规则浮窗必须有「来源」行。微博账号浮窗的 uid 编辑态只读（uid 是账号身份，改它等于换账号，历史微博会串到别人名下）；规则浮窗对微博不出「引用」「附译文」两枚胶囊（该平台没有这两种形态，后端也会拒）。
+- **图文分页（#view-x）**：单墙混排 + 大 segnav 筛选（全部 / X / 微博，带计数）+ 右端圆形「添加账号」钮（与大 segnav 同高呼应）——两张名单的自增 id 会撞、规则又按 `platform` 分流，所以卡片必须带平台角标、规则浮窗必须有「来源」行。添加浮窗顶部小 segnav 切 X/微博（草稿随切换保留）；两平台名称字段同构：**ID/uid = 唯一标识、昵称 = 平台名（X 的 display name / 微博昵称，抓到回写也可手填）、显示名 = 自定义（卡片优先展示）**——X 表单 = ID（@handle，框内 placeholder 只放一个 @ 作格式提示）+ 昵称（并排两 field、label 各在输入框上方）/ 显示名 / 关联主播，微博 = 昵称 + uid（并排，uid 窄列在右；昵称框 placeholder 只放一个 @——@昵称 是微博 ID 的常规词头，后端 normalizeWeiboNick 剥开头 @）/ 显示名 / 关联主播；微博的昵称与 uid 失焦即查 `/api/weibo/resolve` 回填另一个（解析失败静默，保存时后端兜底报错）；微博账号浮窗的 uid 编辑态只读（uid 是账号身份，改它等于换账号，历史微博会串到别人名下）；规则浮窗对微博不出「引用」「附译文」两枚胶囊（该平台没有这两种形态，后端也会拒）。
 - 简称（alias）仅在空间受限处优先（推送规则行生效主播标签、时间表横条），其余一律用原名 uname。
 
 ### demo 模式（`?demo=1`）三层数据信源

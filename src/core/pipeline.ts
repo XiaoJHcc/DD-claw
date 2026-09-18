@@ -255,10 +255,11 @@ export class Pipeline {
       return;
     }
     const bili = account.biliUid ? db.getStreamer(account.biliUid) : undefined;
-    // 两个账号类型只在「标识字段叫什么名字」上不同：X 是 screen name / 微博是数字 uid（昵称只是展示名）
+    // 两个账号类型只在「标识字段叫什么名字」上不同：X 是 screen name / 微博是数字 uid；
+    // 展示名两平台同一条链：自定义显示名 → 平台昵称（再缺省由渲染层回退标识本身）
     const ident: { screenName: string; displayName: string | null } = platform === 'twitter'
-      ? { screenName: (account as XAccount).screenName, displayName: (account as XAccount).displayName }
-      : { screenName: (account as WeiboAccount).uid, displayName: (account as WeiboAccount).nickname };
+      ? { screenName: (account as XAccount).screenName, displayName: (account as XAccount).displayName ?? (account as XAccount).nickname }
+      : { screenName: (account as WeiboAccount).uid, displayName: (account as WeiboAccount).displayName ?? (account as WeiboAccount).nickname };
     const post: PostCandidate = {
       platform,
       accountId: account.id,

@@ -376,6 +376,8 @@ const adminTools: McpToolDef[] = [
     schema: {
       id: idSchema.optional(),
       screenName: z.string().optional().describe('X 账号（@ 可省）'),
+      nickname: z.string().nullable().optional().describe('X 的昵称（平台 display name）；留空 = 未设置'),
+      displayName: z.string().nullable().optional().describe('自定义显示名（卡片优先展示；留空 = 用昵称）'),
       biliUid: uidSchema.nullable().optional().describe('可选关联主播 uid；null = 取消关联'),
       enabled: z.boolean().optional(),
     },
@@ -383,7 +385,7 @@ const adminTools: McpToolDef[] = [
     write: true,
     handler: (deps, args) => {
       if (args.id === undefined) {
-        const input = parseNewXAccount(pickBody(args, ['screenName', 'biliUid', 'enabled']));
+        const input = parseNewXAccount(pickBody(args, ['screenName', 'nickname', 'displayName', 'biliUid', 'enabled']));
         if (deps.db.getXAccountByScreenName(input.screenName)) {
           throw new HttpError(409, `@${input.screenName} 已在名单里`);
         }
@@ -394,7 +396,7 @@ const adminTools: McpToolDef[] = [
       }
       const id = Number(args.id);
       if (!deps.db.getXAccount(id)) throw new HttpError(404, 'X 账号不存在');
-      const patch = parseXAccountPatch(pickBody(args, ['screenName', 'biliUid', 'displayName', 'enabled']));
+      const patch = parseXAccountPatch(pickBody(args, ['screenName', 'nickname', 'biliUid', 'displayName', 'enabled']));
       if (patch.screenName !== undefined) {
         const dup = deps.db.getXAccountByScreenName(patch.screenName);
         if (dup && dup.id !== id) throw new HttpError(409, `@${patch.screenName} 已在名单里`);
@@ -425,6 +427,7 @@ const adminTools: McpToolDef[] = [
       id: idSchema.optional(),
       uid: z.string().optional().describe('微博数字 uid（可从 weibo.com/u/<uid> 复制）'),
       nickname: z.string().nullable().optional().describe('微博昵称；新建时与 uid 至少给一个（给昵称则自动解析 uid）'),
+      displayName: z.string().nullable().optional().describe('自定义显示名（卡片优先展示；留空 = 用昵称）'),
       biliUid: uidSchema.nullable().optional().describe('可选关联主播 uid；null = 取消关联'),
       enabled: z.boolean().optional(),
     },
@@ -432,7 +435,7 @@ const adminTools: McpToolDef[] = [
     write: true,
     handler: async (deps, args) => {
       if (args.id === undefined) {
-        const input = parseNewWeiboAccount(pickBody(args, ['uid', 'nickname', 'biliUid', 'enabled']));
+        const input = parseNewWeiboAccount(pickBody(args, ['uid', 'nickname', 'displayName', 'biliUid', 'enabled']));
         let uid = input.uid;
         if (!uid) {
           if (!deps.weiboResolver) throw new HttpError(400, '微博解析不可用，请直接填 uid');
@@ -451,7 +454,7 @@ const adminTools: McpToolDef[] = [
       }
       const id = Number(args.id);
       if (!deps.db.getWeiboAccount(id)) throw new HttpError(404, '微博账号不存在');
-      const patch = parseWeiboAccountPatch(pickBody(args, ['uid', 'nickname', 'biliUid', 'enabled']));
+      const patch = parseWeiboAccountPatch(pickBody(args, ['uid', 'nickname', 'displayName', 'biliUid', 'enabled']));
       if (patch.uid !== undefined) {
         const dup = deps.db.getWeiboAccountByUid(patch.uid);
         if (dup && dup.id !== id) throw new HttpError(409, `微博 ${patch.uid} 已在名单里`);

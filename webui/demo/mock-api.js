@@ -336,7 +336,8 @@ for (const p of store.twitterPosts) {
     const known = ['watase_yuzuki', 'd4dj_pj', 'hololive_en', 'nhk_news'].includes(screenName);
     if (!known) return json(400, { error: `X 账号不存在：@${screenName}` });
     const row = {
-      id: ++store.xAccountSeq, screenName, displayName: b.displayName ? String(b.displayName) : null,
+      id: ++store.xAccountSeq, screenName, nickname: b.nickname ? String(b.nickname) : null,
+      displayName: b.displayName ? String(b.displayName) : null,
       biliUid: b.biliUid ? String(b.biliUid) : null, enabled: b.enabled !== false,
       lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null, createdAt: nowSec, updatedAt: nowSec,
     };
@@ -350,6 +351,7 @@ for (const p of store.twitterPosts) {
       if (!row) return json(404, { error: 'X 账号不存在' });
       const b = body();
       if (typeof b.screenName === 'string') row.screenName = b.screenName.trim().replace(/^@+/, '').toLowerCase();
+      if (b.nickname !== undefined) row.nickname = b.nickname === null ? null : String(b.nickname);
       if (b.biliUid !== undefined) row.biliUid = b.biliUid === null ? null : String(b.biliUid);
       if (b.displayName !== undefined) row.displayName = b.displayName === null ? null : String(b.displayName);
       if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
@@ -410,6 +412,24 @@ for (const p of store.twitterPosts) {
   if (path === '/api/weibo/accounts' && method === 'GET') {
     return ok({ accounts: store.weiboAccounts.map(weiboAccountView) });
   }
+  // 昵称 ↔ uid 即时互查（与真实后端同构；演示口径：名单里的账号 + 「阿梓」可解析，其余 404）
+  if (path === '/api/weibo/resolve' && method === 'GET') {
+    const nick = (q.get('nick') || '').trim();
+    const uidRaw = (q.get('uid') || '').trim();
+    if (nick) {
+      const hit = store.weiboAccounts.find((a) => a.nickname === nick);
+      if (hit) return ok({ uid: hit.uid, nickname: nick });
+      if (nick === '阿梓从小就很可爱' || nick === '阿梓') return ok({ uid: '2203177060', nickname: nick });
+      return json(404, { error: `微博上找不到这个昵称：${nick}` });
+    }
+    if (uidRaw) {
+      const hit = store.weiboAccounts.find((a) => a.uid === uidRaw);
+      if (hit) return ok({ uid: uidRaw, nickname: hit.nickname || '阿梓从小就很可爱' });
+      if (uidRaw === '2203177060') return ok({ uid: uidRaw, nickname: '阿梓从小就很可爱' });
+      return json(404, { error: `微博上找不到这个 uid：${uidRaw}` });
+    }
+    return json(400, { error: 'nick 与 uid 至少给一个' });
+  }
   if (path === '/api/weibo/accounts' && method === 'POST') {
     const b = body();
     let uid = String(b.uid || '').trim();
@@ -427,7 +447,8 @@ for (const p of store.twitterPosts) {
       return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
     }
     const row = {
-      id: ++store.weiboAccountSeq, uid, nickname, biliUid: b.biliUid ?? null,
+      id: ++store.weiboAccountSeq, uid, nickname, displayName: b.displayName ? String(b.displayName) : null,
+      biliUid: b.biliUid ?? null,
       enabled: b.enabled !== false, lastPostId: null, lastPostAt: null, lastOkAt: null,
       avatar: null, createdAt: nowSec, updatedAt: nowSec,
     };
@@ -454,6 +475,7 @@ for (const p of store.twitterPosts) {
         }
         if (b.uid !== undefined) row.uid = String(b.uid);
         if (b.nickname !== undefined) row.nickname = b.nickname;
+        if (b.displayName !== undefined) row.displayName = b.displayName;
         if (b.biliUid !== undefined) row.biliUid = b.biliUid;
         if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
         row.updatedAt = nowSec;

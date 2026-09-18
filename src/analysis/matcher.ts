@@ -73,7 +73,7 @@ export interface PostCandidate {
   accountId: number;
   /** 账号标识：X = screen name（不含 @）；微博 = 数字 uid */
   screenName: string;
-  /** 展示名：X = display_name（缺省回退 screen name）；微博 = 昵称（缺省回退 uid） */
+  /** 展示名：自定义显示名 → 平台昵称（X 再缺省回退 screen name、微博回退 uid，由渲染层兜底） */
   displayName?: string | null;
   /** 'tweet'/'retweet'（X）或 'mblog'/'retweet'（微博）——'retweet' 是两平台共用的转发语义 */
   type: string;

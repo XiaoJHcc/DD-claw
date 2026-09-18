@@ -18,7 +18,7 @@ import {
   type NewPostRule, type PostFilters, type PostPlatform, type PostRuleInput,
 } from '../core/post-rules.js';
 import { isValidScreenName, normalizeScreenName } from '../core/x-accounts.js';
-import { isValidWeiboUid, normalizeWeiboUid } from '../core/weibo-accounts.js';
+import { isValidWeiboUid, normalizeWeiboNick, normalizeWeiboUid } from '../core/weibo-accounts.js';
 import { describeTunnelError, parseInstanceList, parseProxyUrl } from '../core/proxy.js';
 
 export class HttpError extends Error {
@@ -461,7 +461,7 @@ export function parseXTestRequest(body: unknown): XTestRequest {
 
 // ---- X 关注账号（独立名单，不挂 B站主播；biliUid 仅可选关联）----
 
-const X_ACCOUNT_KEYS = ['screenName', 'biliUid', 'displayName', 'enabled'] as const;
+const X_ACCOUNT_KEYS = ['screenName', 'nickname', 'biliUid', 'displayName', 'enabled'] as const;
 
 /** screen name 归一化 + 形状校验（`@abc` / `ABC` 都收，统一成小写） */
 function asScreenName(v: unknown, field = 'screenName'): string {
@@ -473,19 +473,21 @@ function asScreenName(v: unknown, field = 'screenName'): string {
   return s;
 }
 
-/** POST /api/x/accounts：screenName 必填；biliUid / displayName 可选（存在性在路由层校验）；enabled 缺省 true */
+/** POST /api/x/accounts：screenName 必填；nickname / biliUid / displayName 可选（存在性在路由层校验）；enabled 缺省 true */
 export function parseNewXAccount(body: unknown): {
-  screenName: string; displayName: string | null; biliUid: string | null; enabled: boolean;
+  screenName: string; nickname: string | null; displayName: string | null; biliUid: string | null; enabled: boolean;
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, X_ACCOUNT_KEYS);
   if (!('screenName' in o)) throw new HttpError(400, 'screenName 必填');
-  const out: { screenName: string; displayName: string | null; biliUid: string | null; enabled: boolean } = {
+  const out: { screenName: string; nickname: string | null; displayName: string | null; biliUid: string | null; enabled: boolean } = {
     screenName: asScreenName(o.screenName),
+    nickname: null,
     displayName: null,
     biliUid: null,
     enabled: true,
   };
+  if ('nickname' in o) out.nickname = asNullableString(o.nickname, 'nickname');
   if ('biliUid' in o && o.biliUid !== null) out.biliUid = parseUid(o.biliUid, 'biliUid');
   if ('displayName' in o) out.displayName = asNullableString(o.displayName, 'displayName');
   // enabled 必须被采纳：显式传 false 却被静默忽略会让人以为停用生效了
@@ -495,14 +497,15 @@ export function parseNewXAccount(body: unknown): {
 
 /** PUT /api/x/accounts/:id 的部分更新体；至少一个字段 */
 export function parseXAccountPatch(body: unknown): {
-  screenName?: string; biliUid?: string | null; displayName?: string | null; enabled?: boolean;
+  screenName?: string; nickname?: string | null; biliUid?: string | null; displayName?: string | null; enabled?: boolean;
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, X_ACCOUNT_KEYS);
   const p: {
-    screenName?: string; biliUid?: string | null; displayName?: string | null; enabled?: boolean;
+    screenName?: string; nickname?: string | null; biliUid?: string | null; displayName?: string | null; enabled?: boolean;
   } = {};
   if ('screenName' in o) p.screenName = asScreenName(o.screenName);
+  if ('nickname' in o) p.nickname = asNullableString(o.nickname, 'nickname');
   if ('biliUid' in o) p.biliUid = o.biliUid === null ? null : parseUid(o.biliUid, 'biliUid');
   if ('displayName' in o) p.displayName = asNullableString(o.displayName, 'displayName');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
@@ -636,7 +639,7 @@ export function checkPostRuleRefs(
 }
 
 // ---- 微博关注账号（独立名单，biliUid 仅可选关联；与 X 账号同一套语义）----
-const WEIBO_ACCOUNT_KEYS = ['uid', 'nickname', 'biliUid', 'enabled'] as const;
+const WEIBO_ACCOUNT_KEYS = ['uid', 'nickname', 'displayName', 'biliUid', 'enabled'] as const;
 
 /** uid 归一化 + 形状校验（收 `2203177060` / `u/2203177060` / `weibo.com/u/2203177060`） */
 function asWeiboUid(v: unknown, field = 'uid'): string {
@@ -652,20 +655,22 @@ function asWeiboUid(v: unknown, field = 'uid'): string {
  * 便宜的匿名存在性接口，硬加等于把添加流程挂在一个未实测的端点上（见 docs/boundaries.md）。
  */
 export function parseNewWeiboAccount(body: unknown): {
-  uid: string | null; nickname: string | null; biliUid: string | null; enabled: boolean;
+  uid: string | null; nickname: string | null; displayName: string | null; biliUid: string | null; enabled: boolean;
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, WEIBO_ACCOUNT_KEYS);
   if (!('uid' in o) && !('nickname' in o)) throw new HttpError(400, 'uid 与昵称至少填一个');
   const out: {
-    uid: string | null; nickname: string | null; biliUid: string | null; enabled: boolean;
-  } = { uid: null, nickname: null, biliUid: null, enabled: true };
+    uid: string | null; nickname: string | null; displayName: string | null; biliUid: string | null; enabled: boolean;
+  } = { uid: null, nickname: null, displayName: null, biliUid: null, enabled: true };
   if ('uid' in o && o.uid !== null && o.uid !== '') out.uid = asWeiboUid(o.uid);
   if ('nickname' in o) {
     const nick = asNullableString(o.nickname, 'nickname');
-    out.nickname = nick && nick.trim() ? nick.trim() : null;
+    const norm = nick ? normalizeWeiboNick(nick) : '';
+    out.nickname = norm || null;
   }
   if (!out.uid && !out.nickname) throw new HttpError(400, 'uid 与昵称至少填一个');
+  if ('displayName' in o) out.displayName = asNullableString(o.displayName, 'displayName');
   if ('biliUid' in o && o.biliUid !== null) out.biliUid = parseUid(o.biliUid, 'biliUid');
   if ('enabled' in o) out.enabled = asBoolean(o.enabled, 'enabled');
   return out;
@@ -673,15 +678,19 @@ export function parseNewWeiboAccount(body: unknown): {
 
 /** PUT /api/weibo/accounts/:id 的部分更新体；至少一个字段 */
 export function parseWeiboAccountPatch(body: unknown): {
-  uid?: string; nickname?: string | null; biliUid?: string | null; enabled?: boolean;
+  uid?: string; nickname?: string | null; displayName?: string | null; biliUid?: string | null; enabled?: boolean;
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, WEIBO_ACCOUNT_KEYS);
   const p: {
-    uid?: string; nickname?: string | null; biliUid?: string | null; enabled?: boolean;
+    uid?: string; nickname?: string | null; displayName?: string | null; biliUid?: string | null; enabled?: boolean;
   } = {};
   if ('uid' in o) p.uid = asWeiboUid(o.uid);
-  if ('nickname' in o) p.nickname = asNullableString(o.nickname, 'nickname');
+  if ('nickname' in o) {
+    const nick = asNullableString(o.nickname, 'nickname');
+    p.nickname = nick === null ? null : normalizeWeiboNick(nick) || null;
+  }
+  if ('displayName' in o) p.displayName = asNullableString(o.displayName, 'displayName');
   if ('biliUid' in o) p.biliUid = o.biliUid === null ? null : parseUid(o.biliUid, 'biliUid');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
   if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');

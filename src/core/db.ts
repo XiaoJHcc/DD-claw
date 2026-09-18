@@ -156,6 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_posts_uid_ts ON posts (uid, pub_ts);
 CREATE TABLE IF NOT EXISTS x_accounts (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   screen_name   TEXT    NOT NULL UNIQUE,
+  nickname      TEXT,
   display_name  TEXT,
   bili_uid      TEXT,
   enabled       INTEGER NOT NULL DEFAULT 1,
@@ -186,6 +187,7 @@ CREATE TABLE IF NOT EXISTS weibo_accounts (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   uid           TEXT    NOT NULL UNIQUE,
   nickname      TEXT,
+  display_name  TEXT,
   bili_uid      TEXT,
   enabled       INTEGER NOT NULL DEFAULT 1,
   last_post_id  TEXT,
@@ -326,8 +328,13 @@ export class Db {
     this.ensureColumn('post_rules', 'llm_translate', 'llm_translate INTEGER NOT NULL DEFAULT 0');
     // x_accounts 头像（抓取时顺手抠 X 头像 → 代理下载到 cache/x-avatars，存文件名；旧库在线补列）
     this.ensureColumn('x_accounts', 'avatar', 'avatar TEXT');
+    // x_accounts 昵称（X 的 display name，与自定义显示名 display_name 分开；旧库的
+    // display_name 全是人手填的自定义名——抓取从不写它——留在原列语义不变）
+    this.ensureColumn('x_accounts', 'nickname', 'nickname TEXT');
     // post_rules.platform（微博图文来源接入）：旧库只有 X 规则，默认 'twitter' 即正确
     this.ensureColumn('post_rules', 'platform', "platform TEXT NOT NULL DEFAULT 'twitter'");
+    // weibo_accounts 自定义显示名（卡片优先展示；留空 = 用昵称，同 x_accounts.display_name 语义）
+    this.ensureColumn('weibo_accounts', 'display_name', 'display_name TEXT');
     // weibo_accounts 本身由 SCHEMA 的 CREATE TABLE IF NOT EXISTS 建出；这里只做数据搬家
     this.migrateWeiboAccounts();
     log.info(`数据库就绪: ${path}`);
@@ -1268,10 +1275,11 @@ export class Db {
     if (prev) {
       this.db
         .prepare(
-          `UPDATE x_accounts SET screen_name=?, display_name=?, bili_uid=?, enabled=?, updated_at=? WHERE id=?`,
+          `UPDATE x_accounts SET screen_name=?, nickname=?, display_name=?, bili_uid=?, enabled=?, updated_at=? WHERE id=?`,
         )
         .run(
           screenName,
+          input.nickname !== undefined ? input.nickname : prev.nickname,
           input.displayName !== undefined ? input.displayName : prev.displayName,
           input.biliUid !== undefined ? input.biliUid : prev.biliUid,
           (input.enabled ?? prev.enabled) ? 1 : 0,
@@ -1284,11 +1292,12 @@ export class Db {
     const info = this.db
       .prepare(
         `INSERT INTO x_accounts
-           (screen_name, display_name, bili_uid, enabled, last_tweet_id, last_tweet_at, last_ok_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+           (screen_name, nickname, display_name, bili_uid, enabled, last_tweet_id, last_tweet_at, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
       )
       .run(
         screenName,
+        input.nickname ?? null,
         input.displayName ?? null,
         input.biliUid ?? null,
         (input.enabled ?? true) ? 1 : 0,
@@ -1343,10 +1352,11 @@ export class Db {
     const uid = (input.uid ?? prev?.uid ?? '').trim();
     if (prev) {
       this.db
-        .prepare('UPDATE weibo_accounts SET uid=?, nickname=?, bili_uid=?, enabled=?, updated_at=? WHERE id=?')
+        .prepare('UPDATE weibo_accounts SET uid=?, nickname=?, display_name=?, bili_uid=?, enabled=?, updated_at=? WHERE id=?')
         .run(
           uid,
           input.nickname !== undefined ? input.nickname : prev.nickname,
+          input.displayName !== undefined ? input.displayName : prev.displayName,
           input.biliUid !== undefined ? input.biliUid : prev.biliUid,
           (input.enabled ?? prev.enabled) ? 1 : 0,
           now(),
@@ -1358,10 +1368,10 @@ export class Db {
     const info = this.db
       .prepare(
         `INSERT INTO weibo_accounts
-           (uid, nickname, bili_uid, enabled, last_post_id, last_post_at, last_ok_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+           (uid, nickname, display_name, bili_uid, enabled, last_post_id, last_post_at, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
       )
-      .run(uid, input.nickname ?? null, input.biliUid ?? null, (input.enabled ?? true) ? 1 : 0, t, t);
+      .run(uid, input.nickname ?? null, input.displayName ?? null, input.biliUid ?? null, (input.enabled ?? true) ? 1 : 0, t, t);
     return Number(info.lastInsertRowid);
   }
 

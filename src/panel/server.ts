@@ -23,6 +23,7 @@ import { WEBUI_ASSETS } from './webui-assets.gen.js';
 import { cookieHeader, fetchSelf, loadCookies, saveCookies, type SelfInfo } from '../sources/bili/auth.js';
 import { generateQrcode, pollQrcode } from '../sources/bili/qrcode.js';
 import type { WeiboResolver } from '../sources/weibo/resolve.js';
+import { isValidWeiboUid, normalizeWeiboNick, normalizeWeiboUid } from '../core/weibo-accounts.js';
 import {
   exchangeCookies as exchangeWeiboCookies, generateQrcode as generateWeiboQrcode,
   pollQrcode as pollWeiboQrcode,
@@ -390,6 +391,32 @@ async function handle(
     sendJson(res, 200, deps.weibo.info());
     return;
   }
+  // 昵称 ↔ uid 即时互查（添加浮窗「填一个解析另一个」用；与新建时补 uid 同一条匿名解析链）
+  if (deps.weibo && method === 'GET' && path === '/api/weibo/resolve') {
+    if (!deps.weiboResolver) throw new HttpError(400, '微博解析不可用');
+    const nick = normalizeWeiboNick(url.searchParams.get('nick') ?? '');
+    const uidRaw = (url.searchParams.get('uid') ?? '').trim();
+    try {
+      if (nick) {
+        const uid = await deps.weiboResolver.resolveUid(nick);
+        if (!uid) throw new HttpError(404, `微博上找不到这个昵称：${nick}`);
+        sendJson(res, 200, { uid, nickname: nick });
+        return;
+      }
+      if (uidRaw) {
+        const uid = normalizeWeiboUid(uidRaw);
+        if (!isValidWeiboUid(uid)) throw new HttpError(400, '微博 uid 必须是数字');
+        const nickname = await deps.weiboResolver.resolveNick(uid);
+        if (!nickname) throw new HttpError(404, `微博上找不到这个 uid：${uid}`);
+        sendJson(res, 200, { uid, nickname });
+        return;
+      }
+    } catch (e) {
+      if (e instanceof HttpError) throw e;
+      throw new HttpError(400, `微博解析失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+    throw new HttpError(400, 'nick 与 uid 至少给一个');
+  }
   if (deps.weibo && method === 'GET' && path === '/api/weibo/accounts') {
     sendJson(res, 200, { accounts: weiboAccountList(db) });
     return;
@@ -410,7 +437,7 @@ async function handle(
     }
     if (db.getWeiboAccountByUid(uid)) throw new HttpError(409, `微博 ${uid} 已在名单里`);
     checkWeiboBiliUid(db, input.biliUid);
-    const id = db.upsertWeiboAccount({ uid, nickname, biliUid: input.biliUid, enabled: input.enabled });
+    const id = db.upsertWeiboAccount({ ...input, uid });
     deps.weibo.onChanged();
     sendJson(res, 200, { account: weiboAccountInfo(db, id) });
     return;

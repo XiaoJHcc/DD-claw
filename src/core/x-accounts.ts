@@ -11,6 +11,7 @@
 export interface XAccountRow {
   id: number;
   screen_name: string;
+  nickname: string | null;
   display_name: string | null;
   bili_uid: string | null;
   enabled: number;
@@ -24,9 +25,11 @@ export interface XAccountRow {
 
 export interface XAccount {
   id: number;
-  /** 归一化后的 screen name（去 @、小写） */
+  /** 归一化后的 screen name（去 @、小写）——X 的「ID」（@handle，唯一标识），不是昵称 */
   screenName: string;
-  /** 抓到就存（推文 user.name）；未抓到为 null */
+  /** X 的昵称（平台 display name，user.name；抓取拿到才回写，也可人填） */
+  nickname: string | null;
+  /** 自定义显示名（卡片优先展示；留空 = 用昵称，同 weibo_accounts.display_name 语义） */
   displayName: string | null;
   /** 可选关联主播（引用 streamers.uid；仅展示与文案用，不参与抓取） */
   biliUid: string | null;
@@ -44,6 +47,7 @@ export interface XAccount {
 
 export interface NewXAccount {
   screenName: string;
+  nickname: string | null;
   displayName: string | null;
   biliUid: string | null;
   enabled: boolean;
@@ -52,6 +56,7 @@ export interface NewXAccount {
 export interface XAccountInput {
   id?: number;
   screenName?: string;
+  nickname?: string | null;
   displayName?: string | null;
   biliUid?: string | null;
   enabled?: boolean;
@@ -83,6 +88,7 @@ export function rowToXAccount(r: XAccountRow): XAccount {
   return {
     id: r.id,
     screenName: r.screen_name,
+    nickname: r.nickname,
     displayName: r.display_name,
     biliUid: r.bili_uid,
     enabled: r.enabled === 1,
