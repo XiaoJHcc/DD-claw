@@ -9,6 +9,7 @@ import type { PushMessage, Signal } from './types.js';
 import type { PushChannel, PushRule } from './push.js';
 import { defaultPostFilters, type PostRule } from './post-rules.js';
 import type { XAccount } from './x-accounts.js';
+import type { WeiboAccount } from './weibo-accounts.js';
 import type { PostCandidate } from '../analysis/matcher.js';
 import type { PostAnalysis } from '../analysis/post-analyzer.js';
 import type { RoomStatus } from '../sources/bili/types.js';
@@ -71,14 +72,18 @@ class FakeDb {
   listPushChannels() { return this.channels; }
   getSetting(key: string) { return this.settings.get(key) ?? null; }
 
-  // ---- X / 图文帖（P2 起 pipeline 的 feed_post 分支要用）----
+  // ---- X / 图文帖（P2 起 pipeline 的 feed_post 分支要用；微博同分支，按平台分名单）----
   postRules: PostRule[] = [];
   xAccounts = new Map<string, XAccount>();
+  weiboAccounts = new Map<string, WeiboAccount>();
   listEnabledPostRules() {
     return this.postRules.filter((r) => r.enabled).sort((a, b) => a.sort - b.sort || a.id - b.id);
   }
   getXAccountByScreenName(screenName: string) {
     return this.xAccounts.get(screenName);
+  }
+  getWeiboAccountByUid(uid: string) {
+    return this.weiboAccounts.get(uid);
   }
 }
 
@@ -99,14 +104,22 @@ function classification(categoryId: number): Classification {
 function xAccount(over: Partial<XAccount> = {}): XAccount {
   return {
     id: 1, screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true,
-    lastTweetId: null, lastTweetAt: null, lastOkAt: null, createdAt: 0, updatedAt: 0,
+    lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null, createdAt: 0, updatedAt: 0,
+    ...over,
+  };
+}
+
+function weiboAccount(over: Partial<WeiboAccount> = {}): WeiboAccount {
+  return {
+    id: 1, uid: '2203177060', nickname: '渡瀬結月', biliUid: null, enabled: true,
+    lastPostId: null, lastPostAt: null, lastOkAt: null, avatar: null, createdAt: 0, updatedAt: 0,
     ...over,
   };
 }
 
 function postRule(over: Partial<PostRule> = {}): PostRule {
   return {
-    id: 1, name: '图文帖规则 1', accountIds: [], channels: [1],
+    id: 1, name: '图文帖规则 1', platform: 'twitter', accountIds: [], channels: [1],
     filters: defaultPostFilters(), messageTemplate: null,
     llmJudge: false, judgePrompt: null, llmTranslate: false,
     enabled: true, sort: 0,
@@ -129,12 +142,41 @@ function feedSig(over: {
   };
 }
 
+/** 微博源的 feed_post：同一 kind，平台不同（uid = 微博 uid，归属不走 B站 uid） */
+function weiboSig(over: {
+  payload?: Record<string, unknown>; uid?: string;
+} = {}): Signal {
+  return {
+    source: 'weibo/feed', kind: 'feed_post', uid: over.uid ?? '2203177060', roomId: '', ts: 0,
+    payload: {
+      platform: 'weibo', itemId: '5001', type: 'mblog', text: '今晚九点直播！',
+      pics: [], pubTs: 1_789_549_200, url: 'https://weibo.com/2203177060/Pa1bC',
+      ...(over.payload ?? {}),
+    },
+  };
+}
+
 /** 装好 X 名单与图文帖规则的 harness（feed_post 分支专用） */
-function feedHarness(rules: PostRule[], accounts: XAccount[] = [xAccount()], analyzer?: FakePostAnalyzer) {
+function feedHarness(
+  rules: PostRule[],
+  accounts: XAccount[] = [xAccount()],
+  analyzer?: FakePostAnalyzer,
+  weiboAccounts: WeiboAccount[] = [],
+) {
   const h = harness({}, 0, [], analyzer);
   for (const a of accounts) h.db.xAccounts.set(a.screenName, a);
+  for (const a of weiboAccounts) h.db.weiboAccounts.set(a.uid, a);
   h.db.postRules = rules;
   return h;
+}
+
+/** 微博侧的 harness（默认名单里放一个微博账号） */
+function weiboHarness(
+  rules: PostRule[],
+  accounts: WeiboAccount[] = [weiboAccount()],
+  analyzer?: FakePostAnalyzer,
+) {
+  return feedHarness(rules, [], analyzer, accounts);
 }
 
 /** 假图文帖分析器：记录调用，按注入的策略给结论 */
@@ -581,7 +623,7 @@ test('规则按账号生效：指定名单外的账号不推', async () => {
   assert.equal(h.disp.sent.length, 1, '账号 2 命中');
 });
 
-test('无命中规则 / 规则未勾渠道 / 账号不在名单 / 平台不是 X → 都不推且不炸', async () => {
+test('无命中规则 / 规则未勾渠道 / 账号不在名单 / 平台不匹配 → 都不推且不炸', async () => {
   // 无规则
   const h1 = feedHarness([]);
   h1.bus.emit(feedSig());
@@ -600,11 +642,73 @@ test('无命中规则 / 规则未勾渠道 / 账号不在名单 / 平台不是 X
   await h3.pipeline.whenIdle();
   assert.equal(h3.disp.sent.length, 0);
 
-  // 微博源的 feed_post：同一条总线，但平台不同 → 明确跳过
+  // 微博源的 feed_post：X 规则不该命中它（platform 隔离——两张名单的自增 id 会撞）
   const h4 = feedHarness([postRule()]);
-  h4.bus.emit(feedSig({ payload: { platform: 'weibo' } }));
+  h4.bus.emit(weiboSig());
   await h4.pipeline.whenIdle();
-  assert.equal(h4.disp.sent.length, 0, '图文帖推送目前只支持 X');
+  assert.equal(h4.disp.sent.length, 0, 'X 规则不匹配微博帖');
+
+  // 未知平台：忽略
+  const h5 = feedHarness([postRule()]);
+  h5.bus.emit(feedSig({ payload: { platform: 'douyin' } }));
+  await h5.pipeline.whenIdle();
+  assert.equal(h5.disp.sent.length, 0);
+});
+
+// ---- feed_post 分支（微博）：与 X 同一条路径，账号/文案按平台分支 ----
+
+test('微博 feed_post 命中微博规则 → 推送；文案用昵称、副行标「微博」', async () => {
+  const h = weiboHarness([postRule({ platform: 'weibo', channels: [1] })]);
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+
+  assert.equal(h.disp.sent.length, 1);
+  const m = h.disp.sent[0]!;
+  assert.equal(m.title, '渡瀬結月 发了新微博', '默认推送词按平台走');
+  assert.equal(m.body, '今晚九点直播！');
+  assert.match(m.attribution ?? '', /微博/, '副行标平台');
+  assert.match(m.attribution ?? '', /渡瀬結月/, '副行用昵称而不是 uid');
+  assert.deepEqual(m.channels, ['1']);
+  assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
+});
+
+test('微博规则按账号生效：accountIds 指向 weibo_accounts.id', async () => {
+  const rules = [postRule({ platform: 'weibo', accountIds: [2], channels: [1] })];
+  const h = weiboHarness(rules, [weiboAccount({ id: 1, uid: '2203177060' }), weiboAccount({ id: 2, uid: '111' })]);
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0, '规则只对账号 2 生效');
+
+  h.bus.emit(weiboSig({ uid: '111' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '账号 2 命中');
+});
+
+test('微博帖的推送词模板：{author} 渲染成昵称（不是 uid）', async () => {
+  const h = weiboHarness([postRule({ platform: 'weibo', messageTemplate: '{author}｜{text}' })]);
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent[0]!.title, '渡瀬結月｜今晚九点直播！');
+
+  // 昵称还没抓到（新账号）→ 回退 uid，至少不是空标题
+  const h2 = weiboHarness([postRule({ platform: 'weibo', messageTemplate: '{author}' })],
+    [weiboAccount({ nickname: null })]);
+  h2.bus.emit(weiboSig());
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent[0]!.title, '2203177060');
+});
+
+test('微博帖走同一条 LLM 判定：拦下则不推（翻译只对 X 有意义，不参与微博）', async () => {
+  const analyzer = new FakePostAnalyzer({ source: 'llm', pass: false, reason: '不是直播相关' });
+  const h = weiboHarness(
+    [postRule({ platform: 'weibo', llmJudge: true, judgePrompt: '只推直播预告' })],
+    [weiboAccount()],
+    analyzer,
+  );
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+  assert.equal(analyzer.calls.length, 1, '确实问过模型');
+  assert.equal(h.disp.sent.length, 0, '判定不推 → 不推');
 });
 
 test('推送总开关关闭 → feed_post 也不推（与开播同一条总闸）', async () => {

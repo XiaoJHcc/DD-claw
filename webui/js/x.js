@@ -2,10 +2,12 @@
 // 上半 = 两张设置卡：监听开关都在卡片头右上角（一卡一开关，同 NapCat/LLM/推送渠道卡形态）。
 // X 卡行区只显示连接可达性（出问题才多一行监听诊断）；代理/实例/间隔/回退全部收进「源设置」
 // 二级弹窗，测试按钮是控件右侧的方 icon——结果并入按钮自身：转圈 → 绿勾/红叉，原因进 hover
-// 提示，不往弹窗里插文字块、不动布局。微博卡 = 登录态行（扫码弹窗复用 listen.js，抓取间隔
-// 收进「抓取设置」弹窗）。
-// 下半 = 账号卡片墙（与主播卡同一交互模型：卡面纯展示 = 身份段 + 规则摘要行 + 推文段，
-// 整卡可点；账号字段与规则增删改全在点击后的浮窗，规则编辑开二级浮窗）。
+// 提示，不往弹窗里插文字块、不动布局。微博卡 = 登录态行（扫码弹窗复用 listen.js，
+// 抓取间隔收进「抓取设置」弹窗）——**这张卡保持原样，不加监听/抓取行**。
+// 下半 = **单墙混排的账号卡片墙**（两个平台的账号在同一张网格里，顶部筛选胶囊切换「全部 / X / 微博」；
+// 卡面带平台角标——两张名单的自增 id 会撞，规则又按平台分流，用户必须一眼看出规则落在哪）：
+// 卡面纯展示 = 身份段 + 规则摘要行 + 帖子段，整卡可点，账号字段与规则增删改全在点击后的浮窗，
+// 规则编辑开二级浮窗（规则带平台，从哪张卡进就是哪个平台）。
 // 纪律：GET 只读后端快照（后端绝不在读取路径打网络），探测一律由弹窗里的测试 icon 显式触发；
 // 测试允许用输入框里还没保存的值（先测后存），未保存值的结果只动按钮、不污染卡片状态。
 import { api, toast, ACTIONS, CHANGES, INPUTS, esc, field, checkRowHtml, dropdownHtml, openSheet, closeSheet, sheetCleanups, switchHtml, iconBtn, checkDotHtml, avatarHtml, relTime, ruleDeadReason } from './core.js';
@@ -15,10 +17,13 @@ import { openPlatformLogin, PLAT_STATE, setLoginConfirmedHook } from './listen.j
 let xState = null;
 let listenState = null;
 let accountCache = [];
+let weiboAccountCache = [];
 let streamerCache = [];
 let postRuleCache = [];
 let channelCache = [];
 let testing = false;
+/** 账号墙的平台筛选：'all' | 'twitter' | 'weibo' */
+let platFilter = 'all';
 /** 规则表单草稿（保存时才落库）：scope 固定为开弹窗的那张卡（存量全部/多账号规则保留原 scope） */
 let ruleDraft = null;
 
@@ -33,11 +38,12 @@ function rowHtml(dot, title, sub) {
     '<span class="row-sub">' + esc(sub) + '</span></span></div>';
 }
 
-/** 加载：一次取连接快照 + 监听开关 + 账号名单（含最近推文）+ 主播列表 + 渠道 + 图文帖规则 */
+/** 加载：连接快照 + 监听开关 + 两份账号名单 + 主播列表 + 渠道 + 图文帖规则 */
 function loadX() {
   return Promise.all([
     api('/api/x'), api('/api/listen'), api('/api/x/accounts'),
     api('/api/post-rules'), api('/api/channels'), api('/api/streamers'),
+    api('/api/weibo/accounts'),
   ]).then(function (rs) {
     xState = rs[0];
     listenState = rs[1];
@@ -45,8 +51,10 @@ function loadX() {
     postRuleCache = rs[3].rules || [];
     channelCache = rs[4].channels || [];
     streamerCache = rs[5].streamers || [];
+    weiboAccountCache = rs[6].accounts || [];
     renderXStatus();
     renderWeibo();
+    renderFilter();
     renderAccounts();
   }).catch(function (e) { toast(e.message, true); });
 }
@@ -100,6 +108,8 @@ function renderXStatus() {
 }
 
 // ---- 微博卡：登录态（整行可点 → 扫码弹窗）+ 监听开关 ----
+// 这张卡保持原样：只有登录态一行。抓取运行状态不在这里显示（微博与 X 不同——它没有
+// 代理/实例那套连接概念，卡片再加「监听」「抓取」行就与 X 卡不对称了）。
 function weiboPlatform() {
   const ps = (listenState && listenState.platforms) || [];
   for (let i = 0; i < ps.length; i++) if (ps[i].key === 'weibo') return ps[i];
@@ -284,11 +294,47 @@ ACTIONS['save-weibo-settings'] = function () {
   }).catch(function (e) { if (err) err.textContent = e.message; });
 };
 
-// ---- 账号卡片墙（仿主播列表三段式，无封面；推文段直接复用 .st-posts 结构与 hover 互斥展开）----
-function accountById(id) {
-  for (let i = 0; i < accountCache.length; i++) if (String(accountCache[i].id) === String(id)) return accountCache[i];
+// ---- 账号卡片墙（单墙混排：X 与微博同一张网格，卡面带平台角标，顶部筛选胶囊）----
+// 与主播列表同一套三段式卡片；推文段直接复用 .st-posts 结构与 hover 互斥展开。
+function accountById(id, platform) {
+  const list = platform === 'weibo' ? weiboAccountCache : accountCache;
+  for (let i = 0; i < list.length; i++) if (String(list[i].id) === String(id)) return list[i];
   return null;
 }
+
+/** 当前筛选下的账号（每一项带 platform，供卡片渲染与统计共用） */
+function visibleAccounts() {
+  const out = [];
+  if (platFilter !== 'weibo') {
+    accountCache.forEach(function (a) { out.push({ platform: 'twitter', a: a }); });
+  }
+  if (platFilter !== 'twitter') {
+    weiboAccountCache.forEach(function (a) { out.push({ platform: 'weibo', a: a }); });
+  }
+  return out;
+}
+
+function renderFilter() {
+  const box = document.getElementById('x-account-filter');
+  if (!box) return;
+  const opts = [
+    ['all', '全部', accountCache.length + weiboAccountCache.length],
+    ['twitter', 'X', accountCache.length],
+    ['weibo', '微博', weiboAccountCache.length],
+  ];
+  box.innerHTML = opts.map(function (o) {
+    return '<button type="button" class="chip' + (platFilter === o[0] ? ' on' : '') + '" ' +
+      'data-action="x-plat-filter" data-value="' + o[0] + '">' +
+      '<span class="chip-ic">' + icon('check') + '</span>' +
+      '<span class="chip-txt">' + o[1] + ' ' + o[2] + '</span></button>';
+  }).join('');
+}
+
+ACTIONS['x-plat-filter'] = function (el) {
+  platFilter = el.getAttribute('data-value');
+  renderFilter();
+  renderAccounts();
+};
 
 function channelName(id) {
   for (let i = 0; i < channelCache.length; i++) {
@@ -297,9 +343,10 @@ function channelName(id) {
   return '渠道 ' + id;
 }
 
-/** 卡的规则 = scope 含本账号的规则；存量的「全部账号」（空）/ 多账号规则也显示，标出 scope */
-function rulesFor(a) {
+/** 卡的规则 = 同平台、且 scope 含本账号的规则；「全部账号」（空）/ 多账号规则也显示，标出 scope */
+function rulesFor(a, platform) {
   return postRuleCache.filter(function (r) {
+    if (r.platform !== platform) return false;
     return r.accountIds.length === 0 || r.accountIds.map(String).indexOf(String(a.id)) >= 0;
   });
 }
@@ -308,6 +355,7 @@ function filterSummary(f) {
   const kind = f.original && f.retweet ? '原创·转发' : f.retweet ? '转发' : '原创';
   const parts = [kind];
   if (f.media) parts.push('带图');
+  if (f.quote) parts.push('引用');
   if (f.keywords && f.keywords.length) parts.push('词×' + f.keywords.length);
   return parts.join(' · ');
 }
@@ -332,8 +380,9 @@ function ruleSub(r) {
     llmSummary(r) + scopeSummary(r));
 }
 
-// 推文行：与主播动态同一套结构（.st-post），streamers.js 的全局 hover 委托直接生效
-function tweetRowHtml(p, open) {
+// 帖子行：与主播动态同一套结构（.st-post），streamers.js 的全局 hover 委托直接生效。
+// 微博的「转发」在抓取层就折进 type='retweet'（正文带 //转发自 @原作者），标签语义一致。
+function postRowHtml(p, open) {
   const [label, cls] = p.type === 'retweet' ? ['转发', 'tag-purple'] : ['原创', 'tag-blue'];
   const inner =
     (p.pics && p.pics[0] ? `<img class="pt-img" src="${esc(p.pics[0])}" referrerpolicy="no-referrer" alt="">` : '') +
@@ -346,9 +395,19 @@ function tweetRowHtml(p, open) {
     : `<div class="${clsAttr}">${inner}</div>`;
 }
 
-// ---- 账号卡片墙：与主播卡同一交互模型——卡面纯展示（身份段 + 规则摘要行 + 推文段），
-// 整卡可点，所有设置（账号字段 + 规则管理）都在点击后的浮窗里 ----
-function accountCardHtml(a) {
+function rulesBlockHtml(a, platform) {
+  const rules = rulesFor(a, platform);
+  return '<div class="st-rules"><span class="rl-dot"></span><span class="rl-t">图文规则</span>' +
+    (rules.length
+      ? rules.map(function (r) {
+          return `<span class="tag${ruleDeadReason(r, [], channelCache) ? ' rl-off' : ''}">${esc(r.name)}</span>`;
+        }).join('')
+      : '<span class="rl-none">未配置</span>') +
+    '</div>';
+}
+
+// ---- X 账号卡：身份段（头像 + @screenName）+ 规则摘要 + 推文段 ----
+function xCardHtml(a) {
   const name = a.displayName || a.screenName;
   // 头像链：X 链路抓到的本地缓存 → 关联主播的 B站头像 → 首字占位圆（avatarHtml 加载失败也兜底成占位圆）
   const face = a.avatar
@@ -358,29 +417,53 @@ function accountCardHtml(a) {
     (a.biliName ? ' · 关联 ' + a.biliName : '') +
     (a.lastTweetAt ? ' · 推文 ' + relTime(a.lastTweetAt) : '') +
     (a.enabled ? '' : ' · 已停用');
-  const rules = rulesFor(a);
   const posts = (a.posts || []).slice(0, 3);
   return `<div class="st-card x-card${a.enabled ? '' : ' x-off'}" data-action="open-x-account" data-sid="${a.id}">
     <div class="st-mid">
       <div class="x-id-row">
         <div class="st-id">
           ${avatarHtml(face, name)}
-          <div class="nm"><b>${esc(name)}</b><small>${esc(meta)}</small></div>
+          <div class="nm"><span class="x-plat-row"><span class="x-plat x-plat-x">X</span></span><b>${esc(name)}</b><small>${esc(meta)}</small></div>
         </div>
         ${switchHtml('data-change="toggle-x-account" title="抓取该账号的新推文"', a.enabled)}
       </div>
-      <div class="st-rules"><span class="rl-dot"></span><span class="rl-t">图文规则</span>${
-        rules.length
-          ? rules.map(function (r) {
-              return `<span class="tag${ruleDeadReason(r, [], channelCache) ? ' rl-off' : ''}">${esc(r.name)}</span>`;
-            }).join('')
-          : '<span class="rl-none">未配置</span>'
-      }</div>
+      ${rulesBlockHtml(a, 'twitter')}
     </div>
     <div class="st-posts">${
       posts.length
-        ? posts.map(function (p, i) { return tweetRowHtml(p, i === 0); }).join('')
+        ? posts.map(function (p, i) { return postRowHtml(p, i === 0); }).join('')
         : '<div class="st-posts-empty">还没有抓到推文</div>'
+    }</div>
+  </div>`;
+}
+
+// ---- 微博账号卡：身份段（头像 + 昵称 + uid）+ 规则摘要 + 微博段 ----
+function weiboCardHtml(a) {
+  const name = a.nickname || ('微博 ' + a.uid);
+  // 头像链：微博链路抓到的本地缓存 → 关联主播的 B站头像 → 首字占位圆（与 X 卡同一条链）
+  const face = a.avatar
+    ? '/api/weibo-avatar?file=' + encodeURIComponent(a.avatar)
+    : (a.biliFace || '');
+  const meta = 'uid ' + a.uid +
+    (a.biliName ? ' · 关联 ' + a.biliName : '') +
+    (a.lastPostAt ? ' · 微博 ' + relTime(a.lastPostAt) : '') +
+    (a.enabled ? '' : ' · 已停用');
+  const posts = (a.posts || []).slice(0, 3);
+  return `<div class="st-card x-card${a.enabled ? '' : ' x-off'}" data-action="open-weibo-account" data-sid="${a.id}">
+    <div class="st-mid">
+      <div class="x-id-row">
+        <div class="st-id">
+          ${avatarHtml(face, name)}
+          <div class="nm"><span class="x-plat-row"><span class="x-plat x-plat-weibo">微博</span></span><b>${esc(name)}</b><small>${esc(meta)}</small></div>
+        </div>
+        ${switchHtml('data-change="toggle-weibo-account" title="抓取该账号的新微博"', a.enabled)}
+      </div>
+      ${rulesBlockHtml(a, 'weibo')}
+    </div>
+    <div class="st-posts">${
+      posts.length
+        ? posts.map(function (p, i) { return postRowHtml(p, i === 0); }).join('')
+        : '<div class="st-posts-empty">还没有抓到微博</div>'
     }</div>
   </div>`;
 }
@@ -388,48 +471,102 @@ function accountCardHtml(a) {
 function renderAccounts() {
   const box = document.getElementById('x-account-grid');
   if (!box) return;
-  box.innerHTML = accountCache.map(accountCardHtml).join('') +
-    `<div class="st-card x-add-card" data-action="add-x-account">${icon('plus')}<span>添加账号</span></div>`;
+  const cards = visibleAccounts().map(function (it) {
+    return it.platform === 'weibo' ? weiboCardHtml(it.a) : xCardHtml(it.a);
+  });
+  const addAction = platFilter === 'weibo' ? 'add-weibo-account' : 'add-x-account';
+  const addLabel = platFilter === 'weibo' ? '添加微博账号' : '添加 X 账号';
+  box.innerHTML = cards.join('') +
+    `<div class="st-card x-add-card" data-action="${addAction}">${icon('plus')}<span>${addLabel}</span></div>`;
 }
 
 // ---- 账号浮窗（整卡点击打开）：字段编辑 + 本账号规则管理（规则编辑开二级浮窗）----
-let sheetAccountId = null; // 当前打开账号浮窗的账号 id（规则二级浮窗的 scope 与层级判据）
+let sheetAccountId = null;
+/** 当前浮窗的平台（'twitter' | 'weibo'）：规则的 scope 与平台都由它决定 */
+let sheetPlatform = null;
+
+function biliOptions() {
+  return [{ value: '', label: '不关联' }].concat(streamerCache.map(function (s) {
+    return { value: String(s.uid), label: s.alias || s.uname || String(s.uid) };
+  }));
+}
+
+function rulesSectionHtml(a) {
+  if (!a) return '';
+  return '<div class="sheet-section"><div class="sheet-sub">图文规则</div>' +
+    '<div id="xa-rules" class="sheet-rules"></div>' +
+    `<button class="btn btn-ghost x-add-rule" data-action="add-post-rule">${icon('plus')}添加规则</button></div>`;
+}
 
 ACTIONS['add-x-account'] = function () { openAccountSheet(null); };
+ACTIONS['add-weibo-account'] = function () { openWeiboAccountSheet(null); };
 ACTIONS['open-x-account'] = function (el, e) {
   // 卡面唯一的控件是右上角监听开关——点开关不触发整卡的「打开浮窗」
   if (e && e.target instanceof Element && e.target.closest('label, button')) return;
-  openAccountSheet(accountById(el.getAttribute('data-sid')));
+  openAccountSheet(accountById(el.getAttribute('data-sid'), 'twitter'));
+};
+ACTIONS['open-weibo-account'] = function (el, e) {
+  if (e && e.target instanceof Element && e.target.closest('label, button')) return;
+  openWeiboAccountSheet(accountById(el.getAttribute('data-sid'), 'weibo'));
 };
 
 // 卡片右上角的监听开关：即改即存（账号其余字段仍在浮窗里编辑）
-CHANGES['toggle-x-account'] = function (el) {
-  const card = el.closest('.x-card');
-  if (!card) return;
-  api('/api/x/accounts/' + card.getAttribute('data-sid'), 'PUT', { enabled: el.checked }).then(function () {
-    toast(el.checked ? '已开启' : '已停用');
+function toggleAccount(platform, card, enabled) {
+  const base = platform === 'weibo' ? '/api/weibo/accounts/' : '/api/x/accounts/';
+  api(base + card.getAttribute('data-sid'), 'PUT', { enabled: enabled }).then(function () {
+    toast(enabled ? '已开启' : '已停用');
     loadX();
   }).catch(function (e) { toast(e.message, true); loadX(); });
+}
+
+CHANGES['toggle-x-account'] = function (el) {
+  const card = el.closest('.x-card');
+  if (card) toggleAccount('twitter', card, el.checked);
+};
+CHANGES['toggle-weibo-account'] = function (el) {
+  const card = el.closest('.x-card');
+  if (card) toggleAccount('weibo', card, el.checked);
 };
 
 function openAccountSheet(a) {
   sheetAccountId = a ? a.id : null;
-  const opts = streamerCache.map(function (s) {
-    return { value: String(s.uid), label: s.alias || s.uname || String(s.uid) };
-  });
+  sheetPlatform = 'twitter';
   openSheet(a ? String(a.displayName || '@' + a.screenName) : '添加 X 账号',
     field('X 账号', `<input class="inp" id="xa-name" placeholder="@Watase_Yuzuki（@ 可省）" value="${a ? esc(a.screenName) : ''}">`) +
     field('显示名（可选，留空 = 用账号名）', `<input class="inp" id="xa-display" value="${a && a.displayName ? esc(a.displayName) : ''}">`) +
-    field('关联主播（可选）', dropdownHtml('xa-bili', [{ value: '', label: '不关联' }].concat(opts), a && a.biliUid ? String(a.biliUid) : '')) +
-    (a ? '<div class="sheet-section"><div class="sheet-sub">图文规则</div>' +
-      '<div id="xa-rules" class="sheet-rules"></div>' +
-      `<button class="btn btn-ghost x-add-rule" data-action="add-post-rule">${icon('plus')}添加规则</button></div>` : ''),
+    field('关联主播（可选）', dropdownHtml('xa-bili', biliOptions(), a && a.biliUid ? String(a.biliUid) : '')) +
+    rulesSectionHtml(a),
     1,
     (a ? `<button class="btn" data-action="del-x-account" data-id="${a.id}">删除</button><span class="sp"></span>` : '') +
     '<span id="xa-err" class="form-err"></span>' +
     '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     `<button class="btn btn-primary" data-action="save-x-account" data-id="${a ? a.id : ''}">保存</button>`);
-  sheetCleanups[1] = function () { sheetAccountId = null; };
+  sheetCleanups[1] = function () { sheetAccountId = null; sheetPlatform = null; };
+  if (a) renderSheetRules();
+}
+
+/**
+ * 微博账号浮窗：新建时 uid 与昵称二选一（只填昵称 → 后端走匿名解析链补 uid）。
+ * 编辑态 uid 只读回显：uid 是账号身份，改它等于换账号，历史微博会串到别人名下——要换就删了重加。
+ */
+function openWeiboAccountSheet(a) {
+  sheetAccountId = a ? a.id : null;
+  sheetPlatform = 'weibo';
+  const uidField = a
+    ? field('微博 uid（不可改）', `<input class="inp" id="wa-uid" value="${esc(a.uid)}" disabled>`)
+    : field('微博 uid', `<input class="inp" id="wa-uid" placeholder="2203177060 或 weibo.com/u/2203177060">`);
+  openSheet(a ? (a.nickname || '微博 ' + a.uid) : '添加微博账号',
+    uidField +
+    field(a ? '昵称' : '昵称（只填昵称时自动解析 uid）',
+      `<input class="inp" id="wa-nick" placeholder="阿梓从小就很可爱" value="${a && a.nickname ? esc(a.nickname) : ''}">`) +
+    field('关联主播（可选）', dropdownHtml('wa-bili', biliOptions(), a && a.biliUid ? String(a.biliUid) : '')) +
+    rulesSectionHtml(a),
+    1,
+    (a ? `<button class="btn" data-action="del-weibo-account" data-id="${a.id}">删除</button><span class="sp"></span>` : '') +
+    '<span id="wa-err" class="form-err"></span>' +
+    '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
+    `<button class="btn btn-primary" data-action="save-weibo-account" data-id="${a ? a.id : ''}">保存</button>`);
+  sheetCleanups[1] = function () { sheetAccountId = null; sheetPlatform = null; };
   if (a) renderSheetRules();
 }
 
@@ -446,10 +583,11 @@ function sheetRuleRowHtml(r) {
 function renderSheetRules() {
   const box = document.getElementById('xa-rules');
   if (!box || sheetAccountId == null) return;
-  const a = accountById(sheetAccountId);
-  const rules = a ? rulesFor(a) : [];
+  const a = accountById(sheetAccountId, sheetPlatform);
+  const rules = a ? rulesFor(a, sheetPlatform) : [];
+  const noun = sheetPlatform === 'weibo' ? '微博' : '推文';
   box.innerHTML = rules.map(sheetRuleRowHtml).join('') ||
-    '<p class="hint">没有规则——加一条，符合筛选的新推文就会推送</p>';
+    `<p class="hint">没有规则——加一条，符合筛选的新${noun}就会推送</p>`;
 }
 
 ACTIONS['save-x-account'] = function (el) {
@@ -483,10 +621,49 @@ ACTIONS['save-x-account'] = function (el) {
 };
 
 ACTIONS['del-x-account'] = function (el) {
-  const a = accountById(el.getAttribute('data-id'));
+  const a = accountById(el.getAttribute('data-id'), 'twitter');
   if (!a) return;
   if (!confirm('从 X 名单里移除 @' + a.screenName + '？已归档的推文保留。')) return;
   api('/api/x/accounts/' + a.id, 'DELETE').then(function () {
+    closeSheet(1);
+    toast('已移除');
+    loadX();
+  }).catch(function (e) { toast(e.message, true); });
+};
+
+// 微博账号保存：新建时 uid 与昵称至少填一个（只填昵称 → 后端解析 uid，解析不到就地 400）
+ACTIONS['save-weibo-account'] = function (el) {
+  const err = document.getElementById('wa-err');
+  if (err) err.textContent = '';
+  const idAttr = el.getAttribute('data-id');
+  const uidEl = document.getElementById('wa-uid');
+  const uid = uidEl && !uidEl.disabled ? uidEl.value.trim() : '';
+  const nick = document.getElementById('wa-nick').value.trim();
+  const biliVal = document.getElementById('wa-bili').value;
+  if (!idAttr && !uid && !nick) {
+    if (err) err.textContent = 'uid 与昵称至少填一个';
+    return;
+  }
+  const body = { biliUid: biliVal === '' ? null : biliVal };
+  if (!idAttr && uid) body.uid = uid;
+  if (nick) body.nickname = nick;
+  const req = idAttr ? api('/api/weibo/accounts/' + idAttr, 'PUT', body) : api('/api/weibo/accounts', 'POST', body);
+  req.then(function () {
+    if (idAttr) {
+      toast('已保存'); // 编辑：浮窗留着（规则区还要用）
+    } else {
+      closeSheet(1);
+      toast('已添加');
+    }
+    loadX();
+  }).catch(function (e) { if (err) err.textContent = e.message; });
+};
+
+ACTIONS['del-weibo-account'] = function (el) {
+  const a = accountById(el.getAttribute('data-id'), 'weibo');
+  if (!a) return;
+  if (!confirm('从微博名单里移除 ' + (a.nickname || a.uid) + '？已归档的微博保留。')) return;
+  api('/api/weibo/accounts/' + a.id, 'DELETE').then(function () {
     closeSheet(1);
     toast('已移除');
     loadX();
@@ -504,12 +681,12 @@ function postRuleById(id) {
 
 let ruleLevel = 1;
 
-ACTIONS['add-post-rule'] = function () { openPostRuleSheet(null, sheetAccountId); };
+ACTIONS['add-post-rule'] = function () { openPostRuleSheet(null, sheetPlatform, sheetAccountId); };
 ACTIONS['edit-post-rule'] = function (el, e) {
   // 行内的勾选点/按钮有自己的语义，不触发整行的「打开编辑」
   if (e && e.target instanceof Element && e.target.closest('label, button')) return;
   const row = el.closest('.row');
-  if (row) openPostRuleSheet(postRuleById(row.getAttribute('data-sid')), null);
+  if (row) openPostRuleSheet(postRuleById(row.getAttribute('data-sid')), null, null);
 };
 
 function chip(action, value, label, on) {
@@ -522,22 +699,27 @@ function renderRuleDraft() {
   const box = document.getElementById('pr-draft');
   if (!box || !ruleDraft) return;
   const f = ruleDraft.filters;
+  const isWeibo = ruleDraft.platform === 'weibo';
   const chChips = channelCache.length === 0
     ? '<span class="hint">还没有渠道，去「设置 → 推送渠道」添加</span>'
     : channelCache.map(function (c) {
         return chip('rule-ch-toggle', c.id, c.name, ruleDraft.channels.indexOf(c.id) >= 0);
       }).join('');
+  // 平台差异只体现在可用筛选：微博的「转发」在抓取层就折进 retweet（正文带 //转发自），
+  // 没有独立的引用实体，也不存在需要翻译的外文正文 —— 不出这两枚胶囊（不出比放个永远不命中的勾诚实）
+  const llmChips = chip('rule-llm-toggle', 'judge', '判定要不要推', ruleDraft.llmJudge) +
+    (isWeibo ? '' : chip('rule-llm-toggle', 'translate', '附译文', ruleDraft.llmTranslate));
   box.innerHTML =
+    '<div class="field"><label class="field-label">来源</label>' +
+      `<span class="x-plat ${isWeibo ? 'x-plat-weibo' : 'x-plat-x'}">${isWeibo ? '微博' : 'X'}</span>` +
+      '<span class="row-sub" style="margin-left:8px">规则只匹配该平台的帖子，改平台请另建一条</span></div>' +
     '<div class="field"><label class="field-label">筛选</label><div class="chips">' +
       chip('rule-filter-toggle', 'original', '原创', f.original) +
       chip('rule-filter-toggle', 'retweet', '转发', f.retweet) +
       chip('rule-filter-toggle', 'media', '必须带图', f.media) +
     '</div></div>' +
     '<div class="field"><label class="field-label">渠道</label><div class="chips">' + chChips + '</div></div>' +
-    '<div class="field"><label class="field-label">LLM</label><div class="chips">' +
-      chip('rule-llm-toggle', 'judge', '判定要不要推', ruleDraft.llmJudge) +
-      chip('rule-llm-toggle', 'translate', '附译文', ruleDraft.llmTranslate) +
-    '</div></div>';
+    '<div class="field"><label class="field-label">LLM</label><div class="chips">' + llmChips + '</div></div>';
 }
 
 /** 「判定标准」只在开了判定时显示；用 hidden 而非重渲，保住已填内容（pr-draft 重渲会清输入） */
@@ -546,9 +728,11 @@ function syncJudgeField() {
   if (jf) jf.hidden = !(ruleDraft && ruleDraft.llmJudge);
 }
 
-function openPostRuleSheet(r, accountId) {
+function openPostRuleSheet(r, platform, accountId) {
   ruleDraft = {
     id: r ? r.id : null,
+    // 平台：新建 = 开浮窗那张卡（必填）；编辑 = 保留原平台（平台是账号 id 的解释域，编辑里不给换）
+    platform: r ? r.platform : (platform || 'twitter'),
     // scope：新建 = 当前浮窗账号；编辑 = 保留原 scope（存量的全部/多账号规则不被收窄）
     accountIds: r ? r.accountIds.map(Number) : (accountId != null ? [accountId] : []),
     channels: (r ? r.channels : []).map(Number),
@@ -561,12 +745,17 @@ function openPostRuleSheet(r, accountId) {
     llmTranslate: r ? r.llmTranslate : false,
   };
   ruleLevel = sheetAccountId != null ? 2 : 1;
+  const isWeibo = ruleDraft.platform === 'weibo';
+  const defaultTpl = isWeibo ? '{author} 发了新微博' : '{author} 发了新推文';
+  const judgePlaceholder = isWeibo
+    ? '如：只推与直播预告、新歌发布相关的微博'
+    : '如：只推与直播预告、新曲发布相关的推文';
   openSheet(r ? '编辑图文帖规则' : '添加图文帖规则',
     '<div id="pr-draft"></div>' +
     `<div class="field" id="pr-judge-field"><label class="field-label">判定标准</label>` +
-      `<input class="inp" id="pr-judge" placeholder="如：只推与直播预告、新曲发布相关的推文" value="${r && r.judgePrompt ? esc(r.judgePrompt) : ''}"></div>` +
+      `<input class="inp" id="pr-judge" placeholder="${judgePlaceholder}" value="${r && r.judgePrompt ? esc(r.judgePrompt) : ''}"></div>` +
     field('关键词（逗号分隔）', `<input class="inp" id="pr-kw" placeholder="留空 = 不限" value="${r && r.filters.keywords.length ? esc(r.filters.keywords.join(',')) : ''}">`) +
-    field('推送词', `<input class="inp" id="pr-tpl" placeholder="留空 = 默认（{author} 发了新推文）" value="${r && r.messageTemplate ? esc(r.messageTemplate) : ''}">`) +
+    field('推送词', `<input class="inp" id="pr-tpl" placeholder="留空 = 默认（${defaultTpl}）" value="${r && r.messageTemplate ? esc(r.messageTemplate) : ''}">`) +
     '<span class="row-sub">可用变量：{author} {text} {url} {liver}</span>',
     ruleLevel,
     (r ? `<button class="btn" data-action="del-post-rule" data-id="${r.id}">删除</button><span class="sp"></span>` : '') +
@@ -602,6 +791,7 @@ ACTIONS['save-post-rule'] = function (el) {
   const kw = document.getElementById('pr-kw').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
   const judgePrompt = document.getElementById('pr-judge').value.trim();
   const body = {
+    platform: ruleDraft.platform,
     accountIds: ruleDraft.accountIds,
     channels: ruleDraft.channels,
     filters: {
@@ -612,7 +802,7 @@ ACTIONS['save-post-rule'] = function (el) {
     },
     llmJudge: ruleDraft.llmJudge,
     judgePrompt: judgePrompt || null,
-    llmTranslate: ruleDraft.llmTranslate,
+    llmTranslate: ruleDraft.platform === 'weibo' ? false : ruleDraft.llmTranslate,
     messageTemplate: document.getElementById('pr-tpl').value.trim() || null,
   };
   const idAttr = el.getAttribute('data-id');

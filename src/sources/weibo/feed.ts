@@ -1,13 +1,17 @@
 /**
- * 微博时间线源：轮询「watch=1 且绑定了 weiboUid」的主播的 myblog 列表 →
- * posts 表归档（UNIQUE(platform,item_id) 去重）→ 新帖 emit feed_post。
- * 模子同 bili/dynamic.ts；登录态心跳折进同步周期（模子同 FollowsSource）。
+ * 微博时间线源：轮询 weibo_accounts 里 enabled 的账号的 myblog 列表 →
+ * posts 归档（UNIQUE(platform,item_id) 去重）→ 新帖 emit feed_post。
+ * 模子同 twitter/feed.ts（X 是第一个独立图文来源，微博 2026-09 与它同构）。
  *
- * posts.uid 存的是监听名单里的（B站）uid —— 面板 enrich 按它分组混排第三栏；
- * 微博 uid 只用于拉取与拼 url。
+ * **与 X 的关键差异**：微博有登录态（全站共用一份 weibo-cookies），所以「心跳」是
+ * `fetchWeiboSelf` 查登录态，而不是 X 那样的代理/实例可用性；登录态运行中失效要告警。
+ *
+ * `posts.uid` 存**微博账号自身的 uid**（与 twitter 存 screen name 同语义：帖子归属 =
+ * 被抓账号自身）。「这条微博属于哪个 B站主播」由 `weibo_accounts.bili_uid` 这条可选关联
+ * 反查（面板 enrich 走 `db.listRecentPostsMixed`），所以主播卡第三栏混排行为不变。
  *
  * 失败纪律：HTTP 错 / 响应结构异常（跳登录页）→ 跳过本轮保留旧数据；
- * 单 uid 连续失败到阈值发一次 health_alert，恢复复位。
+ * 单账号连续失败到阈值发一次 health_alert，持续失败超阈值再报一次，恢复复位。
  * cookie 值绝不进日志。
  */
 import { makeLogger } from '../../logger.js';
@@ -16,9 +20,12 @@ import { mapLimit } from '../../core/concurrency.js';
 import type { Signal } from '../../core/types.js';
 import { STREAK_QQ_ALERT_AFTER_SEC } from '../../core/types.js';
 import type { NewPost } from '../../core/posts.js';
+import type { WeiboAccount } from '../../core/weibo-accounts.js';
+import { emptyWeiboFeedSnapshot, type WeiboFeedSnapshot } from '../../core/weibo-accounts.js';
 import type { Source, SourceContext } from '../types.js';
 import { fetchWeiboSelf, type WeiboSelfInfo } from './auth.js';
 import type { FetchImpl } from './qrcode.js';
+import { cacheWeiboAvatar } from './avatar.js';
 
 const log = makeLogger('weibo/feed');
 
@@ -42,6 +49,12 @@ export interface WeiboFeedSourceOpts {
   selfFetcher?: WeiboSelfFetcher;
   /** 每轮心跳拿到登录态后上报一次（无论真假），供面板展示 */
   onLoginState?: (s: WeiboSelfInfo) => void;
+  /** 头像本地缓存目录（cache/weibo-avatars）；不注入则只抠 URL 不落盘 */
+  avatarCacheDir?: string;
+  /** 头像落盘注入点（单测用；默认 cacheWeiboAvatar 直连下载，微博图床无需代理） */
+  avatarSaver?: (url: string, dir: string) => Promise<string | null>;
+  /** 每轮回写运行状态快照（装配处持有；面板当前不展示它，但它是「抓不到 vs 没新帖」的可观测证据） */
+  onStatus?: (s: WeiboFeedSnapshot) => void;
 }
 
 /**
@@ -116,6 +129,19 @@ function picsOf(m: any): string[] {
   return m.pics.map((p: any) => p?.large?.url ?? p?.url).filter(Boolean);
 }
 
+/** 头像（顺手抠，落盘在 feed 里做）：优先大图字段，缺省回退 profile_image_url */
+export function avatarUrlOf(item: unknown): string | null {
+  const u = (item as any)?.user;
+  const url = u?.avatar_large ?? u?.avatar_hd ?? u?.profile_image_url;
+  return typeof url === 'string' && url ? url : null;
+}
+
+/** 昵称（抓到就回写名单，昵称会改、uid 不会） */
+export function nicknameOf(item: unknown): string | null {
+  const n = (item as any)?.user?.screen_name;
+  return typeof n === 'string' && n.trim() ? n.trim() : null;
+}
+
 /** created_at 是 "Mon Aug 03 21:15:00 +0800 2026" 格式，Date.parse 可直接解析 */
 function parseCreatedAt(s: unknown): number {
   const t = Date.parse(String(s ?? ''));
@@ -123,12 +149,12 @@ function parseCreatedAt(s: unknown): number {
 }
 
 /**
- * 原始 mblog → Post；缺 idstr 返回 null 跳过。
+ * 原始 mblog → Post；缺 idstr 返回 null 跳过。**归属 uid = 微博账号自身 uid**。
  * 转发（有 retweeted_status）拼「//转发自 @原作者: 原文」，图取原微博的；
  * 原微博已删时 retweeted_status 只剩残桩，防御式取值不炸。
  */
 export function parseMblog(
-  item: unknown, uid: string, weiboUid: string, longText?: string | null,
+  item: unknown, weiboUid: string, longText?: string | null,
 ): NewPost | null {
   const it = item as any;
   const idstr = it?.idstr;
@@ -154,7 +180,7 @@ export function parseMblog(
 
   return {
     platform: 'weibo',
-    uid,
+    uid: weiboUid,
     itemId: String(idstr),
     type: isRetweet ? 'retweet' : 'mblog',
     text,
@@ -165,21 +191,32 @@ export function parseMblog(
   };
 }
 
+/** 微博 idstr 是数字串，只往前推的游标按数值比较（与 X 的时间戳纪律同理） */
+function newerId(a: string | null, b: string): string {
+  if (!a) return b;
+  try {
+    return BigInt(b) > BigInt(a) ? b : a;
+  } catch {
+    return a;
+  }
+}
+
 /**
- * 微博时间线轮询：listStreamers → watch=1 且 weiboUid 非空 → mapLimit(2) 逐个拉
- * mymblog → 归档 posts → 新帖 emit feed_post。
+ * 微博时间线轮询：listWeiboAccounts(true) → mapLimit(2) 逐个拉 mymblog →
+ * 归档 posts → 新帖 emit feed_post。
  *
  * 登录态心跳折进同步周期：每轮 fetchWeiboSelf，运行中发现意外失效（本进程内此前
  * 成功登录过）才发一次 health_alert 并跳过整轮抓取，恢复复位；本来就没登录
  * （启动起从未成功）只记日志不告警；每轮 onLoginState 上报面板（驱动微博平台状态点）。
- * 冷启动政策：每个 uid 首轮只归档不发信号（同 dynamic 的 first round）。
+ * 冷启动政策：每个账号首轮只归档不发信号（同 dynamic/twitter）。
  */
 export class WeiboFeedSource implements Source {
   readonly name = 'weibo/feed';
 
   private ctx?: SourceContext;
   private task?: PeriodicTask;
-  /** 已成功跑过一轮的 uid（首轮静默归档，不发信号） */
+  private status: WeiboFeedSnapshot = emptyWeiboFeedSnapshot();
+  /** 已成功跑过一轮的账号 uid（首轮静默归档，不发信号） */
   private polled = new Set<string>();
   private failures = new Map<string, number>();
   private uidAlerted = new Set<string>();
@@ -197,6 +234,9 @@ export class WeiboFeedSource implements Source {
   private readonly longTextFetcher: LongTextFetcher;
   private readonly selfFetcher: WeiboSelfFetcher;
   private readonly onLoginState?: (s: WeiboSelfInfo) => void;
+  private readonly avatarCacheDir?: string;
+  private readonly avatarSaver: (url: string, dir: string) => Promise<string | null>;
+  private readonly onStatus?: (s: WeiboFeedSnapshot) => void;
 
   constructor(opts: WeiboFeedSourceOpts) {
     this.cookie = opts.cookie;
@@ -204,6 +244,9 @@ export class WeiboFeedSource implements Source {
     this.longTextFetcher = opts.longTextFetcher ?? fetchLongText;
     this.selfFetcher = opts.selfFetcher ?? fetchWeiboSelf;
     this.onLoginState = opts.onLoginState;
+    this.avatarCacheDir = opts.avatarCacheDir;
+    this.avatarSaver = opts.avatarSaver ?? cacheWeiboAvatar;
+    this.onStatus = opts.onStatus;
   }
 
   start(ctx: SourceContext): void {
@@ -219,15 +262,18 @@ export class WeiboFeedSource implements Source {
 
   stop(): void {
     this.task?.stop();
+    this.patchStatus({ running: false });
   }
 
   /** start 中除周期调度外的部分。测试可 bind 后直接驱动 pollOnce。 */
   bind(ctx: SourceContext): void {
     this.ctx = ctx;
+    this.status = { ...this.status, running: true };
+    this.onStatus?.(this.status);
     log.info(`启动：微博时间线轮询，间隔 ${ctx.config.weibo.intervalSec}s`);
   }
 
-  /** 拉一轮：先心跳查登录态，有效才逐 uid 归档 + 新帖发信号。 */
+  /** 拉一轮：先心跳查登录态，有效才逐账号归档 + 新帖发信号。 */
   async pollOnce(): Promise<void> {
     const ctx = this.ctx!;
 
@@ -237,6 +283,7 @@ export class WeiboFeedSource implements Source {
     } catch (e) {
       // 心跳本身网络失败 ≠ cookie 失效，不告警，只跳过本轮（同 FollowsSource）
       log.error('微博登录态查询失败，跳过本轮抓取', e);
+      this.patchStatus({ lastRunAt: Math.floor(Date.now() / 1000), lastError: '登录态查询失败' });
       return;
     }
     this.onLoginState?.(self);
@@ -258,6 +305,12 @@ export class WeiboFeedSource implements Source {
         });
       }
       log.warn(this.hadOkLogin ? '微博登录态失效，跳过本轮抓取' : '微博未登录，跳过本轮抓取（不告警）');
+      this.patchStatus({
+        lastRunAt: Math.floor(Date.now() / 1000),
+        accounts: 0,
+        okAccounts: 0,
+        lastError: this.hadOkLogin ? '微博登录态失效' : '微博未登录',
+      });
       return;
     }
     this.hadOkLogin = true;
@@ -266,24 +319,47 @@ export class WeiboFeedSource implements Source {
       log.info('微博登录态已恢复，继续抓取');
     }
 
-    const targets = ctx.db.listStreamers().filter((s) => s.watch && s.weiboUid);
-    await mapLimit(targets, 2, async (s) => {
-      await this.pollStreamer(s.uid, s.weiboUid!);
+    const accounts = ctx.db.listWeiboAccounts(true);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (accounts.length === 0) {
+      log.debug('微博名单为空，跳过本轮');
+      this.patchStatus({ lastRunAt: nowSec, accounts: 0, okAccounts: 0, lastError: null });
+      return;
+    }
+
+    let ok = 0;
+    let lastError: string | null = null;
+    await mapLimit(accounts, 2, async (a) => {
+      const r = await this.pollAccount(a);
+      if (r.ok) ok++;
+      if (r.error) lastError = r.error;
+    });
+    this.patchStatus({
+      lastRunAt: nowSec,
+      accounts: accounts.length,
+      okAccounts: ok,
+      lastOkAt: ok > 0 ? nowSec : this.status.lastOkAt,
+      lastError,
     });
   }
 
-  private async pollStreamer(uid: string, weiboUid: string): Promise<void> {
+  /** 单账号一轮：拉 → 归档 → 新帖发信号 → 游标/头像回写。失败不影响其他账号。 */
+  private async pollAccount(
+    account: WeiboAccount,
+  ): Promise<{ ok: boolean; error?: string }> {
     const ctx = this.ctx!;
+    const weiboUid = account.uid;
     let items: unknown[];
     try {
       items = await this.fetcher(this.cookie, weiboUid);
     } catch (e) {
       // 关键：拉取失败绝不当成「没微博」—— 保留旧数据，什么都不写
-      log.error(`微博时间线拉取失败 uid=${uid}（微博 ${weiboUid}），保留旧数据`, e);
-      this.onFailure(uid, e);
-      return;
+      const msg = e instanceof Error ? e.message : String(e);
+      log.error(`微博时间线拉取失败（微博 ${weiboUid}），保留旧数据：${msg}`);
+      this.onFailure(weiboUid, msg);
+      return { ok: false, error: `微博 ${weiboUid}: ${msg}` };
     }
-    this.onSuccess(uid);
+    this.onSuccess(weiboUid);
 
     const posts: NewPost[] = [];
     for (const item of items) {
@@ -297,45 +373,71 @@ export class WeiboFeedSource implements Source {
           longText = null; // 真实实现本身不抛，这里防注入实现/意外
         }
       }
-      const p = parseMblog(item, uid, weiboUid, longText);
+      const p = parseMblog(item, weiboUid, longText);
       if (p) posts.push(p);
     }
     const inserted = ctx.db.insertPosts(posts);
-    const firstRound = !this.polled.has(uid);
-    this.polled.add(uid);
+    const firstRound = !this.polled.has(weiboUid);
+    this.polled.add(weiboUid);
+
+    // 游标与昵称回写：游标只往前推；昵称抓到就更新（昵称会改，uid 不会）
+    const newest = posts.reduce<string | null>((acc, p) => newerId(acc, p.itemId), account.lastPostId);
+    const newestPost = posts.find((p) => p.itemId === newest) ?? null;
+    const nowSec = Math.floor(Date.now() / 1000);
+    ctx.db.touchWeiboAccount(account.id, {
+      lastOkAt: nowSec,
+      ...(newest ? { lastPostId: newest } : {}),
+      ...(newestPost ? { lastPostAt: newestPost.pubTs } : {}),
+      ...(nicknameOf(items[0]) ? { nickname: nicknameOf(items[0]) } : {}),
+    });
 
     if (firstRound) {
-      log.info(`uid=${uid} 首轮归档 ${inserted.length} 条微博（静默，不发信号）`);
-      return;
+      log.info(`微博 ${weiboUid} 首轮归档 ${inserted.length} 条（静默，不发信号）`);
+    } else {
+      for (const i of inserted) {
+        const p = posts[i]!;
+        const sig: Signal = {
+          source: this.name,
+          kind: 'feed_post',
+          uid: weiboUid,
+          roomId: '',
+          ts: nowSec,
+          payload: {
+            platform: p.platform, itemId: p.itemId, type: p.type,
+            text: p.text, pics: p.pics, pubTs: p.pubTs, url: p.url,
+          },
+        };
+        ctx.bus.emit(sig);
+      }
+      if (inserted.length > 0) log.info(`微博 ${weiboUid} 新帖 ${inserted.length} 条`);
     }
-    for (const i of inserted) {
-      const p = posts[i]!;
-      const sig: Signal = {
-        source: this.name,
-        kind: 'feed_post',
-        uid,
-        roomId: '',
-        ts: Math.floor(Date.now() / 1000),
-        payload: {
-          platform: p.platform, itemId: p.itemId, type: p.type,
-          text: p.text, pics: p.pics, pubTs: p.pubTs, url: p.url,
-        },
-      };
-      ctx.bus.emit(sig);
+
+    // 头像最后做：下载慢也不能挡 feed_post 信号。已有本地头像不重复下载，失败静默下轮再试。
+    if (!account.avatar && this.avatarCacheDir) {
+      const url = avatarUrlOf(items[0]);
+      if (url) {
+        const avatar = await this.avatarSaver(url, this.avatarCacheDir);
+        if (avatar) ctx.db.touchWeiboAccount(account.id, { avatar });
+      }
     }
-    if (inserted.length > 0) log.info(`uid=${uid} 新微博 ${inserted.length} 条`);
+    return { ok: true };
+  }
+
+  private patchStatus(patch: Partial<WeiboFeedSnapshot>): void {
+    this.status = { ...this.status, ...patch };
+    this.onStatus?.(this.status);
   }
 
   private onSuccess(uid: string): void {
     const n = this.failures.get(uid) ?? 0;
-    if (n > 0) log.info(`uid=${uid} 微博时间线拉取恢复正常（此前连续失败 ${n} 次）`);
+    if (n > 0) log.info(`微博 ${uid} 时间线拉取恢复正常（此前连续失败 ${n} 次）`);
     this.failures.delete(uid);
     this.uidAlerted.delete(uid);
     this.firstFailTs.delete(uid);
     this.durationAlerted.delete(uid);
   }
 
-  private onFailure(uid: string, err: unknown): void {
+  private onFailure(uid: string, err: string): void {
     const nowSec = Math.floor(Date.now() / 1000);
     const n = (this.failures.get(uid) ?? 0) + 1;
     if (n === 1) this.firstFailTs.set(uid, nowSec);
@@ -353,7 +455,7 @@ export class WeiboFeedSource implements Source {
     }
   }
 
-  private emitUidAlert(uid: string, failures: number, durationSec: number, err: unknown, durationAlert: boolean): void {
+  private emitUidAlert(uid: string, failures: number, durationSec: number, err: string, durationAlert: boolean): void {
     this.ctx!.bus.emit({
       source: this.name,
       kind: 'health_alert',
@@ -362,11 +464,11 @@ export class WeiboFeedSource implements Source {
       ts: Math.floor(Date.now() / 1000),
       payload: {
         alertKind: 'streak',
-        message: `微博时间线拉取连续失败 ${failures} 次（uid=${uid}），该对象本轮已暂停。\n` +
+        message: `微博时间线拉取连续失败 ${failures} 次（微博 ${uid}），该账号本轮已暂停。\n` +
           '多为登录态失效或被风控，恢复后自动继续。' +
           (durationAlert ? `\n已持续失败约 ${Math.round(durationSec / 60)} 分钟。` : ''),
         failures,
-        lastError: String(err),
+        lastError: err,
         ...(durationAlert ? { durationAlert: true } : {}),
       },
     });

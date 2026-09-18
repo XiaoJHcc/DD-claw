@@ -792,3 +792,13 @@ input:disabled{opacity:.5;background:var(--fill)}
 .x-id-row{display:flex;align-items:center;gap:var(--sp-3)}
 .x-id-row .st-id{flex:1;min-width:0}
 .x-id-row .switch{flex:none}
+
+/* 单墙混排：两块平台各自的账号卡在同一张网格里，靠身份段前的平台角标与筛选胶囊区分
+   （角标不是装饰——两张名单的账号在同一屏时，用户必须一眼看出规则会落在哪个平台） */
+.x-accounts-head{display:flex;align-items:center;gap:var(--sp-3);margin:var(--pad) 0 var(--sp-3)}
+.x-plat{display:inline-flex;align-items:center;gap:4px;height:18px;padding:0 7px;border-radius:5px;
+  font-size:var(--fs-xs);font-weight:700;letter-spacing:.2px;flex:none}
+.x-plat-x{background:rgba(0,0,0,.06);color:#3A3A3C}
+.x-plat-weibo{background:rgba(255,130,0,.13);color:#C25E00}
+/* 微博账号卡的身份行：平台角标叠在名称上方（与 X 卡同一三段式，只多这一行） */
+.x-plat-row{display:flex;align-items:center;gap:var(--sp-2);margin-bottom:2px}

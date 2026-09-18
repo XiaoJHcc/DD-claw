@@ -150,21 +150,72 @@ export const mockXAccounts = [
 ];
 
 // ---- 图文帖规则（与开播推送规则平行的另一套；渠道引用上面 mockChannels 的 id）----
-// 两条演示不同筛选：一条「带图原创 → 粉丝群」，一条停用的「转发 → 系统通知」
+// platform 决定 accountIds 属于哪份名单（twitter → mockXAccounts / weibo → mockWeiboAccounts）
+// 三条演示不同筛选：X 的「带图原创 → 粉丝群」、X 停用的「转发 → 系统通知」、微博的「原创 → 粉丝群」
 export const mockPostRules = [
   {
-    id: 1, name: '带图原创', accountIds: [], channels: [2],
+    id: 1, name: '带图原创', platform: 'twitter', accountIds: [], channels: [2],
     filters: { original: true, retweet: false, quote: false, media: true, keywords: [] },
     messageTemplate: null,
     llmJudge: true, judgePrompt: '只推与直播预告、新曲发布相关的推文', llmTranslate: true,
     enabled: true, sort: 0, createdAt: 1, updatedAt: 1,
   },
   {
-    id: 2, name: '转发也看', accountIds: [2], channels: [1],
+    id: 2, name: '转发也看', platform: 'twitter', accountIds: [2], channels: [1],
     filters: { original: false, retweet: true, quote: false, media: false, keywords: ['live'] },
     messageTemplate: '{author} 转发了',
     llmJudge: false, judgePrompt: null, llmTranslate: false,
     enabled: false, sort: 1, createdAt: 1, updatedAt: 1,
+  },
+  {
+    id: 3, name: '微博预告', platform: 'weibo', accountIds: [1], channels: [2],
+    filters: { original: true, retweet: false, quote: false, media: false, keywords: ['预告', '直播'] },
+    messageTemplate: '{author} 发了新微博',
+    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    enabled: true, sort: 2, createdAt: 1, updatedAt: 1,
+  },
+];
+
+// ---- 微博（图文分页第二个来源）：源运行状态 + 独立名单 + 最近微博 ----
+// 与 X 同构但前提不同：微博要登录态（没有代理/实例那套设置，间隔走「抓取设置」）。
+// 留一个「未关联主播」的账号做对照：它是独立博主，不会串进主播卡第三栏。
+export const mockWeibo = {
+  config: { intervalSec: 300 },
+  status: {
+    feed: {
+      running: true, lastRunAt: 0, lastOkAt: 0, accounts: 2, okAccounts: 2, lastError: null,
+    },
+  },
+};
+
+export const mockWeiboAccounts = [
+  {
+    id: 1, uid: '2203177060', nickname: '阿梓从小就很可爱', biliUid: '7706705', enabled: true,
+    lastPostId: '5001', lastPostAt: 1, lastOkAt: 1, avatar: null, createdAt: 1, updatedAt: 1,
+  },
+  {
+    id: 2, uid: '1234567890', nickname: '某某企划官方微博', biliUid: null, enabled: true,
+    lastPostId: '5002', lastPostAt: 1, lastOkAt: 1, avatar: null, createdAt: 1, updatedAt: 1,
+  },
+];
+
+// 最近微博（微博账号卡帖子段的演示数据；pubTs 由 mock-api 在冻结时刻后填）
+export const mockWeiboPosts = [
+  {
+    id: 1, platform: 'weibo', uid: '2203177060', itemId: '5001', type: 'mblog',
+    text: '今晚九点直播！新歌也准备好了，记得来玩～',
+    pics: ['https://wx1.sinaimg.cn/large/006APoFYly1h1234567890.jpg'],
+    pubTs: 1, url: 'https://weibo.com/2203177060/Pa1bC', createdAt: 1,
+  },
+  {
+    id: 2, platform: 'weibo', uid: '2203177060', itemId: '5002', type: 'retweet',
+    text: '好耶\n//转发自 @STAFF: 周边预售开始了',
+    pics: [], pubTs: 1, url: 'https://weibo.com/2203177060/Pb2cD', createdAt: 1,
+  },
+  {
+    id: 3, platform: 'weibo', uid: '1234567890', itemId: '5003', type: 'mblog',
+    text: '【预告】本周六晚八点，新企划发布会直播，敬请期待。',
+    pics: [], pubTs: 1, url: 'https://weibo.com/1234567890/Pc3eF', createdAt: 1,
   },
 ];
 

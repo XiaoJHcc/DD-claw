@@ -4,12 +4,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  WeiboFeedSource, fetchLongText, fetchMymblog, parseMblog,
+  WeiboFeedSource, avatarUrlOf, fetchLongText, fetchMymblog, nicknameOf, parseMblog,
   type LongTextFetcher, type MblogFetcher, type WeiboSelfFetcher,
 } from './feed.js';
 import type { WeiboSelfInfo } from './auth.js';
 import { Bus } from '../../core/bus.js';
 import { Db } from '../../core/db.js';
+import { emptyWeiboFeedSnapshot, type WeiboFeedSnapshot } from '../../core/weibo-accounts.js';
 import type { Signal } from '../../core/types.js';
 import type { AppConfig } from '../../config/schema.js';
 
@@ -33,9 +34,15 @@ function cfg(): AppConfig {
 const CREATED = 'Mon Aug 03 21:15:00 +0800 2026';
 const CREATED_TS = Math.floor(Date.parse(CREATED) / 1000);
 
+const USER = {
+  screen_name: '渡瀬結月',
+  profile_image_url: 'https://tvax1.sinaimg.cn/crop.0.0.180/small.jpg',
+  avatar_large: 'https://tvax1.sinaimg.cn/crop.0.0.1080.1080.180/big.jpg',
+};
+
 const MBLOG = {
   idstr: '5001', mblogid: 'Pa1bC', isLongText: false,
-  text_raw: '今晚九点直播！', created_at: CREATED,
+  text_raw: '今晚九点直播！', created_at: CREATED, user: USER,
   pics: [{ large: { url: 'https://wx1.sinaimg.cn/large/a.jpg' } }],
 };
 
@@ -54,22 +61,22 @@ const RETWEET = {
   },
 };
 
-test('parseMblog 原创带图：字段全对，posts.uid 用监听名单 uid', () => {
-  const p = parseMblog(MBLOG, '7706705', W_UID)!;
+test('parseMblog 原创带图：字段全对，posts.uid 用微博账号自身 uid', () => {
+  const p = parseMblog(MBLOG, W_UID)!;
   assert.equal(p.platform, 'weibo');
-  assert.equal(p.uid, '7706705', '归档归属用（B站）uid，面板 enrich 按它分组');
+  assert.equal(p.uid, W_UID, '归属 uid = 被抓账号自身（同 X 存 screen name 的语义）');
   assert.equal(p.itemId, '5001');
   assert.equal(p.type, 'mblog');
   assert.equal(p.text, '今晚九点直播！');
   assert.deepEqual(p.pics, ['https://wx1.sinaimg.cn/large/a.jpg']);
   assert.equal(p.pubTs, CREATED_TS, 'created_at 是 "Mon Aug 03 ... +0800 2026" 格式');
   assert.ok(p.pubTs > 1_700_000_000, '解析出的是真实时间戳');
-  assert.equal(p.url, 'https://weibo.com/2203177060/Pa1bC', 'url 用微博 uid + mblogid');
+  assert.equal(p.url, `https://weibo.com/${W_UID}/Pa1bC`, 'url 用微博 uid + mblogid');
   assert.ok(p.raw!.includes('5001'), 'raw 整 item 归档');
 });
 
 test('parseMblog 转发：拼「//转发自 @原作者」，图取原微博', () => {
-  const p = parseMblog(RETWEET, '1', W_UID)!;
+  const p = parseMblog(RETWEET, W_UID)!;
   assert.equal(p.type, 'retweet');
   assert.equal(p.text, '好耶\n//转发自 @原作者: 原微博正文');
   assert.deepEqual(p.pics, ['https://wx1.sinaimg.cn/large/o.jpg']);
@@ -77,23 +84,33 @@ test('parseMblog 转发：拼「//转发自 @原作者」，图取原微博', ()
 });
 
 test('parseMblog 长文：longText 优先，缺省用截断文本兜底', () => {
-  const full = parseMblog(LONG, '1', W_UID, '这是完整全文')!;
+  const full = parseMblog(LONG, W_UID, '这是完整全文')!;
   assert.equal(full.text, '这是完整全文');
-  const fallback = parseMblog(LONG, '1', W_UID, null)!;
+  const fallback = parseMblog(LONG, W_UID, null)!;
   assert.equal(fallback.text, '这是一条很长的微博的截断部分...');
 });
 
 test('parseMblog 防御：缺 idstr 返回 null；坏 created_at pubTs=0；被删原微博残桩不炸', () => {
-  assert.equal(parseMblog({ mblogid: 'x' }, '1', W_UID), null);
-  assert.equal(parseMblog(null, '1', W_UID), null);
-  const bad = parseMblog({ idstr: '9', created_at: 'garbage' }, '1', W_UID)!;
+  assert.equal(parseMblog({ mblogid: 'x' }, W_UID), null);
+  assert.equal(parseMblog(null, W_UID), null);
+  const bad = parseMblog({ idstr: '9', created_at: 'garbage' }, W_UID)!;
   assert.equal(bad.pubTs, 0);
   const stub = parseMblog({
     idstr: '10', text_raw: '转了', retweeted_status: { deleted: '1' },
-  }, '1', W_UID)!;
+  }, W_UID)!;
   assert.equal(stub.type, 'retweet');
   assert.equal(stub.text, '转了');
   assert.deepEqual(stub.pics, []);
+});
+
+test('avatarUrlOf / nicknameOf：优先大图字段、缺字段一律 null（防御式）', () => {
+  assert.equal(avatarUrlOf(MBLOG), USER.avatar_large);
+  assert.equal(avatarUrlOf({ user: { profile_image_url: 'https://x/a.jpg' } }), 'https://x/a.jpg');
+  assert.equal(avatarUrlOf({}), null);
+  assert.equal(avatarUrlOf(null), null);
+  assert.equal(nicknameOf(MBLOG), '渡瀬結月');
+  assert.equal(nicknameOf({ user: { screen_name: '  ' } }), null);
+  assert.equal(nicknameOf({}), null);
 });
 
 // ---- fetchMymblog / fetchLongText 请求形状与失败纪律 ----
@@ -147,39 +164,47 @@ interface Harness {
   db: Db;
   signals: Signal[];
   loginStates: WeiboSelfInfo[];
+  statuses: WeiboFeedSnapshot[];
   cleanup(): void;
 }
 
-/** 真 Bus + 收集信号，临时目录真实 Db；默认 uid 1 watch=1 且绑定微博 uid */
+/** 真 Bus + 收集信号，临时目录真实 Db；默认名单里一个启用账号 */
 function harness(opts: {
   fetcher: MblogFetcher;
   selfFetcher?: WeiboSelfFetcher;
   longTextFetcher?: LongTextFetcher;
-  streamers?: Array<{ uid: string; watch?: boolean; weiboUid?: string | null }>;
+  accounts?: Array<{ uid: string; enabled?: boolean; nickname?: string | null; biliUid?: string | null }>;
+  avatarCacheDir?: string;
+  avatarSaver?: (url: string, dir: string) => Promise<string | null>;
 }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));
   const db = new Db(join(dir, 'test.db'));
-  for (const s of opts.streamers ?? [{ uid: '1', watch: true, weiboUid: W_UID }]) {
-    db.upsertStreamer({
-      uid: s.uid,
-      watch: s.watch ?? true,
-      weiboUid: s.weiboUid === undefined ? W_UID : s.weiboUid, // 显式 null 保留（没绑微博）
+  for (const a of opts.accounts ?? [{ uid: W_UID }]) {
+    db.upsertWeiboAccount({
+      uid: a.uid,
+      nickname: a.nickname === undefined ? null : a.nickname,
+      biliUid: a.biliUid ?? null,
+      enabled: a.enabled ?? true,
     });
   }
   const bus = new Bus();
   const signals: Signal[] = [];
   bus.on('*', (s) => { signals.push(s); });
   const loginStates: WeiboSelfInfo[] = [];
+  const statuses: WeiboFeedSnapshot[] = [];
   const src = new WeiboFeedSource({
     cookie: 'fake-cookie',
     fetcher: opts.fetcher,
     longTextFetcher: opts.longTextFetcher,
     selfFetcher: opts.selfFetcher ?? (async () => ({ loggedIn: true, uid: '999' })),
     onLoginState: (s) => { loginStates.push(s); },
+    onStatus: (s) => { statuses.push(s); },
+    avatarCacheDir: opts.avatarCacheDir,
+    avatarSaver: opts.avatarSaver,
   });
   src.bind({ bus, db, config: cfg() });
   return {
-    src, db, signals, loginStates,
+    src, db, signals, loginStates, statuses,
     cleanup() { db.close(); rmSync(dir, { recursive: true, force: true }); },
   };
 }
@@ -190,7 +215,7 @@ test('首轮静默归档不发信号；第二轮新帖逐条 emit feed_post；�
   t.after(h.cleanup);
 
   await h.src.pollOnce();
-  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 2, '首轮归档入库');
+  assert.equal(h.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 2, '首轮归档入库');
   assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 0, '首轮不发信号');
   assert.deepEqual(h.loginStates, [{ loggedIn: true, uid: '999' }], '每轮 onLoginState 上报');
 
@@ -199,18 +224,18 @@ test('首轮静默归档不发信号；第二轮新帖逐条 emit feed_post；�
   const feeds = h.signals.filter((s) => s.kind === 'feed_post');
   assert.equal(feeds.length, 1);
   assert.equal(feeds[0]!.source, 'weibo/feed');
-  assert.equal(feeds[0]!.uid, '1');
+  assert.equal(feeds[0]!.uid, W_UID, '信号 uid = 微博账号 uid（pipeline 按它查名单）');
   const pl = feeds[0]!.payload as { platform: string; itemId: string; type: string; url: string };
   assert.equal(pl.platform, 'weibo');
   assert.equal(pl.itemId, '5002');
   assert.equal(pl.type, 'mblog');
-  assert.equal(pl.url, 'https://weibo.com/2203177060/Pb2cD');
+  assert.equal(pl.url, `https://weibo.com/${W_UID}/Pb2cD`);
 
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 1, '无新增零信号');
 });
 
-test('只抓 watch=1 且绑定 weiboUid 的主播', async (t) => {
+test('只抓 enabled=1 的微博账号（停用的不抓、不写库）', async (t) => {
   const fetched: string[] = [];
   const h = harness({
     fetcher: async (_c, weiboUid) => {
@@ -218,18 +243,89 @@ test('只抓 watch=1 且绑定 weiboUid 的主播', async (t) => {
       // 不同 uid 给不同 idstr，避免撞 UNIQUE(platform,item_id) 去重
       return [{ ...MBLOG, idstr: '9' + weiboUid, mblogid: 'Z' + weiboUid }];
     },
-    streamers: [
-      { uid: '1', watch: true, weiboUid: W_UID },
-      { uid: '2', watch: true, weiboUid: null },   // 没绑微博，不抓
-      { uid: '3', watch: false, weiboUid: '111' }, // 不监听，不抓
+    accounts: [
+      { uid: W_UID, enabled: true },
+      { uid: '111', enabled: false }, // 停用，不抓
     ],
   });
   t.after(h.cleanup);
 
   await h.src.pollOnce();
   assert.deepEqual(fetched, [W_UID]);
-  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 1);
-  assert.equal(h.db.listRecentPosts(['3'], 10).get('3'), undefined, 'watch=0 不写库');
+  assert.equal(h.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 1);
+  assert.equal(h.db.listRecentPosts(['111'], 10).get('111'), undefined, '停用账号不写库');
+});
+
+test('名单为空：不打网络、状态记为 0 账号（面板要能区分「没配账号」与「抓取失败」）', async (t) => {
+  let fetches = 0;
+  const h = harness({ fetcher: async () => { fetches++; return [MBLOG]; }, accounts: [] });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(fetches, 0);
+  assert.equal(h.statuses.at(-1)!.accounts, 0);
+  assert.equal(h.statuses.at(-1)!.lastError, null);
+  assert.ok(h.statuses.at(-1)!.lastRunAt, '仍然记了本轮时间');
+});
+
+test('状态快照：成功轮记账号数/成功数/lastOkAt；失败轮给可读原因（抓不到 ≠ 没新帖）', async (t) => {
+  let fail = false;
+  const h = harness({
+    fetcher: async () => {
+      if (fail) throw new Error('微博 mymblog HTTP 500');
+      return [MBLOG];
+    },
+  });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  const ok = h.statuses.at(-1)!;
+  assert.equal(ok.accounts, 1);
+  assert.equal(ok.okAccounts, 1);
+  assert.equal(ok.lastError, null);
+  assert.ok(ok.lastOkAt, '成功轮写入 lastOkAt');
+
+  fail = true;
+  await h.src.pollOnce();
+  const bad = h.statuses.at(-1)!;
+  assert.equal(bad.okAccounts, 0);
+  assert.match(bad.lastError ?? '', /HTTP 500/, '失败原因必须可读且带上账号');
+  assert.equal(bad.lastOkAt, ok.lastOkAt, '失败不清掉上一次成功的证据');
+});
+
+test('游标只往前推 + 昵称回写 + lastOkAt；旧帖不倒退游标', async (t) => {
+  let round: unknown[] = [{ ...MBLOG, idstr: '5001' }];
+  const h = harness({ fetcher: async () => round });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  let acc = h.db.getWeiboAccountByUid(W_UID)!;
+  assert.equal(acc.lastPostId, '5001');
+  assert.equal(acc.nickname, '渡瀬結月', '抓到昵称就回写（昵称会改、uid 不会）');
+  assert.ok(acc.lastOkAt);
+
+  // 同一条 + 一条更老的：游标不该倒退
+  round = [{ ...MBLOG, idstr: '4999', mblogid: 'Pold' }, { ...MBLOG, idstr: '5001' }];
+  await h.src.pollOnce();
+  acc = h.db.getWeiboAccountByUid(W_UID)!;
+  assert.equal(acc.lastPostId, '5001', '游标只往前推');
+});
+
+test('头像：抓到 URL 才下载并回写文件名；已有头像不重复下载', async (t) => {
+  const calls: string[] = [];
+  const h = harness({
+    fetcher: async () => [MBLOG],
+    avatarCacheDir: join(tmpdir(), 'ddclaw-avatars-unused'),
+    avatarSaver: async (url) => { calls.push(url); return 'abc.jpg'; },
+  });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.deepEqual(calls, [USER.avatar_large], '优先大图字段');
+  assert.equal(h.db.getWeiboAccountByUid(W_UID)!.avatar, 'abc.jpg');
+
+  await h.src.pollOnce();
+  assert.equal(calls.length, 1, '已有本地头像不再下载');
 });
 
 test('isLongText 走 longTextFetcher 补全；补全失败用截断文本不算错误', async (t) => {
@@ -242,7 +338,7 @@ test('isLongText 走 longTextFetcher 补全；补全失败用截断文本不算�
 
   await h.src.pollOnce();
   assert.deepEqual(calls, ['Pb2cD']);
-  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')![0]!.text, '完整全文内容');
+  assert.equal(h.db.listRecentPosts([W_UID], 10).get(W_UID)![0]!.text, '完整全文内容');
 
   const h2 = harness({
     fetcher: async () => [LONG],
@@ -250,7 +346,7 @@ test('isLongText 走 longTextFetcher 补全；补全失败用截断文本不算�
   });
   t.after(h2.cleanup);
   await h2.src.pollOnce();
-  assert.equal(h2.db.listRecentPosts(['1'], 10).get('1')![0]!.text, '这是一条很长的微博的截断部分...');
+  assert.equal(h2.db.listRecentPosts([W_UID], 10).get(W_UID)![0]!.text, '这是一条很长的微博的截断部分...');
   assert.equal(h2.signals.filter((s) => s.kind === 'health_alert').length, 0, '补全失败不算失败');
 });
 
@@ -273,7 +369,8 @@ test('登录失效：跳过整轮不抓不写库，告警一次；恢复复位�
   assert.equal(alerts[0]!.source, 'weibo/feed');
   assert.match((alerts[0]!.payload as { message: string }).message, /微博登录态运行中失效/);
   assert.equal(fetches, 1, '失效轮不抓取');
-  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 1, '不写库，旧数据保留');
+  assert.equal(h.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 1, '不写库，旧数据保留');
+  assert.match(h.statuses.at(-1)!.lastError ?? '', /登录态失效/, '状态行给原因，不静默');
 
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '同一轮失效不重复告警');
@@ -315,7 +412,7 @@ test('心跳本身抛异常：跳过本轮不告警', async (t) => {
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '网络失败 ≠ 失效，不告警');
 });
 
-test('单 uid 拉取失败：保留旧数据、阈值告警一次、恢复复位；不影响其他 uid', async (t) => {
+test('单账号拉取失败：保留旧数据、阈值告警一次、恢复复位；不影响其他账号', async (t) => {
   let fail = false;
   const h = harness({
     fetcher: async (_c, weiboUid) => {
@@ -323,25 +420,22 @@ test('单 uid 拉取失败：保留旧数据、阈值告警一次、恢复复位
       // 不同 uid 给不同 idstr，避免撞 UNIQUE(platform,item_id) 去重
       return [{ ...MBLOG, idstr: '9' + weiboUid, mblogid: 'Z' + weiboUid }];
     },
-    streamers: [
-      { uid: '1', watch: true, weiboUid: W_UID },
-      { uid: '2', watch: true, weiboUid: '111' },
-    ],
+    accounts: [{ uid: W_UID }, { uid: '111' }],
   });
   t.after(h.cleanup);
 
   await h.src.pollOnce();
-  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 1);
+  assert.equal(h.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 1);
 
   fail = true; // threshold=2：连挂 2 次告警一次
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '第 1 次失败未达阈值');
-  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 1, '旧数据原样保留');
+  assert.equal(h.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 1, '旧数据原样保留');
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '到阈值告警一次');
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '同一轮故障不重复告警');
-  assert.equal(h.db.listRecentPosts(['2'], 10).get('2')!.length >= 1, true, '其他 uid 正常归档');
+  assert.equal(h.db.listRecentPosts(['111'], 10).get('111')!.length >= 1, true, '其他账号正常归档');
 
   fail = false; // 恢复复位
   await h.src.pollOnce();
@@ -351,7 +445,7 @@ test('单 uid 拉取失败：保留旧数据、阈值告警一次、恢复复位
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 2, '恢复后故障重新告警');
 });
 
-test('单 uid 连续失败持续满 10 分钟再发 durationAlert 告警（QQ 路由依据）', async (t) => {
+test('单账号连续失败持续满 10 分钟再发 durationAlert 告警（QQ 路由依据）', async (t) => {
   t.mock.timers.enable({ apis: ['Date'] });
   const h = harness({
     fetcher: async () => { throw new Error('微博 mymblog HTTP 500'); },
@@ -369,4 +463,10 @@ test('单 uid 连续失败持续满 10 分钟再发 durationAlert 告警（QQ �
   t.mock.timers.setTime(Date.now() + 600_000);
   await h.src.pollOnce();
   assert.equal(h.signals.filter(isDur).length, 1, '持续满 10 分钟应再报一次');
+});
+
+test('默认状态快照：未启动时 running=false 且各项为空（面板拿它画灰点）', () => {
+  assert.deepEqual(emptyWeiboFeedSnapshot(), {
+    running: false, lastRunAt: null, lastOkAt: null, accounts: 0, okAccounts: 0, lastError: null,
+  });
 });

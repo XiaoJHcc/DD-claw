@@ -10,11 +10,20 @@ const log = makeLogger('notify/image-cache');
 const MAX_BYTES = 3 * 1024 * 1024;
 const KEEP_MS = 3 * 24 * 3600 * 1000;
 
-/** B站图床要 UA + Referer，否则 403 */
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-  Referer: 'https://live.bilibili.com/',
-};
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+
+/**
+ * 按图床选 Referer（都要 UA，否则 403）：
+ *  · B站图床要 `live.bilibili.com`；
+ *  · 微博图床（sinaimg.cn）要 `weibo.com` —— 头像链路带它实测可达，带外站 Referer 会被防盗链 403
+ *    （浏览器端也靠 no-referrer 才能显示微博图，见 webui 的 referrerpolicy）。
+ */
+function imageHeaders(url: string): { 'User-Agent': string; Referer: string } {
+  let host = '';
+  try { host = new URL(url).hostname; } catch { /* 坏 URL 交给 fetch 报错 */ }
+  const referer = /(^|\.)sinaimg\.cn$/i.test(host) ? 'https://weibo.com/' : 'https://live.bilibili.com/';
+  return { 'User-Agent': UA, Referer: referer };
+}
 
 /** 已是本地路径就当本地用（X 图在 pipeline 里已用代理下载好，见 localizeImageViaProxy） */
 export function isLocalImage(src: string): boolean {
@@ -42,7 +51,7 @@ export async function localizeImage(
   fetchImpl: typeof fetch = fetch,
 ): Promise<string | null> {
   try {
-    const res = await fetchImpl(url, { headers: HEADERS, signal: AbortSignal.timeout(8000) });
+    const res = await fetchImpl(url, { headers: imageHeaders(url), signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const buf = Buffer.from(await res.arrayBuffer());
     return writeCached(buf, url, res.headers.get('content-type') ?? '', cacheDir);

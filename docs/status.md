@@ -20,7 +20,7 @@
 | 凭据与登录 | B站 `auth.ts`（cookies.json + nav isLogin 心跳）+ passport 扫码；微博 `weibo/auth.ts` + sso/v2 扫码 + 换票落盘；均真扫实测 |
 | 关注列表同步 | `FollowsSource`：604 关注 13 页、无需 WBI；关注不自动入监听 |
 | B站空间动态 | `DynamicSource`：全量 cookie + dm 三参 + space Referer、**无需 WBI**；22 uid 全量归档零 412 |
-| 微博时间线 | `WeiboFeedSource`：mymblog 轮询、转发/长文补全、登录态心跳；真扫全链路实测 |
+| 微博时间线 | `WeiboFeedSource`：`weibo_accounts` 独立名单（2026-09 起，从「主播附属」升级）→ mymblog 轮询、转发/长文补全、登录态心跳、运行状态快照、头像本地化；真扫全链路实测 |
 | 关键帧缓存 | `KeyframeCache`：在播定时本地缓存、md5 去重、相对路径入库、开关热生效 |
 | LLM 接线 | `providers.ts`：text/vision 路由 + 熔断 + 多 key 池 + structuredOutput 三档 + chat-completions/responses 双协议；provider 名单与 key 面板管理 |
 | 内容分类管线 | `tasks/classify.ts` 单次批量 LLM + `RulesClassifier`（LLM 优先 / 确定性回退）→ `verdicts` 表；仅 live_start 烧 LLM |
@@ -53,13 +53,15 @@
 | `src/analysis/context.ts` | 按房间聚合时间窗内多源数据 → 一份 context（喂给分类 prompt） |
 | `src/analysis/tasks/schedule-extract.ts` | 预告解析 → schedules 表（置信度入库，阈值过滤） |
 | `src/sources/twitter/{nitter,web,feed}.ts` | ~~**X/推特图文源**~~ **P1 已落地**（Nitter RSS 主 + 免登录回退 `web.ts` + 源 `feed.ts`）；计划见 [plan/twitter-source.md](plan/twitter-source.md) |
-| `src/core/post-rules.ts` | ~~图文帖规则表~~ **P2 已落地**（与 push_rules 平行的第 15 张表 + filters 语义） |
+| `src/core/post-rules.ts` | ~~图文帖规则表~~ **P2 已落地**（与 push_rules 平行的第 15 张表 + filters 语义）；**2026-09 加 `platform` 列**：X 与微博共用一张表、按平台分流 |
+| `src/core/weibo-accounts.ts` | **已落地**：微博独立名单（第 16 张表 `weibo_accounts` 的行类型/映射 + 源运行状态快照） |
 | `src/analysis/tasks/post-analysis.ts` + `src/analysis/post-analyzer.ts` | ~~推文翻译~~ **P3 已落地**（判定 + 翻译合并一次 LLM 调用，含失败回退机械筛选） |
 
 **未落地能力**
 
 - `schedules` 表未建（目标）；`signals` 表已放弃（见 `design.md` §11）
-- **X/推特：P0–P3 全部落地**（隧道 fetch、`/api/x*`、图文分页 `#view-x`（X + 微博：设置条 + 账号卡片墙，规则针对单账号、推文段入卡）、免登录源 Nitter RSS + 回退、`x_accounts` 独立名单、监听开关 `listen_twitter`、`post_rules` 图文帖规则 + `feed_post` 推送分支（X 图经代理本地化后交 NapCat）、规则级 LLM 判定/翻译（失败回退机械筛选）、账号头像（抓取顺手抠 channel image / og:image → 代理落盘 cache/x-avatars，卡片展示兜底关联主播 B站头像）、MCP 工具）；计划见 [plan/twitter-source.md](plan/twitter-source.md)
+- **X/推特：P0–P3 全部落地**（隧道 fetch、`/api/x*`、图文分页 `#view-x`（X + 微博：设置条 + 账号卡片墙，规则针对单账号、帖子段入卡）、免登录源 Nitter RSS + 回退、`x_accounts` 独立名单、监听开关 `listen_twitter`、`post_rules` 图文帖规则 + `feed_post` 推送分支（X 图经代理本地化后交 NapCat）、规则级 LLM 判定/翻译（失败回退机械筛选）、账号头像（抓取顺手抠 channel image / og:image → 代理落盘 cache/x-avatars，卡片展示兜底关联主播 B站头像）、MCP 工具）；计划见 [plan/twitter-source.md](plan/twitter-source.md)
+- **微博图文来源：已落地（与 X 同构的第二条图文链路）**——`weibo_accounts` 独立名单（`bili_uid` 仅可选关联，独立博主也能加）、`WeiboFeedSource` 轮独立名单（运行状态快照 / 头像直连落 `cache/weibo-avatars` / 游标与昵称回写）、`post_rules.platform` 平台分流（微博不出「引用」「翻译」）、`feed_post` 双平台推送分支（微博图直连本地化）、图文页**单墙混排 + 平台筛选胶囊**（平台角标区分）、MCP `list/upsert/delete_weibo_account`、老库一次性数据搬家（`streamers.weibo_uid` → `weibo_accounts` + 历史微博帖归属改写，幂等）；主播卡第三栏经关联反查继续混排，开播路径零回归。计划与实现记录见 [plan/weibo-source.md](plan/weibo-source.md)
 - verdicts 总览 UI；预告半透明条与「预定时间到」推送
 - dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）：待产品方案，机制不预设
 - 其余已放弃 / 不采用方案见 `design.md` §11

@@ -23,8 +23,12 @@ import {
   type XAccount, type XAccountFetchTouch, type XAccountInput, type XAccountRow,
 } from './x-accounts.js';
 import {
-  defaultPostFilters, rowToPostRule,
-  type NewPostRule, type PostFilters, type PostRule, type PostRuleInput, type PostRuleRow,
+  rowToWeiboAccount,
+  type WeiboAccount, type WeiboAccountFetchTouch, type WeiboAccountInput, type WeiboAccountRow,
+} from './weibo-accounts.js';
+import {
+  defaultPostFilters, parsePlatform, rowToPostRule,
+  type NewPostRule, type PostFilters, type PostPlatform, type PostRule, type PostRuleInput, type PostRuleRow,
 } from './post-rules.js';
 
 const log = makeLogger('core/db');
@@ -165,6 +169,7 @@ CREATE TABLE IF NOT EXISTS x_accounts (
 CREATE TABLE IF NOT EXISTS post_rules (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   name             TEXT    NOT NULL DEFAULT '',
+  platform         TEXT    NOT NULL DEFAULT 'twitter',
   account_ids      TEXT    NOT NULL DEFAULT '[]',
   channels         TEXT    NOT NULL DEFAULT '[]',
   filters          TEXT    NOT NULL DEFAULT '{}',
@@ -176,6 +181,19 @@ CREATE TABLE IF NOT EXISTS post_rules (
   sort             INTEGER NOT NULL DEFAULT 0,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS weibo_accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid           TEXT    NOT NULL UNIQUE,
+  nickname      TEXT,
+  bili_uid      TEXT,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  last_post_id  TEXT,
+  last_post_at  INTEGER,
+  last_ok_at    INTEGER,
+  avatar        TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS live_segments (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -202,6 +220,9 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_room ON snapshots (room_id, live_time, 
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
+
+/** 微博独立名单迁移的一次性闸门（见 Db.migrateWeiboAccounts） */
+const WEIBO_MIGRATION_KEY = 'migrated_weibo_accounts_v1';
 
 /** listTimeline 在播判定：last_seen 超过该秒数未刷新 = 已下播（崩溃/停机错过 live_end 的兜底） */
 const TIMELINE_LIVE_STALE_S = 600;
@@ -305,6 +326,10 @@ export class Db {
     this.ensureColumn('post_rules', 'llm_translate', 'llm_translate INTEGER NOT NULL DEFAULT 0');
     // x_accounts 头像（抓取时顺手抠 X 头像 → 代理下载到 cache/x-avatars，存文件名；旧库在线补列）
     this.ensureColumn('x_accounts', 'avatar', 'avatar TEXT');
+    // post_rules.platform（微博图文来源接入）：旧库只有 X 规则，默认 'twitter' 即正确
+    this.ensureColumn('post_rules', 'platform', "platform TEXT NOT NULL DEFAULT 'twitter'");
+    // weibo_accounts 本身由 SCHEMA 的 CREATE TABLE IF NOT EXISTS 建出；这里只做数据搬家
+    this.migrateWeiboAccounts();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -313,6 +338,43 @@ export class Db {
     const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
+  }
+
+  /**
+   * 微博从「主播附属数据源」迁到「独立名单」的一次性数据搬家（settings 闸门，只跑一次）：
+   *  ① `streamers.weibo_uid` → `weibo_accounts`（昵称、可选关联主播、启用态照抄 watch）；
+   *  ② 旧微博帖的 `posts.uid` 曾是**B站 uid**（面板第三栏按它分组混排）→ 改写成微博 uid，
+   *     与 X/推特同语义（帖子归属 = 被抓账号自身的 id）。主播卡第三栏改由「关联主播」反查混排
+   *     （见 listRecentPostsMixed），所以这次改写对面板是透明的。
+   *
+   * 幂等靠闸门而不是条件判断：改写后 `posts.uid` 已是微博 uid，
+   * 与 `weibo_accounts.bili_uid` 不再相等，重跑是空操作——但闸门让「只跑一次」这件事显式可读。
+   */
+  private migrateWeiboAccounts(): void {
+    if (this.getSetting(WEIBO_MIGRATION_KEY)) return;
+    const t = now();
+    const seeded = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO weibo_accounts
+           (uid, nickname, bili_uid, enabled, created_at, updated_at)
+         SELECT weibo_uid, weibo_nick, uid, watch, ?, ?
+           FROM streamers
+          WHERE weibo_uid IS NOT NULL AND TRIM(weibo_uid) <> ''`,
+      )
+      .run(t, t);
+    const remapped = this.db
+      .prepare(
+        `UPDATE posts SET uid = (SELECT w.uid FROM weibo_accounts w WHERE w.bili_uid = posts.uid)
+          WHERE platform = 'weibo'
+            AND EXISTS (SELECT 1 FROM weibo_accounts w WHERE w.bili_uid = posts.uid)`,
+      )
+      .run();
+    this.setSetting(WEIBO_MIGRATION_KEY, '1');
+    if (seeded.changes > 0 || remapped.changes > 0) {
+      log.info(
+        `微博独立名单迁移：种入 ${seeded.changes} 个账号，改写 ${remapped.changes} 条历史微博的归属 uid`,
+      );
     }
   }
 
@@ -974,9 +1036,15 @@ export class Db {
       ...(prev?.filters ?? defaultPostFilters()),
       ...(input.filters ?? {}),
     };
+    const platform: PostPlatform = input.platform ?? prev?.platform ?? 'twitter';
+    // 换平台 = accountIds 的解释域变了（两张名单的自增 id 会撞）：没显式给新名单就清空，
+    // 留着旧平台的 id 只会指向一个不相干的账号。
+    const accountIds = input.accountIds
+      ?? (prev && prev.platform !== platform ? [] : prev?.accountIds ?? []);
     const r: NewPostRule = {
       name: input.name !== undefined ? input.name : prev?.name ?? '',
-      accountIds: input.accountIds ?? prev?.accountIds ?? [],
+      platform,
+      accountIds,
       channels: input.channels ?? prev?.channels ?? [],
       filters,
       messageTemplate: input.messageTemplate !== undefined
@@ -989,11 +1057,11 @@ export class Db {
     if (prev) {
       this.db
         .prepare(
-          `UPDATE post_rules SET name=?, account_ids=?, channels=?, filters=?, message_template=?,
+          `UPDATE post_rules SET name=?, platform=?, account_ids=?, channels=?, filters=?, message_template=?,
              llm_judge=?, judge_prompt=?, llm_translate=?, enabled=?, updated_at=?
            WHERE id=?`,
         )
-        .run(r.name, JSON.stringify(r.accountIds), JSON.stringify(r.channels), JSON.stringify(r.filters),
+        .run(r.name, r.platform, JSON.stringify(r.accountIds), JSON.stringify(r.channels), JSON.stringify(r.filters),
           r.messageTemplate, r.llmJudge ? 1 : 0, r.judgePrompt, r.llmTranslate ? 1 : 0,
           r.enabled ? 1 : 0, now(), prev.id);
       return prev.id;
@@ -1005,11 +1073,11 @@ export class Db {
     const info = this.db
       .prepare(
         `INSERT INTO post_rules
-           (name, account_ids, channels, filters, message_template,
+           (name, platform, account_ids, channels, filters, message_template,
             llm_judge, judge_prompt, llm_translate, enabled, sort, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(r.name, JSON.stringify(r.accountIds), JSON.stringify(r.channels), JSON.stringify(r.filters),
+      .run(r.name, r.platform, JSON.stringify(r.accountIds), JSON.stringify(r.channels), JSON.stringify(r.filters),
         r.messageTemplate, r.llmJudge ? 1 : 0, r.judgePrompt, r.llmTranslate ? 1 : 0,
         r.enabled ? 1 : 0, m, t, t);
     const id = Number(info.lastInsertRowid);
@@ -1105,6 +1173,44 @@ export class Db {
         if (list.length < perUid) list.push(rowToPost(r));
       } else {
         out.set(r.uid, [rowToPost(r)]);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 主播卡第三栏（混排）：每个主播各取最近 perUid 条 —— B站动态（`posts.uid` = 主播 uid）
+   * + 该主播**关联微博账号**的微博（`posts.uid` = 微博 uid，`platform='weibo'`）。
+   *
+   * 微博成为独立来源后帖子归属改成了微博账号自身（同 X），"这条微博属于哪个主播"由
+   * `weibo_accounts.bili_uid` 这条可选关联反查——所以主播卡第三栏的行为对用户没有变化，
+   * 而未关联任何主播的微博账号（独立博主）不会串进主播卡。
+   */
+  listRecentPostsMixed(streamerUids: string[], perUid: number): Map<string, Post[]> {
+    const out = new Map<string, Post[]>();
+    if (streamerUids.length === 0 || perUid <= 0) return out;
+    const ph = streamerUids.map(() => '?').join(',');
+    const links = this.db
+      .prepare(`SELECT uid, bili_uid FROM weibo_accounts WHERE bili_uid IN (${ph})`)
+      .all(...streamerUids) as Array<{ uid: string; bili_uid: string }>;
+    const weiboToBili = new Map(links.map((l) => [l.uid, l.bili_uid]));
+    const uids = [...new Set([...streamerUids, ...links.map((l) => l.uid)])];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM posts WHERE uid IN (${uids.map(() => '?').join(',')})
+          ORDER BY pub_ts DESC, id DESC`,
+      )
+      .all(...uids) as PostRow[];
+    for (const uid of streamerUids) out.set(uid, []);
+    for (const r of rows) {
+      const owners: string[] = [];
+      // B站动态：uid 就是主播；微博：反查它关联的主播（防 uid 数字撞车，用 platform 卡死语义）
+      if (r.platform !== 'weibo' && streamerUids.includes(r.uid)) owners.push(r.uid);
+      const bili = weiboToBili.get(r.uid);
+      if (bili && r.platform === 'weibo' && !owners.includes(bili)) owners.push(bili);
+      for (const o of owners) {
+        const list = out.get(o)!;
+        if (list.length < perUid) list.push(rowToPost(r));
       }
     }
     return out;
@@ -1208,6 +1314,81 @@ export class Db {
     sets.push('updated_at = ?');
     args.push(now(), id);
     this.db.prepare(`UPDATE x_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  }
+
+  // ---- weibo_accounts：微博独立名单（独立于 streamers，见 core/weibo-accounts.ts）----
+
+  /** 名单（按 uid 稳定排序，方便面板对照） */
+  listWeiboAccounts(onlyEnabled = false): WeiboAccount[] {
+    const sql = 'SELECT * FROM weibo_accounts' + (onlyEnabled ? ' WHERE enabled = 1' : '') + ' ORDER BY uid';
+    return (this.db.prepare(sql).all() as WeiboAccountRow[]).map(rowToWeiboAccount);
+  }
+
+  getWeiboAccount(id: number): WeiboAccount | undefined {
+    const row = this.db.prepare('SELECT * FROM weibo_accounts WHERE id = ?').get(id) as WeiboAccountRow | undefined;
+    return row ? rowToWeiboAccount(row) : undefined;
+  }
+
+  getWeiboAccountByUid(uid: string): WeiboAccount | undefined {
+    const row = this.db.prepare('SELECT * FROM weibo_accounts WHERE uid = ?').get(uid) as WeiboAccountRow | undefined;
+    return row ? rowToWeiboAccount(row) : undefined;
+  }
+
+  /**
+   * 带 id 且存在 = 改行（未提供字段保留原值）；否则按 uid 建行。
+   * uid 撞 UNIQUE（同一账号加两遍）时抛错，由面板转成 409——不做静默合并。
+   */
+  upsertWeiboAccount(input: WeiboAccountInput): number {
+    const prev = input.id !== undefined ? this.getWeiboAccount(input.id) : undefined;
+    const uid = (input.uid ?? prev?.uid ?? '').trim();
+    if (prev) {
+      this.db
+        .prepare('UPDATE weibo_accounts SET uid=?, nickname=?, bili_uid=?, enabled=?, updated_at=? WHERE id=?')
+        .run(
+          uid,
+          input.nickname !== undefined ? input.nickname : prev.nickname,
+          input.biliUid !== undefined ? input.biliUid : prev.biliUid,
+          (input.enabled ?? prev.enabled) ? 1 : 0,
+          now(),
+          prev.id,
+        );
+      return prev.id;
+    }
+    const t = now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO weibo_accounts
+           (uid, nickname, bili_uid, enabled, last_post_id, last_post_at, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+      )
+      .run(uid, input.nickname ?? null, input.biliUid ?? null, (input.enabled ?? true) ? 1 : 0, t, t);
+    return Number(info.lastInsertRowid);
+  }
+
+  deleteWeiboAccount(id: number): boolean {
+    return this.db.prepare('DELETE FROM weibo_accounts WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** 抓取回写：只更新传入的字段（游标只往前推由调用方保证） */
+  touchWeiboAccount(id: number, touch: WeiboAccountFetchTouch): void {
+    const sets: string[] = [];
+    const args: Array<string | number | null> = [];
+    if (touch.lastPostId !== undefined) { sets.push('last_post_id = ?'); args.push(touch.lastPostId); }
+    if (touch.lastPostAt !== undefined) { sets.push('last_post_at = ?'); args.push(touch.lastPostAt); }
+    if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
+    if (touch.nickname) { sets.push('nickname = ?'); args.push(touch.nickname); }
+    if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
+    if (sets.length === 0) return;
+    sets.push('updated_at = ?');
+    args.push(now(), id);
+    this.db.prepare(`UPDATE weibo_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  }
+
+  /** 解除某主播的微博关联（主播详情清空微博昵称时用）；账号行保留，历史微博不删 */
+  unlinkWeiboAccountsFromBili(biliUid: string): number {
+    return this.db
+      .prepare('UPDATE weibo_accounts SET bili_uid = NULL, updated_at = ? WHERE bili_uid = ?')
+      .run(now(), biliUid).changes;
   }
 
   // ---- settings：kv（push_enabled / listen_* / llm_* / napcat_* 等）----

@@ -15,6 +15,7 @@ import { saveMcpTokens } from '../mcp/auth.js';
 import { resetMcpWriteLimiter } from '../mcp/rate-limit.js';
 import { saveLlmProviders, listLlmProviders } from '../analysis/providers.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
+import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 
 const ADMIN_TOKEN = 'ddc_test_admin';
 const GATEWAY_TOKEN = 'ddc_test_gateway';
@@ -54,6 +55,7 @@ async function setup(
   const advancedChanged = { count: 0 };
   // X 分页 dep（生产装配形状）：配置落 settings，探测/校验走网络（测试里不触发）
   const xChanged = { count: 0 };
+  const weiboChanged = { count: 0 };
   const deps: PanelDeps = {
     db,
     status: () => status,
@@ -71,6 +73,17 @@ async function setup(
         ? { checked: true, ok: false, kind: 'not-found' as const, message: '账号不存在' }
         : { checked: true, ok: true, kind: 'ok' as const, message: '账号存在' }),
       onChanged: () => xChanged.count++,
+    },
+    // 微博分页 dep（生产装配形状）：只有状态快照 + 名单热生效回调；昵称解析走 weiboResolver
+    weibo: {
+      info: () => ({
+        config: { intervalSec: 300 },
+        status: { feed: emptyWeiboFeedSnapshot(), accounts: db.listWeiboAccounts(true).length },
+      }),
+      onChanged: () => weiboChanged.count++,
+    },
+    weiboResolver: {
+      resolveUid: async (nick) => (nick === '渡瀬結月' ? '2203177060' : null),
     },
   };
   const server: Server = createPanelServer(deps);
@@ -350,6 +363,97 @@ test('X 工具：gateway 角色看不到（配置含代理地址，属运维面�
   assert.equal(tools.includes('get_x_config'), false, 'admin 专属');
   assert.equal(tools.includes('upsert_x_account'), false, 'admin 专属');
   assert.equal(tools.includes('list_x_accounts'), true, '只读名单对群友可见');
+});
+
+// ---- 微博（图文分页第二个来源）：与 X 同构的一整套工具 ----
+
+test('微博工具：list/upsert/delete 账号；昵称解析补 uid；写路径与面板同语义', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  assert.deepEqual(((await call(adm, 'list_weibo_accounts')) as { accounts: unknown[] }).accounts, []);
+
+  // 只给昵称 → 走解析链；解析不到 → 拒
+  await assert.rejects(() => call(adm, 'upsert_weibo_account', { nickname: '查无此人' }), /找不到这个昵称/);
+  const byNick = (await call(adm, 'upsert_weibo_account', { nickname: '渡瀬結月' })) as {
+    id: number; account: { uid: string; nickname: string };
+  };
+  assert.equal(byNick.account.uid, '2203177060');
+  assert.equal(byNick.account.nickname, '渡瀬結月');
+  assert.equal(f.db.listWeiboAccounts().length, 1);
+  await assert.rejects(() => call(adm, 'upsert_weibo_account', { uid: '2203177060' }), /已在名单里/);
+
+  // 直填 uid 也能建（另起一个账号）
+  const created = (await call(adm, 'upsert_weibo_account', { uid: '9999' })) as {
+    id: number; account: { uid: string; enabled: boolean };
+  };
+  assert.equal(created.account.uid, '9999');
+  assert.equal(f.db.listWeiboAccounts().length, 2);
+
+  // 关联主播必须存在；更新带 id
+  await assert.rejects(() => call(adm, 'upsert_weibo_account', { uid: '111', biliUid: '9999' }), /不在监听名单/);
+  f.db.upsertStreamer({ uid: '1001', uname: '阿梓', watch: true });
+  await call(adm, 'upsert_weibo_account', { id: byNick.id, nickname: '阿梓', biliUid: '1001', enabled: false });
+  const listed = (await call(adm, 'list_weibo_accounts')) as {
+    accounts: Array<{ uid: string; biliName: string | null; enabled: boolean }>;
+  };
+  assert.equal(listed.accounts.find((a) => a.uid === '2203177060')!.biliName, '阿梓');
+  assert.equal(listed.accounts.find((a) => a.uid === '2203177060')!.enabled, false);
+
+  await call(adm, 'delete_weibo_account', { id: byNick.id });
+  await assert.rejects(() => call(adm, 'delete_weibo_account', { id: byNick.id }), /微博账号不存在/);
+});
+
+test('微博工具：gateway 只读可见；set_streamer 填微博昵称会建/关联名单行', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const tools = (await gw.listTools()).tools.map((x) => x.name);
+  assert.equal(tools.includes('list_weibo_accounts'), true, '只读名单对群友可见');
+  assert.equal(tools.includes('upsert_weibo_account'), false, '写是 admin 专属');
+  assert.equal(tools.includes('delete_weibo_account'), false);
+
+  f.db.upsertStreamer({ uid: '1001', uname: '阿梓', watch: true });
+  await call(adm, 'set_streamer', { uid: '1001', weiboNick: '渡瀬結月' });
+  const acc = f.db.getWeiboAccountByUid('2203177060')!;
+  assert.equal(acc.biliUid, '1001', '主播详情填昵称 = 在微博名单里建行并关联');
+  await call(adm, 'set_streamer', { uid: '1001', weiboNick: null });
+  assert.equal(f.db.getWeiboAccountByUid('2203177060')!.biliUid, null, '清空 → 解关联但保留行');
+});
+
+test('upsert_post_rule：platform 决定账号名单；微博规则拒绝「引用」/「翻译」; 换平台清账号', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const { groupChannelId } = seedBase(f.db);
+  const xId = f.db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true });
+  f.db.upsertWeiboAccount({ uid: '2203177060', nickname: null, biliUid: null, enabled: true });
+  f.db.upsertWeiboAccount({ uid: '111', nickname: null, biliUid: null, enabled: true });
+  const wbOnlyId = f.db.upsertWeiboAccount({ uid: '222', nickname: null, biliUid: null, enabled: true });
+
+  // platform 决定 accountIds 的解释域（两张名单自增 id 会撞）
+  await assert.rejects(
+    () => call(adm, 'upsert_post_rule', { platform: 'twitter', accountIds: [wbOnlyId] }),
+    /X 账号不存在/,
+  );
+  const wbRule = (await call(adm, 'upsert_post_rule', {
+    platform: 'weibo', name: '微博规则', accountIds: [xId], channels: [groupChannelId],
+  })) as { id: number };
+  assert.equal(f.db.listPostRules().find((r) => r.id === wbRule.id)!.platform, 'weibo');
+
+  await assert.rejects(
+    () => call(adm, 'upsert_post_rule', { platform: 'weibo', filters: { quote: true } }),
+    /「引用」筛选只对 X 生效/,
+  );
+  await assert.rejects(
+    () => call(adm, 'upsert_post_rule', { platform: 'weibo', llmTranslate: true }),
+    /不需要 LLM 翻译/,
+  );
+
+  // 换平台（带 id）：accountIds 清空
+  await call(adm, 'upsert_post_rule', { id: wbRule.id, platform: 'twitter' });
+  const after = f.db.listPostRules().find((r) => r.id === wbRule.id)!;
+  assert.equal(after.platform, 'twitter');
+  assert.deepEqual(after.accountIds, [], '换平台后旧账号 id 必须清掉');
 });
 
 test('search_posts：platform=twitter 可检索 X 归档；set_listen 支持 twitter', async (t) => {

@@ -378,3 +378,118 @@ test('nearestSnapshot：取距 ts 最近一帧；无缓存 null', (t) => {
   assert.equal(db.nearestSnapshot('r1', 200, 1400)!.path, '/kf/r1/200/1500.jpg', '按场次隔离');
   assert.equal(db.nearestSnapshot('rX', 100, 1100), null, '别的房间 null');
 });
+
+// ---- weibo_accounts：微博独立名单（含从 streamers.weibo_uid 的一次性数据搬家）----
+
+const LEGACY_SCHEMA = `
+  CREATE TABLE streamers (
+    uid TEXT PRIMARY KEY, uname TEXT NOT NULL DEFAULT '', alias TEXT,
+    room_id TEXT, weibo_uid TEXT, weibo_nick TEXT,
+    watch INTEGER NOT NULL DEFAULT 1, analyze INTEGER NOT NULL DEFAULT 0,
+    notify INTEGER NOT NULL DEFAULT 1, profile_note TEXT,
+    source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('follows','manual')),
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, uid TEXT NOT NULL,
+    item_id TEXT NOT NULL, type TEXT NOT NULL, text TEXT, pics TEXT NOT NULL DEFAULT '[]',
+    pub_ts INTEGER NOT NULL, url TEXT, raw TEXT, created_at INTEGER NOT NULL,
+    UNIQUE(platform, item_id)
+  );
+`;
+
+test('微博迁移：weibo_uid 种入独立名单 + 历史微博帖归属由 B站 uid 改写成微博 uid', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'legacy-weibo.db');
+  const raw = new Database(path);
+  raw.exec(LEGACY_SCHEMA);
+  raw.exec(`
+    INSERT INTO streamers (uid, uname, weibo_uid, weibo_nick, watch, created_at, updated_at)
+      VALUES ('1', '阿梓', '2203177060', '阿梓从小就很可爱', 1, 1800000000, 1800000000);
+    INSERT INTO streamers (uid, uname, weibo_uid, watch, created_at, updated_at)
+      VALUES ('2', '没微博的', NULL, 1, 1800000000, 1800000000);
+    INSERT INTO streamers (uid, uname, weibo_uid, watch, created_at, updated_at)
+      VALUES ('3', '停用的', '991122', 0, 1800000000, 1800000000);
+    INSERT INTO posts (platform, uid, item_id, type, text, pics, pub_ts, url, raw, created_at)
+      VALUES ('weibo', '1', '5001', 'mblog', '今晚九点直播！', '[]', 1789549200, 'u', NULL, 1800000000);
+    INSERT INTO posts (platform, uid, item_id, type, text, pics, pub_ts, url, raw, created_at)
+      VALUES ('bili_dynamic', '1', 'd1', 'DYNAMIC_TYPE_WORD', 'B站动态', '[]', 1789549100, 'u', NULL, 1800000000);
+  `);
+  raw.close();
+
+  db = new Db(path);
+  const accs = db.listWeiboAccounts();
+  assert.equal(accs.length, 2, '两个绑了微博的主播各得一行');
+  const a1 = accs.find((a) => a.uid === '2203177060')!;
+  assert.equal(a1.nickname, '阿梓从小就很可爱');
+  assert.equal(a1.biliUid, '1', '关联回原主播');
+  assert.equal(a1.enabled, true, 'watch=1 → 启用');
+  assert.equal(accs.find((a) => a.uid === '991122')!.enabled, false, 'watch=0 → 停用（不再抓）');
+
+  // 历史微博帖的 uid 改写成微博 uid；B站动态纹丝不动
+  assert.equal(db.listRecentPosts(['2203177060'], 5).get('2203177060')!.length, 1);
+  const biliOnly = db.listRecentPosts(['1'], 5).get('1')!;
+  assert.equal(biliOnly.length, 1, 'B站 uid 下只剩动态');
+  assert.equal(biliOnly[0]!.platform, 'bili_dynamic');
+
+  // 幂等：再开一次不重复种、不再改写（闸门 + UNIQUE(uid) 双保险）
+  db.close();
+  db = new Db(path);
+  assert.equal(db.listWeiboAccounts().length, 2);
+  assert.equal(db.listRecentPosts(['2203177060'], 5).get('2203177060')!.length, 1);
+});
+
+test('weibo_accounts CRUD：uid 唯一、抓取回写只动传入字段、解关联保留行', (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+
+  const id = db.upsertWeiboAccount({ uid: '2203177060', nickname: '渡瀬結月', biliUid: '1', enabled: true });
+  assert.equal(db.getWeiboAccountByUid('2203177060')!.id, id);
+  assert.equal(db.getWeiboAccount(id)!.nickname, '渡瀬結月');
+
+  db.touchWeiboAccount(id, { lastPostId: '5001', lastPostAt: 1789549200, lastOkAt: 1800000000, avatar: 'a.jpg' });
+  const after = db.getWeiboAccount(id)!;
+  assert.equal(after.lastPostId, '5001');
+  assert.equal(after.lastPostAt, 1789549200);
+  assert.equal(after.lastOkAt, 1800000000);
+  assert.equal(after.avatar, 'a.jpg');
+  assert.equal(after.nickname, '渡瀬結月', 'touch 不碰没传的字段');
+
+  // 空昵称不回写（抓到空值不该把好昵称擦掉）
+  db.touchWeiboAccount(id, { nickname: null });
+  assert.equal(db.getWeiboAccount(id)!.nickname, '渡瀬結月');
+
+  db.upsertWeiboAccount({ id, enabled: false });
+  assert.equal(db.getWeiboAccount(id)!.enabled, false);
+  assert.equal(db.getWeiboAccount(id)!.uid, '2203177060', '未传 uid 保留原值');
+
+  assert.equal(db.unlinkWeiboAccountsFromBili('1'), 1);
+  assert.equal(db.getWeiboAccount(id)!.biliUid, null);
+  assert.ok(db.getWeiboAccount(id), '解关联不删行（历史微博还在）');
+
+  assert.equal(db.deleteWeiboAccount(id), true);
+  assert.equal(db.deleteWeiboAccount(id), false);
+});
+
+test('listRecentPostsMixed：主播卡第三栏按「关联主播」反查混排微博与动态；未关联的不串台', (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+
+  // 主播 1 关联微博 2203；微博 9999 未关联任何主播
+  db.upsertWeiboAccount({ uid: '2203177060', nickname: '渡瀬結月', biliUid: '1', enabled: true });
+  db.upsertWeiboAccount({ uid: '9999', nickname: '独立博主', biliUid: null, enabled: true });
+  db.insertPosts([
+    { platform: 'bili_dynamic', uid: '1', itemId: 'd1', type: 'WORD', text: '动态', pics: [], pubTs: 100, url: null, raw: null },
+    { platform: 'weibo', uid: '2203177060', itemId: 'w1', type: 'mblog', text: '微博', pics: [], pubTs: 200, url: null, raw: null },
+    { platform: 'weibo', uid: '9999', itemId: 'w2', type: 'mblog', text: '别人的微博', pics: [], pubTs: 300, url: null, raw: null },
+  ]);
+
+  const mixed = db.listRecentPostsMixed(['1'], 5).get('1')!;
+  assert.deepEqual(mixed.map((p) => p.text), ['微博', '动态'], '按时间倒序混排，未关联的微博不进卡');
+  assert.equal(mixed.length, 2);
+
+  // perUid 截断在两路混合之后做
+  assert.equal(db.listRecentPostsMixed(['1'], 1).get('1')!.length, 1);
+  assert.equal(db.listRecentPostsMixed([], 5).size, 0, '空名单不查库');
+});
+

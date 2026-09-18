@@ -58,6 +58,10 @@ const store = {
   x: clone(M.mockX),
   xAccounts: clone(M.mockXAccounts),
   xAccountSeq: M.mockXAccounts.length,
+  weibo: clone(M.mockWeibo),
+  weiboAccounts: clone(M.mockWeiboAccounts),
+  weiboAccountSeq: M.mockWeiboAccounts.length,
+  weiboPosts: clone(M.mockWeiboPosts),
   postRules: clone(M.mockPostRules),
   postRuleSeq: M.mockPostRules.length,
   twitterPosts: clone(M.mockTwitterPosts),
@@ -79,6 +83,15 @@ store.x.status.feed.lastOkAt = nowSec - 120;
 for (const a of store.xAccounts) {
   if (a.lastTweetAt) a.lastTweetAt = nowSec - 4200;
   if (a.lastOkAt) a.lastOkAt = nowSec - 120;
+  a.createdAt = nowSec;
+  a.updatedAt = nowSec;
+}
+// 微博快照与名单同样用冻结时刻（卡片显示「微博 x 小时前」；快照本身面板不展示，保留以免与后端契约分叉）
+store.weibo.status.feed.lastRunAt = nowSec - 90;
+store.weibo.status.feed.lastOkAt = nowSec - 90;
+for (const a of store.weiboAccounts) {
+  if (a.lastPostAt) a.lastPostAt = nowSec - 3600 * 5;
+  if (a.lastOkAt) a.lastOkAt = nowSec - 90;
   a.createdAt = nowSec;
   a.updatedAt = nowSec;
 }
@@ -180,36 +193,53 @@ for (const p of store.twitterPosts) {
     }
   }
 
-  // ---- 图文帖规则（X/推特；与推送规则平行的另一张表）----
+  // ---- 图文帖规则（X/推特 + 微博；与推送规则平行的另一张表，platform 决定账号名单）----
+  // 平台 → 名单/报错文案，与真实后端 checkPostRuleRefs 同构（两张名单的自增 id 会撞）
+  const acctList = (platform) => platform === 'weibo' ? store.weiboAccounts : store.xAccounts;
+  const acctErr = (platform) => platform === 'weibo' ? '微博 账号不存在' : 'X 账号不存在';
+  const checkPostRule = (b, rule) => {
+    const platform = b.platform !== undefined ? b.platform : (rule ? rule.platform : 'twitter');
+    if (platform !== 'twitter' && platform !== 'weibo') return { error: 'platform 必须是 twitter 或 weibo' };
+    const filters = Object.assign(
+      { original: true, retweet: false, quote: false, media: false, keywords: [] },
+      rule ? rule.filters : {}, b.filters || {},
+    );
+    if (!filters.original && !filters.retweet) {
+      return { error: '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中' };
+    }
+    if (platform === 'weibo' && filters.quote) return { error: '微博没有「引用」这种形态，「引用」筛选只对 X 生效' };
+    if (platform === 'weibo' && b.llmTranslate === true) return { error: '微博正文本就是中文，不需要 LLM 翻译' };
+    const judge = b.llmJudge !== undefined ? b.llmJudge === true : (rule ? rule.llmJudge : false);
+    const prompt = b.judgePrompt !== undefined ? b.judgePrompt : (rule ? rule.judgePrompt : null);
+    if (judge && !String(prompt || '').trim()) return { error: '开启「LLM 判定」必须填判定提示词' };
+    if (Array.isArray(b.channels) && b.channels.some((id) => !store.channels.some((c) => c.id === id))) {
+      return { error: '渠道不存在' };
+    }
+    // 换平台时没带新名单 → 清空（旧平台 id 指向另一个账号）；与真实后端同口径
+    const accountIds = b.accountIds !== undefined
+      ? b.accountIds
+      : (rule && rule.platform !== platform ? [] : (rule ? rule.accountIds : []));
+    const bad = accountIds.find((id) => !acctList(platform).some((a) => a.id === id));
+    if (bad !== undefined) return { error: acctErr(platform) };
+    return { platform, filters, accountIds };
+  };
+
   if (path === '/api/post-rules' && method === 'GET') {
     return ok({ rules: clone(store.postRules) });
   }
   if (path === '/api/post-rules' && method === 'POST') {
     const b = body();
-    const filters = Object.assign(
-      { original: true, retweet: false, quote: false, media: false, keywords: [] },
-      b.filters || {},
-    );
-    if (!filters.original && !filters.retweet) {
-      return json(400, { error: '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中' });
-    }
-    if (b.llmJudge && !String(b.judgePrompt || '').trim()) {
-      return json(400, { error: '开启「LLM 判定」必须填判定提示词' });
-    }
-    if (Array.isArray(b.channels) && b.channels.some((id) => !store.channels.some((c) => c.id === id))) {
-      return json(400, { error: '渠道不存在' });
-    }
-    if (Array.isArray(b.accountIds) && b.accountIds.some((id) => !store.xAccounts.some((a) => a.id === id))) {
-      return json(400, { error: 'X 账号不存在' });
-    }
+    const c = checkPostRule(b, null);
+    if (c.error) return json(400, { error: c.error });
     const rule = {
       id: ++store.postRuleSeq,
       name: b.name || `图文帖规则 ${store.postRuleSeq}`,
-      accountIds: b.accountIds || [], channels: b.channels || [], filters,
+      platform: c.platform,
+      accountIds: c.accountIds, channels: b.channels || [], filters: c.filters,
       messageTemplate: b.messageTemplate ?? null,
       llmJudge: b.llmJudge === true,
       judgePrompt: b.judgePrompt ?? null,
-      llmTranslate: b.llmTranslate === true,
+      llmTranslate: c.platform === 'weibo' ? false : b.llmTranslate === true,
       enabled: b.enabled !== false,
       sort: store.postRules.length, createdAt: nowSec, updatedAt: nowSec,
     };
@@ -230,19 +260,16 @@ for (const p of store.twitterPosts) {
       if (!rule) return json(404, { error: '图文帖规则不存在' });
       if (method === 'PUT') {
         const b = body();
+        const c = checkPostRule(b, rule);
+        if (c.error) return json(400, { error: c.error });
         if (b.name !== undefined) rule.name = b.name;
-        if (b.accountIds !== undefined) rule.accountIds = b.accountIds;
+        rule.platform = c.platform;
+        rule.accountIds = c.accountIds;
         if (b.channels !== undefined) rule.channels = b.channels;
-        if (b.filters !== undefined) Object.assign(rule.filters, b.filters);
-        if (!rule.filters.original && !rule.filters.retweet) {
-          return json(400, { error: '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中' });
-        }
+        rule.filters = c.filters;
         if (b.llmJudge !== undefined) rule.llmJudge = b.llmJudge === true;
         if (b.judgePrompt !== undefined) rule.judgePrompt = b.judgePrompt;
-        if (b.llmTranslate !== undefined) rule.llmTranslate = b.llmTranslate === true;
-        if (rule.llmJudge && !String(rule.judgePrompt || '').trim()) {
-          return json(400, { error: '开启「LLM 判定」必须填判定提示词' });
-        }
+        if (b.llmTranslate !== undefined) rule.llmTranslate = c.platform === 'weibo' ? false : b.llmTranslate === true;
         if (b.messageTemplate !== undefined) rule.messageTemplate = b.messageTemplate;
         if (typeof b.enabled === 'boolean') rule.enabled = b.enabled;
         rule.updatedAt = nowSec;
@@ -357,6 +384,88 @@ for (const p of store.twitterPosts) {
     }
     return ok({ config: store.x.config, status: store.x.status });
   }
+  // ---- 微博（图文分页第二个来源）：GET 只读快照 + 独立名单 CRUD ----
+  // 契约与真实后端 /api/weibo* 同构：uid 与昵称二选一（只填昵称 → 演示口径固定解析成 2203177060）
+  const weiboAccountView = (a) => {
+    const bili = a.biliUid != null
+      ? store.streamers.find((s) => String(s.uid) === String(a.biliUid)) : null;
+    const posts = store.weiboPosts
+      .filter((p) => p.uid === a.uid)
+      .sort((x2, y2) => y2.pubTs - x2.pubTs)
+      .slice(0, 3)
+      .map((p) => clone(p));
+    return {
+      ...clone(a),
+      biliName: bili ? (bili.alias || bili.uname || String(a.biliUid)) : null,
+      biliFace: bili ? (bili.face ?? null) : null,
+      posts,
+    };
+  };
+  if (path === '/api/weibo' && method === 'GET') {
+    return ok({
+      config: store.weibo.config,
+      status: { ...store.weibo.status, accounts: store.weiboAccounts.filter((a) => a.enabled).length },
+    });
+  }
+  if (path === '/api/weibo/accounts' && method === 'GET') {
+    return ok({ accounts: store.weiboAccounts.map(weiboAccountView) });
+  }
+  if (path === '/api/weibo/accounts' && method === 'POST') {
+    const b = body();
+    let uid = String(b.uid || '').trim();
+    let nickname = b.nickname ? String(b.nickname).trim() : null;
+    if (!uid && nickname) {
+      if (nickname !== '阿梓从小就很可爱' && nickname !== '阿梓') {
+        return json(400, { error: `微博上找不到这个昵称：${nickname}` });
+      }
+      uid = '2203177060';
+    }
+    if (!uid) return json(400, { error: 'uid 与昵称至少填一个' });
+    if (!/^\d{1,20}$/.test(uid)) return json(400, { error: '微博 uid 必须是数字（可从 weibo.com/u/<uid> 复制）' });
+    if (store.weiboAccounts.some((a) => a.uid === uid)) return json(409, { error: `微博 ${uid} 已在名单里` });
+    if (b.biliUid != null && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
+      return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
+    }
+    const row = {
+      id: ++store.weiboAccountSeq, uid, nickname, biliUid: b.biliUid ?? null,
+      enabled: b.enabled !== false, lastPostId: null, lastPostAt: null, lastOkAt: null,
+      avatar: null, createdAt: nowSec, updatedAt: nowSec,
+    };
+    store.weiboAccounts.push(row);
+    return ok({ account: weiboAccountView(row) });
+  }
+  {
+    const wa = path.match(/^\/api\/weibo\/accounts\/(\d+)$/);
+    if (wa) {
+      const row = store.weiboAccounts.find((a) => a.id === Number(wa[1]));
+      if (!row) return json(404, { error: '微博账号不存在' });
+      if (method === 'PUT') {
+        const b = body();
+        if (b.uid !== undefined && !/^\d{1,20}$/.test(String(b.uid))) {
+          return json(400, { error: '微博 uid 必须是数字' });
+        }
+        if (b.uid !== undefined && String(b.uid) !== row.uid
+          && store.weiboAccounts.some((a) => a.uid === String(b.uid))) {
+          return json(409, { error: `微博 ${b.uid} 已在名单里` });
+        }
+        if (b.biliUid !== undefined && b.biliUid !== null
+          && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
+          return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
+        }
+        if (b.uid !== undefined) row.uid = String(b.uid);
+        if (b.nickname !== undefined) row.nickname = b.nickname;
+        if (b.biliUid !== undefined) row.biliUid = b.biliUid;
+        if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
+        row.updatedAt = nowSec;
+        return ok({ account: weiboAccountView(row) });
+      }
+      if (method === 'DELETE') {
+        store.weiboAccounts = store.weiboAccounts.filter((a) => a.id !== row.id);
+        return ok({ ok: true });
+      }
+    }
+  }
+
   if (path === '/api/x/test' && method === 'POST') {
     const b = body();
     const target = b.target || 'all';

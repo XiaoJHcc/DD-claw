@@ -88,7 +88,8 @@
 │   ├─ bili/live-status  批量轮询（分片 POST） [匿名] → 开播/下播/标题变更
 │   ├─ bili/follows      关注列表同步         [SESSDATA]
 │   ├─ bili/dynamic      空间动态             [cookie]  → 正文/预告文本
-│   ├─ weibo/feed        微博时间线           [cookie]
+│   ├─ weibo/feed        微博时间线           [cookie]  → 独立图文来源（weibo_accounts 名单）
+│   ├─ twitter/feed      X 时间线             [代理]    → 独立图文来源（x_accounts 名单）
 │   ├─ media/keyframe    画面采样             [匿名]
 │   └─ bili/danmaku      弹幕 WS（待启动，按需拉起）
 │                            ↓
@@ -110,6 +111,7 @@
 │                    机械去重与防抖始终生效（每场一次 + 场景切换去重 + 冷却，用户不可配）
 │                            ↓
 ├─ 偏好执行 matcher → PushMessage（解耦边界就是 PushMessage，无中间态）
+│   push_rules（开播）× post_rules（图文帖：X + 微博，platform 分流）两张平行表
 │                            ↓
 └─ 通知 notify/   只负责执行
     ├─ dispatcher  按 PushMessage.channels 路由到启用渠道
@@ -126,6 +128,8 @@
 | 能力面注册表 | 轴 B | 加能力 → 进 `tools.ts` 注册表，再接前端 |
 
 **偏好归属（已决策，2026-08-09 修订）**：人类需求是唯一锚点信源，直接以结构化形式落地，不做 NL→结构化编译。用户面板直填**推送规则**（`push_rules` v2，全局）：分类引用（可空 = 任意开播）× 生效主播集合（空 = 全部主播，含未来新增）→ 渠道、推送词模板。LLM 不解释偏好，只做**内容分类**这种客观判定（本场直播属于哪些分类，结果入 `verdicts` 表）；分类口径也由人填（`categories` 表：LLM 提示词 + 确定性关键词/分区条件〔且/或〕）——分类配了提示词且 LLM 可用以 LLM 判定为准，LLM 关闭/熔断/调用失败回退确定性条件，无提示词永远走确定性。推送规则的匹配、模板渲染、路由全确定性。运行管线无人工环节。
+
+**图文帖（第二条偏好执行路径，2026-09）**：X 与微博是**独立于 B站的图文来源**，各有一份独立账号名单（`x_accounts` / `weibo_accounts`），共用一张 `post_rules`（`platform` 决定 `accountIds` 属于哪份名单）× 渠道，走与开播平行的 `feed_post` 分支。微博与 X **同构**：帖子归属 = 被抓账号自身的 id（`posts.uid`）；「这条微博属于哪个主播」由 `weibo_accounts.bili_uid` 这条可选关联反查（面板主播卡第三栏混排据此）。平台差异只剩三处：微博要登录态、X 要代理；微博图床境内直连（X 图必须经代理隧道）；微博没有「引用」实体、也不需要翻译。LLM 在图文链路里只做两件人填口径的事——规则级「要不要推」判定与（仅 X 的）翻译，**失败一律回退机械筛选照推**。
 
 **推送时机的边界（2026-09 收敛）**：`push_rules` 已覆盖「推给谁、推什么」。未来只做**增加式可选推送时机**——延迟到有封面再推、换标题时推、内容实际变更时推（依赖 LLM 分析可信）；**不做**定时推、不做静音名单/静默时段/「不推」偏好。同一场内的「每场一次 + 场景切换去重 + 冷却防抖」是机械约束，始终生效、用户不可配。详见 §11「已放弃 / 不采用」。
 
@@ -252,7 +256,7 @@ type Streamer = {
   uname: string;                        // 昵称缓存，follows 同步/轮询自动刷新
   alias: string | null;                 // 用户别名，推送文案与面板展示用
   roomId: string | null;                // 批量接口响应自动回填，无需手填
-  weiboUid: string | null;              // 微博 uid，面板填昵称经 resolve 解析
+  weiboUid: string | null;              // 【连通字段】微博 uid；面板填昵称经 resolve 解析，同步维护 weibo_accounts 的关联
   weiboNick: string | null;             // 微博昵称（面板直填）
   watch: boolean;                       // 是否在监听名单（名单内即监听中；false = 退回关注候选池）
   analyze: boolean;                     // 【待删遗留列】面板三开关已删、无人消费
@@ -278,6 +282,17 @@ type PushRule = {
   uids: string[];                         // 生效主播集合；空 = 全部主播（含未来新增）
   channels: number[];                     // 引用 push_channels.id
   messageTemplate: string | null;         // null = 用内置默认模板（'{liver} 开播了'）；支持 {liver} {uname} {title} 变量
+  enabled: boolean;
+};
+
+/** 图文帖规则：X 与微博共用一张表，platform 决定 accountIds 属于哪份名单；LLM 只做规则级判定/翻译 */
+type PostRule = {
+  platform: 'twitter' | 'weibo';
+  accountIds: number[];                   // 对应平台名单的 id；空 = 该平台全部账号（含未来新增）
+  channels: number[];                     // 引用 push_channels.id（与开播规则共用）
+  filters: { original: boolean; retweet: boolean; quote: boolean; media: boolean; keywords: string[] };
+  messageTemplate: string | null;         // null = 内置默认（'{author} 发了新推文 / 新微博'）
+  llmJudge: boolean; judgePrompt: string | null; llmTranslate: boolean;   // 翻译仅 X
   enabled: boolean;
 };
 
@@ -312,9 +327,11 @@ interface Notifier {
 | `streamers` | 监听名单 + 主播画像（面板管理），source 的事实来源 | 已建 |
 | `push_channels` / `push_rules` v2 | 推送渠道（面板统一管理，可停用）/ 推送规则（分类引用 × 主播集合 → 渠道/文案），面板直填 | 已建 |
 | `categories` | 分类规则（LLM 提示词 + 确定性关键词/分区条件），面板直填 | 已建 |
-| `posts` | 动态/微博原文，供预告解析反复使用 | 已建 |
+| `posts` | 动态/微博/推文原文，供预告解析反复使用（`uid` = 该平台账号标识；`platform` 区分来源） | 已建 |
 | `snapshots` | 画面采样引用，供内容判定 | 已建 |
 | `verdicts` | 每场直播的分类判定结果（source llm/rule + evidence，可追溯误判） | 已建 |
+| `x_accounts` / `weibo_accounts` | 图文来源的独立账号名单（可选关联主播；与 `streamers` 解耦） | 已建 |
+| `post_rules` | 图文帖规则（platform × 账号集合 × 筛选 → 渠道/文案），与 `push_rules` 平行 | 已建 |
 | `schedules` | 预告时间表 | 待建 |
 
 ## 7. 成本分层（现状）

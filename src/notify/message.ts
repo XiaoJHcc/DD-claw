@@ -42,8 +42,13 @@ export interface PostMessageInput {
 }
 
 /**
- * 推文 → 推送层通用载荷。不用 emoji（同 liveEventToMessage：QQ iOS 气泡渲染器会把
- * 增补平面 emoji 拆成方框）。正文为空（纯图推文）时给一句占位，别让 QQ 里出现空消息。
+ * 图文帖 → 推送层通用载荷（X 推文与微博共用）。不用 emoji（同 liveEventToMessage：
+ * QQ iOS 气泡渲染器会把增补平面 emoji 拆成方框）。正文为空（纯图帖）时给一句占位，
+ * 别让 QQ 里出现空消息。
+ *
+ * 平台差异只在文案：X 的作者是 `@screen_name`、微博的是昵称（uid 对人没有意义）。
+ * 这里刻意不 import analysis/matcher 的 `postAuthorName`——`sources / analysis / notify`
+ * 互不 import 是依赖方向纪律，为一行字符串不值得破坏它（`PostCandidate` 只作类型引用，运行时被擦除）。
  */
 export function postToMessage(input: PostMessageInput): PushMessage {
   const { post } = input;
@@ -55,11 +60,13 @@ export function postToMessage(input: PostMessageInput): PushMessage {
   const extra = post.pics.length > 1 ? `  ·  共 ${post.pics.length} 张图` : '';
   const text = (post.text ?? '').trim() || '（仅图片，无正文）';
   const translation = input.translation?.trim();
+  const isWeibo = post.platform === 'weibo';
+  const author = isWeibo ? (post.displayName || post.screenName) : `@${post.screenName}`;
   return {
-    title: input.title?.trim() || `@${post.screenName} 发了新推文`,
+    title: input.title?.trim() || `${author} 发了新${isWeibo ? '微博' : '推文'}`,
     body: translation ? `${text}\n\n【译】${translation}` : text,
     image: input.image,
-    attribution: `X  ·  @${post.screenName}` + (when ? `  ·  ${when}` : '') + extra,
+    attribution: `${isWeibo ? '微博' : 'X'}  ·  ${author}` + (when ? `  ·  ${when}` : '') + extra,
     url: post.url ?? undefined,
     priority: 'normal',
   };

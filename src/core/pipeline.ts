@@ -1,12 +1,17 @@
 import { makeLogger } from '../logger.js';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage, postToMessage } from '../notify/message.js';
-import { matchPostRules, matchPushRules, renderPostTemplate, renderTemplate, type PostCandidate } from '../analysis/matcher.js';
+import {
+  defaultPostTitle, matchPostRules, matchPushRules, postAuthorName, renderPostTemplate, renderTemplate,
+  type PostCandidate,
+} from '../analysis/matcher.js';
 import { isPushEnabled } from './push.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
-import { localizeImageViaProxy } from '../notify/image-cache.js';
+import { localizeImage, localizeImageViaProxy } from '../notify/image-cache.js';
 import { ruleNeedsLlm, type PostAnalysis, type PostAnalyzer } from '../analysis/post-analyzer.js';
 import type { PostRule } from './post-rules.js';
+import type { XAccount } from './x-accounts.js';
+import type { WeiboAccount } from './weibo-accounts.js';
 import { getXConfig } from './x-config.js';
 import { isNotifyOnFirstRun, isNotifyOnNewSubscription } from './runtime-config.js';
 import type { Bus } from './bus.js';
@@ -34,7 +39,7 @@ export interface PipelineDeps {
   postAnalyzer?: PostAnalyzer;
 }
 
-/** feed_post 的载荷形状（X 源产出；微博源同用 kind 但平台不同，见 handleFeedPost） */
+/** feed_post 的载荷形状（X 源与微博源同形，platform 决定账号解释域，见 handleFeedPost） */
 interface FeedPostPayload {
   platform?: string;
   itemId?: string;
@@ -225,31 +230,41 @@ export class Pipeline {
    * 图文帖（feed_post）路径：机械筛选 → 图文帖规则 → 带图推送。与开播路径完全平行：
    *  · 不过决策规则（`DecisionRule` 是「每场直播推一次」那类防抖，帖子没有场次概念，
    *    去重由 posts 的 UNIQUE(platform,item_id) 兜住）；
-   *  · 不进 LLM（P3 才有规则级判定/翻译）；
-   *  · 目前只处理 X：微博源的 feed_post 走同一条总线但平台不同，这里明确跳过，
-   *    免得将来误把微博帖按 X 规则匹配。
+   *  · 不过冷启动抑制（帖子不是「启动时已在播」那种状态，首轮由 source 静默归档挡住）；
+   *  · 两个平台走同一条分支：账号在各自名单里查（X→x_accounts / 微博→weibo_accounts），
+   *    规则按 `platform` 过滤（`matchPostRules`），所以一条微博永远不会被 X 规则匹配到。
    */
   private async handleFeedPost(signal: Signal): Promise<void> {
     const { db, dispatcher } = this.deps;
     const p = signal.payload as FeedPostPayload | undefined;
-    if (!p || p.platform !== 'twitter') {
-      log.debug(`忽略 feed_post（平台 ${p?.platform ?? '未知'}）：图文帖推送目前只支持 X`);
+    const platform = p?.platform === 'weibo' ? 'weibo' : p?.platform === 'twitter' ? 'twitter' : null;
+    if (!p || !platform) {
+      log.debug(`忽略 feed_post（平台 ${p?.platform ?? '未知'}）：只支持 twitter / weibo`);
       return;
     }
     if (!isPushEnabled(db)) {
-      log.debug(`不推送 feed_post @${signal.uid}: 推送总开关已关`);
+      log.debug(`不推送 feed_post ${signal.uid}: 推送总开关已关`);
       return;
     }
-    const account = db.getXAccountByScreenName(signal.uid);
+    // 账号解析：uid 的解释域按平台不同（X=screen name / 微博=数字 uid）
+    const account = platform === 'twitter'
+      ? db.getXAccountByScreenName(signal.uid)
+      : db.getWeiboAccountByUid(signal.uid);
     if (!account) {
-      log.warn(`feed_post 来自不在名单里的账号 @${signal.uid}，忽略`);
+      log.warn(`feed_post 来自不在${platform === 'weibo' ? '微博' : 'X'}名单里的账号 ${signal.uid}，忽略`);
       return;
     }
     const bili = account.biliUid ? db.getStreamer(account.biliUid) : undefined;
+    // 两个账号类型只在「标识字段叫什么名字」上不同：X 是 screen name / 微博是数字 uid（昵称只是展示名）
+    const ident: { screenName: string; displayName: string | null } = platform === 'twitter'
+      ? { screenName: (account as XAccount).screenName, displayName: (account as XAccount).displayName }
+      : { screenName: (account as WeiboAccount).uid, displayName: (account as WeiboAccount).nickname };
     const post: PostCandidate = {
+      platform,
       accountId: account.id,
-      screenName: account.screenName,
-      type: p.type ?? 'tweet',
+      screenName: ident.screenName,
+      displayName: ident.displayName,
+      type: p.type ?? (platform === 'weibo' ? 'mblog' : 'tweet'),
       text: p.text ?? null,
       pics: p.pics ?? [],
       pubTs: p.pubTs ?? 0,
@@ -257,10 +272,11 @@ export class Pipeline {
       ...(p.isQuote !== undefined ? { isQuote: p.isQuote } : {}),
       biliName: bili ? (bili.alias || bili.uname) : null,
     };
+    const label = postAuthorName(post);
 
     const hits = matchPostRules(db.listEnabledPostRules(), post);
     if (hits.length === 0) {
-      log.info(`不推送 @${account.screenName}: 无命中图文帖规则`);
+      log.info(`不推送 ${label}: 无命中图文帖规则`);
       return;
     }
 
@@ -284,7 +300,7 @@ export class Pipeline {
       }
       if (r.llmJudge && a.source === 'llm' && !a.pass) {
         log.info(
-          `LLM 判定不推 @${account.screenName}（规则 #${r.id}）：${a.reason || '模型未给理由'}`,
+          `LLM 判定不推 ${label}（规则 #${r.id}）：${a.reason || '模型未给理由'}`,
         );
         continue;
       }
@@ -292,7 +308,7 @@ export class Pipeline {
       if (r.llmTranslate && a.translation && !translated) translated = a.translation;
     }
     if (contributing.length === 0) {
-      log.info(`不推送 @${account.screenName}: 命中 ${hits.length} 条规则，但都被 LLM 判定拦下`);
+      log.info(`不推送 ${label}: 命中 ${hits.length} 条规则，但都被 LLM 判定拦下`);
       return;
     }
 
@@ -305,24 +321,29 @@ export class Pipeline {
       templateOverride ??= r.messageTemplate;
     }
     if (channelIds.length === 0) {
-      log.info(`不推送 @${account.screenName}: 命中 ${hits.length} 条规则但都未勾选渠道`);
+      log.info(`不推送 ${label}: 命中 ${hits.length} 条规则但都未勾选渠道`);
       return;
     }
 
-    // 图片：经代理下载成本地文件再推。X 图床在墙内直连不通，NapCat 与本进程同网络也拉不到，
-    // 所以「先落本地、再给本地路径」是唯一可行形态；下载失败就按无图发，不阻塞通知。
+    // 图片必须先落成本地文件再推（NapCat 与本进程同网络，远程 URL 交给它同样拉不到；
+    // toast 的 Win32 限制也不支持远程图）。两条路线：
+    //  · X 图床（pbs.twimg.com）墙内直连不通 → 走代理隧道下载；
+    //  · 微博图床（sinaimg.cn）境内直连可达 → 普通 fetch，不给代理链路添无关流量。
+    // 下载失败按无图发，不阻塞通知。
     let image: string | undefined;
     if (post.pics.length > 0 && this.deps.imageCacheDir) {
-      image = (await localizeImageViaProxy(post.pics[0]!, this.deps.imageCacheDir, getXConfig(db).proxyUrl)) ?? undefined;
+      image = (platform === 'twitter'
+        ? await localizeImageViaProxy(post.pics[0]!, this.deps.imageCacheDir, getXConfig(db).proxyUrl)
+        : await localizeImage(post.pics[0]!, this.deps.imageCacheDir)) ?? undefined;
     }
 
-    const tpl = templateOverride ?? '{author} 发了新推文';
+    const tpl = templateOverride ?? defaultPostTitle(post);
     const msg: PushMessage = {
       ...postToMessage({ post, title: renderPostTemplate(tpl, post), image, translation: translated }),
       channels: channelIds.map(String),
     };
     log.info(
-      `推送 feed_post @${account.screenName} — 命中规则 ${contributing.map((r) => `#${r.id}`).join('/')}` +
+      `推送 feed_post ${label} — 命中规则 ${contributing.map((r) => `#${r.id}`).join('/')}` +
       (translated ? '（含译文）' : ''),
     );
     await dispatcher.broadcast(msg);

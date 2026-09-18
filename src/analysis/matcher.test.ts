@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  matchCategory, matchPostFilters, matchPostRules, matchPushRules, renderPostTemplate, renderTemplate,
+  defaultPostTitle, matchCategory, matchPostFilters, matchPostRules, matchPushRules,
+  renderPostTemplate, renderTemplate,
   type PostCandidate,
 } from './matcher.js';
 import type { LiveEvent } from '../core/types.js';
@@ -146,19 +147,31 @@ test('uname 为空时 {liver} 回退简称', () => {
   assert.equal(renderTemplate('{liver}开播', event({ uname: '' })), '阿梓开播');
 });
 
-// ---- 图文帖（X/推特）：与开播规则平行的确定性判定 ----
+// ---- 图文帖（X/推特 + 微博）：与开播规则平行的确定性判定 ----
 
 function post(over: Partial<PostCandidate> = {}): PostCandidate {
   return {
+    platform: 'twitter',
     accountId: 1, screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
     pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
     ...over,
   };
 }
 
+/** 微博帖：账号标识是数字 uid、展示名是昵称、类型是 mblog */
+function weiboPost(over: Partial<PostCandidate> = {}): PostCandidate {
+  return {
+    platform: 'weibo',
+    accountId: 1, screenName: '2203177060', displayName: '渡瀬結月', type: 'mblog',
+    text: '今晚九点直播！', pics: [], pubTs: 1_789_549_200,
+    url: 'https://weibo.com/2203177060/Pa1bC',
+    ...over,
+  };
+}
+
 function postRule(over: Partial<PostRule> = {}): PostRule {
   return {
-    id: 1, name: 'r', accountIds: [], channels: [1],
+    id: 1, name: 'r', platform: 'twitter', accountIds: [], channels: [1],
     filters: defaultPostFilters(), messageTemplate: null,
     llmJudge: false, judgePrompt: null, llmTranslate: false,
     enabled: true, sort: 0,
@@ -228,4 +241,39 @@ test('renderPostTemplate：{author} {text} {url} {liver}', () => {
     '没关联主播时回退账号',
   );
   assert.equal(renderPostTemplate('{text}', post({ text: null })), '', '无正文渲染成空串');
+});
+
+// ---- 平台隔离：两张名单的自增 id 会撞，规则必须按 platform 分流 ----
+
+test('matchPostRules：platform 不同不命中（微博帖不会被 X 规则吃掉，反之亦然）', () => {
+  const xRule = postRule({ id: 1, platform: 'twitter', accountIds: [] });
+  const wbRule = postRule({ id: 2, platform: 'weibo', accountIds: [] });
+  assert.deepEqual(matchPostRules([xRule, wbRule], post()).map((r) => r.id), [1]);
+  assert.deepEqual(matchPostRules([xRule, wbRule], weiboPost()).map((r) => r.id), [2]);
+});
+
+test('matchPostRules：微博帖的账号范围按微博账号 id（同样只有空 = 全部）', () => {
+  const rules = [
+    postRule({ id: 1, platform: 'weibo', accountIds: [] }),
+    postRule({ id: 2, platform: 'weibo', accountIds: [7] }),
+  ];
+  assert.deepEqual(matchPostRules(rules, weiboPost({ accountId: 3 })).map((r) => r.id), [1]);
+  assert.deepEqual(matchPostRules(rules, weiboPost({ accountId: 7 })).map((r) => r.id), [1, 2]);
+});
+
+test('微博帖文案：{author} 用昵称、缺昵称回退 uid；转发语义与 X 相同', () => {
+  assert.equal(renderPostTemplate('{author} 发了新微博', weiboPost()), '渡瀬結月 发了新微博');
+  assert.equal(
+    renderPostTemplate('{author}', weiboPost({ displayName: null })),
+    '2203177060',
+    '昵称还没抓到（新账号）时用 uid，至少不是空标题',
+  );
+  assert.equal(defaultPostTitle(weiboPost()), '渡瀬結月 发了新微博');
+  assert.equal(defaultPostTitle(post()), '@watase_yuzuki 发了新推文');
+  // 微博的转发在抓取层折进 type='retweet'（正文带 //转发自），筛选语义与 X 一致
+  assert.equal(matchPostFilters(defaultPostFilters(), weiboPost({ type: 'retweet' })), false);
+  assert.equal(
+    matchPostFilters({ ...defaultPostFilters(), original: false, retweet: true }, weiboPost({ type: 'retweet' })),
+    true,
+  );
 });

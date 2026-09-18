@@ -14,14 +14,16 @@ import { makeLogger } from '../logger.js';
 import type { PanelDeps } from '../panel/server.js';
 import {
   HttpError, checkCategoryConditions, checkChannelShape, checkPostFiltersUsable, checkPostJudgeUsable,
-  checkPostRuleRefs, checkRuleRefs, parseCategoryPatch, parseChannelPatch, parseNewCategory,
-  parseNewChannel, parseNewPostRule, parseNewRule, parseNewXAccount, parsePostRulePatch, parseRulePatch,
-  parseRuntimePatch, parseStreamerPatch, parseXAccountPatch, parseXPatch, watchStreamer,
+  checkPostRuleRefs, checkPostTranslateUsable, checkRuleRefs, parseCategoryPatch, parseChannelPatch,
+  parseNewCategory, parseNewChannel, parseNewPostRule, parseNewRule, parseNewWeiboAccount, parseNewXAccount,
+  parsePostRulePatch, parseRulePatch, parseRuntimePatch, parseStreamerPatch, parseWeiboAccountPatch,
+  parseXAccountPatch, parseXPatch, syncStreamerWeiboLink, watchStreamer,
 } from '../panel/http-util.js';
 import { scheduleInfo } from '../panel/schedule.js';
 import { setPushEnabled } from '../core/push.js';
 import { setListen, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
 import { X_INTERVAL_MAX, X_INTERVAL_MIN } from '../core/x-config.js';
+import type { PostPlatform } from '../core/post-rules.js';
 import { getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS } from '../core/runtime-config.js';
 import { isLlmEnabled, setLlmEnabled } from '../analysis/providers.js';
 import { llmProviderSchema } from '../config/schema.js';
@@ -60,6 +62,11 @@ function pickBody(args: Record<string, unknown>, keys: readonly string[]): Recor
 
 /** X 账号的关联主播必须存在于监听名单（与面板 checkXBiliUid 同一条校验） */
 function checkXBiliUidForMcp(deps: PanelDeps, uid: string | null): void {
+  if (uid && !deps.db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
+}
+
+/** 微博账号的关联主播校验（与 checkXBiliUidForMcp 同一条纪律） */
+function checkWeiboBiliUidForMcp(deps: PanelDeps, uid: string | null): void {
   if (uid && !deps.db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
 }
 
@@ -191,8 +198,20 @@ const sharedTools: McpToolDef[] = [
     }),
   },
   {
+    name: 'list_weibo_accounts',
+    description: '微博 关注账号名单（独立于 B站主播；含启用状态、最近微博时间、可选关联主播）',
+    schema: {},
+    role: 'shared',
+    handler: (deps) => ({
+      accounts: deps.db.listWeiboAccounts().map((a) => {
+        const bili = a.biliUid ? deps.db.getStreamer(a.biliUid) : undefined;
+        return { ...a, biliName: bili ? (bili.alias || bili.uname || a.biliUid) : null };
+      }),
+    }),
+  },
+  {
     name: 'list_post_rules',
-    description: '图文帖规则列表（X/推特链路；与开播推送规则平行的另一套，渠道共用 push_channels）',
+    description: '图文帖规则列表（X 推文 + 微博两平台共用一张表；platform 决定 accountIds 属于哪份名单，渠道共用 push_channels）',
     schema: {},
     role: 'shared',
     handler: (deps) => ({ rules: deps.db.listPostRules() }),
@@ -260,6 +279,8 @@ const adminTools: McpToolDef[] = [
         }
       }
       deps.db.upsertStreamer({ uid, ...patch });
+      // 微博独立名单联动（与面板 PUT /api/streamers 共用一份逻辑：填昵称则建/关联网名单行）
+      syncStreamerWeiboLink(deps.db, uid, patch);
       return { streamer: deps.db.getStreamer(uid) };
     },
   },
@@ -397,31 +418,91 @@ const adminTools: McpToolDef[] = [
     },
   },
   {
+    name: 'upsert_weibo_account',
+    description: '新建/更新 微博 关注账号（独立名单，不要求对应 B站主播）。带 id = 更新（未传字段保留原值），不带 = 新建；'
+      + '只填 nickname 时走微博昵称解析链补出 uid（需已装配 resolver）',
+    schema: {
+      id: idSchema.optional(),
+      uid: z.string().optional().describe('微博数字 uid（可从 weibo.com/u/<uid> 复制）'),
+      nickname: z.string().nullable().optional().describe('微博昵称；新建时与 uid 至少给一个（给昵称则自动解析 uid）'),
+      biliUid: uidSchema.nullable().optional().describe('可选关联主播 uid；null = 取消关联'),
+      enabled: z.boolean().optional(),
+    },
+    role: 'admin',
+    write: true,
+    handler: async (deps, args) => {
+      if (args.id === undefined) {
+        const input = parseNewWeiboAccount(pickBody(args, ['uid', 'nickname', 'biliUid', 'enabled']));
+        let uid = input.uid;
+        if (!uid) {
+          if (!deps.weiboResolver) throw new HttpError(400, '微博解析不可用，请直接填 uid');
+          try {
+            uid = await deps.weiboResolver.resolveUid(input.nickname!);
+          } catch (e) {
+            throw new HttpError(400, `微博昵称解析失败：${e instanceof Error ? e.message : String(e)}`);
+          }
+          if (!uid) throw new HttpError(400, `微博上找不到这个昵称：${input.nickname}`);
+        }
+        if (deps.db.getWeiboAccountByUid(uid)) throw new HttpError(409, `微博 ${uid} 已在名单里`);
+        checkWeiboBiliUidForMcp(deps, input.biliUid);
+        const id = deps.db.upsertWeiboAccount({ ...input, uid });
+        deps.weibo?.onChanged();
+        return { id, account: deps.db.getWeiboAccount(id) };
+      }
+      const id = Number(args.id);
+      if (!deps.db.getWeiboAccount(id)) throw new HttpError(404, '微博账号不存在');
+      const patch = parseWeiboAccountPatch(pickBody(args, ['uid', 'nickname', 'biliUid', 'enabled']));
+      if (patch.uid !== undefined) {
+        const dup = deps.db.getWeiboAccountByUid(patch.uid);
+        if (dup && dup.id !== id) throw new HttpError(409, `微博 ${patch.uid} 已在名单里`);
+      }
+      if (patch.biliUid !== undefined) checkWeiboBiliUidForMcp(deps, patch.biliUid);
+      deps.db.upsertWeiboAccount({ ...patch, id });
+      deps.weibo?.onChanged();
+      return { id, account: deps.db.getWeiboAccount(id) };
+    },
+  },
+  {
+    name: 'delete_weibo_account',
+    description: '从微博名单移除账号（已归档的微博保留在 posts 表里）',
+    schema: { id: idSchema },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      if (!deps.db.deleteWeiboAccount(Number(args.id))) throw new HttpError(404, '微博账号不存在');
+      deps.weibo?.onChanged();
+      return { ok: true };
+    },
+  },
+  {
     name: 'upsert_post_rule',
-    description: '新建/更新图文帖规则（X 推文 → 渠道推送）。带 id = 更新（未提供字段保留原值），不带 = 新建；「原创」「转发」至少要勾一个',
+    description: '新建/更新图文帖规则（X 推文或微博 → 渠道推送）。带 id = 更新（未提供字段保留原值），不带 = 新建；'
+      + 'platform 决定 accountIds 属于哪份名单（twitter → list_x_accounts / weibo → list_weibo_accounts）；'
+      + '「原创」「转发」至少要勾一个',
     schema: {
       id: idSchema.optional(),
       name: z.string().optional(),
-      accountIds: z.array(idSchema).optional().describe('生效 X 账号 id（见 list_x_accounts）；空 = 全部账号'),
+      platform: z.enum(['twitter', 'weibo']).optional().describe('图文来源平台；缺省 twitter（accountIds 的解释域）'),
+      accountIds: z.array(idSchema).optional().describe('生效账号 id（见 list_x_accounts / list_weibo_accounts）；空 = 该平台全部账号'),
       channels: z.array(idSchema).optional().describe('推送渠道 id（与开播规则共用 push_channels）'),
       filters: z.object({
         original: z.boolean().optional().describe('原创'),
         retweet: z.boolean().optional().describe('转发'),
-        quote: z.boolean().optional().describe('引用（当前无来源可识别，勾上等于不推）'),
+        quote: z.boolean().optional().describe('引用（只有 X 有这种形态；微博规则勾上会被拒）'),
         media: z.boolean().optional().describe('必须带图'),
         keywords: z.array(z.string()).optional().describe('正文关键词，命中任一即可'),
       }).optional(),
       messageTemplate: z.string().nullable().optional().describe('推送词，可用 {author} {text} {url} {liver}'),
       llmJudge: z.boolean().optional().describe('交给 LLM 判定「要不要推」（须同时给 judgePrompt）'),
       judgePrompt: z.string().nullable().optional().describe('判定标准（人填口径）；llmJudge=true 时必填'),
-      llmTranslate: z.boolean().optional().describe('推送时附上 LLM 译文'),
+      llmTranslate: z.boolean().optional().describe('推送时附上 LLM 译文（只有 X 需要，微博会被拒）'),
       enabled: z.boolean().optional(),
     },
     role: 'admin',
     write: true,
     handler: (deps, args) => {
       const keys = [
-        'name', 'accountIds', 'channels', 'filters', 'messageTemplate',
+        'name', 'platform', 'accountIds', 'channels', 'filters', 'messageTemplate',
         'llmJudge', 'judgePrompt', 'llmTranslate', 'enabled',
       ] as const;
       if (args.id === undefined) {
@@ -433,16 +514,17 @@ const adminTools: McpToolDef[] = [
       const prev = deps.db.listPostRules().find((r) => r.id === id);
       if (!prev) throw new HttpError(404, '图文帖规则不存在');
       const patch = parsePostRulePatch(pickBody(args, keys));
-      checkPostRuleRefs(deps.db, {
-        accountIds: patch.accountIds ?? prev.accountIds,
-        channels: patch.channels ?? prev.channels,
-      });
-      checkPostFiltersUsable({ ...prev.filters, ...(patch.filters ?? {}) });
+      // 与面板同一条纪律：换平台时没带新名单就当空（旧平台 id 指向的是另一个账号）
+      const platform: PostPlatform = patch.platform ?? prev.platform;
+      const accountIds = patch.accountIds ?? (platform === prev.platform ? prev.accountIds : []);
+      checkPostRuleRefs(deps.db, { platform, accountIds, channels: patch.channels ?? prev.channels });
+      checkPostFiltersUsable(platform, { ...prev.filters, ...(patch.filters ?? {}) });
       checkPostJudgeUsable(
         patch.llmJudge ?? prev.llmJudge,
         patch.judgePrompt !== undefined ? patch.judgePrompt : prev.judgePrompt,
       );
-      deps.db.upsertPostRule({ id, ...patch });
+      checkPostTranslateUsable(platform, patch.llmTranslate ?? prev.llmTranslate);
+      deps.db.upsertPostRule({ id, ...patch, platform, accountIds });
       return { id };
     },
   },

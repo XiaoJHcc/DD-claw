@@ -32,7 +32,7 @@ bus 信号按序走：**归档分派** → **冷启动抑制** → **分析触�
 - **冷启动推送两开关**（`notify_on_first_run` / `notify_on_new_subscription`）直读 settings、热生效；信号处理并发 4。
 - **health_alert → `alertAll`**：payload 带 `message` 时用自定义文案；本机告警只派发到实现 `alert()` 的通道（当前仅 toast）。**QQ 告警政策**：`alertKind==='login_drop'`（运行中登录掉线）立即报、`durationAlert===true`（连续失败满 10 分钟 source 再发的一次）才报，目标 = settings `napcat_alert_qq`（留空 = 全不发），经 `onebot.send` 私聊点对点发出，其余告警不发 QQ。
 
-### `db.ts` — better-sqlite3 十三表
+### `db.ts` — better-sqlite3 十六表
 - `live_sessions`：时间轴列 `last_seen`（在播每轮刷新 = 近似下播锚点，崩溃恢复也有近似终点）/ `keyframe` / `cover`；方法 `recordSession`（扩展写快照 + 插首段）/ `touchLiveSessions` / `endSession(roomId, endTs)`（按房间 first_seen 最新一场关闭；liveTime 在 live_end 信号里不可靠）/ `rotateSegment` / `listTimeline`（时间轴三表归并）。`endTs` 语义：`last_seen` 鲜度窗口（10min）内 = 在播 null，超时/无打点 = `last_seen ?? first_seen`（崩溃错过 live_end 的兜底；legacy 场零长不画）。
 - `live_segments`：一场按内容变更切分的连续时间段，idx `(room_id, live_time)`。
 - `notify_log` / `room_state`：`room_state` 含展示列 `area_name/parent_area_name/keyframe/cover/online/last_live_at`（`ensureColumn` 自动补列）；`countLiveRooms()` / `listRoomStatesFull()` 供面板。
@@ -43,7 +43,10 @@ bus 信号按序走：**归档分派** → **冷启动抑制** → **分析触�
 - `categories`：分类规则——`llm_prompt` 空 = 纯确定性；keywords/areas JSON 数组 + `cond_mode` and/or、enabled/sort；空名补「分类 N」；删除前 `disablePushRulesByCategory` 级联停用引用它的推送规则。
 - `verdicts`：每场分类判定——`UNIQUE(room_id, live_time, category_id)` 去重 `INSERT OR IGNORE`；`category_name` 冗余、`source` llm/rule、`confidence`（rule 路径 NULL）、`evidence` 命中说明。
 - `settings`：kv（`push_enabled` 等总开关、`llm_providers`/`llm_key:*`、`napcat_*`、`mcp_tokens`…）。
-- `posts`：动态/微博归档，`UNIQUE(platform, item_id)` 去重、raw 整 item 全留；`insertPosts`（返回新行下标）/ `listRecentPosts`（分组取近 N 供面板 enrich）/ `searchPosts`（供 MCP）。
+- `posts`：动态/微博/推文归档，`UNIQUE(platform, item_id)` 去重、raw 整 item 全留；`insertPosts`（返回新行下标）/ `listRecentPosts`（分组取近 N）/ `listRecentPostsMixed`（**主播卡第三栏**：B站动态按 uid + 关联微博账号的微博按 `weibo_accounts.bili_uid` 反查，混排后各截 perUid）/ `searchPosts`（供 MCP 与账号卡帖子段）。`uid` 语义：`bili_dynamic` = B站 uid、`weibo` = 微博账号 uid、`twitter` = screen name（**帖子归属 = 被抓账号自身**，不跨平台借 uid）。
+- `x_accounts` / `weibo_accounts`：图文来源的独立账号名单（独立于 streamers/follows）；`bili_uid` 只是可选关联（展示、文案、第三栏混排）；`enabled` 启停、`last_*` 增量游标与抓取健康、`avatar` 本地头像文件名。CRUD 在 `Db`；微博侧另有 `unlinkWeiboAccountsFromBili`（主播详情清空昵称时解关联、保留行）。
+- `post_rules`：图文帖规则（与 `push_rules` 平行）；**`platform` 决定 `account_ids` 的解释域**（两张名单的自增 id 会撞）；`filters` JSON（original/retweet 二选一、media、keywords、quote 仅 X）；`llm_judge`/`judge_prompt`/`llm_translate` 规则级开关；`sort` 全局 = 匹配优先级。
+- **一次性数据搬家** `migrateWeiboAccounts`（settings 闸门 `migrated_weibo_accounts_v1`）：① `streamers.weibo_uid` → `weibo_accounts`（`enabled = watch`）；② 历史 `platform='weibo'` 帖的 `uid` 从 B站 uid 改写成微博 uid（面板第三栏改由关联反查，对用户透明）。幂等靠闸门（改写后条件本身也不再成立）。
 - `snapshots`：关键帧缓存 room_id/live_time/ts/path/bytes，idx `(room_id, live_time, ts)`；`insertSnapshot`、`nearestSnapshot(roomId, liveTime, ts)` 按 `ABS(ts-?)` 取最近一帧（`/api/snapshot` 用）。**path 语义 = 相对 keyframe 目录、分隔符恒为正斜杠**（`<roomId>/<liveTime>/<ts>.ext`）——落库处（keyframe.ts）保证、绝不用 `join()`（Windows 反斜杠换机后全 404），读端读库时归一化反斜杠兜底，存量用 `migrate:snapshots-path` 一次性收敛。
 - **目标**：`schedules` 表（预告时间表）。`signals` 表已放弃（见 `../design.md` §11）。
 

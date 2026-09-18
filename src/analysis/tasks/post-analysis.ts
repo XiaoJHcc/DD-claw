@@ -1,14 +1,17 @@
 /**
- * 图文帖 LLM 任务：**一次调用同时做「要不要推」的判定与翻译**。
+ * 图文帖 LLM 任务：**一次调用同时做「要不要推」的判定与翻译**（X 推文与微博共用）。
  *
  * 为什么合并成一次：两者吃的是同一段正文，分开调用就是两倍延迟与两倍额度；
  * 而用户关心的是「这条推文要不要发到群里、发的时候带不带译文」——一件事。
  *
- * 口径由人填（与分类一致的原则）：判定标准 = 规则里的 `judgePrompt`；
- * 没开判定时要求模型 pass 恒 true，没开翻译时要求 translation 恒 null，
- * 免得调用方还要猜模型有没有越权替它决定。
+ * 平台差异：判定的口径由人填（规则里的 `judgePrompt`），两平台通用；
+ * **翻译只对 X 出现**（微博本就中文，译文没有意义，`platformSupportsTranslate` 已挡住）。
+ *
+ * 口径由人填（与分类一致的原则）：没开判定时要求模型 pass 恒 true，
+ * 没开翻译时要求 translation 恒 null，免得调用方还要猜模型有没有越权替它决定。
  */
 import { z } from 'zod';
+import { platformLabel } from '../../core/post-rules.js';
 import type { PostCandidate } from '../matcher.js';
 import type { LlmRequest } from '../providers.js';
 
@@ -34,13 +37,19 @@ const resultSchema = z.object({
 });
 
 const SYSTEM_PROMPT =
-  '你是推文过滤器兼翻译器。严格按 JSON schema 输出，不要输出任何多余内容。';
+  '你是社交平台图文过滤器兼翻译器。严格按 JSON schema 输出，不要输出任何多余内容。';
 
 const MAX_TRANSLATION_CHARS = 1200;
 
 export function buildPostAnalysisRequest(post: PostCandidate, opts: PostAnalysisOptions): LlmRequest {
+  // 平台决定措辞：对模型说「推文」而给它一条微博，只会白白引入噪声
+  const kind = post.platform === 'weibo' ? '微博' : '推文';
+  const author = post.platform === 'weibo'
+    ? (post.displayName ? `${post.displayName}（uid ${post.screenName}）` : `uid ${post.screenName}`)
+    : `@${post.screenName}`;
   const head = [
-    `账号：@${post.screenName}`,
+    `平台：${platformLabel(post.platform)}`,
+    `账号：${author}`,
     post.biliName ? `关联主播：${post.biliName}` : '',
     `类型：${post.type === 'retweet' ? '转发' : '原创'}`,
     post.pubTs > 0 ? `发布时间：${new Date(post.pubTs * 1000).toISOString()}` : '',
@@ -62,7 +71,7 @@ export function buildPostAnalysisRequest(post: PostCandidate, opts: PostAnalysis
       { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
-        content: [...head, '', '推文正文：', post.text || '（无正文，仅图片）', '', ...tail].join('\n'),
+        content: [...head, '', `${kind}正文：`, post.text || `（无正文，仅图片）`, '', ...tail].join('\n'),
       },
     ],
     jsonSchema: {

@@ -1,6 +1,6 @@
 import type { LiveEvent } from '../core/types.js';
 import type { Category, PushRule } from '../core/push.js';
-import type { PostFilters, PostRule } from '../core/post-rules.js';
+import type { PostFilters, PostPlatform, PostRule } from '../core/post-rules.js';
 
 export interface CategoryMatch {
   matched: boolean;
@@ -63,21 +63,25 @@ export function renderTemplate(tpl: string, event: LiveEvent): string {
     .replaceAll('{title}', event.title);
 }
 
-// ---- 图文帖（X/推特）：与开播规则平行的一套确定性判定 ----
+// ---- 图文帖（X/推特 + 微博）：与开播规则平行的一套确定性判定 ----
 
 /** matcher 眼里的「一条帖子」——不依赖 Post 行，由 pipeline 从 feed_post 载荷组装 */
 export interface PostCandidate {
-  /** x_accounts.id（规则按它生效） */
+  /** 图文来源平台（规则按 platform + accountId 生效） */
+  platform: PostPlatform;
+  /** x_accounts.id / weibo_accounts.id（对应平台名单的行 id） */
   accountId: number;
-  /** 被轮询的账号 screen name（不含 @） */
+  /** 账号标识：X = screen name（不含 @）；微博 = 数字 uid */
   screenName: string;
-  /** 'tweet'（原创）| 'retweet' */
+  /** 展示名：X = display_name（缺省回退 screen name）；微博 = 昵称（缺省回退 uid） */
+  displayName?: string | null;
+  /** 'tweet'/'retweet'（X）或 'mblog'/'retweet'（微博）——'retweet' 是两平台共用的转发语义 */
   type: string;
   text: string | null;
   pics: string[];
   pubTs: number;
   url: string | null;
-  /** 只有免登录回退路线能识别引用；undefined = 未知（RSS 不标） */
+  /** 只有 X 免登录回退路线能识别引用；undefined = 未知（RSS / 微博不标） */
   isQuote?: boolean;
   /** 可选关联主播的展示名（模板变量 {liver} 用） */
   biliName?: string | null;
@@ -103,12 +107,14 @@ export function matchPostFilters(f: PostFilters, post: PostCandidate): boolean {
 }
 
 /**
- * 图文帖规则命中判定：命中 =（accountIds 空 = 全部账号，或含该账号）且通过机械筛选。
- * 返回全部命中规则（保持 sort 顺序）——所有命中规则独立生效，渠道取并集、推送词取首个非空。
+ * 图文帖规则命中判定：命中 =（platform 相同）且（accountIds 空 = 该平台全部账号，
+ * 或含该账号）且通过机械筛选。返回全部命中规则（保持 sort 顺序）——
+ * 所有命中规则独立生效，渠道取并集、推送词取首个非空。
  */
 export function matchPostRules(rules: PostRule[], post: PostCandidate): PostRule[] {
   const hits: PostRule[] = [];
   for (const r of rules) {
+    if (r.platform !== post.platform) continue;
     if (r.accountIds.length > 0 && !r.accountIds.includes(post.accountId)) continue;
     if (!matchPostFilters(r.filters, post)) continue;
     hits.push(r);
@@ -116,12 +122,25 @@ export function matchPostRules(rules: PostRule[], post: PostCandidate): PostRule
   return hits;
 }
 
-/** 渲染图文帖推送词变量：{author} = @账号，{text} = 正文，{url} = 链接，{liver} = 关联主播（缺省回退账号） */
+/** 推送文案里的作者名：X 带 @，微博用昵称（uid 对人没有意义） */
+export function postAuthorName(post: PostCandidate): string {
+  if (post.platform === 'weibo') return post.displayName || post.screenName;
+  return `@${post.screenName}`;
+}
+
+/** 内置默认推送词（规则没填 messageTemplate 时用） */
+export function defaultPostTitle(post: PostCandidate): string {
+  return post.platform === 'weibo'
+    ? `${postAuthorName(post)} 发了新微博`
+    : `${postAuthorName(post)} 发了新推文`;
+}
+
+/** 渲染图文帖推送词变量：{author} = 作者（X=@账号 / 微博=昵称），{text} = 正文，{url} = 链接，{liver} = 关联主播 */
 export function renderPostTemplate(tpl: string, post: PostCandidate): string {
   return tpl
-    .replaceAll('{author}', `@${post.screenName}`)
+    .replaceAll('{author}', postAuthorName(post))
     .replaceAll('{screenName}', post.screenName)
     .replaceAll('{text}', post.text ?? '')
     .replaceAll('{url}', post.url ?? '')
-    .replaceAll('{liver}', post.biliName || `@${post.screenName}`);
+    .replaceAll('{liver}', post.biliName || postAuthorName(post));
 }

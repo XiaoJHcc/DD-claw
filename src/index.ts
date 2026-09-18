@@ -32,6 +32,9 @@ import { createPanelServer, type PlatformStatus, type PanelDeps } from './panel/
 import { createWeiboResolver } from './sources/weibo/resolve.js';
 import { loadWeiboCookies, weiboCookieHeader, type WeiboSelfInfo } from './sources/weibo/auth.js';
 import { WeiboFeedSource } from './sources/weibo/feed.js';
+import {
+  emptyWeiboFeedSnapshot, type WeiboFeedSnapshot,
+} from './core/weibo-accounts.js';
 import type { NewPushChannel } from './core/push.js';
 import { shouldRunListen } from './core/listen.js';
 import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
@@ -438,20 +441,33 @@ async function main(): Promise<void> {
   // 有 cookie 未心跳先按已登录（源会自校正），心跳后按真实值
   const biliLoggedIn = (): boolean => cookieImported && (biliLogin === null ? true : biliLogin.isLogin);
 
-  // weibo feed source 同样单独持有：扫码登录后要热重启
+  // weibo feed source 同样单独持有：扫码登录后要热重启；名单/间隔变了也要（新增账号立刻抓）
   let weiboFeedSrc: WeiboFeedSource | null = null;
   let weiboLogin: WeiboSelfInfo | null = null;
   let weiboCookieImported = false;
   let weiboCookieHdr: string | null = null;
+  let weiboStatus: WeiboFeedSnapshot = emptyWeiboFeedSnapshot();
+  let weiboFeedKey = '';
+  const weiboAvatarDir = join(dirname(secrets.dbPath), 'cache', 'weibo-avatars');
+  const weiboFeedKeyNow = (): string =>
+    [String(eff.weibo.intervalSec), db.listWeiboAccounts(true).map((a) => a.uid).join(',')].join('|');
   const startWeiboFeed = (cookieHdr: string): void => {
     weiboFeedSrc?.stop();
     weiboFeedSrc = new WeiboFeedSource({
       cookie: cookieHdr,
+      avatarCacheDir: weiboAvatarDir,
       onLoginState: (s) => { weiboLogin = s; },
+      onStatus: (s) => { weiboStatus = s; },
     });
     weiboFeedSrc.start({ bus, db, config: eff });
+    weiboFeedKey = weiboFeedKeyNow();
   };
-  const stopWeiboFeed = (): void => { weiboFeedSrc?.stop(); weiboFeedSrc = null; };
+  const stopWeiboFeed = (): void => {
+    weiboFeedSrc?.stop();
+    weiboFeedSrc = null;
+    weiboFeedKey = '';
+    weiboStatus = { ...emptyWeiboFeedSnapshot(), running: false };
+  };
   const weiboLoggedIn = (): boolean =>
     weiboCookieImported && (weiboLogin === null ? true : weiboLogin.loggedIn);
 
@@ -502,13 +518,18 @@ async function main(): Promise<void> {
       log.info('动态轮询已停止（面板开关关闭 / 无 cookie）');
       stopDynamic();
     }
-    if (shouldRunListen(db, 'weibo', weiboCookieHdr !== null)) {
+    // 微博：开关 × 有 cookie × 名单非空；名单/间隔变了就地重启（新增账号要立刻抓）
+    const weiboAccounts = db.listWeiboAccounts(true).length;
+    if (shouldRunListen(db, 'weibo', weiboCookieHdr !== null) && weiboAccounts > 0) {
       if (!weiboFeedSrc) {
-        log.info(`微博时间线：间隔 ${eff.weibo.intervalSec}s`);
+        log.info(`微博时间线：${weiboAccounts} 个账号，间隔 ${eff.weibo.intervalSec}s`);
+        startWeiboFeed(weiboCookieHdr!);
+      } else if (weiboFeedKey !== weiboFeedKeyNow()) {
+        log.info('微博时间线参数已热更新（间隔 / 名单）');
         startWeiboFeed(weiboCookieHdr!);
       }
     } else if (weiboFeedSrc) {
-      log.info('微博时间线已停止（面板开关关闭 / 无 cookie）');
+      log.info('微博时间线已停止（面板开关关闭 / 无 cookie / 名单为空）');
       stopWeiboFeed();
     }
     // X：开关 × 代理已配置 × 名单非空；参数变了就地重启
@@ -708,6 +729,15 @@ async function main(): Promise<void> {
       },
       snapshots: { dir: keyframeDir },
       xAvatars: { dir: xAvatarDir },
+      weiboAvatars: { dir: weiboAvatarDir },
+      weibo: {
+        // GET 只读快照（面板每分钟轮询这张卡，绝不打网络）；间隔取自 settings（与 /api/advanced 同一份）
+        info: () => ({
+          config: { intervalSec: getRuntimeConfig(db).weiboIntervalSec },
+          status: { feed: weiboStatus, accounts: db.listWeiboAccounts(true).length },
+        }),
+        onChanged: () => reconcileListen(),
+      },
       testPush: () => sendTestPush(),
       napcat: {
         effective: () => ({ ...getNapcatConfig(db), dir: effectiveNapcatDir(db) }),

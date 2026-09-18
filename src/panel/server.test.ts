@@ -12,6 +12,7 @@ import { createLlmRouter, listLlmProviders, saveLlmProviders, setLlmEnabled, dbK
 import type { LlmProviderConfig } from '../config/schema.js';
 import { saveNapcatConfig } from '../notify/napcat.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
+import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { defaultPostFilters } from '../core/post-rules.js';
 
 interface Fixture {
@@ -55,6 +56,10 @@ async function setup(
     testPush?: PanelDeps['testPush'];
     /** 注入 x dep（/api/x*）；缺省不注入（404） */
     x?: PanelDeps['x'];
+    /** 注入 weibo dep（/api/weibo*）；缺省不注入（404） */
+    weibo?: PanelDeps['weibo'];
+    /** 注入 weiboAvatars dep（/api/weibo-avatar）；缺省不注入（404） */
+    weiboAvatars?: PanelDeps['weiboAvatars'];
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -111,6 +116,8 @@ async function setup(
     avatar: opts.avatar,
     testPush: opts.testPush,
     x: opts.x,
+    weibo: opts.weibo,
+    weiboAvatars: opts.weiboAvatars,
     ...(opts.listen
       ? {
           listen: {
@@ -2022,3 +2029,194 @@ test('/api/x/accounts：名单行携带最近 3 条推文（不含 raw）+ 关�
   assert.deepEqual(accounts[0]!.posts.map((p) => p.pubTs), [3000, 2000], '按发布时间倒序');
   assert.equal(accounts[0]!.posts[0]!.raw, undefined, 'raw 不下发');
 });
+
+// ---- 微博（图文分页第二个来源）：状态快照 + 独立名单 CRUD ----
+
+/** 生产装配形状的 weibo dep：GET 只读快照，名单变化回调热生效（计数验证） */
+function makeWeiboDep(db: Db, calls: string[]): NonNullable<PanelDeps['weibo']> {
+  return {
+    info: () => ({
+      config: { intervalSec: 300 },
+      status: { feed: emptyWeiboFeedSnapshot(), accounts: db.listWeiboAccounts(true).length },
+    }),
+    onChanged: () => { calls.push('changed'); },
+  };
+}
+
+test('/api/weibo：未注入 dep → 整组端点 404', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/weibo')).status, 404);
+  assert.equal((await api(base, '/api/weibo/accounts')).status, 404);
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', { uid: '1' })).status, 404);
+});
+
+test('/api/weibo：GET 只读快照（含账号数与运行状态），绝不打网络', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, weibo: makeWeiboDep(db, calls) });
+  db.upsertWeiboAccount({ uid: '2203177060', nickname: '渡瀬結月', biliUid: null, enabled: true });
+
+  const r = await api(base, '/api/weibo');
+  assert.equal(r.status, 200);
+  const status = r.json.status as { accounts: number; feed: { running: boolean; lastError: string | null } };
+  assert.equal(status.accounts, 1);
+  assert.equal(status.feed.running, false);
+  assert.equal(status.feed.lastError, null);
+  assert.deepEqual(calls, [], 'GET 不触发热生效');
+});
+
+test('/api/weibo/accounts：uid 直填 / 昵称解析 / 重名 409 / 非法 uid 400', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, {
+    db,
+    weibo: makeWeiboDep(db, calls),
+    weiboResolver: {
+      resolveUid: async (nick) => (nick === '渡瀬結月' ? '2203177060' : null),
+    },
+  });
+
+  assert.deepEqual(((await api(base, '/api/weibo/accounts')).json.accounts as unknown[]).length, 0, '初始空名单');
+
+  // 直填 uid（也认 weibo.com/u/<uid> 形态）
+  const created = await api(base, '/api/weibo/accounts', 'POST', { uid: 'https://weibo.com/u/1234567890' });
+  assert.equal(created.status, 200);
+  assert.equal((created.json.account as { uid: string }).uid, '1234567890');
+  assert.deepEqual(calls, ['changed'], '新增后触发热生效（立刻开始抓）');
+
+  // 昵称解析：解析不到 → 400
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', { nickname: '查无此人' })).status, 400);
+  const byNick = await api(base, '/api/weibo/accounts', 'POST', { nickname: '渡瀬結月' });
+  assert.equal(byNick.status, 200);
+  assert.equal((byNick.json.account as { uid: string }).uid, '2203177060');
+
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', { uid: '2203177060' })).status, 409, '重名 409');
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', { uid: 'abc' })).status, 400, '非数字 uid');
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', {})).status, 400, 'uid 与昵称都不给');
+  assert.equal(
+    (await api(base, '/api/weibo/accounts', 'POST', { uid: '111', biliUid: '999' })).status,
+    400,
+    '关联主播必须在监听名单',
+  );
+});
+
+test('/api/weibo/accounts：编辑 / 启停 / 删除 / 关联主播 / 404', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, weibo: makeWeiboDep(db, calls) });
+  db.upsertStreamer({ uid: '1', uname: '阿梓' });
+  const id = db.upsertWeiboAccount({ uid: '2203177060', nickname: null, biliUid: null, enabled: true });
+
+  const upd = await api(base, `/api/weibo/accounts/${id}`, 'PUT', { enabled: false, biliUid: '1' });
+  assert.equal(upd.status, 200);
+  const acc = db.getWeiboAccount(id)!;
+  assert.equal(acc.enabled, false);
+  assert.equal(acc.biliUid, '1', '关联主播落库');
+  assert.equal((await api(base, `/api/weibo/accounts/${id}`, 'PUT', {})).status, 400, '空 patch');
+  assert.equal((await api(base, '/api/weibo/accounts/9999', 'PUT', { enabled: true })).status, 404);
+  assert.equal((await api(base, '/api/weibo/accounts/9999', 'DELETE')).status, 404);
+
+  assert.equal((await api(base, `/api/weibo/accounts/${id}`, 'DELETE')).status, 200);
+  assert.equal(db.getWeiboAccount(id), undefined);
+});
+
+test('PUT /api/streamers 填微博昵称 → 同步建微博名单行并关联本主播；清空 → 解关联但保留行', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, {
+    db,
+    weiboResolver: { resolveUid: async () => '2203177060' },
+  });
+  db.upsertStreamer({ uid: '1', uname: '阿梓' });
+
+  const r = await api(base, '/api/streamers/1', 'PUT', { weiboNick: '阿梓从小就很可爱' });
+  assert.equal(r.status, 200);
+  const acc = db.getWeiboAccountByUid('2203177060')!;
+  assert.equal(acc.biliUid, '1', '主播详情填昵称 = 在微博名单里建行并关联');
+  assert.equal(acc.nickname, '阿梓从小就很可爱');
+
+  const cleared = await api(base, '/api/streamers/1', 'PUT', { weiboNick: null });
+  assert.equal(cleared.status, 200);
+  assert.equal(db.getWeiboAccountByUid('2203177060')!.biliUid, null, '清空昵称 → 解关联');
+  assert.ok(db.getWeiboAccountByUid('2203177060'), '账号行保留（历史微博与图文页配置都还在）');
+});
+
+test('/api/weibo-avatar：按文件名读缓存目录；坏文件名 400、缺文件 404、无 dep 404', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const name = 'a'.repeat(32) + '.jpg';
+  writeFileSync(join(dir, name), Buffer.from([0xff, 0xd8, 0xff]));
+
+  const { base } = await setup(t, { weiboAvatars: { dir } });
+  const res = await fetch(`${base}/api/weibo-avatar?file=${name}`, { headers: { connection: 'close' } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /image\/jpeg/);
+  assert.equal((await res.arrayBuffer()).byteLength, 3);
+
+  assert.equal((await api(base, '/api/weibo-avatar?file=../../etc/passwd')).status, 400);
+  assert.equal((await api(base, `/api/weibo-avatar?file=${'b'.repeat(32)}.jpg`)).status, 404);
+
+  const bare = await setup(t);
+  assert.equal((await api(bare.base, '/api/weibo-avatar?file=' + name)).status, 404, '未装配 dep');
+});
+
+test('/api/post-rules：platform 决定账号名单；微博规则拒绝「引用」与「翻译」; 换平台清账号', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []), weibo: makeWeiboDep(db, []) });
+  const channelId = db.upsertPushChannel({
+    name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001', enabled: true,
+  });
+  const xId = db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true });
+  db.upsertXAccount({ screenName: 'd4dj_pj', displayName: null, biliUid: null, enabled: true });
+  const wbId = db.upsertWeiboAccount({ uid: '2203177060', nickname: '渡瀬結月', biliUid: null, enabled: true });
+  db.upsertWeiboAccount({ uid: '111', nickname: null, biliUid: null, enabled: true });
+  // 只在微博名单里存在的 id：拿它验「两张名单不串台」（两张表的自增 id 会撞，所以必须挑不撞的）
+  const wbOnlyId = db.upsertWeiboAccount({ uid: '222', nickname: null, biliUid: null, enabled: true });
+
+  // 平台决定 accountIds 的解释域：同一个 id 在 X 名单里不存在 → 拒
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { platform: 'twitter', accountIds: [wbOnlyId] })).status,
+    400,
+    'X 规则引用只在微博名单里的 id 必须拒',
+  );
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { platform: 'weibo', accountIds: [xId] })).status,
+    201,
+    '同一 id 在微博名单里存在（自增 id 撞车）→ 微博规则照收，证明查的是微博那份名单',
+  );
+
+  const created = await api(base, '/api/post-rules', 'POST', {
+    platform: 'weibo', name: '只推原创微博', accountIds: [wbId], channels: [channelId],
+  });
+  assert.equal(created.status, 201);
+  const rule = db.listPostRules().find((r) => r.name === '只推原创微博')!;
+  assert.equal(rule.platform, 'weibo');
+  assert.deepEqual(rule.accountIds, [wbId], '平台与账号范围落库');
+
+  // 微博没有「引用」这种形态、也不需要翻译 → 当场拒（不存死配置）
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { platform: 'weibo', filters: { quote: true } })).status,
+    400,
+  );
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', {
+      platform: 'weibo', filters: { quote: false }, llmTranslate: true,
+    })).status,
+    400,
+  );
+  // 微博的 LLM 判定照常可用
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', {
+      platform: 'weibo', llmJudge: true, judgePrompt: '只推直播预告',
+    })).status,
+    201,
+  );
+  // 未知平台
+  assert.equal((await api(base, '/api/post-rules', 'POST', { platform: 'douyin' })).status, 400);
+
+  // 换平台（PUT）：没带新名单 → accountIds 清空（旧平台 id 指向另一个账号）
+  assert.equal((await api(base, `/api/post-rules/${rule.id}`, 'PUT', { platform: 'twitter' })).status, 200);
+  const after = db.listPostRules().find((r) => r.id === rule.id)!;
+  assert.equal(after.platform, 'twitter');
+  assert.deepEqual(after.accountIds, [], '换平台后旧账号 id 必须清掉');
+});
+

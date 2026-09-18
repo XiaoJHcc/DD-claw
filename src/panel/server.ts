@@ -11,10 +11,11 @@ import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
   HttpError, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseCategoryPatch, parseChannelPatch,
-  parseNewCategory, parseNewChannel, parseNewRule, parseNewXAccount, parsePostRulePatch, parseRulePatch, parseRuntimePatch,
-  checkPostFiltersUsable, checkPostJudgeUsable, checkPostRuleRefs, parseNewPostRule,
+  parseNewCategory, parseNewChannel, parseNewRule, parseNewWeiboAccount, parseNewXAccount, parsePostRulePatch,
+  parseRulePatch, parseRuntimePatch, parseWeiboAccountPatch,
+  checkPostFiltersUsable, checkPostJudgeUsable, checkPostRuleRefs, checkPostTranslateUsable, parseNewPostRule,
   parseStreamerPatch, parseUid, parseXAccountPatch, parseXPatch, parseXTestRequest, readJsonBody, sendJson,
-  watchStreamer, type XTestRequest,
+  syncStreamerWeiboLink, watchStreamer, type XTestRequest,
 } from './http-util.js';
 import { scheduleInfo } from './schedule.js';
 import { handleMcp } from '../mcp/handler.js';
@@ -37,6 +38,7 @@ import {
 } from '../core/runtime-config.js';
 import { isPushEnabled, setPushEnabled } from '../core/push.js';
 import type { XConfig } from '../core/x-config.js';
+import type { PostPlatform } from '../core/post-rules.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 
@@ -147,6 +149,21 @@ export interface PanelDeps {
     verify: (screenName: string) => Promise<XAccountVerify>;
     /** 保存后回调：装配处热生效 */
     onChanged: () => void;
+  };
+  /**
+   * 微博（图文分页的第二个来源）：源运行状态快照 + 独立名单的增删改。
+   * 与 X 的分工差异：微博的连接前提是**登录态**（没有代理/实例那套设置，间隔走 /api/advanced），
+   * 所以这里只有状态快照 + 账号 CRUD。不注入则 /api/weibo* 一律 404。
+   */
+  weibo?: {
+    /** 当前配置 + 运行状态快照（GET 只读，绝不打网络） */
+    info: () => unknown;
+    /** 名单/账号变化后回调：装配处热重启源（新增账号要立刻抓） */
+    onChanged: () => void;
+  };
+  /** 微博头像本地缓存目录（/api/weibo-avatar 按文件名读）；不注入则一律 404 */
+  weiboAvatars?: {
+    dir: string;
   };
   /** 关键帧缓存目录（/api/snapshot 按鼠标时间点取最近帧）；不注入则 /api/snapshot 一律 404 */
   snapshots?: {
@@ -368,6 +385,59 @@ async function handle(
     return;
   }
 
+  // ---- 微博独立名单（图文分页第二个来源：不要求对应 B站主播，biliUid 只是可选关联）----
+  if (deps.weibo && method === 'GET' && path === '/api/weibo') {
+    sendJson(res, 200, deps.weibo.info());
+    return;
+  }
+  if (deps.weibo && method === 'GET' && path === '/api/weibo/accounts') {
+    sendJson(res, 200, { accounts: weiboAccountList(db) });
+    return;
+  }
+  if (deps.weibo && method === 'POST' && path === '/api/weibo/accounts') {
+    const input = parseNewWeiboAccount(await readJsonBody(req));
+    let uid = input.uid;
+    const nickname = input.nickname;
+    // 只填昵称时走匿名访客解析链补 uid（与主播详情填「微博昵称」同一条链，同一个 resolver）
+    if (!uid) {
+      if (!deps.weiboResolver) throw new HttpError(400, '微博解析不可用，请直接填 uid');
+      try {
+        uid = await deps.weiboResolver.resolveUid(nickname!);
+      } catch (e) {
+        throw new HttpError(400, `微博昵称解析失败：${e instanceof Error ? e.message : String(e)}`);
+      }
+      if (!uid) throw new HttpError(400, `微博上找不到这个昵称：${nickname}`);
+    }
+    if (db.getWeiboAccountByUid(uid)) throw new HttpError(409, `微博 ${uid} 已在名单里`);
+    checkWeiboBiliUid(db, input.biliUid);
+    const id = db.upsertWeiboAccount({ uid, nickname, biliUid: input.biliUid, enabled: input.enabled });
+    deps.weibo.onChanged();
+    sendJson(res, 200, { account: weiboAccountInfo(db, id) });
+    return;
+  }
+  const wa = path.match(/^\/api\/weibo\/accounts\/(\d+)$/);
+  if (deps.weibo && wa && method === 'PUT') {
+    const id = Number(wa[1]);
+    if (!db.getWeiboAccount(id)) throw new HttpError(404, '微博账号不存在');
+    const patch = parseWeiboAccountPatch(await readJsonBody(req));
+    if (patch.uid !== undefined) {
+      const dup = db.getWeiboAccountByUid(patch.uid);
+      if (dup && dup.id !== id) throw new HttpError(409, `微博 ${patch.uid} 已在名单里`);
+    }
+    if (patch.biliUid !== undefined) checkWeiboBiliUid(db, patch.biliUid);
+    db.upsertWeiboAccount({ ...patch, id });
+    deps.weibo.onChanged();
+    sendJson(res, 200, { account: weiboAccountInfo(db, id) });
+    return;
+  }
+  if (deps.weibo && wa && method === 'DELETE') {
+    const id = Number(wa[1]);
+    if (!db.deleteWeiboAccount(id)) throw new HttpError(404, '微博账号不存在');
+    deps.weibo.onChanged();
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   // ---- 缓存关键帧（snapshots dep 存在才挂）：取距 ts 最近的一帧，hover 缩略图用 ----
   if (method === 'GET' && path === '/api/snapshot') {
     if (!deps.snapshots) throw new HttpError(404, '未装配关键帧缓存目录');
@@ -422,6 +492,26 @@ async function handle(
     res.writeHead(200, {
       'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
       // 文件名随内容变（md5），长缓存安全
+      'cache-control': 'max-age=86400',
+    });
+    res.end(data);
+    return;
+  }
+
+  // ---- 微博头像本地缓存（weiboAvatars dep 存在才挂）：按文件名读 cache/weibo-avatars ----
+  if (method === 'GET' && path === '/api/weibo-avatar') {
+    if (!deps.weiboAvatars) throw new HttpError(404, '未装配微博头像缓存目录');
+    const name = url.searchParams.get('file') ?? '';
+    // 文件名就是 md5+扩展名（weibo/avatar.ts 落盘形式），白名单校验天然防路径穿越
+    if (!/^[a-f0-9]{32}\.(jpg|png)$/.test(name)) throw new HttpError(400, 'file 参数不对');
+    let data: Buffer;
+    try {
+      data = readFileSync(join(deps.weiboAvatars.dir, name));
+    } catch {
+      throw new HttpError(404, '头像缓存不存在');
+    }
+    res.writeHead(200, {
+      'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
       'cache-control': 'max-age=86400',
     });
     res.end(data);
@@ -641,6 +731,7 @@ async function handle(
       const patch = parseStreamerPatch(await readJsonBody(req));
       await resolveWeiboNick(deps, prev, patch);
       db.upsertStreamer({ uid, ...patch });
+      syncStreamerWeiboLink(db, uid, patch);
       sendJson(res, 200, { streamer: db.getStreamer(uid) });
       return;
     }
@@ -727,17 +818,18 @@ async function handle(
       const patch = parsePostRulePatch(await readJsonBody(req));
       const prev = db.listPostRules().find((r) => r.id === id);
       if (!prev) throw new HttpError(404, '图文帖规则不存在');
+      // platform 决定 accountIds 的解释域：换平台时没带新名单就当空（指向旧平台 id 毫无意义）
+      const platform: PostPlatform = patch.platform ?? prev.platform;
+      const accountIds = patch.accountIds ?? (platform === prev.platform ? prev.accountIds : []);
       // 校验要对「合并后」的形状做（只改 filters 时账号/渠道沿用旧值）
-      checkPostRuleRefs(db, {
-        accountIds: patch.accountIds ?? prev.accountIds,
-        channels: patch.channels ?? prev.channels,
-      });
-      checkPostFiltersUsable({ ...prev.filters, ...(patch.filters ?? {}) });
+      checkPostRuleRefs(db, { platform, accountIds, channels: patch.channels ?? prev.channels });
+      checkPostFiltersUsable(platform, { ...prev.filters, ...(patch.filters ?? {}) });
       checkPostJudgeUsable(
         patch.llmJudge ?? prev.llmJudge,
         patch.judgePrompt !== undefined ? patch.judgePrompt : prev.judgePrompt,
       );
-      db.upsertPostRule({ id, ...patch });
+      checkPostTranslateUsable(platform, patch.llmTranslate ?? prev.llmTranslate);
+      db.upsertPostRule({ id, ...patch, platform, accountIds });
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -873,15 +965,15 @@ function putPostRuleOrder(db: Db, body: unknown): unknown {
   return { ok: true };
 }
 
-/** 名单 + face + 实况（room_state）+ 生效规则名标签 + 最近动态（posts）。一次请求内每表只查一次。 */
+/** 名单 + face + 实况（room_state）+ 生效规则名标签 + 最近动态（posts，含关联微博账号的微博）。一次请求内每表只查一次。 */
 function enrichedStreamers(db: Db): unknown[] {
   const streamers = db.listStreamers();
   const roomStates = db.listRoomStatesFull();
   // 每个 uid 的生效规则名（listPushRules 已按全局 sort 排序，含 disabled；
   // uids 空 = 对全部主播生效，含未来新增）
   const allRules = db.listPushRules();
-  // 一次分组查询：每个 uid 最近 5 条动态（跨平台按 pub_ts 混排），raw 不下发
-  const recentPosts = db.listRecentPosts(streamers.map((s) => s.uid), 5);
+  // 一次分组查询：每个 uid 最近 5 条（B站动态 + 关联微博账号的微博，按 pub_ts 混排），raw 不下发
+  const recentPosts = db.listRecentPostsMixed(streamers.map((s) => s.uid), 5);
   return streamers.map((s) => {
     const rs = roomStates.get(s.uid);
     return {
@@ -1055,6 +1147,40 @@ function xAccountInfo(db: Db, id: number): unknown {
 
 /** 关联主播必须存在于监听名单（避免留下悬空引用） */
 function checkXBiliUid(db: Db, uid: string | null): void {
+  if (uid && !db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
+}
+
+// ---- 微博关注账号（独立名单）辅助 ----
+
+/**
+ * 名单行的面板视图：附关联主播展示名（简称优先，同 streamers.alias 约定）+ 最近 3 条微博（卡片动态段）。
+ * biliFace 是头像兜底：微博链路还没抓到头像时，卡片先用关联主播的 B站头像。
+ */
+function weiboAccountView(db: Db, a: ReturnType<Db['listWeiboAccounts']>[number]): unknown {
+  const bili = a.biliUid ? db.getStreamer(a.biliUid) : undefined;
+  const posts = db
+    .searchPosts({ platform: 'weibo', uid: a.uid, limit: 3 })
+    .map(({ raw: _raw, ...p }) => p);
+  return {
+    ...a,
+    biliName: bili ? (bili.alias || bili.uname || a.biliUid) : null,
+    biliFace: bili?.face ?? null,
+    posts,
+  };
+}
+
+function weiboAccountList(db: Db): unknown[] {
+  return db.listWeiboAccounts().map((a) => weiboAccountView(db, a));
+}
+
+function weiboAccountInfo(db: Db, id: number): unknown {
+  const a = db.getWeiboAccount(id);
+  if (!a) throw new HttpError(404, '微博账号不存在');
+  return weiboAccountView(db, a);
+}
+
+/** 关联主播必须存在于监听名单（与 checkXBiliUid 同一条纪律） */
+function checkWeiboBiliUid(db: Db, uid: string | null): void {
   if (uid && !db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
 }
 

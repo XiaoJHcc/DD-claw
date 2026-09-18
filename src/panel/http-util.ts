@@ -12,8 +12,13 @@ import { NUM_SPECS, BOOL_SPECS, type RuntimeConfig } from '../core/runtime-confi
 import {
   X_INTERVAL_MAX, X_INTERVAL_MIN, type XConfig,
 } from '../core/x-config.js';
-import { defaultPostFilters, judgeIsUsable, type NewPostRule, type PostFilters, type PostRuleInput } from '../core/post-rules.js';
+import {
+  POST_PLATFORMS, defaultPostFilters, filtersAreUsable, filtersSupported, judgeIsUsable,
+  platformSupportsTranslate,
+  type NewPostRule, type PostFilters, type PostPlatform, type PostRuleInput,
+} from '../core/post-rules.js';
 import { isValidScreenName, normalizeScreenName } from '../core/x-accounts.js';
+import { isValidWeiboUid, normalizeWeiboUid } from '../core/weibo-accounts.js';
 import { describeTunnelError, parseInstanceList, parseProxyUrl } from '../core/proxy.js';
 
 export class HttpError extends Error {
@@ -505,10 +510,10 @@ export function parseXAccountPatch(body: unknown): {
   return p;
 }
 
-// ---- 图文帖规则（X/推特；与推送规则平行的一张表）----
+// ---- 图文帖规则（X/推特 + 微博；与推送规则平行的一张表）----
 
 const POST_RULE_KEYS = [
-  'name', 'accountIds', 'channels', 'filters', 'messageTemplate',
+  'name', 'platform', 'accountIds', 'channels', 'filters', 'messageTemplate',
   'llmJudge', 'judgePrompt', 'llmTranslate', 'enabled',
 ] as const;
 const POST_FILTER_KEYS = ['original', 'retweet', 'quote', 'media', 'keywords'] as const;
@@ -535,6 +540,8 @@ function parsePostRuleFields(o: Record<string, unknown>, p: PostRuleInput): void
     if (!name) throw new HttpError(400, '规则名称不能为空');
     p.name = name;
   }
+  // platform 决定 accountIds 的解释域（x_accounts.id / weibo_accounts.id），显式传才覆盖
+  if ('platform' in o) p.platform = asEnum(o.platform, 'platform', POST_PLATFORMS);
   if ('accountIds' in o) p.accountIds = asIdArray(o.accountIds, 'accountIds');
   if ('channels' in o) p.channels = asIdArray(o.channels, 'channels');
   if ('filters' in o) p.filters = parsePostFiltersField(o.filters);
@@ -545,10 +552,20 @@ function parsePostRuleFields(o: Record<string, unknown>, p: PostRuleInput): void
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
 }
 
-/** 「原创/转发都不勾」= 永不命中的死规则，拒绝保存 */
-export function checkPostFiltersUsable(f: PostFilters): void {
-  if (!f.original && !f.retweet) {
+/** 「原创/转发都不勾」= 永不命中的死规则；微博规则勾「引用」= 该平台没有的形态，都拒绝保存 */
+export function checkPostFiltersUsable(platform: PostPlatform, f: PostFilters): void {
+  if (!filtersAreUsable(f)) {
     throw new HttpError(400, '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中');
+  }
+  if (!filtersSupported(platform, f)) {
+    throw new HttpError(400, '微博没有「引用」这种形态，「引用」筛选只对 X 生效');
+  }
+}
+
+/** 微博帖本就是中文，开「LLM 翻译」等于白烧额度（与 filters.quote 同一条纪律：不存死配置） */
+export function checkPostTranslateUsable(platform: PostPlatform, llmTranslate: boolean): void {
+  if (llmTranslate && !platformSupportsTranslate(platform)) {
+    throw new HttpError(400, '微博正文本就是中文，不需要 LLM 翻译');
   }
 }
 
@@ -559,31 +576,35 @@ export function checkPostJudgeUsable(llmJudge: boolean, judgePrompt: string | nu
   }
 }
 
-/** POST /api/post-rules：全部可省，缺省 = 只推原创 / 全部账号 / 无渠道 / 默认推送词 / LLM 全关 */
+/** POST /api/post-rules：platform 缺省 twitter（旧客户端/旧 MCP 调用的兼容口径）；其余缺省照默认值 */
 export function parseNewPostRule(body: unknown): NewPostRule {
   const o = asObject(body);
   rejectUnknownKeys(o, POST_RULE_KEYS);
   const p: PostRuleInput = {};
   parsePostRuleFields(o, p);
+  const platform: PostPlatform = p.platform ?? 'twitter';
   const filters: PostFilters = { ...defaultPostFilters(), ...(p.filters ?? {}) };
-  checkPostFiltersUsable(filters);
+  checkPostFiltersUsable(platform, filters);
   const llmJudge = p.llmJudge ?? false;
   const judgePrompt = p.judgePrompt ?? null;
   checkPostJudgeUsable(llmJudge, judgePrompt);
+  const llmTranslate = p.llmTranslate ?? false;
+  checkPostTranslateUsable(platform, llmTranslate);
   return {
     name: p.name ?? '',
+    platform,
     accountIds: p.accountIds ?? [],
     channels: p.channels ?? [],
     filters,
     messageTemplate: p.messageTemplate ?? null,
     llmJudge,
     judgePrompt,
-    llmTranslate: p.llmTranslate ?? false,
+    llmTranslate,
     enabled: p.enabled ?? true,
   };
 }
 
-/** PUT /api/post-rules/:id 的部分更新体；至少一个字段。filters 合并后是否可用由路由层判 */
+/** PUT /api/post-rules/:id 的部分更新体；至少一个字段。合并后是否可用由路由层判 */
 export function parsePostRulePatch(body: unknown): PostRuleInput {
   const o = asObject(body);
   rejectUnknownKeys(o, POST_RULE_KEYS);
@@ -593,14 +614,100 @@ export function parsePostRulePatch(body: unknown): PostRuleInput {
   return p;
 }
 
-/** 图文帖规则引用存在性校验：渠道（共用 push_channels）与 X 账号都必须存在 */
-export function checkPostRuleRefs(db: Db, r: { accountIds: number[]; channels: number[] }): void {
+/**
+ * 图文帖规则引用存在性校验：渠道（共用 push_channels）+ **对应平台**的账号名单。
+ * 平台必须显式传入：两张名单的自增 id 会撞，拿错表校验等于放行一条指向别人家账号的规则。
+ */
+export function checkPostRuleRefs(
+  db: Db,
+  r: { platform: PostPlatform; accountIds: number[]; channels: number[] },
+): void {
   const channelIds = new Set(db.listPushChannels().map((c) => c.id));
   for (const id of r.channels) {
     if (!channelIds.has(id)) throw new HttpError(400, `渠道不存在: ${id}`);
   }
-  const accountIds = new Set(db.listXAccounts().map((a) => a.id));
+  const accounts = r.platform === 'weibo' ? db.listWeiboAccounts() : db.listXAccounts();
+  const accountIds = new Set(accounts.map((a) => a.id));
   for (const id of r.accountIds) {
-    if (!accountIds.has(id)) throw new HttpError(400, `X 账号不存在: ${id}`);
+    if (!accountIds.has(id)) {
+      throw new HttpError(400, `${r.platform === 'weibo' ? '微博' : 'X'} 账号不存在: ${id}`);
+    }
   }
+}
+
+// ---- 微博关注账号（独立名单，biliUid 仅可选关联；与 X 账号同一套语义）----
+const WEIBO_ACCOUNT_KEYS = ['uid', 'nickname', 'biliUid', 'enabled'] as const;
+
+/** uid 归一化 + 形状校验（收 `2203177060` / `u/2203177060` / `weibo.com/u/2203177060`） */
+function asWeiboUid(v: unknown, field = 'uid'): string {
+  if (typeof v !== 'string') throw new HttpError(400, `${field} 必须是字符串`);
+  const s = normalizeWeiboUid(v);
+  if (!isValidWeiboUid(s)) throw new HttpError(400, '微博 uid 必须是数字（可从 weibo.com/u/<uid> 复制）');
+  return s;
+}
+
+/**
+ * POST /api/weibo/accounts：uid 与 nickname 至少给一个（route 层用 nickname 走解析链补出 uid）；
+ * biliUid / enabled 可选。**不做「给 uid 就验证存在」**：微博没有像 X 的 tweet-result 那样
+ * 便宜的匿名存在性接口，硬加等于把添加流程挂在一个未实测的端点上（见 docs/boundaries.md）。
+ */
+export function parseNewWeiboAccount(body: unknown): {
+  uid: string | null; nickname: string | null; biliUid: string | null; enabled: boolean;
+} {
+  const o = asObject(body);
+  rejectUnknownKeys(o, WEIBO_ACCOUNT_KEYS);
+  if (!('uid' in o) && !('nickname' in o)) throw new HttpError(400, 'uid 与昵称至少填一个');
+  const out: {
+    uid: string | null; nickname: string | null; biliUid: string | null; enabled: boolean;
+  } = { uid: null, nickname: null, biliUid: null, enabled: true };
+  if ('uid' in o && o.uid !== null && o.uid !== '') out.uid = asWeiboUid(o.uid);
+  if ('nickname' in o) {
+    const nick = asNullableString(o.nickname, 'nickname');
+    out.nickname = nick && nick.trim() ? nick.trim() : null;
+  }
+  if (!out.uid && !out.nickname) throw new HttpError(400, 'uid 与昵称至少填一个');
+  if ('biliUid' in o && o.biliUid !== null) out.biliUid = parseUid(o.biliUid, 'biliUid');
+  if ('enabled' in o) out.enabled = asBoolean(o.enabled, 'enabled');
+  return out;
+}
+
+/** PUT /api/weibo/accounts/:id 的部分更新体；至少一个字段 */
+export function parseWeiboAccountPatch(body: unknown): {
+  uid?: string; nickname?: string | null; biliUid?: string | null; enabled?: boolean;
+} {
+  const o = asObject(body);
+  rejectUnknownKeys(o, WEIBO_ACCOUNT_KEYS);
+  const p: {
+    uid?: string; nickname?: string | null; biliUid?: string | null; enabled?: boolean;
+  } = {};
+  if ('uid' in o) p.uid = asWeiboUid(o.uid);
+  if ('nickname' in o) p.nickname = asNullableString(o.nickname, 'nickname');
+  if ('biliUid' in o) p.biliUid = o.biliUid === null ? null : parseUid(o.biliUid, 'biliUid');
+  if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
+  if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
+  return p;
+}
+
+/**
+ * 主播详情里改「微博昵称」时同步维护**微博独立名单**（面板 PUT /api/streamers 与 MCP set_streamer 共用）：
+ *  · 填了昵称并解析出 uid → 名单里没有就建一行、有关联就更新昵称与关联；
+ *  · 清空昵称 → 解除关联（账号行保留，已归档的微博不删——它可能还在图文页独立使用）；
+ *  · 没动这个字段 → 什么都不做（图文页里手动关联的关系不该被主播详情的一次无关保存冲掉）。
+ *
+ * 为什么两处都能改：主播详情的入口对「这个主播的微博」最自然，图文页的入口对「独立博主」最自然；
+ * 它们维护的是同一份事实（weibo_accounts），不是两份配置。
+ */
+export function syncStreamerWeiboLink(db: Db, uid: string, patch: Partial<StreamerInput>): void {
+  if (patch.weiboNick === undefined) return;
+  if (patch.weiboNick === null || patch.weiboNick === '') {
+    db.unlinkWeiboAccountsFromBili(uid);
+    return;
+  }
+  if (!patch.weiboUid) return;
+  const prev = db.getWeiboAccountByUid(patch.weiboUid);
+  db.upsertWeiboAccount({
+    ...(prev ? { id: prev.id } : { uid: patch.weiboUid }),
+    nickname: patch.weiboNick,
+    biliUid: uid,
+  });
 }
