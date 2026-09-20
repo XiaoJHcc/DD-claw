@@ -37,10 +37,18 @@ function harness(
   fetcher: DynamicFetcher,
   uids: string[] = ['1'],
   selfFetcher?: DynamicSelfFetcher,
+  opts?: {
+    biliAccounts?: Array<{ uid: string; enabled?: boolean }>;
+    avatarDir?: string;
+    avatarSaver?: (url: string, dir: string) => Promise<string | null>;
+  },
 ): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));
   const db = new Db(join(dir, 'test.db'));
   for (const uid of uids) db.upsertStreamer({ uid, watch: true });
+  for (const a of opts?.biliAccounts ?? []) {
+    db.upsertBiliAccount({ uid: a.uid, uname: null, displayName: null, enabled: a.enabled ?? true });
+  }
   const bus = new Bus();
   const signals: Signal[] = [];
   bus.on('*', (s) => { signals.push(s); });
@@ -50,6 +58,8 @@ function harness(
     fetcher,
     selfFetcher: selfFetcher ?? (async () => ({ isLogin: true, mid: '99' })),
     onLoginState: (s) => { loginStates.push(s); },
+    avatarDir: opts?.avatarDir,
+    avatarSaver: opts?.avatarSaver,
   });
   src.bind({ bus, db, config: cfg() });
   return {
@@ -309,6 +319,113 @@ test('单 uid 失败不影响其他 uid 本轮归档', async (t) => {
   assert.equal(h.db.listRecentPosts(['2'], 10).get('2')!.length, 1, '其他 uid 正常归档');
 });
 
+// ---- 动态名单（bili_accounts）：union 轮询与账号回写 ----
+
+/** 带 face 的作者字段（名单账号回写 fixture） */
+const ACCOUNT_AUTHOR = { pub_ts: 1_754_000_000, name: '动态号主', face: 'https://i0.hdslb.com/bfs/face/abc.jpg' };
+const ACCOUNT_WORD = {
+  id_str: '2001',
+  type: 'DYNAMIC_TYPE_WORD',
+  modules: {
+    module_author: ACCOUNT_AUTHOR,
+    module_dynamic: { desc: { text: '名单账号的动态' }, major: null },
+  },
+};
+
+test('轮询对象 = 监听主播 ∪ 动态名单启用账号（Set 去重，disabled 不拉）', async (t) => {
+  const called: string[] = [];
+  const h = harness(
+    async (_c, uid) => { called.push(uid); return []; },
+    ['1'],
+    undefined,
+    { biliAccounts: [{ uid: '1' }, { uid: '2' }, { uid: '3', enabled: false }] },
+  );
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.deepEqual([...called].sort(), ['1', '2'], '重复 uid 只拉一次，disabled 账号不拉');
+});
+
+test('名单账号拉取成功回写 uname/lastOkAt；非名单 uid（仅监听主播）不回写', async (t) => {
+  const h = harness(
+    async (_c, uid) => (uid === '2' ? [ACCOUNT_WORD] : [WORD]),
+    ['1'],
+    undefined,
+    { biliAccounts: [{ uid: '2' }] },
+  );
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  const acc = h.db.getBiliAccountByUid('2')!;
+  assert.equal(acc.uname, '动态号主', '摸到非空名就回写（名会改、uid 不会）');
+  assert.ok(acc.lastOkAt, '成功一轮推 lastOkAt');
+  assert.equal(h.db.getBiliAccountByUid('1'), undefined, '监听主播不在动态名单，不产生账号行');
+});
+
+test('uname 拿不到非空值时不覆盖已有名字，lastOkAt 照常推', async (t) => {
+  const h = harness(
+    async () => [{ ...ACCOUNT_WORD, modules: { module_author: { pub_ts: 1 }, module_dynamic: { desc: { text: 'x' }, major: null } } }],
+    [],
+    undefined,
+    { biliAccounts: [{ uid: '2' }] },
+  );
+  t.after(h.cleanup);
+  h.db.touchBiliAccount(h.db.getBiliAccountByUid('2')!.id, { uname: '旧名字' });
+
+  await h.src.pollOnce();
+  const acc = h.db.getBiliAccountByUid('2')!;
+  assert.equal(acc.uname, '旧名字', '空名不覆盖');
+  assert.ok(acc.lastOkAt);
+});
+
+test('头像：注入 avatarDir 才抠 face 落盘并回写文件名；已有头像不重复下载', async (t) => {
+  const calls: string[] = [];
+  const h = harness(
+    async () => [ACCOUNT_WORD],
+    [],
+    undefined,
+    {
+      biliAccounts: [{ uid: '2' }],
+      avatarDir: join(tmpdir(), 'ddclaw-bili-avatars-unused'),
+      avatarSaver: async (url) => { calls.push(url); return 'face.jpg'; },
+    },
+  );
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.deepEqual(calls, [ACCOUNT_AUTHOR.face], '抠 module_author.face 落盘');
+  assert.equal(h.db.getBiliAccountByUid('2')!.avatar, 'face.jpg', '落盘成功回写文件名');
+
+  await h.src.pollOnce();
+  assert.equal(calls.length, 1, '已有本地头像不再下载');
+
+  // 不注入 avatarDir：只归档回写身份，不落盘
+  const h2 = harness(async () => [ACCOUNT_WORD], [], undefined, { biliAccounts: [{ uid: '2' }] });
+  t.after(h2.cleanup);
+  await h2.src.pollOnce();
+  assert.equal(h2.db.getBiliAccountByUid('2')!.avatar, null);
+});
+
+test('头像下载失败（saver 返回 null）不回写 avatar，主流程照常归档与回写身份', async (t) => {
+  const h = harness(
+    async () => [ACCOUNT_WORD],
+    [],
+    undefined,
+    {
+      biliAccounts: [{ uid: '2' }],
+      avatarDir: join(tmpdir(), 'ddclaw-bili-avatars-unused'),
+      avatarSaver: async () => null,
+    },
+  );
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  const acc = h.db.getBiliAccountByUid('2')!;
+  assert.equal(acc.avatar, null, '失败按无头像处理');
+  assert.equal(acc.uname, '动态号主', '身份回写不受头像失败影响');
+  assert.equal(h.db.listRecentPosts(['2'], 10).get('2')!.length, 1, '归档照常');
+});
+
 // ---- 登录态心跳（折进轮询周期，同 FollowsSource 纪律）----
 
 test('每轮心跳上报登录态（onLoginState），供面板展示', async (t) => {
@@ -376,4 +493,25 @@ test('心跳本身网络失败：不告警、不抓取，跳过本轮', async (t
   await h.src.pollOnce();
   assert.equal(fetched, 0);
   assert.equal(h.signals.length, 0, '网络失败 ≠ cookie 失效，不发 health_alert 也不上报');
+});
+
+test('kickAccount：面板添加账号后的即时首拉（不等周期；首轮静默政策同样生效）', async (t) => {
+  const fetched: string[] = [];
+  const h = harness(
+    async (_cookie, uid) => { fetched.push(uid); return [WORD]; },
+    ['1'],
+    undefined,
+    { biliAccounts: [{ uid: '7' }] },
+  );
+  t.after(h.cleanup);
+
+  await h.src.kickAccount('7');
+  assert.deepEqual(fetched, ['7'], '只拉被 kick 的账号');
+  assert.equal(h.db.listRecentPosts(['7'], 10).get('7')!.length, 1, '即时归档');
+  assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 0, '首轮静默不发信号');
+
+  // 名单账号的 uname/lastOkAt 回写同样走（与周期路径同一 pollUid）
+  const acc = h.db.getBiliAccountByUid('7')!;
+  assert.equal(acc.uname, '阿梓从小就很可爱');
+  assert.ok(acc.lastOkAt && acc.lastOkAt > 0);
 });

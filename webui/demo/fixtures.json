@@ -5024,5 +5024,65 @@
       ],
       "verdicts": []
     }
+  ],
+  "biliAccounts": [
+    {
+      "id": 1,
+      "uid": "3546661873781168",
+      "uname": "小日向美香的传声筒",
+      "displayName": null,
+      "enabled": true,
+      "ruleIds": [4],
+      "lastOkAt": 1787162009,
+      "avatar": "7daa5999d919fc8075e3635fdf7e96d9.jpg"
+    }
+  ],
+  "biliPosts": [
+  {
+    "id": 1,
+    "platform": "bili_dynamic",
+    "uid": "3546661873781168",
+    "itemId": "1249796888587141161",
+    "type": "DYNAMIC_TYPE_DRAW",
+    "text": "#小日向美香##舞台剧AIBy#\n",
+    "pics": [
+      "http://i0.hdslb.com/bfs/new_dyn/625af95320f2a3db3f37964abc5e6ad43546661873781168.jpg",
+      "http://i0.hdslb.com/bfs/new_dyn/18f66610ac56bdd59032125b2abbdc173546661873781168.jpg",
+      "http://i0.hdslb.com/bfs/new_dyn/5b3cbd83e4f734c93c8adafd95f7e5a93546661873781168.jpg",
+      "http://i0.hdslb.com/bfs/new_dyn/5486261c8f4849c1b0dc73e9fd36cace3546661873781168.jpg"
+    ],
+    "pubTs": 1789829414,
+    "url": "https://t.bilibili.com/1249796888587141161",
+    "createdAt": 1789829414
+  },
+  {
+    "id": 2,
+    "platform": "bili_dynamic",
+    "uid": "3546661873781168",
+    "itemId": "1249010853761515608",
+    "type": "DYNAMIC_TYPE_AV",
+    "text": "【切片中字】直播疑似暴露自己外星人身份的蜜柑【晒太阳 #22】\nhttps://nicochannel.jp/hinatabokko/video/smUfisGguksya5WxbHfXVQmN\n‼️节目后半为付费内容，请有能力的小日向民务必注册付费会员支持⬆️\n",
+    "pics": [
+      "http://i1.hdslb.com/bfs/archive/9eacbe169a859ac4d22a1d8fa2c5d18a77203df9.jpg"
+    ],
+    "pubTs": 1789646401,
+    "url": "https://t.bilibili.com/1249010853761515608",
+    "createdAt": 1789646401
+  },
+  {
+    "id": 3,
+    "platform": "bili_dynamic",
+    "uid": "3546661873781168",
+    "itemId": "1248679140564926516",
+    "type": "DYNAMIC_TYPE_DRAW",
+    "text": "#小日向美香##舞台剧AIBy#\n",
+    "pics": [
+      "http://i0.hdslb.com/bfs/new_dyn/1e4474499896e11bba4dee68d5e7c8503546661873781168.jpg",
+      "http://i0.hdslb.com/bfs/new_dyn/917ea5b2c84ed4dca274ed97a0b785d13546661873781168.jpg"
+    ],
+    "pubTs": 1789569168,
+    "url": "https://t.bilibili.com/1248679140564926516",
+    "createdAt": 1789569168
+  }
   ]
 }

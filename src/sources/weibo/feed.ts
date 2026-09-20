@@ -125,8 +125,21 @@ export async function fetchLongText(
 // ---- 解析（字段路径按 2026-08-03 实测响应；类型用宽松 any 走防御式取值）----
 
 function picsOf(m: any): string[] {
-  if (!Array.isArray(m?.pics)) return [];
-  return m.pics.map((p: any) => p?.large?.url ?? p?.url).filter(Boolean);
+  // 老字段 pics 数组优先（部分响应形态仍有）；mymblog 实测（2026-09-20）图片在
+  // pic_infos（按 pic_id 键控的对象，thumbnail/bmiddle/large 三档），顺序按 pic_ids（对象键序不保证）
+  if (Array.isArray(m?.pics) && m.pics.length > 0) {
+    return m.pics.map((p: any) => p?.large?.url ?? p?.url).filter(Boolean);
+  }
+  const infos = m?.pic_infos;
+  if (!infos || typeof infos !== 'object') return [];
+  const ids: string[] = Array.isArray(m?.pic_ids) && m.pic_ids.length > 0 ? m.pic_ids : Object.keys(infos);
+  const out: string[] = [];
+  for (const id of ids) {
+    const info = (infos as Record<string, any>)[id];
+    const url = info?.large?.url ?? info?.bmiddle?.url ?? info?.thumbnail?.url;
+    if (typeof url === 'string' && url) out.push(url);
+  }
+  return out;
 }
 
 /** 头像（顺手抠，落盘在 feed 里做）：优先大图字段，缺省回退 profile_image_url */
@@ -341,6 +354,15 @@ export class WeiboFeedSource implements Source {
       lastOkAt: ok > 0 ? nowSec : this.status.lastOkAt,
       lastError,
     });
+  }
+
+  /** 面板添加账号后的即时首拉（不等下个轮询周期、不在全量轮里排队；首轮静默政策同样生效） */
+  async kickAccount(uid: string): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const account = ctx.db.getWeiboAccountByUid(uid);
+    if (!account) return;
+    await this.pollAccount(account);
   }
 
   /** 单账号一轮：拉 → 归档 → 新帖发信号 → 游标/头像回写。失败不影响其他账号。 */

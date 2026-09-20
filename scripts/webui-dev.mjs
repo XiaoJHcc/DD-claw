@@ -9,7 +9,12 @@ import { resolve, sep, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(import.meta.url), '..', '..', 'webui');
-const XAVATARS = resolve(ROOT, '..', 'data', 'cache', 'x-avatars');
+// demo 专用的头像缓存映射：生产由后端从 data/cache/<目录> 读，dev 静态服映射同一目录
+const AVATAR_DIRS = {
+  '/api/x-avatar': resolve(ROOT, '..', 'data', 'cache', 'x-avatars'),
+  '/api/weibo-avatar': resolve(ROOT, '..', 'data', 'cache', 'weibo-avatars'),
+  '/api/bili-avatar': resolve(ROOT, '..', 'data', 'cache', 'bili-avatars'),
+};
 const PORT = process.env.WEBUI_PORT ? Number(process.env.WEBUI_PORT) : 8788;
 
 const TYPES = {
@@ -21,19 +26,43 @@ const TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   let pathname = decodeURIComponent(url.pathname);
-  // demo 专用的 /api/x-avatar：生产由后端从 cache/x-avatars 读，dev 静态服映射同一目录
-  if (pathname === '/api/x-avatar') {
+  // demo 专用的头像缓存（/api/x-avatar、/api/bili-avatar）：无缓存文件时 404，前端回退占位圆
+  const avatarDir = AVATAR_DIRS[pathname];
+  if (avatarDir) {
     const name = (url.searchParams.get('file') ?? '').replace(/[^a-z0-9.]/gi, '');
-    const file = resolve(XAVATARS, name);
-    if (!file.startsWith(XAVATARS + sep) || !existsSync(file)) {
+    const file = resolve(avatarDir, name);
+    if (!file.startsWith(avatarDir + sep) || !existsSync(file)) {
       res.writeHead(404).end('not found');
       return;
     }
     res.writeHead(200, { 'content-type': file.endsWith('.png') ? 'image/png' : 'image/jpeg' });
     res.end(readFileSync(file));
+    return;
+  }
+  // demo 专用的微博帖子图反代（与生产 /api/weibo-image 同构：sinaimg 要 weibo Referer；不落盘）
+  if (pathname === '/api/weibo-image') {
+    const raw = url.searchParams.get('url') ?? '';
+    let host = '';
+    try { host = new URL(raw).hostname; } catch { /* 非法 */ }
+    if (host !== 'sinaimg.cn' && !host.endsWith('.sinaimg.cn')) {
+      res.writeHead(400).end('bad url');
+      return;
+    }
+    try {
+      const resp = await fetch(raw, {
+        headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://weibo.com/' },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!resp.ok) throw new Error(String(resp.status));
+      const ct = resp.headers.get('content-type') ?? 'image/jpeg';
+      res.writeHead(200, { 'content-type': ct });
+      res.end(Buffer.from(await resp.arrayBuffer()));
+    } catch {
+      res.writeHead(502).end('fetch failed');
+    }
     return;
   }
   if (pathname === '/') pathname = '/index.html';

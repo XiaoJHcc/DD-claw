@@ -103,6 +103,26 @@ test('parseMblog 防御：缺 idstr 返回 null；坏 created_at pubTs=0；被�
   assert.deepEqual(stub.pics, []);
 });
 
+test('parseMblog pic_infos 形态：mymblog 实测（2026-09-20）图片在 pic_infos，顺序按 pic_ids', () => {
+  const p = parseMblog({
+    idstr: '5004', mblogid: 'Pd4eG', text_raw: '带图', created_at: CREATED,
+    pic_ids: ['bbb', 'aaa'],
+    pic_infos: {
+      aaa: { large: { url: 'https://wx1.sinaimg.cn/orj960/aaa.jpg' } },
+      bbb: { bmiddle: { url: 'https://wx2.sinaimg.cn/wap360/bbb.jpg' } },
+    },
+  }, W_UID)!;
+  assert.deepEqual(p.pics, ['https://wx2.sinaimg.cn/wap360/bbb.jpg', 'https://wx1.sinaimg.cn/orj960/aaa.jpg'],
+    '顺序按 pic_ids（pic_infos 键序不保证）；缺 large 回退 bmiddle');
+  // pics 数组形态仍优先（两种响应形态共存）
+  const both = parseMblog({
+    idstr: '5005', text_raw: 'x', created_at: CREATED,
+    pics: [{ large: { url: 'https://wx1.sinaimg.cn/large/a.jpg' } }],
+    pic_infos: { zzz: { large: { url: 'https://wx1.sinaimg.cn/orj960/zzz.jpg' } } },
+  }, W_UID)!;
+  assert.deepEqual(both.pics, ['https://wx1.sinaimg.cn/large/a.jpg']);
+});
+
 test('avatarUrlOf / nicknameOf：优先大图字段、缺字段一律 null（防御式）', () => {
   assert.equal(avatarUrlOf(MBLOG), USER.avatar_large);
   assert.equal(avatarUrlOf({ user: { profile_image_url: 'https://x/a.jpg' } }), 'https://x/a.jpg');

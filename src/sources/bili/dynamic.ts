@@ -4,10 +4,12 @@ import { mapLimit } from '../../core/concurrency.js';
 import type { Signal } from '../../core/types.js';
 import { STREAK_QQ_ALERT_AFTER_SEC } from '../../core/types.js';
 import type { NewPost } from '../../core/posts.js';
+import type { BiliAccount } from '../../core/bili-accounts.js';
 import type { Source, SourceContext } from '../types.js';
 import { BiliApiError, biliRequest, type BiliRequestFn } from './client.js';
 import { fetchSelf, type SelfInfo } from './auth.js';
 import { dmQueryParams } from './dm.js';
+import { cacheBiliAvatar } from './avatar.js';
 
 const log = makeLogger('bili/dynamic');
 
@@ -26,6 +28,10 @@ export interface DynamicSourceOpts {
   selfFetcher?: DynamicSelfFetcher;
   /** 每轮心跳拿到 self 后上报一次（无论 isLogin 真假），供面板展示登录态 */
   onLoginState?: (s: SelfInfo) => void;
+  /** B站动态账号头像本地缓存目录（cache/bili-avatars）；不注入则只抠 URL 不落盘 */
+  avatarDir?: string;
+  /** 头像落盘注入点（单测用；默认 cacheBiliAvatar 直连下载，hdslb 图床无需代理） */
+  avatarSaver?: (url: string, dir: string) => Promise<string | null>;
 }
 
 interface FeedSpaceData {
@@ -139,8 +145,14 @@ export function parseDynamicItem(item: unknown, uid: string): NewPost | null {
 }
 
 /**
- * 空间动态轮询：listWatchedUids → mapLimit(2) 逐个拉 feed/space → 归档 posts
- * （INSERT OR IGNORE，去重只靠 (platform, item_id) UNIQUE）→ 新帖 emit feed_post。
+ * 空间动态轮询：轮询对象是 **listWatchedUids ∪ bili_accounts(enabled) 的 uid**（Set 去重）
+ * → mapLimit(2) 逐个拉 feed/space → 归档 posts（INSERT OR IGNORE，去重只靠
+ * (platform, item_id) UNIQUE）→ 新帖 emit feed_post。
+ * 两边都归档；监听主播的动态信号会被 pipeline 丢弃（uid 不在 bili_accounts 名单内，
+ * 只归档不推送），动态名单账号的信号才走图文规则推送。
+ * 动态名单账号每次拉取成功还回写 uname / last_ok_at（摸到非空才写名，uid 不会变名会改）；
+ * 头像（face URL）在注入了 avatarDir 且尚无本地头像时顺手落盘，成功回写 avatar 文件名
+ * （下载慢不挡 feed_post 信号，失败静默下轮再试）。
  *
  * 登录态心跳折进轮询周期（模子同 FollowsSource / WeiboFeedSource）：每轮先 fetchSelf，
  * 运行中发现意外失效（本进程内此前成功登录过）才发一次 health_alert 并跳过本轮，
@@ -173,12 +185,16 @@ export class DynamicSource implements Source {
   private readonly fetcher: DynamicFetcher;
   private readonly selfFetcher: DynamicSelfFetcher;
   private readonly onLoginState?: (s: SelfInfo) => void;
+  private readonly avatarDir?: string;
+  private readonly avatarSaver: (url: string, dir: string) => Promise<string | null>;
 
   constructor(opts: DynamicSourceOpts) {
     this.cookie = opts.cookie;
     this.fetcher = opts.fetcher ?? fetchDynamics;
     this.selfFetcher = opts.selfFetcher ?? fetchSelf;
     this.onLoginState = opts.onLoginState;
+    this.avatarDir = opts.avatarDir;
+    this.avatarSaver = opts.avatarSaver ?? cacheBiliAvatar;
   }
 
   start(ctx: SourceContext): void {
@@ -200,6 +216,12 @@ export class DynamicSource implements Source {
   bind(ctx: SourceContext): void {
     this.ctx = ctx;
     log.info(`启动：空间动态轮询，间隔 ${ctx.config.dynamic.intervalSec}s`);
+  }
+
+  /** 面板添加动态账号后的即时首拉（不等下个轮询周期；首轮静默政策同样生效） */
+  async kickAccount(uid: string): Promise<void> {
+    if (!this.ctx) return;
+    await this.pollUid(uid);
   }
 
   /** 拉一轮：先心跳查登录态，有效才逐 uid 归档 + 新帖发信号。单 uid 失败不影响其他 uid。 */
@@ -241,7 +263,13 @@ export class DynamicSource implements Source {
       log.info('登录态已恢复，继续抓取');
     }
 
-    const uids = ctx.db.listWatchedUids();
+    // 轮询对象 = 监听主播 ∪ 动态名单启用账号：两边都归档，推送分流在 pipeline（名单外 uid 丢弃）
+    const uids = [
+      ...new Set([
+        ...ctx.db.listWatchedUids(),
+        ...ctx.db.listBiliAccounts(true).map((a) => a.uid),
+      ]),
+    ];
     await mapLimit(uids, 2, async (uid) => {
       await this.pollUid(uid);
     });
@@ -268,8 +296,22 @@ export class DynamicSource implements Source {
     const firstRound = !this.polled.has(uid);
     this.polled.add(uid);
 
+    // 动态名单账号回写（首轮也写）：uname 摸到非空才更新，lastOkAt 每次成功都推
+    const account = ctx.db.getBiliAccountByUid(uid);
+    const author = dig(items[0], 'modules', 'module_author');
+    const uname = typeof author?.name === 'string' && author.name.trim()
+      ? author.name.trim() : null;
+    const face = typeof author?.face === 'string' && author.face ? author.face : null;
+    if (account) {
+      ctx.db.touchBiliAccount(account.id, {
+        lastOkAt: Math.floor(Date.now() / 1000),
+        ...(uname ? { uname } : {}),
+      });
+    }
+
     if (firstRound) {
       log.info(`uid=${uid} 首轮归档 ${inserted.length} 条动态（静默，不发信号）`);
+      await this.maybeSaveAvatar(account, face);
       return;
     }
     for (const i of inserted) {
@@ -288,6 +330,18 @@ export class DynamicSource implements Source {
       ctx.bus.emit(sig);
     }
     if (inserted.length > 0) log.info(`uid=${uid} 新动态 ${inserted.length} 条`);
+
+    // 头像最后做：下载慢也不能挡 feed_post 信号。已有本地头像不重复下载，失败静默下轮再试。
+    await this.maybeSaveAvatar(account, face);
+  }
+
+  /** 动态名单账号且尚无本地头像时，抠 face URL 落盘并回写文件名；未注入 avatarDir 则只抠不落 */
+  private async maybeSaveAvatar(
+    account: BiliAccount | undefined, face: string | null,
+  ): Promise<void> {
+    if (!account || account.avatar || !this.avatarDir || !face) return;
+    const saved = await this.avatarSaver(face, this.avatarDir);
+    if (saved) this.ctx!.db.touchBiliAccount(account.id, { avatar: saved });
   }
 
   private onSuccess(uid: string): void {

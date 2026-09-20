@@ -17,6 +17,7 @@ export interface WeiboAccountRow {
   display_name: string | null;
   bili_uid: string | null;
   enabled: number;
+  rule_ids: string;
   last_post_id: string | null;
   last_post_at: number | null;
   last_ok_at: number | null;
@@ -36,6 +37,8 @@ export interface WeiboAccount {
   /** 可选关联主播（引用 streamers.uid；仅展示、文案与主播卡第三栏混排用） */
   biliUid: string | null;
   enabled: boolean;
+  /** 选用的图文帖规则（post_rules.id）；空 = 这个账号的帖子一律不推 */
+  ruleIds: number[];
   /** 增量游标：最近一次见到的微博 idstr（只往前推） */
   lastPostId: string | null;
   lastPostAt: number | null;
@@ -61,6 +64,7 @@ export interface WeiboAccountInput {
   displayName?: string | null;
   biliUid?: string | null;
   enabled?: boolean;
+  ruleIds?: number[];
 }
 
 /** 抓取成功后的回写（可选字段：只更新拿到的部分） */
@@ -100,6 +104,7 @@ export function rowToWeiboAccount(r: WeiboAccountRow): WeiboAccount {
     displayName: r.display_name,
     biliUid: r.bili_uid,
     enabled: r.enabled === 1,
+    ruleIds: JSON.parse(r.rule_ids) as number[],
     lastPostId: r.last_post_id,
     lastPostAt: r.last_post_at,
     lastOkAt: r.last_ok_at,

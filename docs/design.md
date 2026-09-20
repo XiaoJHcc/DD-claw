@@ -111,7 +111,7 @@
 │                    机械去重与防抖始终生效（每场一次 + 场景切换去重 + 冷却，用户不可配）
 │                            ↓
 ├─ 偏好执行 matcher → PushMessage（解耦边界就是 PushMessage，无中间态）
-│   push_rules（开播）× post_rules（图文帖：X + 微博，platform 分流）两张平行表
+│   push_rules（开播）× post_rules（图文帖：平台无关通用规则，账号侧 rule_ids 选用）两张平行表
 │                            ↓
 └─ 通知 notify/   只负责执行
     ├─ dispatcher  按 PushMessage.channels 路由到启用渠道
@@ -285,14 +285,13 @@ type PushRule = {
   enabled: boolean;
 };
 
-/** 图文帖规则：X 与微博共用一张表，platform 决定 accountIds 属于哪份名单；LLM 只做规则级判定/翻译 */
+/** 图文帖规则：平台无关的通用规则——任何账号经 rule_ids 选用；LLM 只做规则级判定/翻译 */
 type PostRule = {
-  platform: 'twitter' | 'weibo';
-  accountIds: number[];                   // 对应平台名单的 id；空 = 该平台全部账号（含未来新增）
   channels: number[];                     // 引用 push_channels.id（与开播规则共用）
   filters: { original: boolean; retweet: boolean; quote: boolean; media: boolean; keywords: string[] };
-  messageTemplate: string | null;         // null = 内置默认（'{author} 发了新推文 / 新微博'）
-  llmJudge: boolean; judgePrompt: string | null; llmTranslate: boolean;   // 翻译仅 X
+                                            // quote 只有 X 帖可识别（其余平台永不命中，是语义不是校验错误）
+  messageTemplate: string | null;         // null = 内置默认（按帖子平台：'{author} 发了新推文 / 新微博 / 新动态'）
+  llmJudge: boolean; judgePrompt: string | null; llmTranslate: boolean;   // 翻译运行时仅对 X 帖生效
   enabled: boolean;
 };
 

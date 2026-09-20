@@ -6,7 +6,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  defaultPostFilters, filtersAreUsable, judgeIsUsable, parseFilters, rowToPostRule, type PostRuleRow,
+  defaultPostFilters, filtersAreUsable, judgeIsUsable, parseFilters,
+  platformLabel, platformSupportsQuote, platformSupportsTranslate, POST_PLATFORMS,
+  rowToPostRule, type PostRuleRow,
 } from './post-rules.js';
 
 test('默认筛选：只推原创、不论有没有图', () => {
@@ -36,16 +38,16 @@ test('filtersAreUsable：原创/转发至少勾一个，都不勾就是死规则
   assert.equal(filtersAreUsable({ ...defaultPostFilters(), original: false, retweet: false }), false);
 });
 
-test('rowToPostRule：JSON 列还原成数组/对象，布尔列还原成 boolean', () => {
+test('rowToPostRule：JSON 列还原成数组/对象，布尔列还原成 boolean；platform 与 account_ids 遗留列不读', () => {
   const row: PostRuleRow = {
-    id: 7, name: '只推带图原创', account_ids: '[1,2]', channels: '[3]',
+    id: 7, name: '只推带图原创', platform: 'weibo', account_ids: '[1,2]', channels: '[3]',
     filters: JSON.stringify({ original: true, retweet: false, media: true, keywords: ['live'] }),
     message_template: '{author} 更新了',
     llm_judge: 1, judge_prompt: '只推直播预告', llm_translate: 1,
     enabled: 0, sort: 5, created_at: 100, updated_at: 200,
   };
   const r = rowToPostRule(row);
-  assert.deepEqual(r.accountIds, [1, 2]);
+  assert.ok(!('platform' in r), '规则已平台无关，对象不再带 platform（列保留但不再读）');
   assert.deepEqual(r.channels, [3]);
   assert.equal(r.filters.media, true);
   assert.equal(r.filters.quote, false, '未存的字段回落默认');
@@ -56,6 +58,16 @@ test('rowToPostRule：JSON 列还原成数组/对象，布尔列还原成 boolea
   assert.equal(r.llmTranslate, true);
   assert.equal(r.enabled, false);
   assert.equal(r.sort, 5);
+  assert.ok(!('accountIds' in r), '生效范围已搬到账号侧 rule_ids，规则对象不再有 accountIds');
+});
+
+test('platformLabel / POST_PLATFORMS / 平台能力：帖子侧语义（文案措辞、quote、翻译门控）', () => {
+  assert.deepEqual(POST_PLATFORMS, ['twitter', 'weibo', 'bili_dynamic']);
+  assert.equal(platformLabel('bili_dynamic'), 'B站');
+  assert.equal(platformSupportsQuote('bili_dynamic'), false, 'B站动态没有独立的引用实体');
+  assert.equal(platformSupportsQuote('twitter'), true);
+  assert.equal(platformSupportsTranslate('bili_dynamic'), false, '本就中文，译文没有意义');
+  assert.equal(platformSupportsTranslate('twitter'), true);
 });
 
 test('judgeIsUsable：开了判定就必须有标准（口径由人填）', () => {

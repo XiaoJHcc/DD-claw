@@ -428,11 +428,13 @@ async function main(): Promise<void> {
     });
     followsSrc.start({ bus, db, config: eff });
   };
+  const biliAvatarDir = join(dirname(secrets.dbPath), 'cache', 'bili-avatars');
   const startDynamic = (cookieHdr: string): void => {
     dynamicSrc?.stop();
     // 登录态心跳在 DynamicSource 内部：关注同步未运行时这是 B站登录态来源之一
     dynamicSrc = new DynamicSource({
       cookie: cookieHdr,
+      avatarDir: biliAvatarDir,
       onLoginState: (s) => { biliLogin = s; },
     });
     dynamicSrc.start({ bus, db, config: eff });
@@ -449,6 +451,7 @@ async function main(): Promise<void> {
   let weiboStatus: WeiboFeedSnapshot = emptyWeiboFeedSnapshot();
   let weiboFeedKey = '';
   const weiboAvatarDir = join(dirname(secrets.dbPath), 'cache', 'weibo-avatars');
+  const weiboImageDir = join(dirname(secrets.dbPath), 'cache', 'weibo-images');
   const weiboFeedKeyNow = (): string =>
     [String(eff.weibo.intervalSec), db.listWeiboAccounts(true).map((a) => a.uid).join(',')].join('|');
   const startWeiboFeed = (cookieHdr: string): void => {
@@ -725,11 +728,20 @@ async function main(): Promise<void> {
           // 连接设置或账号名单变了 → 走同一个启停入口（参数指纹变化会就地重启源）
           reconcileListen();
         },
+        // 添加账号后的即时首拉（全量轮要排队，单账号先拉一次；去重靠 posts UNIQUE 兜底）
+        kickAccount: async (screenName) => { await xFeedSrc?.kickAccount(screenName); },
         verify: (screenName) => verifyAccount(screenName, getXConfig(db).proxyUrl),
       },
       snapshots: { dir: keyframeDir },
       xAvatars: { dir: xAvatarDir },
       weiboAvatars: { dir: weiboAvatarDir },
+      biliAvatars: { dir: biliAvatarDir },
+      weiboImages: { dir: weiboImageDir },
+      biliFeed: {
+        // 添加动态账号后即时首拉（动态源间隔默认 300s，等下一轮太久）；
+        // 源没在跑（无 cookie / 开关关）时跳过，等 reconcileListen 启停后的首轮
+        kickAccount: async (uid) => { await dynamicSrc?.kickAccount(uid); },
+      },
       weibo: {
         // GET 只读快照（面板每分钟轮询这张卡，绝不打网络）；间隔取自 settings（与 /api/advanced 同一份）
         info: () => ({
@@ -737,6 +749,8 @@ async function main(): Promise<void> {
           status: { feed: weiboStatus, accounts: db.listWeiboAccounts(true).length },
         }),
         onChanged: () => reconcileListen(),
+        // 添加账号后的即时首拉（全量轮要排队，单账号先拉一次；去重靠 posts UNIQUE 兜底）
+        kickAccount: async (uid) => { await weiboFeedSrc?.kickAccount(uid); },
       },
       testPush: () => sendTestPush(),
       napcat: {

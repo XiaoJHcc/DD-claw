@@ -152,6 +152,15 @@ export class TwitterFeedSource implements Source {
     });
   }
 
+  /** 面板添加账号后的即时首拉（不等下个轮询周期、不在全量轮里排队；首轮静默政策同样生效） */
+  async kickAccount(screenName: string): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const acc = ctx.db.getXAccountByScreenName(screenName);
+    if (!acc) return;
+    await this.pollAccount(acc.screenName, acc.lastTweetId);
+  }
+
   private async pollAccount(
     screenName: string,
     sinceId: string | null,

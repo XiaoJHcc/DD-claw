@@ -63,27 +63,31 @@ export function renderTemplate(tpl: string, event: LiveEvent): string {
     .replaceAll('{title}', event.title);
 }
 
-// ---- 图文帖（X/推特 + 微博）：与开播规则平行的一套确定性判定 ----
+// ---- 图文帖（X/推特 + 微博 + B站动态共用一套平台无关规则）：与开播规则平行的一套确定性判定 ----
 
 /** matcher 眼里的「一条帖子」——不依赖 Post 行，由 pipeline 从 feed_post 载荷组装 */
 export interface PostCandidate {
-  /** 图文来源平台（规则按 platform + accountId 生效） */
+  /** 帖子来源平台：决定文案措辞（{author}/「推文/微博/动态」）、quote 语义与 LLM 翻译门控；
+   *  规则不再按平台分流，命中只看账号侧 ruleIds + 机械筛选 */
   platform: PostPlatform;
-  /** x_accounts.id / weibo_accounts.id（对应平台名单的行 id） */
+  /** 对应平台名单的行 id（x_accounts / weibo_accounts / bili_accounts） */
   accountId: number;
-  /** 账号标识：X = screen name（不含 @）；微博 = 数字 uid */
+  /** 该账号选用的图文帖规则（账号行的 ruleIds）；空 = 一律不推 */
+  ruleIds: number[];
+  /** 账号标识：X = screen name（不含 @）；微博 / B站动态 = 数字 uid */
   screenName: string;
-  /** 展示名：自定义显示名 → 平台昵称（X 再缺省回退 screen name、微博回退 uid，由渲染层兜底） */
+  /** 展示名：自定义显示名 → 平台昵称/用户名（再缺省回退标识本身，由渲染层兜底） */
   displayName?: string | null;
-  /** 'tweet'/'retweet'（X）或 'mblog'/'retweet'（微博）——'retweet' 是两平台共用的转发语义 */
+  /** 'tweet'/'retweet'（X）、'mblog'/'retweet'（微博）、'dynamic'/'retweet'（B站动态，
+   *  DYNAMIC_TYPE_FORWARD 在 pipeline 归一成 retweet）——'retweet' 是三平台共用的转发语义 */
   type: string;
   text: string | null;
   pics: string[];
   pubTs: number;
   url: string | null;
-  /** 只有 X 免登录回退路线能识别引用；undefined = 未知（RSS / 微博不标） */
+  /** 只有 X 免登录回退路线能识别引用；undefined = 未知（RSS / 微博 / B站动态不标） */
   isQuote?: boolean;
-  /** 可选关联主播的展示名（模板变量 {liver} 用） */
+  /** 可选关联主播的展示名（模板变量 {liver} 用；B站动态按 uid 直接反查 streamers） */
   biliName?: string | null;
 }
 
@@ -107,35 +111,33 @@ export function matchPostFilters(f: PostFilters, post: PostCandidate): boolean {
 }
 
 /**
- * 图文帖规则命中判定：命中 =（platform 相同）且（accountIds 空 = 该平台全部账号，
- * 或含该账号）且通过机械筛选。返回全部命中规则（保持 sort 顺序）——
+ * 图文帖规则命中判定（规则平台无关）：命中 = 账号侧 ruleIds 选用了该规则
+ * 且通过机械筛选。返回全部命中规则（保持 sort 顺序）——
  * 所有命中规则独立生效，渠道取并集、推送词取首个非空。
  */
 export function matchPostRules(rules: PostRule[], post: PostCandidate): PostRule[] {
   const hits: PostRule[] = [];
   for (const r of rules) {
-    if (r.platform !== post.platform) continue;
-    if (r.accountIds.length > 0 && !r.accountIds.includes(post.accountId)) continue;
+    if (!post.ruleIds.includes(r.id)) continue;
     if (!matchPostFilters(r.filters, post)) continue;
     hits.push(r);
   }
   return hits;
 }
 
-/** 推送文案里的作者名：X 带 @，微博用昵称（uid 对人没有意义） */
+/** 推送文案里的作者名：X 带 @，其余平台用展示名（uid 对人没有意义，只作兜底） */
 export function postAuthorName(post: PostCandidate): string {
-  if (post.platform === 'weibo') return post.displayName || post.screenName;
-  return `@${post.screenName}`;
+  if (post.platform === 'twitter') return `@${post.screenName}`;
+  return post.displayName || post.screenName;
 }
 
 /** 内置默认推送词（规则没填 messageTemplate 时用） */
 export function defaultPostTitle(post: PostCandidate): string {
-  return post.platform === 'weibo'
-    ? `${postAuthorName(post)} 发了新微博`
-    : `${postAuthorName(post)} 发了新推文`;
+  const noun = post.platform === 'weibo' ? '微博' : post.platform === 'bili_dynamic' ? '动态' : '推文';
+  return `${postAuthorName(post)} 发了新${noun}`;
 }
 
-/** 渲染图文帖推送词变量：{author} = 作者（X=@账号 / 微博=昵称），{text} = 正文，{url} = 链接，{liver} = 关联主播 */
+/** 渲染图文帖推送词变量：{author} = 作者（X=@账号 / 其余=展示名），{text} = 正文，{url} = 链接，{liver} = 关联主播 */
 export function renderPostTemplate(tpl: string, post: PostCandidate): string {
   return tpl
     .replaceAll('{author}', postAuthorName(post))

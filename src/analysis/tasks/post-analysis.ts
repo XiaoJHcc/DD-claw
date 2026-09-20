@@ -1,11 +1,12 @@
 /**
- * 图文帖 LLM 任务：**一次调用同时做「要不要推」的判定与翻译**（X 推文与微博共用）。
+ * 图文帖 LLM 任务：**一次调用同时做「要不要推」的判定与翻译**（X / 微博 / B站动态共用）。
  *
  * 为什么合并成一次：两者吃的是同一段正文，分开调用就是两倍延迟与两倍额度；
  * 而用户关心的是「这条推文要不要发到群里、发的时候带不带译文」——一件事。
  *
- * 平台差异：判定的口径由人填（规则里的 `judgePrompt`），两平台通用；
- * **翻译只对 X 出现**（微博本就中文，译文没有意义，`platformSupportsTranslate` 已挡住）。
+ * 平台差异：判定的口径由人填（规则里的 `judgePrompt`），各平台通用；
+ * **翻译只对 X 帖出现**（微博与B站动态本就中文，译文没有意义）——运行时由
+ * post-analyzer 按 `platformSupportsTranslate(post.platform)` 门控，非 X 帖根本不会带 translate=true 进来。
  *
  * 口径由人填（与分类一致的原则）：没开判定时要求模型 pass 恒 true，
  * 没开翻译时要求 translation 恒 null，免得调用方还要猜模型有没有越权替它决定。
@@ -42,11 +43,11 @@ const SYSTEM_PROMPT =
 const MAX_TRANSLATION_CHARS = 1200;
 
 export function buildPostAnalysisRequest(post: PostCandidate, opts: PostAnalysisOptions): LlmRequest {
-  // 平台决定措辞：对模型说「推文」而给它一条微博，只会白白引入噪声
-  const kind = post.platform === 'weibo' ? '微博' : '推文';
-  const author = post.platform === 'weibo'
-    ? (post.displayName ? `${post.displayName}（uid ${post.screenName}）` : `uid ${post.screenName}`)
-    : `@${post.screenName}`;
+  // 平台决定措辞：对模型说「推文」而给它一条微博/动态，只会白白引入噪声
+  const kind = post.platform === 'weibo' ? '微博' : post.platform === 'bili_dynamic' ? '动态' : '推文';
+  const author = post.platform === 'twitter'
+    ? `@${post.screenName}`
+    : (post.displayName ? `${post.displayName}（uid ${post.screenName}）` : `uid ${post.screenName}`);
   const head = [
     `平台：${platformLabel(post.platform)}`,
     `账号：${author}`,

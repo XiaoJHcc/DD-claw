@@ -142,7 +142,24 @@
 <button class="btn btn-line" data-action="open-weibo-settings"><span data-icon="sliders"></span>抓取设置</button>
 </div>
 </section>
+
+<section class="card set-card acc-pink" id="card-bili">
+<div class="card-head"><span class="card-ic" data-icon="paw"></span><h2>B站动态</h2>
+<div class="card-head-end">
+<label class="switch"><input type="checkbox" id="bili-listen-enabled" data-change="toggle-bili-listen"><span class="knob"></span></label>
 </div>
+</div>
+<div id="bili-rows">加载中…</div>
+</section>
+</div>
+
+<section class="card acc-purple" id="card-post-rules">
+<div class="card-head"><span class="card-ic" data-icon="list"></span><h2>图文规则</h2></div>
+<div id="post-rule-list">加载中…</div>
+<div class="card-actions">
+<button class="btn btn-ghost" data-action="add-post-rule"><span data-icon="plus"></span>新建规则</button>
+</div>
+</section>
 
 <div class="x-accounts-head">
 <div id="x-account-filter"></div>

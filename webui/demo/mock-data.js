@@ -122,7 +122,7 @@ export const mockX = {
     web: { ok: true, message: '免登录可用 · 7 个 id · 最新 2026-09-16T00:54:10.000Z', checkedAt: 0 },
     feed: {
       running: true, lastRunAt: 0, lastOkAt: 0,
-      via: 'nitter', host: 'nitter.jaydenha.uk', accounts: 3, okAccounts: 3, lastError: null,
+      via: 'nitter', host: 'nitter.jaydenha.uk', accounts: 2, okAccounts: 2, lastError: null,
     },
     updatedAt: 0,
   },
@@ -130,118 +130,133 @@ export const mockX = {
 
 // ---- X 关注账号（独立名单：不要求对应 B站主播；留一个停用项做对照）----
 // avatar = X 链路抓到的本地缓存文件名；demo 由 webui-dev 把 /api/x-avatar 映射到
-// data/cache/x-avatars，这里的文件名对应该目录下真实存在的缓存文件
+// data/cache/x-avatars，这里的文件名对应该目录下真实存在的缓存文件。
+// ruleIds = 该账号选用的图文规则（mockPostRules 的 id；规则本身不带账号 scope）
 export const mockXAccounts = [
   {
     id: 1, screenName: 'watase_yuzuki', displayName: '渡濑结月', biliUid: null, enabled: true,
-    lastTweetId: '2100138324883280168', lastTweetAt: 1, lastOkAt: 1,
-    avatar: '59727ee6f349a652ad7d4a8c1a24da0a.jpg', createdAt: 1, updatedAt: 1,
+    ruleIds: [1],
+    lastTweetId: '2101671199457894850', lastTweetAt: 1, lastOkAt: 1,
+    avatar: '661034f88371821109aed0e05c5389dc.jpg', createdAt: 1, updatedAt: 1,
   },
   {
-    id: 2, screenName: 'd4dj_pj', displayName: 'D4DJ公式', biliUid: null, enabled: true,
-    lastTweetId: '2100147931877929308', lastTweetAt: 1, lastOkAt: 1,
-    avatar: 'dadfc48258084559799a396b55dad345.png', createdAt: 1, updatedAt: 1,
-  },
-  {
-    id: 3, screenName: 'hololive_en', displayName: 'hololive English', biliUid: null, enabled: false,
+    id: 2, screenName: 'hololive_en', displayName: 'hololive English', biliUid: null, enabled: false,
+    ruleIds: [],
     lastTweetId: null, lastTweetAt: null, lastOkAt: null,
     avatar: 'a57dc1efff44d79e3ca2b5d9b3144013.png', createdAt: 0, updatedAt: 0,
   },
 ];
 
 // ---- 图文帖规则（与开播推送规则平行的另一套；渠道引用上面 mockChannels 的 id）----
-// platform 决定 accountIds 属于哪份名单（twitter → mockXAccounts / weibo → mockWeiboAccounts）
-// 三条演示不同筛选：X 的「带图原创 → 粉丝群」、X 停用的「转发 → 系统通知」、微博的「原创 → 粉丝群」
+// 规则平台无关（无 platform 字段）、不带账号 scope——账号侧用 ruleIds 选用，
+// 任何账号可选用任何规则（mockXAccounts / mockWeiboAccounts / fixtures.biliAccounts）。
+// 四条演示不同筛选：「带图原创 → 粉丝群」、停用的「转发 → 系统通知」、
+// 两条「预告词 → 粉丝群（+私聊）」
 export const mockPostRules = [
   {
-    id: 1, name: '带图原创', platform: 'twitter', accountIds: [], channels: [2],
+    id: 1, name: '带图原创', channels: [2],
     filters: { original: true, retweet: false, quote: false, media: true, keywords: [] },
     messageTemplate: null,
     llmJudge: true, judgePrompt: '只推与直播预告、新曲发布相关的推文', llmTranslate: true,
     enabled: true, sort: 0, createdAt: 1, updatedAt: 1,
   },
   {
-    id: 2, name: '转发也看', platform: 'twitter', accountIds: [2], channels: [1],
+    id: 2, name: '转发也看', channels: [1],
     filters: { original: false, retweet: true, quote: false, media: false, keywords: ['live'] },
     messageTemplate: '{author} 转发了',
     llmJudge: false, judgePrompt: null, llmTranslate: false,
     enabled: false, sort: 1, createdAt: 1, updatedAt: 1,
   },
   {
-    id: 3, name: '微博预告', platform: 'weibo', accountIds: [1], channels: [2],
+    id: 3, name: '微博预告', channels: [2],
     filters: { original: true, retweet: false, quote: false, media: false, keywords: ['预告', '直播'] },
     messageTemplate: '{author} 发了新微博',
     llmJudge: false, judgePrompt: null, llmTranslate: false,
     enabled: true, sort: 2, createdAt: 1, updatedAt: 1,
   },
+  {
+    id: 4, name: '动态预告', channels: [2, 3],
+    filters: { original: true, retweet: false, quote: false, media: false, keywords: ['预告', '直播'] },
+    messageTemplate: null,
+    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    enabled: true, sort: 3, createdAt: 1, updatedAt: 1,
+  },
 ];
 
 // ---- 微博（图文分页第二个来源）：源运行状态 + 独立名单 + 最近微博 ----
 // 与 X 同构但前提不同：微博要登录态（没有代理/实例那套设置，间隔走「抓取设置」）。
-// 留一个「未关联主播」的账号做对照：它是独立博主，不会串进主播卡第三栏。
 export const mockWeibo = {
   config: { intervalSec: 300 },
   status: {
     feed: {
-      running: true, lastRunAt: 0, lastOkAt: 0, accounts: 2, okAccounts: 2, lastError: null,
+      running: true, lastRunAt: 0, lastOkAt: 0, accounts: 1, okAccounts: 1, lastError: null,
     },
   },
 };
 
 export const mockWeiboAccounts = [
   {
-    id: 1, uid: '2203177060', nickname: '阿梓从小就很可爱', biliUid: '7706705', enabled: true,
-    lastPostId: '5001', lastPostAt: 1, lastOkAt: 1, avatar: null, createdAt: 1, updatedAt: 1,
-  },
-  {
-    id: 2, uid: '1234567890', nickname: '某某企划官方微博', biliUid: null, enabled: true,
-    lastPostId: '5002', lastPostAt: 1, lastOkAt: 1, avatar: null, createdAt: 1, updatedAt: 1,
+    id: 1, uid: '1158211483', nickname: 'Hosi_Tiri', biliUid: null, enabled: true,
+    ruleIds: [3],
+    lastPostId: '5345338974275832', lastPostAt: 1, lastOkAt: 1,
+    avatar: '39d3ac4936e727f6ae12b559ee372266.jpg', createdAt: 1, updatedAt: 1,
   },
 ];
 
-// 最近微博（微博账号卡帖子段的演示数据；pubTs 由 mock-api 在冻结时刻后填）
+// 最近微博（微博账号卡帖子段的演示数据，2026-09-20 真实抓取；pubTs 由 mock-api 在冻结时刻后填）
 export const mockWeiboPosts = [
   {
-    id: 1, platform: 'weibo', uid: '2203177060', itemId: '5001', type: 'mblog',
-    text: '今晚九点直播！新歌也准备好了，记得来玩～',
-    pics: ['https://wx1.sinaimg.cn/large/006APoFYly1h1234567890.jpg'],
-    pubTs: 1, url: 'https://weibo.com/2203177060/Pa1bC', createdAt: 1,
+    id: 1, platform: 'weibo', uid: '1158211483', itemId: '5345338974275832', type: 'mblog',
+    text: '#髙橋ミナミ# ​​​',
+    pics: [
+      'https://wx1.sinaimg.cn/orj960/4508e79bgy1ihagt9renpj20rw116djo.jpg',
+      'https://wx3.sinaimg.cn/orj960/4508e79bgy1ihagt9fvfyj20rg10m77t.jpg',
+      'https://wx4.sinaimg.cn/orj960/4508e79bgy1ihagt9hkv2j20s811mq6v.jpg',
+      'https://wx1.sinaimg.cn/orj960/4508e79bgy1ihagt9nbj1j20t412sdk1.jpg',
+      'https://wx1.sinaimg.cn/orj960/4508e79bgy1ihagt9htlhj216o1kw0yc.jpg',
+      'https://wx1.sinaimg.cn/orj960/4508e79bgy1ihagt9mqpjj216o1kwdl8.jpg',
+    ],
+    pubTs: 1, url: 'https://weibo.com/1158211483/Rj1tnhWl2', createdAt: 1,
   },
   {
-    id: 2, platform: 'weibo', uid: '2203177060', itemId: '5002', type: 'retweet',
-    text: '好耶\n//转发自 @STAFF: 周边预售开始了',
-    pics: [], pubTs: 1, url: 'https://weibo.com/2203177060/Pb2cD', createdAt: 1,
+    id: 2, platform: 'weibo', uid: '1158211483', itemId: '5345338391266881', type: 'mblog',
+    text: '#早见沙织# ​​​',
+    pics: [
+      'https://wx1.sinaimg.cn/orj960/4508e79bgy1ihagqv7ttfj20w013kwjy.jpg',
+      'https://wx3.sinaimg.cn/orj960/4508e79bgy1ihagquxwcrj20w013ktek.jpg',
+      'https://wx3.sinaimg.cn/orj960/4508e79bgy1ihagqv2x0uj20w013k79a.jpg',
+    ],
+    pubTs: 1, url: 'https://weibo.com/1158211483/Rj1sr5jzz', createdAt: 1,
   },
   {
-    id: 3, platform: 'weibo', uid: '1234567890', itemId: '5003', type: 'mblog',
-    text: '【预告】本周六晚八点，新企划发布会直播，敬请期待。',
-    pics: [], pubTs: 1, url: 'https://weibo.com/1234567890/Pc3eF', createdAt: 1,
+    id: 3, platform: 'weibo', uid: '1158211483', itemId: '5345338287197042', type: 'mblog',
+    text: '#岡田夢以# ​​​',
+    pics: [
+      'https://wx4.sinaimg.cn/orj960/4508e79bgy1ihagqf84inj22512urkjl.jpg',
+      'https://wx2.sinaimg.cn/orj960/4508e79bgy1ihagqfdb48j22c0340hdu.jpg',
+    ],
+    pubTs: 1, url: 'https://weibo.com/1158211483/Rj1sguchk', createdAt: 1,
   },
 ];
 
-// ---- 最近推文（账号卡推文段的演示数据；按 uid 归到各账号卡，pubTs 由 mock-api 在冻结时刻后填）----
+// ---- 最近推文（账号卡推文段的演示数据，2026-09-20 真实归档；按 uid 归到各账号卡，pubTs 由 mock-api 在冻结时刻后填）----
 export const mockTwitterPosts = [
   {
-    id: 1, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2100138324883280168', type: 'tweet',
-    text: '【 お知らせ͛📢⋆ 】オープンワールドモンスター収集RPG 『 Aniimo（アニモ） 』 ソニア 役として出演させていただきます！',
-    pics: ['https://pbs.twimg.com/media/HSUrcDJbYAAkpoV.jpg'],
-    pubTs: 1, url: 'https://x.com/watase_yuzuki/status/2100138324883280168', createdAt: 1,
+    id: 1, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2101671199457894850', type: 'tweet',
+    text: 'こちらご確認お願いいたします\n\nずっと楽しみにしていたイベントだったので悔しいですが、楽しみの気持ちをお昼の部で全部お伝えできればと...!!\n安全第一でお会いしましょう!!',
+    pics: [],
+    pubTs: 1, url: 'https://x.com/watase_yuzuki/status/2101671199457894850', createdAt: 1,
   },
   {
-    id: 2, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2100147931877929308', type: 'retweet',
-    text: '⋰⋆໒꒱ ⋰⋱⋰ 𝕃𝕪𝕣𝕚𝕔𝕒𝕝 𝕃𝕚𝕝𝕪 𝟞𝕥𝕙 𝕃𝕀𝕍𝔼 「渋谷とは魔境でございますか？」 グッズ事前販売中！',
-    pics: ['https://pbs.twimg.com/media/HSUrcDJbYAAkpoV.jpg', 'https://pbs.twimg.com/media/HSUrdJBagAA0d5g.jpg'],
-    pubTs: 1, url: 'https://x.com/d4dj_pj/status/2100147931877929308', createdAt: 1,
+    id: 2, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2101668953844064324', type: 'tweet',
+    text: '【重要なお知らせ】\n台風に伴う一部開催中止および変更について\n\n9月21日(月・祝)東京・全電通労働会館にて開催予定の『声グラゼミナール～業界のいろは学びまSHOW～夏の特別授業』につきまして、ご案内いたします。\n\n■開催予定の内容\n・昼の部公演\n\n予定通り【開催】の方向で準備を進めております。 https://t.co/zxqnYfpfT6',
+    pics: ['https://pbs.twimg.com/media/HSqdLbUbIAEtuN1.jpg'],
+    pubTs: 1, url: 'https://x.com/seigura/status/2101668953844064324', createdAt: 1,
   },
   {
-    id: 3, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2100064559860216302', type: 'tweet',
-    text: 'この時の渡瀬のカラコン何使ってたのか気になりすぎる',
-    pics: [], pubTs: 1, url: 'https://x.com/watase_yuzuki/status/2100064559860216302', createdAt: 1,
-  },
-  {
-    id: 4, platform: 'twitter', uid: 'd4dj_pj', itemId: '2100147931877929309', type: 'tweet',
-    text: '「D4DJ D4 FES. XROSS∞BEAT」DAY1 ありがとうございました！明日の DAY2 もお楽しみに！',
-    pics: ['https://pbs.twimg.com/media/HSUrdJBagAA0d5g.jpg'],
-    pubTs: 1, url: 'https://x.com/d4dj_pj/status/2100147931877929309', createdAt: 1,
+    id: 3, platform: 'twitter', uid: 'watase_yuzuki', itemId: '2101622144761537011', type: 'retweet',
+    text: '【お知らせ】 9月21日(月･祝)開催『声グラゼミナール～夏の特別授業』につきまして 台風の影響による今後の対応について、現在の状況をご案内いたします。 ■ 昼の部公演 慎重に協議のうえ【開催】の方向で準備を進めております。今後の気象情報や交通状況の急激な悪化によっては変更となる可能性がございます。 ■ 会場物販・夜の部公演 気象情報・交通状況を注視し、引き続き【慎重に検討中】でございます。 夜の部・物販の実施可否につきましては、本日中に本アカウントにて改めてご案内いたします。 ご来場予定の皆様にはご心配をおかけし誠に申し訳ございませんが、今しばらくお待ちいただけますと幸いです。 #声グラゼミ',
+    pics: ['https://pbs.twimg.com/media/HSp0XnRbcAAWV2T.jpg'],
+    pubTs: 1, url: 'https://x.com/seigura/status/2101622144761537011', createdAt: 1,
   },
 ];

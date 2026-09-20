@@ -11,7 +11,7 @@ import type { LlmRouter } from './providers.js';
 
 function post(over: Partial<PostCandidate> = {}): PostCandidate {
   return {
-    accountId: 1, screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
+    platform: 'twitter', accountId: 1, ruleIds: [1], screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
     pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
     ...over,
   };
@@ -19,7 +19,7 @@ function post(over: Partial<PostCandidate> = {}): PostCandidate {
 
 function rule(over: Partial<PostRule> = {}): PostRule {
   return {
-    id: 1, name: 'r', accountIds: [], channels: [1], filters: defaultPostFilters(),
+    id: 1, name: 'r', channels: [1], filters: defaultPostFilters(),
     messageTemplate: null, llmJudge: false, judgePrompt: null, llmTranslate: false,
     enabled: true, sort: 0, createdAt: 0, updatedAt: 0,
     ...over,
@@ -124,4 +124,34 @@ test('翻译为空串 / 空白 → 归一成 null（消息层不该拼出空译�
   );
   const r = await a.analyze(post(), rule({ llmTranslate: true }));
   assert.equal(r.translation, null);
+});
+
+// ---- 翻译运行时门控：llmTranslate 只对 X 帖生效（微博/B站动态本就中文）；判定不受平台影响 ----
+
+test('非 X 帖只开了翻译 → 根本不调 LLM（翻译被平台门控掉后等于没开任何 LLM）', async () => {
+  let called = 0;
+  const a = new PostAnalyzer(
+    () => router(() => { called++; return { pass: true, reason: '', translation: '译文' }; }),
+    () => true,
+  );
+  for (const platform of ['weibo', 'bili_dynamic'] as const) {
+    const r = await a.analyze(post({ platform }), rule({ llmTranslate: true }));
+    assert.equal(r.source, 'off', `${platform} 帖不请求翻译`);
+    assert.equal(r.translation, null);
+  }
+  assert.equal(called, 0);
+});
+
+test('非 X 帖开了判定 + 翻译 → 调 LLM 判定但译文被丢弃（判定三平台通用）', async () => {
+  const a = new PostAnalyzer(
+    () => router(() => ({ pass: false, reason: '不是直播相关', translation: '不该出现' })),
+    () => true,
+  );
+  const r = await a.analyze(
+    post({ platform: 'weibo' }),
+    rule({ llmJudge: true, judgePrompt: '只推直播预告', llmTranslate: true }),
+  );
+  assert.equal(r.source, 'llm');
+  assert.equal(r.pass, false, '判定不受平台影响');
+  assert.equal(r.translation, null, '非 X 帖不采纳译文');
 });

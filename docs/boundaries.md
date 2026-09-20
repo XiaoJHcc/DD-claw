@@ -142,7 +142,7 @@
 
 23. 微博扫码 `passport sso/v2` 的 generate **必须带 `Referer: https://weibo.com/`，否则 403**；返回 image 是 png 直链（面板直接 `<img src>`）。poll 的 retcode 归一化：`20000000`=confirmed、`50114001`=waiting（已实测）；`50114002`=scanned、其他 `50114xxx`=expired（防御式映射，未单独观测）。[实测]
 24. 微博登录态心跳走 `ajax/log/action`，看 **`X-Log-Uid` 响应头**；异常与缺头都归一化为未登录。[实测]
-25. 微博昵称→UID 匿名解析链（`src/sources/weibo/resolve.ts`）：`genvisitor` 拿 tid → `incarnate` 拿 SUB/SUBP → `m.weibo.cn/n/<昵称>` 302 到 `/u/<uid>`；cookie 模块级缓存、失效自动重建并重试一次，绝不进日志。[实测]
+25. 微博昵称→UID 匿名解析链（`src/sources/weibo/resolve.ts`）：`genvisitor` 拿 tid → `incarnate` 拿 SUB/SUBP → `m.weibo.cn/n/<昵称>` 302 到 `/u/<uid>`；cookie 模块级缓存、失效自动重建并重试一次，绝不进日志。[实测]（2026-09-20 补充：反方向 uid→昵称走的 `getIndex` 已被微博收紧——带访客 cookie 也 302 到 `sso/signin` 要求真登录；resolve.ts 已把 `signin` 归入「失效重建」判定，但重建同样救不回，该方向当前实质不可用）
 26. B站 `x/relation/followings` 分页 **50/页**，按返回 total 翻页、短页到底；**无需 WBI 签名**（604 关注 13 页实测）。[实测]
 27. B站批量接口 `get_status_info_by_uids` 传入**非纯数字 uid** 会报 `65530 route_exception`，单 uid 拉取也必败——`listWatchedUids()` 只回 watch=1 且纯数字的 uid（防止 demo 演示数据混入）。[实测]
 
@@ -161,5 +161,6 @@
 以下来自微博独立图文来源实施（2026-09-17）：
 
 37. **微博没有像 X 那样便宜的匿名「账号存在性」接口**：X 可以拿 `tweet-result` 单推接口低成本判账号（见 29），微博只有昵称解析链（见 25）能反查 uid。所以微博账号的添加流程**在只填 uid 时不校验存在性**（填昵称则解析失败即 400）——硬加等于把添加流程挂在一个未实测的端点上。填错 uid 的表现是「该账号抓取持续失败并告警」，不是「添加时就报错」。[设计取舍]
-38. **微博图床（`sinaimg.cn`）境内直连可达**，不需要 X 那条代理隧道；但**对 Referer 敏感**——头像链路带 `Referer: https://weibo.com/` 实测可达，帖子图复用的 `localizeImage` 也按域带 weibo Referer（带外站 Referer 会被防盗链 403，浏览器端同样靠 no-referrer 才显示得了微博图）。头像 URL 还带签名与过期参数（`?KID=…&ssig=…`，同一头像每轮 URL 也可能不同），所以按 URL 的 md5 落盘、且只在还没有本地头像时下载一次——换头像不更新本地缓存（删号重加才会；旧文件体积小、随目录一起清理）。[实测]
+38. **微博图床（`sinaimg.cn`）境内直连可达**，不需要 X 那条代理隧道；但**对 Referer 敏感**——头像链路带 `Referer: https://weibo.com/` 实测可达，帖子图复用的 `localizeImage` 也按域带 weibo Referer。2026-09-20 实测：**no-referrer 也 403 了**（wx1/orj960），浏览器热链与 `<img referrerpolicy="no-referrer">` 都显示不出，所以面板帖子图改走 `/api/weibo-image` 服务端反代（带 weibo Referer + 按 URL md5 落盘 cache/weibo-images；host 白名单防 SSRF）。头像 URL 还带签名与过期参数（`?KID=…&ssig=…`，同一头像每轮 URL 也可能不同），所以按 URL 的 md5 落盘、且只在还没有本地头像时下载一次——换头像不更新本地缓存（删号重加才会；旧文件体积小、随目录一起清理）。[实测]
+40. **mymblog 的图片字段是 `pic_infos` 而不是 `pics`**（2026-09-20 实测踩坑）：`pic_infos` 按 pic_id 键控、thumbnail/bmiddle/large 三档，顺序以 `pic_ids` 为准（对象键序不保证）；`picsOf` 两形态都认、`pics` 数组优先。字段没解析对的表现是「帖子归档成功但 pics 恒空」，不报错。[实测]
 39. **微博的「转发」就是它的引用形态**：抓取层把带 `retweeted_status` 的微博折成 `type='retweet'` 并把原文拼进正文（`//转发自 @原作者: …`），没有独立的引用实体可言。因此图文帖规则里 `filters.quote` 只对 X 生效，微博规则带它会**保存时 400**（与「原创/转发都不勾 = 死规则」同一条纪律：不存永不命中的配置）。[设计取舍]

@@ -40,7 +40,7 @@ test('缺分区显示未知分区；liveTime=0 不拼开播时间', () => {
 
 function post(over: Partial<PostCandidate> = {}): PostCandidate {
   return {
-    accountId: 1, screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
+    platform: 'twitter', accountId: 1, ruleIds: [1], screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
     pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
     ...over,
   };
@@ -80,4 +80,20 @@ test('postToMessage：有译文时正文下方拼【译】块；空译文不拼'
 
   const none = postToMessage({ post: post({ text: null, pics: ['a'] }), translation: null });
   assert.equal(none.body, '（仅图片，无正文）');
+});
+
+test('postToMessage：B站动态副行标「B站动态」、标题后缀「动态」、作者用展示名（uid 兜底）', () => {
+  const m = postToMessage({
+    post: post({
+      platform: 'bili_dynamic', screenName: '80397', displayName: '阿梓',
+      type: 'dynamic', url: 'https://t.bilibili.com/9001',
+    }),
+  });
+  assert.equal(m.title, '阿梓 发了新动态');
+  assert.match(m.attribution!, /^B站动态 {2}· {2}阿梓/);
+
+  const noName = postToMessage({
+    post: post({ platform: 'bili_dynamic', screenName: '80397', displayName: null, type: 'dynamic' }),
+  });
+  assert.equal(noName.title, '80397 发了新动态', '展示名缺省回退 uid，至少不是空标题');
 });

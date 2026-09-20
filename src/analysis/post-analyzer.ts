@@ -1,19 +1,22 @@
 /**
- * 图文帖分析编排：命中规则要 LLM 时，对一条推文做「判定 + 翻译」，一次调用出结果。
+ * 图文帖分析编排：命中规则要 LLM 时，对一条帖子做「判定 + 翻译」，一次调用出结果。
+ *
+ * 翻译运行时门控：规则的 llmTranslate 只对 X 帖生效（微博/B站动态本就中文）——
+ * 非 X 帖不请求翻译、不附译文；判定（llmJudge）不受平台影响，三平台通用。
  *
  * 降级策略（与 RulesClassifier 同一条思路，也是项目纪律）：
- * - 规则没开判定也没开翻译 → 根本不调 LLM（`source='off'`）
+ * - 规则没开判定也没开翻译（或翻译被平台门控掉）→ 根本不调 LLM（`source='off'`）
  * - LLM 总开关关 / router 不可用 / 调用失败 / 解析失败 → `source='fallback'`，
  *   **判定视为通过（照机械筛选推）**、不附译文。宁可按用户填的机械条件发出去，
  *   也不要因为模型抖动让推文凭空消失。
- * - `source='llm'` 时判定权威：pass=false 则该规则不贡献渠道（这条推文不推）。
+ * - `source='llm'` 时判定权威：pass=false 则该规则不贡献渠道（这条帖子不推）。
  *
  * 熔断状态在 providers 层：服务异常 = completeJson 抛错 → 当场回退，无需额外状态。
  */
 import { makeLogger } from '../logger.js';
 import type { LlmRouter } from './providers.js';
 import type { PostCandidate } from './matcher.js';
-import type { PostRule } from '../core/post-rules.js';
+import { platformSupportsTranslate, type PostRule } from '../core/post-rules.js';
 import { buildPostAnalysisRequest, parsePostAnalysis, type PostAnalysisOptions } from './tasks/post-analysis.js';
 
 const log = makeLogger('analysis/post-analyzer');
@@ -43,9 +46,10 @@ export class PostAnalyzer {
     const opts: PostAnalysisOptions = {
       judge: rule.llmJudge,
       judgePrompt: rule.judgePrompt,
-      translate: rule.llmTranslate,
+      // 翻译运行时门控：只有 X 帖才需要译文（微博/B站动态本就中文），非 X 帖不请求翻译
+      translate: rule.llmTranslate && platformSupportsTranslate(post.platform),
     };
-    if (!ruleNeedsLlm(rule)) {
+    if (!opts.judge && !opts.translate) {
       return { source: 'off', pass: true, reason: '', translation: null };
     }
     const router = this.getRouter();

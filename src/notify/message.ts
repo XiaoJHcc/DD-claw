@@ -42,14 +42,30 @@ export interface PostMessageInput {
 }
 
 /**
- * 图文帖 → 推送层通用载荷（X 推文与微博共用）。不用 emoji（同 liveEventToMessage：
+ * 图文帖 → 推送层通用载荷（X / 微博 / B站动态共用）。不用 emoji（同 liveEventToMessage：
  * QQ iOS 气泡渲染器会把增补平面 emoji 拆成方框）。正文为空（纯图帖）时给一句占位，
  * 别让 QQ 里出现空消息。
  *
- * 平台差异只在文案：X 的作者是 `@screen_name`、微博的是昵称（uid 对人没有意义）。
+ * 平台差异只在文案：X 的作者是 `@screen_name`，微博 / B站动态用展示名（uid 对人没有意义，
+ * 只作兜底）；来源标注与「发了新X」后缀按平台映射。
  * 这里刻意不 import analysis/matcher 的 `postAuthorName`——`sources / analysis / notify`
  * 互不 import 是依赖方向纪律，为一行字符串不值得破坏它（`PostCandidate` 只作类型引用，运行时被擦除）。
  */
+
+/** attribution 里的来源标注 */
+const PLATFORM_ATTRIBUTION: Record<PostCandidate['platform'], string> = {
+  twitter: 'X',
+  weibo: '微博',
+  bili_dynamic: 'B站动态',
+};
+
+/** 「发了新X」的名词后缀 */
+const POST_NOUN: Record<PostCandidate['platform'], string> = {
+  twitter: '推文',
+  weibo: '微博',
+  bili_dynamic: '动态',
+};
+
 export function postToMessage(input: PostMessageInput): PushMessage {
   const { post } = input;
   const when = post.pubTs > 0
@@ -60,13 +76,12 @@ export function postToMessage(input: PostMessageInput): PushMessage {
   const extra = post.pics.length > 1 ? `  ·  共 ${post.pics.length} 张图` : '';
   const text = (post.text ?? '').trim() || '（仅图片，无正文）';
   const translation = input.translation?.trim();
-  const isWeibo = post.platform === 'weibo';
-  const author = isWeibo ? (post.displayName || post.screenName) : `@${post.screenName}`;
+  const author = post.platform === 'twitter' ? `@${post.screenName}` : (post.displayName || post.screenName);
   return {
-    title: input.title?.trim() || `${author} 发了新${isWeibo ? '微博' : '推文'}`,
+    title: input.title?.trim() || `${author} 发了新${POST_NOUN[post.platform]}`,
     body: translation ? `${text}\n\n【译】${translation}` : text,
     image: input.image,
-    attribution: `${isWeibo ? '微博' : 'X'}  ·  ${author}` + (when ? `  ·  ${when}` : '') + extra,
+    attribution: `${PLATFORM_ATTRIBUTION[post.platform]}  ·  ${author}` + (when ? `  ·  ${when}` : '') + extra,
     url: post.url ?? undefined,
     priority: 'normal',
   };

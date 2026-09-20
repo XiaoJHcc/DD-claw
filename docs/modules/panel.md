@@ -36,17 +36,19 @@
 | GET/PUT /api/napcat · POST /api/napcat/launch | NapCat 通道；GET 回生效配置（含 autorestart）+ 端点 + 实时三态探测 + taskRegistered；PUT 校验（布尔/纯数字，**空串 = 清空字段，settings 唯一信源无回落**）后 await save——autorestart 开 = 建拉起任务（失败 400 透传、不落开关）、关 = 移除任务；launch 失败 400 透传原因 |
 | /mcp | MCP 端点（Bearer token 鉴权 + 按角色注册工具面），实现委托 src/mcp/ |
 | GET/PUT /api/x · POST /api/x/test | X 连接配置与探测（GET **只读快照、绝不打网络**；POST 测试允许未保存的输入值「先测后存」，只有测已保存配置才更新快照；配置变了相关旧结论作废） |
-| /api/x/accounts · /:id | X 独立名单 CRUD；新建时走免登录存在性校验（账号不存在 400 / 链路不通照收并回报 `verify`）；`biliUid` 必须在监听名单 |
-| /api/weibo · /api/weibo/accounts · /:id | 微博运行状态快照（GET 只读；**面板当前不消费**，保留给后续可视化）+ 微博独立名单 CRUD；POST 时 `uid` 与 `nickname` 二选一（只填昵称走匿名解析链补 uid），重名 409、非数字 uid 400；`displayName` 为自定义显示名（卡片优先展示，留空 = 用昵称） |
+| /api/x/accounts · /:id | X 独立名单 CRUD；新建时走免登录存在性校验（账号不存在 400 / 链路不通照收并回报 `verify`），**POST 后经 `kickAccount` 即时首拉**（不等周期、不在全量轮里排队）；`biliUid` 必须在监听名单；`ruleIds` 选用图文帖规则（规则存在即可，规则平台无关） |
+| /api/weibo · /api/weibo/accounts · /:id | 微博运行状态快照（GET 只读；**面板当前不消费**，保留给后续可视化）+ 微博独立名单 CRUD；POST 时 `uid` 与 `nickname` 二选一（只填昵称走匿名解析链补 uid），重名 409、非数字 uid 400；`displayName` 为自定义显示名（卡片优先展示，留空 = 用昵称）；`ruleIds` 口径同 X（规则平台无关）；POST 后同样经 `kickAccount` 即时首拉 |
+| /api/bili/accounts · /:id | B站动态账号名单 CRUD（纯 DB，**恒挂载无 dep 门**——抓取轮询对象由动态源每轮自并监听主播 ∪ bili_accounts，无需热重启回调；**POST 后经 `biliFeed.kickAccount` 即时首拉**，不等下个轮询周期）；uid 可粘 space.bilibili.com 链接归一化、重名 409、更新时 uid 不可改；`ruleIds` 口径同 X；GET 视图带最近 3 帖（raw 不下发） |
 | GET /api/weibo/resolve?nick · ?uid | 昵称 ↔ uid 即时互查（添加浮窗「填一个解析另一个」用；与新建补 uid 同一条匿名解析链；找不到 404、解析失败 400） |
-| /api/x-avatar · /api/weibo-avatar?file= | 按文件名读本地头像缓存（md5+扩展名白名单，天然防穿越；长缓存） |
-| /api/post-rules · /:id · /order | 图文帖规则 CRUD：**`platform` 决定 `accountIds` 查哪份名单**；微博规则拒 `filters.quote` 与 `llmTranslate`；换平台未带新名单则清空 `accountIds`；「原创/转发都不勾」400；开了 LLM 判定必须填判定标准 |
+| /api/x-avatar · /api/weibo-avatar · /api/bili-avatar?file= | 按文件名读本地头像缓存（md5+扩展名白名单，天然防穿越；长缓存） |
+| /api/weibo-image?url= | 微博帖子图反代（**sinaimg 防盗链，no-referrer 也 403**：服务端带 weibo Referer 拉取 + 按 URL md5 落盘 cache/weibo-images；host 白名单防 SSRF） |
+| /api/post-rules · /:id · /order | 图文帖规则 CRUD：**平台无关的通用规则——只定义筛选+渠道+推送词，生效范围在账号侧 ruleIds**（不再有 accountIds / platform，传入按未知字段 400）；「原创/转发都不勾」400；开了 LLM 判定必须填判定标准；quote/翻译任何规则可存（运行时按帖子平台生效：quote 仅 X 帖可识别、翻译仅 X 帖附加）；DELETE 连带清扫三份账号名单里选用了该规则的 ruleIds |
 
 **安全约定**：cookie 值不进任何响应/日志；唯一例外是 LLM key 在本机面板明文回显/编辑（明示决策，不做掩码）。各 order 路由（channels/categories/rules/llm providers）均在 `:id`/`:name` 通配之前匹配。
 
 ## src/panel/http-util.ts
 
-请求体解析（64KB 上限）、参数校验（400 + 中文错误）、JSON 响应。**面板路由与 MCP 工具共用的跨表逻辑也在这里**：`checkRuleRefs`（开播规则引用存在性）、`checkPostRuleRefs`（图文帖规则引用：渠道 + **对应平台**的账号名单）、`checkPostFiltersUsable` / `checkPostTranslateUsable` / `checkPostJudgeUsable`（图文帖的死配置一律保存时拒）、`syncStreamerWeiboLink`（主播详情填/清微博昵称 → 建/关联网名单行）、`watchStreamer`（候选池一键加入监听）、`parseRuntimePatch`（高级设置规格表校验）。
+请求体解析（64KB 上限）、参数校验（400 + 中文错误）、JSON 响应。**面板路由与 MCP 工具共用的跨表逻辑也在这里**：`checkRuleRefs`（开播规则引用存在性）、`checkPostRuleRefs`（图文帖规则引用：只剩渠道——生效范围在账号侧）、`checkAccountRuleIds`（账号 ruleIds 必须存在且 platform 与账号平台一致）、`deletePostRuleSweepingRefs`（删规则连带清扫三份账号名单的 ruleIds）、`checkPostFiltersUsable` / `checkPostTranslateUsable` / `checkPostJudgeUsable`（图文帖的死配置一律保存时拒；微博与B站动态同侧——禁引用、禁翻译）、`parseNewBiliAccount` / `parseBiliAccountPatch`（B站动态账号，uid 可粘 space 链接归一化）、`syncStreamerWeiboLink`（主播详情填/清微博昵称 → 建/关联网名单行）、`watchStreamer`（候选池一键加入监听）、`parseRuntimePatch`（高级设置规格表校验）。
 
 ## src/panel/schedule.ts
 
@@ -66,7 +68,7 @@
 | js/icons.js | `icon(name)`：消费本地节选的 lucide 官方节点数据（js/lucide-icons.js），按官网同款 SVG 属性输出，离线可用 |
 | js/qr-lib.js | qrcode-generator 真实 JS，扫码登录弹窗用 |
 | js/{listen,llm,categories,push,napcat,streamers,follows,schedule}.js | 九卡模块；streamers 导出 loadStreamers、push 导出 loadPush 供跨卡 import，无循环依赖 |
-| js/x.js | **图文分页**（X / 推特 + 微博）：两张来源卡（X 卡 = 连接可达性行；微博卡 = 登录态行，**保持原样不加行**）+「源设置/抓取设置」弹窗 + **单墙混排的账号卡片墙**（顶部大 segnav 筛选 + 右端圆形添加钮，与 segnav 同高；平台角标；卡面 = 身份段 + 图文规则摘要 + 帖子段，整卡可点开账号浮窗——添加态顶部小 segnav 切平台，规则编辑开二级浮窗） |
+| js/x.js | **图文分页**（X / 推特 + 微博 + B站动态）：三张来源卡（X 卡 = 连接可达性行；微博卡 / B站动态卡 = 登录态行，**保持原样不加行**）+「图文规则」卡（规则列表 = 拖拽排序 / 启停勾即改即存 / 筛选·渠道摘要；**规则平台无关**、不带账号 scope）+ **单墙混排的账号卡片墙**（顶部大 segnav 筛选 + 右端圆形添加钮；平台角标；卡面 = 身份段 + 规则摘要 + 帖子段，整卡可点开账号浮窗——添加态顶部小 segnav 切平台，浮窗规则区 = 全部规则的勾选列表，勾选 = PUT 账号 ruleIds 即改即存，规则编辑开二级浮窗） |
 
 ### v2 设计要点（只记非显而易见的机制）
 
@@ -74,7 +76,7 @@
 - **主播列表**：竖版三段式 .st-card（关键帧横幅头 / 主播信息段 / 动态段），在播优先再按 lastLiveAt 排序；**主播三开关已删**（名单内即监听中，watch 仍是名单机制，关注列表「取消监听」= PUT watch:false）。
 - **设置视图**：六设置卡（acc 主题色区分）+ 关注列表候选池；运行时参数收纳进对应卡底部按钮的 sheet（监听「抓取设置」/ LLM「高级」/ 推送渠道「推送设置」），settings 唯一信源、保存即热生效。
 - **时间表**：5 天滑动窗口（点击居中 + 滚轮按天步进）；**泳道行高 JS 解算**——0-1-2 级权重制，按「当天道数 × 级权重 1/2」水装填分配余高、解成 flex-basis 像素值，每道下限 single 16px / center 32px，放不下按三步降级（去首末两天 → 相邻天降 mini → 当天降单行），全程 px→px 连续过渡；相邻 ±1 步窗口后台预取，命中立即渲染再后台纠偏；hover 图优先 /api/snapshot 最近缓存帧，404 回退远程 keyframe ?? cover，再挂移除 img。
-- **图文分页（#view-x）**：单墙混排 + 大 segnav 筛选（全部 / X / 微博，带计数）+ 右端圆形「添加账号」钮（与大 segnav 同高呼应）——两张名单的自增 id 会撞、规则又按 `platform` 分流，所以卡片必须带平台角标、规则浮窗必须有「来源」行。添加浮窗顶部小 segnav 切 X/微博（草稿随切换保留）；两平台名称字段同构：**ID/uid = 唯一标识、昵称 = 平台名（X 的 display name / 微博昵称，抓到回写也可手填）、显示名 = 自定义（卡片优先展示）**——X 表单 = ID（@handle，框内 placeholder 只放一个 @ 作格式提示）+ 昵称（并排两 field、label 各在输入框上方）/ 显示名 / 关联主播，微博 = 昵称 + uid（并排，uid 窄列在右；昵称框 placeholder 只放一个 @——@昵称 是微博 ID 的常规词头，后端 normalizeWeiboNick 剥开头 @）/ 显示名 / 关联主播；微博的昵称与 uid 失焦即查 `/api/weibo/resolve` 回填另一个（解析失败静默，保存时后端兜底报错）；微博账号浮窗的 uid 编辑态只读（uid 是账号身份，改它等于换账号，历史微博会串到别人名下）；规则浮窗对微博不出「引用」「附译文」两枚胶囊（该平台没有这两种形态，后端也会拒）。
+- **图文分页（#view-x）**：页面上半 = 三张来源卡（X / 微博 / B站动态，监听开关都在卡片头右上角；B站动态的前提是 B站登录态，复用 listen_dynamic）+「图文规则」卡——规则行 = 拖拽把手（落 /api/post-rules/order）/ 启停勾即改即存 / 名称 / 副行「筛选 · 渠道 · LLM」/ 编辑删除；**规则平台无关、不带账号 scope，账号侧用 ruleIds「选用」**（账号浮窗规则区 = 全部规则的勾选列表，勾选即 PUT 账号 ruleIds，行仍可点开编辑该规则）。下半 = 单墙混排 + 大 segnav 筛选（全部 / X / 微博 / B站，带计数）+ 右端圆形「添加账号」钮（与大 segnav 同高呼应）——三张名单的自增 id 会撞，所以卡片必须带平台角标。添加浮窗顶部小 segnav 切 X/微博/B站（草稿随切换保留）；X/微博名称字段同构：**ID/uid = 唯一标识、昵称 = 平台名（X 的 display name / 微博昵称，抓到回写也可手填）、显示名 = 自定义（卡片优先展示）**——X 表单 = ID（@handle，框内 placeholder 只放一个 @ 作格式提示）+ 昵称（并排两 field、label 各在输入框上方）/ 显示名 / 关联主播，微博 = 昵称 + UID（主页链接）（并排，uid 窄列在右；昵称框 placeholder 只放一个 @，后端 normalizeWeiboNick 剥开头 @；uid 框可粘 weibo.com 主页链接、失焦提取纯数字）/ 显示名 / 关联主播，B站 = 名称 + UID（主页链接）（同微博行结构，uid 窄列在右、可粘 space.bilibili.com 链接失焦提取、编辑态只读；无关联主播，也无昵称↔uid 解析链——那是微博专属接口）/ 显示名；微博的昵称与 uid 失焦即查 `/api/weibo/resolve` 回填另一个（解析失败静默，保存时后端兜底报错）；规则浮窗无平台维度，「引用（仅X）」「附译文（仅X）」两枚胶囊恒定显示（运行时只对 X 帖生效）。
 - 简称（alias）仅在空间受限处优先（推送规则行生效主播标签、时间表横条），其余一律用原名 uname。
 
 ### demo 模式（`?demo=1`）三层数据信源

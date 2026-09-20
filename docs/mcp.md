@@ -72,19 +72,20 @@ claude mcp add --transport http dd-claw http://127.0.0.1:8787/mcp \
 
 - **只读（两角色共享）**：`get_status` / `get_live_now` / `get_schedule` / `list_streamers` /
   `search_streamers` / `list_push_rules` / `list_categories` / `list_channels` / `search_posts` /
-  `list_x_accounts` / `list_weibo_accounts` / `list_post_rules`
+  `list_x_accounts` / `list_weibo_accounts` / `list_bili_accounts` / `list_post_rules`
 - **admin 写**：`watch_streamer` / `unwatch_streamer` / `set_streamer` / `set_push_enabled` /
   `set_llm_enabled` / `set_listen` / `update_runtime_config` / `upsert_category` / `delete_category` /
   `upsert_push_rule` / `delete_push_rule` / `upsert_channel` / `delete_channel` /
   `list_llm_providers` / `upsert_llm_provider` / `delete_llm_provider` / `set_llm_key` /
   `get_x_config` / `update_x_config` / `upsert_x_account` / `delete_x_account` /
-  `upsert_weibo_account` / `delete_weibo_account` / `upsert_post_rule` / `delete_post_rule`
+  `upsert_weibo_account` / `delete_weibo_account` / `upsert_bili_account` / `delete_bili_account` /
+  `upsert_post_rule` / `delete_post_rule`
 - **gateway 自助**：`list_group_channels` / `add_group_push_rule` / `remove_group_push_rule`
 
-图文来源的工具与面板同一条校验：`upsert_post_rule` 的 `platform` 决定 `accountIds` 属于
-`list_x_accounts` 还是 `list_weibo_accounts`（两张名单的自增 id 会撞）；微博规则带
-`filters.quote` 或 `llmTranslate` 会被拒；X 配置含代理地址与实例（运维面），故 `get_x_config`
-是 admin 专属，而两份账号名单是 shared。
+图文来源的工具与面板同一条校验：post_rules 是**平台无关的通用规则**（只定义筛选+渠道+推送词），
+账号经 `ruleIds` 选用规则（只校验规则存在，任意账号可选用任意规则）；quote 仅 X 帖可识别、
+`llmTranslate` 运行时仅对 X 帖生效；X 配置含代理地址与实例（运维面），故 `get_x_config`
+是 admin 专属，而三份账号名单是 shared。
 
 写路径全部复用面板同款校验与热生效回调——经 MCP 改设置与在面板改完全等价
 （监听开关热启停源、运行时参数热生效、LLM 名单/key 热重建 router）。

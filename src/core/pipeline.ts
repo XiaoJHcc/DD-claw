@@ -12,6 +12,7 @@ import { ruleNeedsLlm, type PostAnalysis, type PostAnalyzer } from '../analysis/
 import type { PostRule } from './post-rules.js';
 import type { XAccount } from './x-accounts.js';
 import type { WeiboAccount } from './weibo-accounts.js';
+import type { BiliAccount } from './bili-accounts.js';
 import { getXConfig } from './x-config.js';
 import { isNotifyOnFirstRun, isNotifyOnNewSubscription } from './runtime-config.js';
 import type { Bus } from './bus.js';
@@ -39,7 +40,7 @@ export interface PipelineDeps {
   postAnalyzer?: PostAnalyzer;
 }
 
-/** feed_post 的载荷形状（X 源与微博源同形，platform 决定账号解释域，见 handleFeedPost） */
+/** feed_post 的载荷形状（X / 微博 / B站动态三源同形，platform 决定账号解释域，见 handleFeedPost） */
 interface FeedPostPayload {
   platform?: string;
   itemId?: string;
@@ -113,7 +114,7 @@ export class Pipeline {
 
   private async handle(signal: Signal): Promise<void> {
     if (signal.kind === 'health_alert') return this.handleHealthAlert(signal);
-    // 图文帖（X/推特）：与开播完全平行的一条路径，不进 LLM、不看直播状态
+    // 图文帖（X / 微博 / B站动态）：与开播完全平行的一条路径，不进 LLM、不看直播状态
     if (signal.kind === 'feed_post') return this.handleFeedPost(signal);
     if (!signal.status) {
       log.debug(`忽略无状态的信号 [${signal.kind}]（${signal.source}）`);
@@ -231,41 +232,64 @@ export class Pipeline {
    *  · 不过决策规则（`DecisionRule` 是「每场直播推一次」那类防抖，帖子没有场次概念，
    *    去重由 posts 的 UNIQUE(platform,item_id) 兜住）；
    *  · 不过冷启动抑制（帖子不是「启动时已在播」那种状态，首轮由 source 静默归档挡住）；
-   *  · 两个平台走同一条分支：账号在各自名单里查（X→x_accounts / 微博→weibo_accounts），
-   *    规则按 `platform` 过滤（`matchPostRules`），所以一条微博永远不会被 X 规则匹配到。
+   *  · 三个平台走同一条分支：账号在各自名单里查（X→x_accounts / 微博→weibo_accounts /
+   *    B站动态→bili_accounts），规则平台无关——命中只看账号侧 ruleIds 是否选用
+   *    （`matchPostRules`），平台差异只在文案措辞、quote 语义与翻译门控上体现。
    */
   private async handleFeedPost(signal: Signal): Promise<void> {
     const { db, dispatcher } = this.deps;
     const p = signal.payload as FeedPostPayload | undefined;
-    const platform = p?.platform === 'weibo' ? 'weibo' : p?.platform === 'twitter' ? 'twitter' : null;
+    const platform = p?.platform === 'weibo' ? 'weibo'
+      : p?.platform === 'twitter' ? 'twitter'
+      : p?.platform === 'bili_dynamic' ? 'bili_dynamic'
+      : null;
     if (!p || !platform) {
-      log.debug(`忽略 feed_post（平台 ${p?.platform ?? '未知'}）：只支持 twitter / weibo`);
+      log.debug(`忽略 feed_post（平台 ${p?.platform ?? '未知'}）：只支持 twitter / weibo / bili_dynamic`);
       return;
     }
     if (!isPushEnabled(db)) {
       log.debug(`不推送 feed_post ${signal.uid}: 推送总开关已关`);
       return;
     }
-    // 账号解析：uid 的解释域按平台不同（X=screen name / 微博=数字 uid）
+    // 账号解析：uid 的解释域按平台不同（X=screen name / 微博与B站动态=数字 uid）
     const account = platform === 'twitter'
       ? db.getXAccountByScreenName(signal.uid)
-      : db.getWeiboAccountByUid(signal.uid);
+      : platform === 'weibo'
+        ? db.getWeiboAccountByUid(signal.uid)
+        : db.getBiliAccountByUid(signal.uid);
     if (!account) {
-      log.warn(`feed_post 来自不在${platform === 'weibo' ? '微博' : 'X'}名单里的账号 ${signal.uid}，忽略`);
+      // B站动态源对监听名单里每个 uid 每轮都可能发信号，「不在动态名单」是常态，
+      // 用 warn 会刷屏；X/微博源的名单与抓取同源，查不到才值得 warn
+      if (platform === 'bili_dynamic') {
+        log.debug(`忽略 feed_post：${signal.uid} 不在 bili_accounts 名单`);
+      } else {
+        log.warn(`feed_post 来自不在${platform === 'weibo' ? '微博' : 'X'}名单里的账号 ${signal.uid}，忽略`);
+      }
       return;
     }
-    const bili = account.biliUid ? db.getStreamer(account.biliUid) : undefined;
-    // 两个账号类型只在「标识字段叫什么名字」上不同：X 是 screen name / 微博是数字 uid；
-    // 展示名两平台同一条链：自定义显示名 → 平台昵称（再缺省由渲染层回退标识本身）
+    // 关联主播（{liver}）：动态账号本身就是 B站 uid，直接按 uid 查；
+    // X/微博账号走可选关联 biliUid
+    const biliUid = platform === 'bili_dynamic'
+      ? (account as BiliAccount).uid
+      : (account as XAccount | WeiboAccount).biliUid;
+    const bili = biliUid ? db.getStreamer(biliUid) : undefined;
+    // 三个账号类型只在「标识字段叫什么名字」上不同：X 是 screen name / 微博与B站是数字 uid；
+    // 展示名同一条链：自定义显示名 → 平台昵称/用户名（再缺省由渲染层回退标识本身）
     const ident: { screenName: string; displayName: string | null } = platform === 'twitter'
       ? { screenName: (account as XAccount).screenName, displayName: (account as XAccount).displayName ?? (account as XAccount).nickname }
-      : { screenName: (account as WeiboAccount).uid, displayName: (account as WeiboAccount).displayName ?? (account as WeiboAccount).nickname };
+      : platform === 'weibo'
+        ? { screenName: (account as WeiboAccount).uid, displayName: (account as WeiboAccount).displayName ?? (account as WeiboAccount).nickname }
+        : { screenName: (account as BiliAccount).uid, displayName: (account as BiliAccount).displayName ?? (account as BiliAccount).uname };
     const post: PostCandidate = {
       platform,
       accountId: account.id,
+      ruleIds: account.ruleIds,
       screenName: ident.screenName,
       displayName: ident.displayName,
-      type: p.type ?? (platform === 'weibo' ? 'mblog' : 'tweet'),
+      // B站动态的原始 type 是 DYNAMIC_TYPE_* 枚举，归一成 matcher 的原创/转发语义
+      type: platform === 'bili_dynamic'
+        ? (p.type === 'DYNAMIC_TYPE_FORWARD' ? 'retweet' : 'dynamic')
+        : p.type ?? (platform === 'weibo' ? 'mblog' : 'tweet'),
       text: p.text ?? null,
       pics: p.pics ?? [],
       pubTs: p.pubTs ?? 0,
@@ -329,7 +353,7 @@ export class Pipeline {
     // 图片必须先落成本地文件再推（NapCat 与本进程同网络，远程 URL 交给它同样拉不到；
     // toast 的 Win32 限制也不支持远程图）。两条路线：
     //  · X 图床（pbs.twimg.com）墙内直连不通 → 走代理隧道下载；
-    //  · 微博图床（sinaimg.cn）境内直连可达 → 普通 fetch，不给代理链路添无关流量。
+    //  · 微博图床（sinaimg.cn）与B站图床（hdslb.com）境内直连可达 → 普通 fetch，不给代理链路添无关流量。
     // 下载失败按无图发，不阻塞通知。
     let image: string | undefined;
     if (post.pics.length > 0 && this.deps.imageCacheDir) {

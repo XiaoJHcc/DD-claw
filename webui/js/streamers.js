@@ -69,8 +69,12 @@ function bannerHtml(s) {
 // 收起态 .pt-img display:none 彻底出流（否则 width:0 仍吃 flex gap 导致左缘不齐）。
 function postRow(p, open) {
   const [label, cls] = postTag(p);
+  // 微博图床防盗链（no-referrer 也 403）：帖子图经 /api/weibo-image 反代（服务端带 Referer + 落盘缓存）
+  const pic = p.pics && p.pics[0]
+    ? (p.platform === 'weibo' ? '/api/weibo-image?url=' + encodeURIComponent(p.pics[0]) : p.pics[0])
+    : '';
   const inner =
-    (p.pics && p.pics[0] ? `<img class="pt-img" src="${esc(p.pics[0])}" referrerpolicy="no-referrer" alt="">` : '') +
+    (pic ? `<img class="pt-img" src="${esc(pic)}" referrerpolicy="no-referrer" alt="">` : '') +
     `<span class="pt-main"><span class="pt-head"><span class="tag ${cls}">${label}</span>` +
     `<small class="pt-tm">${relTime(p.pubTs)}</small></span>` +
     `<span class="pt-x">${esc(p.text || '(无文字)')}</span></span>`;

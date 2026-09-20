@@ -10,7 +10,7 @@ import type { PostCandidate } from '../matcher.js';
 
 function post(over: Partial<PostCandidate> = {}): PostCandidate {
   return {
-    accountId: 1, screenName: 'watase_yuzuki', type: 'tweet', text: '今晚20時から配信',
+    platform: 'twitter', accountId: 1, ruleIds: [1], screenName: 'watase_yuzuki', type: 'tweet', text: '今晚20時から配信',
     pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
     ...over,
   };
@@ -47,6 +47,24 @@ test('请求：判定关 → 明确要求 pass 恒 true；翻译关 → 明确�
 test('请求：纯图推文（无正文）也有占位，不让提示词里出现空白正文段', () => {
   const text = userText(buildPostAnalysisRequest(post({ text: null }), { judge: true, judgePrompt: 'x', translate: false }));
   assert.match(text, /（无正文，仅图片）/);
+});
+
+test('请求：平台措辞——微博说「微博」、B站动态说「动态」，账号用展示名 + uid', () => {
+  const wb = userText(buildPostAnalysisRequest(
+    post({ platform: 'weibo', screenName: '2203177060', displayName: '渡瀬結月', type: 'mblog' }),
+    { judge: true, judgePrompt: 'x', translate: false },
+  ));
+  assert.match(wb, /平台：微博/);
+  assert.match(wb, /账号：渡瀬結月（uid 2203177060）/);
+  assert.match(wb, /微博正文：/);
+
+  const dyn = userText(buildPostAnalysisRequest(
+    post({ platform: 'bili_dynamic', screenName: '80397', displayName: null, type: 'dynamic' }),
+    { judge: true, judgePrompt: 'x', translate: false },
+  ));
+  assert.match(dyn, /平台：B站/);
+  assert.match(dyn, /账号：uid 80397/, '展示名缺省只给 uid');
+  assert.match(dyn, /动态正文：/);
 });
 
 test('解析：正常返回；理由与译文两侧空白被裁掉', () => {

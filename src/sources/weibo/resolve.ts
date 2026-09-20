@@ -111,7 +111,8 @@ export function createWeiboResolver(fetchImpl?: FetchImpl): WeiboResolver {
     );
     if (res.status === 301 || res.status === 302) {
       const loc = res.headers.get('location') ?? '';
-      if (/visitor\.passport\.weibo\.(com|cn)|login/.test(loc)) return 'expired';
+      // 2026-09 实测：getIndex 现在还会 302 到 sso/signin（微博侧收紧，访客 cookie 不再够用）
+      if (/visitor\.passport\.weibo\.(com|cn)|login|signin/.test(loc)) return 'expired';
       throw new Error(`微博 uid 解析跳转目标无法识别（Location: 非资料页）`);
     }
     if (!res.ok) throw new Error(`微博 uid 解析请求失败（HTTP ${res.status}）`);

@@ -16,7 +16,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
  * 按图床选 Referer（都要 UA，否则 403）：
  *  · B站图床要 `live.bilibili.com`；
  *  · 微博图床（sinaimg.cn）要 `weibo.com` —— 头像链路带它实测可达，带外站 Referer 会被防盗链 403
- *    （浏览器端也靠 no-referrer 才能显示微博图，见 webui 的 referrerpolicy）。
+ *    （2026-09-20 实测 no-referrer 也 403，面板帖子图走 /api/weibo-image 反代，见 boundaries #38）。
  */
 function imageHeaders(url: string): { 'User-Agent': string; Referer: string } {
   let host = '';

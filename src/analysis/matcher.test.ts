@@ -147,12 +147,12 @@ test('uname 为空时 {liver} 回退简称', () => {
   assert.equal(renderTemplate('{liver}开播', event({ uname: '' })), '阿梓开播');
 });
 
-// ---- 图文帖（X/推特 + 微博）：与开播规则平行的确定性判定 ----
+// ---- 图文帖（X/推特 + 微博 + B站动态）：与开播规则平行的确定性判定 ----
 
 function post(over: Partial<PostCandidate> = {}): PostCandidate {
   return {
     platform: 'twitter',
-    accountId: 1, screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
+    accountId: 1, ruleIds: [1, 2], screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
     pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
     ...over,
   };
@@ -162,16 +162,27 @@ function post(over: Partial<PostCandidate> = {}): PostCandidate {
 function weiboPost(over: Partial<PostCandidate> = {}): PostCandidate {
   return {
     platform: 'weibo',
-    accountId: 1, screenName: '2203177060', displayName: '渡瀬結月', type: 'mblog',
+    accountId: 1, ruleIds: [1, 2], screenName: '2203177060', displayName: '渡瀬結月', type: 'mblog',
     text: '今晚九点直播！', pics: [], pubTs: 1_789_549_200,
     url: 'https://weibo.com/2203177060/Pa1bC',
     ...over,
   };
 }
 
+/** B站动态：账号标识是 uid、类型在 pipeline 归一成 dynamic/retweet */
+function biliDynPost(over: Partial<PostCandidate> = {}): PostCandidate {
+  return {
+    platform: 'bili_dynamic',
+    accountId: 1, ruleIds: [1, 2], screenName: '80397', displayName: '阿梓', type: 'dynamic',
+    text: '今晚八点直播！', pics: [], pubTs: 1_789_549_200,
+    url: 'https://t.bilibili.com/9001',
+    ...over,
+  };
+}
+
 function postRule(over: Partial<PostRule> = {}): PostRule {
   return {
-    id: 1, name: 'r', platform: 'twitter', accountIds: [], channels: [1],
+    id: 1, name: 'r', channels: [1],
     filters: defaultPostFilters(), messageTemplate: null,
     llmJudge: false, judgePrompt: null, llmTranslate: false,
     enabled: true, sort: 0,
@@ -215,18 +226,23 @@ test('matchPostFilters：quote 勾上要求来源确实标了引用（RSS 帖永
   assert.equal(matchPostFilters(q, post({ isQuote: true })), true);
 });
 
-test('matchPostRules：账号范围 + 筛选，返回全部命中（保持 sort 顺序）', () => {
+test('matchPostRules：账号侧 ruleIds 选用规则 + 筛选，返回全部命中（保持 sort 顺序）', () => {
   const rules = [
-    postRule({ id: 1, sort: 0, accountIds: [] }),
-    postRule({ id: 2, sort: 1, accountIds: [1], filters: { ...defaultPostFilters(), media: true } }),
-    postRule({ id: 3, sort: 2, accountIds: [99] }),
+    postRule({ id: 1, sort: 0 }),
+    postRule({ id: 2, sort: 1, filters: { ...defaultPostFilters(), media: true } }),
+    postRule({ id: 3, sort: 2 }),
   ];
-  assert.deepEqual(matchPostRules(rules, post()).map((r) => r.id), [1], '账号 99 的规则不命中，带图规则也不命中');
   assert.deepEqual(
-    matchPostRules(rules, post({ pics: ['https://pbs.twimg.com/media/a.jpg'] })).map((r) => r.id),
-    [1, 2],
-    '有图时两条都命中，顺序按 sort',
+    matchPostRules(rules, post({ ruleIds: [1] })).map((r) => r.id),
+    [1],
+    '账号没选用的规则不命中（规则 3 同理）',
   );
+  assert.deepEqual(
+    matchPostRules(rules, post({ ruleIds: [1, 2], pics: ['https://pbs.twimg.com/media/a.jpg'] })).map((r) => r.id),
+    [1, 2],
+    '有图时选用的两条都命中，顺序按 sort；ruleIds 为空 = 一律不推',
+  );
+  assert.deepEqual(matchPostRules(rules, post({ ruleIds: [] })), [], '账号不选用任何规则 = 不推');
 });
 
 test('renderPostTemplate：{author} {text} {url} {liver}', () => {
@@ -243,22 +259,36 @@ test('renderPostTemplate：{author} {text} {url} {liver}', () => {
   assert.equal(renderPostTemplate('{text}', post({ text: null })), '', '无正文渲染成空串');
 });
 
-// ---- 平台隔离：两张名单的自增 id 会撞，规则必须按 platform 分流 ----
+// ---- 规则平台无关：任何平台的账号都可选用任何规则，命中只看 ruleIds + 机械筛选 ----
 
-test('matchPostRules：platform 不同不命中（微博帖不会被 X 规则吃掉，反之亦然）', () => {
-  const xRule = postRule({ id: 1, platform: 'twitter', accountIds: [] });
-  const wbRule = postRule({ id: 2, platform: 'weibo', accountIds: [] });
-  assert.deepEqual(matchPostRules([xRule, wbRule], post()).map((r) => r.id), [1]);
-  assert.deepEqual(matchPostRules([xRule, wbRule], weiboPost()).map((r) => r.id), [2]);
+test('matchPostRules：规则不分平台，微博/B站帖命中同一条规则（账号侧选用即可）', () => {
+  const rules = [postRule({ id: 1 }), postRule({ id: 2 })];
+  assert.deepEqual(matchPostRules(rules, post({ ruleIds: [1] })).map((r) => r.id), [1], 'X 帖');
+  assert.deepEqual(matchPostRules(rules, weiboPost({ ruleIds: [1] })).map((r) => r.id), [1], '微博帖命中同一条规则');
+  assert.deepEqual(matchPostRules(rules, biliDynPost({ ruleIds: [1, 2] })).map((r) => r.id), [1, 2], 'B站动态帖同理');
+  assert.deepEqual(matchPostRules(rules, weiboPost({ ruleIds: [] })), [], '账号不选用任何规则 = 不推');
 });
 
-test('matchPostRules：微博帖的账号范围按微博账号 id（同样只有空 = 全部）', () => {
-  const rules = [
-    postRule({ id: 1, platform: 'weibo', accountIds: [] }),
-    postRule({ id: 2, platform: 'weibo', accountIds: [7] }),
-  ];
-  assert.deepEqual(matchPostRules(rules, weiboPost({ accountId: 3 })).map((r) => r.id), [1]);
-  assert.deepEqual(matchPostRules(rules, weiboPost({ accountId: 7 })).map((r) => r.id), [1, 2]);
+test('matchPostRules：quote 规则对非 X 帖永不命中（isQuote undefined，是语义不是错误）', () => {
+  const q = postRule({ id: 1, filters: { ...defaultPostFilters(), quote: true } });
+  assert.deepEqual(matchPostRules([q], weiboPost({ ruleIds: [1] })), [], '微博没有引用形态');
+  assert.deepEqual(matchPostRules([q], biliDynPost({ ruleIds: [1] })), [], 'B站动态没有引用形态');
+  assert.deepEqual(matchPostRules([q], post({ ruleIds: [1], isQuote: true })).map((r) => r.id), [1], 'X 引用帖命中');
+});
+
+test('B站动态帖：作者名用展示名、uid 兜底；转发走同一套原创/转发筛选', () => {
+  assert.equal(defaultPostTitle(biliDynPost()), '阿梓 发了新动态');
+  assert.equal(
+    renderPostTemplate('{author}', biliDynPost({ displayName: null })),
+    '80397',
+    '展示名缺省回退 uid（uid 对人没有意义，但至少不是空标题）',
+  );
+  // 转发（pipeline 已把 DYNAMIC_TYPE_FORWARD 归一成 retweet）走同一套原创/转发筛选
+  assert.equal(matchPostFilters(defaultPostFilters(), biliDynPost({ type: 'retweet' })), false);
+  assert.equal(
+    matchPostFilters({ ...defaultPostFilters(), original: false, retweet: true }, biliDynPost({ type: 'retweet' })),
+    true,
+  );
 });
 
 test('微博帖文案：{author} 用昵称、缺昵称回退 uid；转发语义与 X 相同', () => {

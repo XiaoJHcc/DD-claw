@@ -4,16 +4,20 @@
  * 扫码登录路由仅在装配处注入 auth dep 时挂载；cookie 值不出现在任何响应/日志里。
  */
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
-  HttpError, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseCategoryPatch, parseChannelPatch,
-  parseNewCategory, parseNewChannel, parseNewRule, parseNewWeiboAccount, parseNewXAccount, parsePostRulePatch,
+  HttpError, checkAccountRuleIds, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseBiliAccountPatch,
+  parseCategoryPatch, parseChannelPatch,
+  parseNewBiliAccount, parseNewCategory, parseNewChannel, parseNewRule, parseNewWeiboAccount, parseNewXAccount,
+  parsePostRulePatch,
   parseRulePatch, parseRuntimePatch, parseWeiboAccountPatch,
-  checkPostFiltersUsable, checkPostJudgeUsable, checkPostRuleRefs, checkPostTranslateUsable, parseNewPostRule,
+  checkPostFiltersUsable, checkPostJudgeUsable, checkPostRuleRefs, parseNewPostRule,
+  deletePostRuleSweepingRefs,
   parseStreamerPatch, parseUid, parseXAccountPatch, parseXPatch, parseXTestRequest, readJsonBody, sendJson,
   syncStreamerWeiboLink, watchStreamer, type XTestRequest,
 } from './http-util.js';
@@ -39,7 +43,6 @@ import {
 } from '../core/runtime-config.js';
 import { isPushEnabled, setPushEnabled } from '../core/push.js';
 import type { XConfig } from '../core/x-config.js';
-import type { PostPlatform } from '../core/post-rules.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 
@@ -150,6 +153,8 @@ export interface PanelDeps {
     verify: (screenName: string) => Promise<XAccountVerify>;
     /** 保存后回调：装配处热生效 */
     onChanged: () => void;
+    /** 添加账号后的即时首拉钩子（不等下个轮询周期、不在全量轮里排队）；不注入则跳过 */
+    kickAccount?: (screenName: string) => Promise<void>;
   };
   /**
    * 微博（图文分页的第二个来源）：源运行状态快照 + 独立名单的增删改。
@@ -161,10 +166,26 @@ export interface PanelDeps {
     info: () => unknown;
     /** 名单/账号变化后回调：装配处热重启源（新增账号要立刻抓） */
     onChanged: () => void;
+    /** 添加账号后的即时首拉钩子（不等下个轮询周期、不在全量轮里排队）；不注入则跳过 */
+    kickAccount?: (uid: string) => Promise<void>;
   };
   /** 微博头像本地缓存目录（/api/weibo-avatar 按文件名读）；不注入则一律 404 */
   weiboAvatars?: {
     dir: string;
+  };
+  /** B站动态账号头像本地缓存目录（/api/bili-avatar 按文件名读）；不注入则一律 404 */
+  biliAvatars?: {
+    dir: string;
+  };
+  /** 微博帖子图本地缓存目录（/api/weibo-image 按 URL md5 落盘反代）；不注入则不落盘、纯反代 */
+  weiboImages?: {
+    dir: string;
+    /** 反代 fetch 注入点（测试用）；缺省用全局 fetch */
+    fetchImpl?: FetchLike;
+  };
+  /** 动态源即时首拉钩子：添加 B站动态账号后调用（不等下个轮询周期）；不注入则跳过 */
+  biliFeed?: {
+    kickAccount: (uid: string) => Promise<void>;
   };
   /** 关键帧缓存目录（/api/snapshot 按鼠标时间点取最近帧）；不注入则 /api/snapshot 一律 404 */
   snapshots?: {
@@ -351,6 +372,7 @@ async function handle(
       throw new HttpError(409, `@${input.screenName} 已在名单里`);
     }
     checkXBiliUid(db, input.biliUid);
+    checkAccountRuleIds(db, input.ruleIds);
     // 存在性校验：能校验就校验。「账号不存在」是硬错误（多半敲错了）；
     // 链路原因（代理不通 / 限流）照收——不能因为代理没开就让人加不了账号，
     // 把原因回给面板显示即可（这是区分「我填错了」与「链路断了」的唯一手段）。
@@ -359,6 +381,8 @@ async function handle(
       throw new HttpError(400, `X 账号不存在：@${input.screenName}`);
     }
     const id = db.upsertXAccount(input);
+    // 即时首拉：fire-and-forget，失败只进日志（源内有自己的失败纪律），不挡响应
+    if (deps.x.kickAccount) void deps.x.kickAccount(input.screenName).catch(() => {});
     deps.x.onChanged();
     sendJson(res, 200, { account: xAccountInfo(db, id), verify });
     return;
@@ -373,6 +397,7 @@ async function handle(
       if (dup && dup.id !== id) throw new HttpError(409, `@${patch.screenName} 已在名单里`);
     }
     if (patch.biliUid !== undefined) checkXBiliUid(db, patch.biliUid);
+    if (patch.ruleIds !== undefined) checkAccountRuleIds(db, patch.ruleIds);
     db.upsertXAccount({ ...patch, id });
     deps.x.onChanged();
     sendJson(res, 200, { account: xAccountInfo(db, id) });
@@ -437,7 +462,10 @@ async function handle(
     }
     if (db.getWeiboAccountByUid(uid)) throw new HttpError(409, `微博 ${uid} 已在名单里`);
     checkWeiboBiliUid(db, input.biliUid);
+    checkAccountRuleIds(db, input.ruleIds);
     const id = db.upsertWeiboAccount({ ...input, uid });
+    // 即时首拉：fire-and-forget，失败只进日志（源内有自己的失败纪律），不挡响应
+    if (deps.weibo.kickAccount) void deps.weibo.kickAccount(uid).catch(() => {});
     deps.weibo.onChanged();
     sendJson(res, 200, { account: weiboAccountInfo(db, id) });
     return;
@@ -452,6 +480,7 @@ async function handle(
       if (dup && dup.id !== id) throw new HttpError(409, `微博 ${patch.uid} 已在名单里`);
     }
     if (patch.biliUid !== undefined) checkWeiboBiliUid(db, patch.biliUid);
+    if (patch.ruleIds !== undefined) checkAccountRuleIds(db, patch.ruleIds);
     db.upsertWeiboAccount({ ...patch, id });
     deps.weibo.onChanged();
     sendJson(res, 200, { account: weiboAccountInfo(db, id) });
@@ -461,6 +490,40 @@ async function handle(
     const id = Number(wa[1]);
     if (!db.deleteWeiboAccount(id)) throw new HttpError(404, '微博账号不存在');
     deps.weibo.onChanged();
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // ---- B站动态账号名单（图文分页第三个来源：纯 DB CRUD 恒挂载，无 dep 门）----
+  // 只管推送选用（ruleIds）；抓取轮询对象由动态源每轮自并监听主播 ∪ bili_accounts，
+  // 名单变化下一轮自动生效；添加后额外经 biliFeed.kickAccount 即时首拉（不等下个周期）。
+  if (method === 'GET' && path === '/api/bili/accounts') {
+    sendJson(res, 200, { accounts: biliAccountList(db) });
+    return;
+  }
+  if (method === 'POST' && path === '/api/bili/accounts') {
+    const input = parseNewBiliAccount(await readJsonBody(req));
+    if (db.getBiliAccountByUid(input.uid)) throw new HttpError(409, `uid ${input.uid} 已在名单里`);
+    checkAccountRuleIds(db, input.ruleIds);
+    const id = db.upsertBiliAccount(input);
+    // 即时首拉：fire-and-forget，失败只进日志（源内有自己的失败纪律），不挡响应
+    if (deps.biliFeed) void deps.biliFeed.kickAccount(input.uid).catch(() => {});
+    sendJson(res, 200, { account: biliAccountInfo(db, id) });
+    return;
+  }
+  const ba = path.match(/^\/api\/bili\/accounts\/(\d+)$/);
+  if (ba && method === 'PUT') {
+    const id = Number(ba[1]);
+    if (!db.getBiliAccount(id)) throw new HttpError(404, 'B站动态账号不存在');
+    const patch = parseBiliAccountPatch(await readJsonBody(req));
+    if (patch.ruleIds !== undefined) checkAccountRuleIds(db, patch.ruleIds);
+    db.upsertBiliAccount({ ...patch, id });
+    sendJson(res, 200, { account: biliAccountInfo(db, id) });
+    return;
+  }
+  if (ba && method === 'DELETE') {
+    const id = Number(ba[1]);
+    if (!db.deleteBiliAccount(id)) throw new HttpError(404, 'B站动态账号不存在');
     sendJson(res, 200, { ok: true });
     return;
   }
@@ -534,6 +597,33 @@ async function handle(
     let data: Buffer;
     try {
       data = readFileSync(join(deps.weiboAvatars.dir, name));
+    } catch {
+      throw new HttpError(404, '头像缓存不存在');
+    }
+    res.writeHead(200, {
+      'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
+      'cache-control': 'max-age=86400',
+    });
+    res.end(data);
+    return;
+  }
+
+  // ---- 微博帖子图反代（恒挂载）：sinaimg 对 no-referrer 也 403（2026-09-20 实测），
+  // 浏览器热链不出，必须服务端带 weibo Referer 拉；weiboImages dep 存在时按 URL md5 落盘缓存 ----
+  if (method === 'GET' && path === '/api/weibo-image') {
+    await sendWeiboImage(deps, url, res);
+    return;
+  }
+
+  // ---- B站动态账号头像本地缓存（biliAvatars dep 存在才挂）：按文件名读 cache/bili-avatars ----
+  if (method === 'GET' && path === '/api/bili-avatar') {
+    if (!deps.biliAvatars) throw new HttpError(404, '未装配 B站头像缓存目录');
+    const name = url.searchParams.get('file') ?? '';
+    // 文件名就是 md5+扩展名（bili/avatar.ts 落盘形式），白名单校验天然防路径穿越
+    if (!/^[a-f0-9]{32}\.(jpg|png)$/.test(name)) throw new HttpError(400, 'file 参数不对');
+    let data: Buffer;
+    try {
+      data = readFileSync(join(deps.biliAvatars.dir, name));
     } catch {
       throw new HttpError(404, '头像缓存不存在');
     }
@@ -845,23 +935,20 @@ async function handle(
       const patch = parsePostRulePatch(await readJsonBody(req));
       const prev = db.listPostRules().find((r) => r.id === id);
       if (!prev) throw new HttpError(404, '图文帖规则不存在');
-      // platform 决定 accountIds 的解释域：换平台时没带新名单就当空（指向旧平台 id 毫无意义）
-      const platform: PostPlatform = patch.platform ?? prev.platform;
-      const accountIds = patch.accountIds ?? (platform === prev.platform ? prev.accountIds : []);
-      // 校验要对「合并后」的形状做（只改 filters 时账号/渠道沿用旧值）
-      checkPostRuleRefs(db, { platform, accountIds, channels: patch.channels ?? prev.channels });
-      checkPostFiltersUsable(platform, { ...prev.filters, ...(patch.filters ?? {}) });
+      // 校验要对「合并后」的形状做（只改 filters 时渠道沿用旧值）
+      checkPostRuleRefs(db, { channels: patch.channels ?? prev.channels });
+      checkPostFiltersUsable({ ...prev.filters, ...(patch.filters ?? {}) });
       checkPostJudgeUsable(
         patch.llmJudge ?? prev.llmJudge,
         patch.judgePrompt !== undefined ? patch.judgePrompt : prev.judgePrompt,
       );
-      checkPostTranslateUsable(platform, patch.llmTranslate ?? prev.llmTranslate);
-      db.upsertPostRule({ id, ...patch, platform, accountIds });
+      db.upsertPostRule({ id, ...patch });
       sendJson(res, 200, { ok: true });
       return;
     }
     if (method === 'DELETE') {
-      if (!db.deletePostRule(id)) throw new HttpError(404, '图文帖规则不存在');
+      // 连带清扫三份账号名单里选用了这条规则的 ruleIds（与 webui mock 同构）
+      if (!deletePostRuleSweepingRefs(db, id)) throw new HttpError(404, '图文帖规则不存在');
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -935,6 +1022,70 @@ async function sendAvatar(deps: PanelDeps, url: URL, res: http.ServerResponse): 
     'cache-control': 'private, no-cache',
   });
   res.end(entry.buf);
+}
+
+/** 微博图床防盗链要求 Referer: weibo.com（no-referrer 也 403，2026-09-20 实测 wx1/orj960） */
+const WEIBO_IMAGE_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+  Referer: 'https://weibo.com/',
+};
+const WEIBO_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * 微博帖子图反代：sinaimg 防盗链让浏览器热链不出（带外站 Referer 或 no-referrer 都 403），
+ * 只能服务端带 weibo Referer 拉。weiboImages.dir 存在时按 URL md5 落盘（签名 URL 会过期，
+ * 但落盘后同一 URL 永远有本地副本；新 URL 自然重新拉）。host 白名单防开放 SSRF。
+ */
+async function sendWeiboImage(deps: PanelDeps, url: URL, res: http.ServerResponse): Promise<void> {
+  const raw = url.searchParams.get('url') ?? '';
+  let host: string;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('bad scheme');
+    host = u.hostname;
+  } catch {
+    throw new HttpError(400, 'url 参数非法');
+  }
+  if (host !== 'sinaimg.cn' && !host.endsWith('.sinaimg.cn')) {
+    throw new HttpError(400, 'url 不在微博图床白名单内');
+  }
+  const dir = deps.weiboImages?.dir;
+  const ext = raw.toLowerCase().includes('.png') ? 'png' : raw.toLowerCase().includes('.webp') ? 'webp' : 'jpg';
+  const name = createHash('md5').update(raw).digest('hex') + '.' + ext;
+  if (dir) {
+    try {
+      const data = readFileSync(join(dir, name));
+      res.writeHead(200, {
+        'content-type': ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg',
+        'cache-control': 'max-age=86400',
+      });
+      res.end(data);
+      return;
+    } catch { /* 未缓存，往下拉取 */ }
+  }
+  let resp: Response;
+  try {
+    const fetchImpl = deps.weiboImages?.fetchImpl ?? fetch;
+    resp = await fetchImpl(raw, { headers: WEIBO_IMAGE_HEADERS, signal: AbortSignal.timeout(10_000) });
+  } catch {
+    throw new HttpError(502, '微博图片拉取失败');
+  }
+  if (!resp.ok) throw new HttpError(502, `微博图片拉取失败（HTTP ${resp.status}）`);
+  const buf = Buffer.from(await resp.arrayBuffer());
+  if (buf.length === 0 || buf.length > WEIBO_IMAGE_MAX_BYTES) throw new HttpError(502, '微博图片为空或过大');
+  if (dir) {
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, name), buf);
+    } catch { /* 落盘失败照样透传 */ }
+  }
+  const ct = (resp.headers.get('content-type') ?? '').toLowerCase();
+  res.writeHead(200, {
+    'content-type': ct.includes('png') ? 'image/png' : ct.includes('webp') ? 'image/webp'
+      : ct.includes('gif') ? 'image/gif' : 'image/jpeg',
+    'cache-control': 'max-age=86400',
+  });
+  res.end(buf);
 }
 
 /** 渠道拖拽排序：ids 必须是现有渠道的全排列（长度一致/无重复/无增删）。 */
@@ -1209,6 +1360,29 @@ function weiboAccountInfo(db: Db, id: number): unknown {
 /** 关联主播必须存在于监听名单（与 checkXBiliUid 同一条纪律） */
 function checkWeiboBiliUid(db: Db, uid: string | null): void {
   if (uid && !db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
+}
+
+// ---- B站动态账号（独立名单）辅助 ----
+
+/**
+ * 名单行的面板视图：附最近 3 条动态（卡片帖子段；raw 不下发）。
+ * 账号本身就是主播（uid 即身份锚点），不像 x/weibo 那样需要 biliUid 关联与头像兜底。
+ */
+function biliAccountView(db: Db, a: ReturnType<Db['listBiliAccounts']>[number]): unknown {
+  const posts = db
+    .searchPosts({ platform: 'bili_dynamic', uid: a.uid, limit: 3 })
+    .map(({ raw: _raw, ...p }) => p);
+  return { ...a, posts };
+}
+
+function biliAccountList(db: Db): unknown[] {
+  return db.listBiliAccounts().map((a) => biliAccountView(db, a));
+}
+
+function biliAccountInfo(db: Db, id: number): unknown {
+  const a = db.getBiliAccount(id);
+  if (!a) throw new HttpError(404, 'B站动态账号不存在');
+  return biliAccountView(db, a);
 }
 
 // ---- LLM key 管理（settings 表 llm_key:<providerName>；本机面板，值可回显/编辑）----
