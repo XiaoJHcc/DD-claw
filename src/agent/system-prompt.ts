@@ -1,5 +1,5 @@
 /**
- * WebUI Agent 的系统提示 + 写操作模式（`settings.chat_write_mode` 是唯一信源）。
+ * 系统提示 + 写操作模式（`settings.chat_write_mode` 是唯一信源）：面板变体与 QQ 变体。
  *
  * 写前询问**不在 loop 里硬拦**（计划明确没要这个机制）：纪律写在系统提示里——
  * ask 模式下模型必须先在回复里复述「要改什么、改成什么」，用户在下一轮确认后才调写工具；
@@ -7,6 +7,9 @@
  *
  * 模式开关对 LLM **不可见**（`set_chat_mode` 进 AGENT_EXCLUDED_TOOLS）：模型若能自己切到 auto，
  * 「未确认不写」的门槛就形同虚设，P1 验收的「误写率 0 容忍」会名存实亡。
+ *
+ * QQ 变体（`buildQqbotSystemPrompt`，P3 NapCat 直连）**不看 `chat_write_mode`**：那个开关是
+ * 面板（本机主人）的口味，QQ 入口一视同仁地「先复述、等确认」——见函数注释。
  */
 import type { Db } from '../core/db.js';
 
@@ -75,4 +78,49 @@ export function buildSystemPrompt(mode: ChatWriteMode): string {
     '- 不确定主人意图时先问，不要靠猜写库。',
   );
   return lines.join('\n');
+}
+
+/** QQ 直连的「本群 / 本私聊」措辞（系统提示里点明服务对象，避免模型说「主人」） */
+export interface QqSystemPromptOptions {
+  /** group = 群聊 / private = 私聊 */
+  kind: 'group' | 'private';
+  /** 展示用的渠道名（一般是渠道表中的名字，如「XX 群」）；缺省用「本群」/「本私聊」 */
+  label?: string;
+}
+
+/**
+ * QQ 侧系统提示（P3，docs/plan/agent-access.md「渠道隔离」第 7 条：提示词明确「只处理本渠道」）。
+ *
+ * 与面板提示的三处刻意差异：
+ * 1. **只处理本渠道**：身份 = 消息来源渠道，能力只有 gateway 工具面；渠道由服务端按来源注入，
+ *    模型既没有渠道参数、也不该追问渠道——它只回答「本群/本私聊」。
+ * 2. **永远写前询问**：面板有 ask/auto 两档（那是主人本机操作），QQ 侧没有这个开关——
+ *    plan「写前确认不强制，QQ 侧由 LLM 追问 + 口头确认」的落法就是提示层一直要求先复述再等确认，
+ *    兜底是可撤销（每渠道一条独立撤销栈）。
+ * 3. **回执要短**：QQ 消息没有折叠，长回复会刷屏；正文控制在几行内，不贴 JSON、不堆 emoji。
+ */
+export function buildQqbotSystemPrompt(opts: QqSystemPromptOptions): string {
+  const label = (opts.label ?? '').trim();
+  const where = label === '' ? (opts.kind === 'group' ? '本群' : '本私聊') : label;
+  return [
+    `你是 DD-claw 的 QQ 自助助手，正在服务**${where}**（${opts.kind === 'group' ? '群聊' : '私聊'}）。`,
+    '和你说话的是群成员或私聊对方，**不是本机主人**——你看不到也改不了别人的渠道，主人级的设置一律请你转告主人在面板上操作。',
+    '',
+    '## 你的能力只来自工具',
+    '- 你能做的事就是本轮工具列表里给出的那些，没有别的通道：没有的工具就是没有，不要承诺，也不要用别的方式绕过。',
+    `- 你的范围 = ${where} 自己：查清单、加/删本渠道的推送规则、撤销本渠道最近一次变更。渠道由服务端按消息来源确定，**没有任何渠道参数**，你也不需要问「是哪个群」。`,
+    '- 查数据用 list_* / search_*；写用 add_group_push_rule / remove_group_push_rule；撤销用 undo_last_change。',
+    '',
+    '## 硬纪律',
+    '1. uid / id 一律「先查再引用」：主播先 search_streamers（或 list_streamers）确认 uid；规则先 list_push_rules 找 id。**绝不编造 uid、规则 id**；查不到就说没找到、请对方确认，不许猜一个塞进去。',
+    '2. 写之前先把要改什么、改成什么说清楚，**等对方下一条确认**（例如「好」「可以」）再调用写工具；一轮只做确认过的范围。',
+    '3. 工具报错就照实转述并给下一步，不要声称改成功了。',
+    `4. 撤销 = 调用 undo_last_change，撤的是${where}最近一次变更（别的渠道和主人的改动撤不到，也不该试图撤）。`,
+    '5. 只处理本渠道的事：不主动查询、也不转述别的渠道的信息。',
+    '',
+    '## 说话方式',
+    '- 简短：两三行说完，最多 5 条要点；**不要贴 JSON**、不要表格、不要堆 emoji。',
+    '- 列表只给关键信息（主播名 / 规则 id / 渠道名），细节让对方面板看。',
+    '- 不确定就说不确定，做不到就说做不到。',
+  ].join('\n');
 }

@@ -207,6 +207,14 @@ export interface PanelDeps {
   /** agent 会话存储（core/chat-store.ts）：面板单会话（scope = adminScope），/api/chat* 消费 */
   chat?: ChatStore;
   /**
+   * OneBot 11 事件接收（P3 NapCat 直连）：`POST /onebot` 的唯一消费者。
+   * 事件形状校验、触发判定、限流、渠道映射、回执全在 `src/qqbot/`；路由只做 JSON 解析与响应。
+   * 不注入则 `/onebot` 404（面板没在跑 / `qqbot_enabled` 关时本入口本来就不装配）。
+   */
+  qqbot?: {
+    handleEvent: (event: unknown) => Promise<{ action: string; reason?: string }>;
+  };
+  /**
    * 头像代理 fetch 注入点（测试用）；缺省用全局 fetch。/api/avatar 恒挂载，
    * 按 uid 反代主播头像以规避 B站图床无 CORS 导致的画布污染（颜色条取平均色用）。
    */
@@ -1004,6 +1012,17 @@ async function handle(
       throw new HttpError(409, '该设置已被其他入口修改，无法撤销本次');
     }
     sendJson(res, 200, { ok: true, change: { id: r.id, tool: r.tool ?? null } });
+    return;
+  }
+
+  // ---- OneBot 11 事件接收（NapCat 直连，P3；qqbot dep 存在才挂）----
+  // **刻意不挂在 /api/* 下**：它不是主人能力面（人点鼠标的地方），而是 QQ 消息入口——
+  // NapCat 的 onebot11 `network.httpClients` 上报地址指向这里（见 src/qqbot/napcat-post.ts）。
+  // 恒 200 + JSON 摘要：NapCat 侧对非 2xx 只会记错/重试，而「这条消息没被处理」是正常业务结果；
+  // 响应里没有 reply/delete 等字段，不会触发 OneBot 的「快速操作」（不会意外替他回一句）。
+  if (deps.qqbot && method === 'POST' && path === '/onebot') {
+    const r = await deps.qqbot.handleEvent(await readJsonBody(req));
+    sendJson(res, 200, r.reason === undefined ? { ok: true, action: r.action } : { ok: true, action: r.action, reason: r.reason });
     return;
   }
 

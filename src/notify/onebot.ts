@@ -72,6 +72,16 @@ export class OneBotNotifier implements Notifier {
   }
 
   /**
+   * 直发一段纯文本（QQ 对话回执路径，P3 NapCat 直连）：不进 dispatcher / 不看 targets，
+   * 与推送**共用同一条 HTTP 实现与同一个目标的串行链 + 最小间隔**（群里推送与回执撞一起同样会被 QQ 限速）。
+   * 出参形状与 send 的单目标结果一致（ok / reached / retryable / error），由调用方决定怎么记日志。
+   */
+  async sendText(target: PushTarget, text: string): Promise<NotifyResult> {
+    const [r] = await this.mapTargets([target], (t) => this.post(t, [{ type: 'text', data: { text } }]));
+    return { ...(r ?? { ok: false, reached: false, retryable: true, error: '未发送' }), target: `${target.type}:${target.id}` };
+  }
+
+  /**
    * 同一个目标（尤其是群）的消息串行发并留最小间隔。
    * 官方文档给的群聊主动推送上限是单群 20 条/分钟，多主播同时开播时
    * 并发轰同一个群很容易撞上。不同目标之间仍并行。

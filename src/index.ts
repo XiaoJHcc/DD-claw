@@ -41,6 +41,9 @@ import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
 import { seedOnboardingDefaults } from './core/onboarding.js';
 import { adminScope, UndoStore, undoEffects, type UndoResult } from './core/undo.js';
 import { ChatStore } from './core/chat-store.js';
+import { createQqbot } from './qqbot/bot.js';
+import { ensureNapcatHttpClient, qqPostUrl } from './qqbot/napcat-post.js';
+import { isQqbotEnabled } from './qqbot/settings.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 import {
@@ -668,7 +671,8 @@ async function main(): Promise<void> {
   const startedAt = Math.floor(Date.now() / 1000);
   let panel: Server | undefined;
   if (app.panel.enabled) {
-    panel = createPanelServer({
+    // 面板依赖面先建出来（QQ 自助入口要复用同一份：同源的 chat / llm router / undo）
+    const panelDeps: PanelDeps = {
       db,
       undo: undoStore,
       undoLast,
@@ -857,7 +861,55 @@ async function main(): Promise<void> {
           void napcatWatchdog?.tick();
         },
       },
-    });
+    };
+
+    // ---- QQ 自助入口（P3 NapCat 直连）----
+    // 事件接收与面板共用同一个 http server（`POST /onebot`），所以只在面板分支里装配；
+    // 开关是 settings `qqbot_enabled`（缺省关——QQ 入口是暴露面，必须主人主动开）。
+    // 运行时关掉它不用重启：bot 每条事件都重读开关，关了直接静默丢弃。
+    if (isQqbotEnabled(db)) {
+      const qqbot = createQqbot({
+        db,
+        // 同一份面板依赖面：loop / 工具执行 / 会话存储 / 撤销全与面板同源，不另造一套
+        panel: panelDeps,
+        // 回执发送接**当前** onebot notifier（rebuildNotifiers 会换实例，故每次取最新的那个）：
+        // 与开播推送共用同一个 HTTP 实现、同一条目标串行链与最小间隔
+        send: async (conv, text) => {
+          if (!onebotNotifier) return { ok: false, error: 'QQ 通道未装配（NapCat 端点发现失败）' };
+          const r = await onebotNotifier.sendText({ type: conv.kind, id: conv.id }, text);
+          return r.ok ? { ok: true } : { ok: false, error: r.error };
+        },
+      });
+      panelDeps.qqbot = { handleEvent: (ev) => qqbot.handleEvent(ev) };
+      log.info('QQ 自助入口已装配：POST /onebot（触发纪律与渠道映射见 docs/modules/qqbot.md）');
+
+      // NapCat 侧的上报地址自管（onebot11 `network.httpClients` 的 dd-claw-qqbot 条目）：
+      // 顺着 napcat.ts 既有的「专属条目自管 + webui 热重载」机制做（src/qqbot/napcat-post.ts）；
+      // 读不到配置/写失败都不硬来，只记日志并提示手工配置步骤
+      const postUrl = qqPostUrl(app.panel.port);
+      const nc = getNapcatConfig(db);
+      const napcatDir = effectiveNapcatDir(db);
+      if (nc.enabled && napcatDir && /^\d+$/.test(nc.uin)) {
+        void ensureNapcatHttpClient(napcatDir, nc.uin, postUrl)
+          .then((r) => {
+            if (r.status === 'failed') {
+              log.warn(`NapCat 上报地址未自动注册（${r.detail}）：请在 NapCat webui 里新建 HTTP 客户端指向 ${postUrl}`);
+              return;
+            }
+            log.info(
+              `NapCat 上报地址${r.status === 'unchanged' ? '已就绪' : '已注册'}: ${postUrl}` +
+              `${r.status === 'unchanged' || r.reloaded === true ? '' : '（NapCat 重启后生效）'}`,
+            );
+          })
+          .catch((e: unknown) => log.warn('NapCat 上报地址注册异常', e));
+      } else {
+        log.warn(`NapCat 未配置（面板 NapCat 卡片），QQ 消息收不到：请把 NapCat 的 HTTP 客户端上报地址指向 ${postUrl}`);
+      }
+    } else {
+      log.info('QQ 自助入口未启用（settings qqbot_enabled 缺省关；开启步骤见 docs/modules/qqbot.md）');
+    }
+
+    panel = createPanelServer(panelDeps);
     panel.on('error', (e) => log.error('控制面板启动失败（不影响主流程）', e));
     panel.listen(app.panel.port, '127.0.0.1', () => {
       log.info(`控制面板: http://127.0.0.1:${app.panel.port}`);

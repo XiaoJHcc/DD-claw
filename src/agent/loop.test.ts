@@ -11,7 +11,7 @@ import {
 } from '../analysis/providers.js';
 import { ChatStore } from '../core/chat-store.js';
 import { Db } from '../core/db.js';
-import { UndoStore, adminScope } from '../core/undo.js';
+import { UndoStore, adminScope, channelScope } from '../core/undo.js';
 import { HttpError } from '../panel/http-util.js';
 import type { PanelDeps, PanelStatus } from '../panel/server.js';
 import { AGENT_MAX_STEPS, chatBlockedReason, runAgentTurn } from './loop.js';
@@ -307,6 +307,78 @@ test('undo_last_change 在 loop 里可用：撤掉上一轮 agent 自己的写�
   assert.match(toolTexts(llm.seen[2]!).at(-1)!, /"tool": "set_push_enabled"/);
   assert.equal(undo.history().length, 1, '撤销自己不进变更记录（track:false）');
   assert.equal(undo.peek('admin'), null);
+});
+
+// ---- 入口泛化（P3：QQ 直连复用同一个 loop）----
+
+test('入口泛化：role/scope/actor/channelId 全由 opts 决定，工具面与调用域随之变', async () => {
+  const { chat, undo, deps } = fixture();
+  const llm = fakeChat([
+    () => ({ content: '我看看。', toolCalls: [toolCall('c1', 'search_streamers', { query: '阿梓' })] }),
+    () => reply('没有找到。'),
+  ]);
+
+  const r = await runAgentTurn(deps, '本群推了哪些', {
+    completeChat: llm.fn,
+    scope: channelScope(7),
+    role: 'gateway',
+    actor: 'qqbot-group:111',
+    channelId: 7,
+    systemPrompt: '（QQ 变体）',
+    fallbacks: { truncated: '（QQ 兜底）' },
+  });
+  assert.equal(r.reply, '没有找到。');
+
+  // 工具面按角色过滤：gateway 看不到 admin 工具（不可见即不存在）
+  const names = llm.seen[0]!.tools!.map((t) => t.name);
+  assert.ok(names.includes('add_group_push_rule'));
+  assert.ok(!names.includes('set_push_enabled'));
+
+  // 系统提示用注入的变体（不再读 chat_write_mode）；往来落该渠道自己的会话
+  assert.equal(llm.seen[0]!.messages[0]!.content, '（QQ 变体）');
+  assert.deepEqual(chat.messages(channelScope(7)).map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
+  assert.deepEqual(chat.messages(adminScope()), [], '面板会话不受影响');
+  // 历史回放也只回放本渠道的（第二轮请求里带上第一轮的 tool 结果）
+  assert.equal(toolTexts(llm.seen[1]!)[0]!, '[]', 'search_streamers 的 tool 结果原样回填');
+
+  // 撤销域 = 该渠道栈：undo_last_change 在 gateway ctx 下会去 ch:7（未绑渠道会 403，见 run-tool.ts）
+  const llm2 = fakeChat([
+    () => ({ content: '好。', toolCalls: [toolCall('c9', 'undo_last_change')] }),
+    () => reply('本渠道没有可撤的。'),
+  ]);
+  await runAgentTurn(deps, '撤销刚才那个', {
+    completeChat: llm2.fn, scope: channelScope(7), role: 'gateway', actor: 'qqbot-group:111', channelId: 7,
+  });
+  assert.match(toolTexts(llm2.seen[1]!).at(-1)!, /没有可撤销的变更/, 'gateway 走渠道栈（本渠道栈为空，撤不到 admin 全局栈）');
+  assert.equal(undo.peek(channelScope(7)), null, '撤销失败不留记录');
+
+  // 缺省（不传 opts）仍是面板那套：admin scope / admin 工具面 / 面板提示
+  const panelLlm = fakeChat([() => reply('面板答')]);
+  await runAgentTurn(deps, '再问一次', { completeChat: panelLlm.fn });
+  assert.ok(panelLlm.seen[0]!.tools!.some((t) => t.name === 'set_push_enabled'));
+  assert.equal(panelLlm.seen[0]!.messages[0]!.content, panelLlm.seen[0]!.messages[0]!.content);
+  assert.match(String(panelLlm.seen[0]!.messages[0]!.content), /DD-claw 控制面板里的助手/);
+  assert.deepEqual(chat.messages(adminScope()).map((m) => m.role), ['user', 'assistant']);
+});
+
+test('入口泛化：兜底文案可覆盖（超轮次），未传 opts 时用面板原文案', async () => {
+  const { deps } = fixture();
+  const always = (): ChatCompletion => ({ content: '', toolCalls: [toolCall('c', 'list_streamers')] });
+  const qq = fakeChat([always, always]);
+  const r = await runAgentTurn(deps, '帮我处理一堆事', {
+    completeChat: qq.fn, maxSteps: 2, scope: channelScope(9), role: 'gateway', actor: 'qqbot-group:222', channelId: 9,
+    fallbacks: { truncated: '（QQ 兜底：拆两句再说）' },
+  });
+  assert.equal(r.truncated, true);
+  assert.equal(r.reply, '（QQ 兜底：拆两句再说）');
+
+  const panel = fakeChat([always, always]);
+  const r2 = await runAgentTurn(deps, '面板也一样', { completeChat: panel.fn, maxSteps: 2 });
+  assert.match(r2.reply, /连续 2 轮工具调用/);
+
+  const empty = fakeChat([() => ({ content: '   ', toolCalls: [] })]);
+  const r3 = await runAgentTurn(deps, '空回复', { completeChat: empty.fn, fallbacks: { empty: '（QQ：没生成出回复）' } });
+  assert.equal(r3.reply, '（QQ：没生成出回复）');
 });
 
 // ---- 前置检查与缺省 LLM 接缝 ----

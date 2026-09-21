@@ -1,21 +1,27 @@
 /**
- * WebUI Agent 的 agent loop（P1，docs/plan/agent-access.md「P1：agent loop + WebUI Agent」）。
+ * DD-claw 自己的 agent loop（P1 WebUI Agent / P3 NapCat 直连，docs/plan/agent-access.md
+ * 「P1：agent loop + WebUI Agent」「P3：NapCat 直连」）。
  *
  * 一轮对话的形状：读会话历史 → 拼 `[system, ...history, user]` → 循环（≤ maxSteps）：
- * `completeChat`（工具面 = admin 可见且未被 `AGENT_EXCLUDED_TOOLS` 挖掉的）→ 有 tool_calls 就
+ * `completeChat`（工具面 = 该角色可见且未被 `AGENT_EXCLUDED_TOOLS` 挖掉的）→ 有 tool_calls 就
  * 逐个经 `runToolTracked` 执行（zod 校验 / 审计 / 写快照全在能力层，loop 不直调 handler）→
  * 工具结果或错误文本回填 messages → 再问；没有 tool_calls 即终答。
  * user / assistant（含 tool_calls）/ tool 往来**全部落 ChatStore**；system 提示每轮重拼、不落库
- * （它随写模式变化）。
+ * （面板那套随写模式变化）。
  *
- * 会话范围：面板是**单会话**，scope = `adminScope()`（与撤销栈同一套 scope 字符串）。
- * 身份：进程内 loop 由接入层构造 ctx——回环 = 主人 = admin（鉴权口径见 mcp/auth.ts 头注释），
- * 变更记录 entry='agent'，所以在面板变更历史里能区分「agent 写的」与「人手点的」。
+ * **两个入口共用这一个 loop**，差异全部走 `AgentOptions`（接入层给什么就是什么，loop 不推断）：
+ * - 面板（P1）：单会话，scope = `adminScope()`、角色 admin、actor `webui-agent`；
+ * - QQ 直连（P3）：每个来源渠道一份会话，scope = `channelScope(channelId)`、角色 **gateway**、
+ *   actor 形如 `qqbot-group-123`、调用域带 `channelId`（身份由 OneBot 事件解析后注入，
+ *   **永不进工具参数**），系统提示换成 QQ 变体（system-prompt.ts）。
+ *
+ * 变更记录 entry 只有 'panel' | 'mcp' | 'agent' 三档（mcp/run-tool.ts）：面板与 QQ 都写 'agent'
+ * ——两者都是「DD-claw 自己的进程内 loop」，来源靠 scope（渠道栈）与 actor 区分。
  *
  * 有意未做（计划明确不要的机制）：
  * - **不按 mode 硬拦写工具**：ask 模式的「先问再写」是系统提示层的纪律（system-prompt.ts），
  *   不是 loop 里的闸门。误写率靠提示词与工具 description 调优，兜底是「写可撤销」。
- * - **不自动裁剪上下文**：历史原样回放（面板由 UI 提示用量）。
+ * - **不自动裁剪上下文**：历史原样回放（面板由 UI 提示用量，QQ 侧由回执附 /reset 提示）。
  *
  * 依赖注入：`opts.completeChat` 是唯一的 LLM 接缝（测试用假 LLM 驱动多轮 tool_calls 剧本）；
  * 生产缺省走 `deps.llm.router.completeChat`——熔断 / 路由 / 降级语义与分类任务同源。
@@ -24,8 +30,8 @@ import type { ChatCompletion, ChatMessage, LlmRequest, ToolCall } from '../analy
 import { isLlmEnabled } from '../analysis/providers.js';
 import type { ChatMessage as StoredMessage } from '../core/chat-store.js';
 import { adminScope } from '../core/undo.js';
-import type { McpAuth } from '../mcp/auth.js';
-import { runToolTracked } from '../mcp/run-tool.js';
+import type { McpAuth, McpRole } from '../mcp/auth.js';
+import { runToolTracked, type ToolEntry } from '../mcp/run-tool.js';
 import { toolDefsForRole, type McpToolDef } from '../mcp/tools.js';
 import { HttpError } from '../panel/http-util.js';
 import type { PanelDeps } from '../panel/server.js';
@@ -35,17 +41,37 @@ import { agentToolSpecs, isAgentExposed } from './tool-schema.js';
 /** 单轮上限：防止模型无限「调工具 → 再调工具」空转（超了就兜底回复，不卡死） */
 export const AGENT_MAX_STEPS = 8;
 
-/** 审计/变更记录里的调用者名（entry='agent' 的 actor） */
+/** 审计/变更记录里的调用者名（面板入口的 actor） */
 export const AGENT_ACTOR = 'webui-agent';
 
-/** agent 的工具调用身份：进程内直构 ctx；本机绑定即主人 = admin，无渠道 scope */
+/**
+ * 面板入口缺省身份（= 缺省 opts 下 loop 自构的 ctx：本机绑定即主人 = admin，无渠道 scope）。
+ * QQ 入口**不用**它——那边由事件来源解析出 channelId 后自构 ctx（身份绝不进工具参数）。
+ */
 export const AGENT_TOOL_CTX: McpAuth = { name: AGENT_ACTOR, role: 'admin', scope: {} };
+
+/** 模型没返回内容时的兜底（面板措辞；QQ 变体由 opts.fallbacks 覆盖） */
+const EMPTY_REPLY = '（模型没有返回内容，请再问一次）';
 
 export interface AgentOptions {
   /** LLM 对话函数（测试注入点）；缺省 = `deps.llm.router.completeChat` */
   completeChat?: (req: LlmRequest) => Promise<ChatCompletion>;
   /** 轮次上限；缺省 AGENT_MAX_STEPS */
   maxSteps?: number;
+  /** 会话键与撤销栈 scope（缺省 `adminScope()` = 面板单会话；QQ = `channelScope(channelId)`） */
+  scope?: string;
+  /** 工具面角色（缺省 admin = 面板；QQ 入口 = gateway） */
+  role?: McpRole;
+  /** 调用者名：`ctx.name` + 审计/变更记录的 actor（缺省 AGENT_ACTOR） */
+  actor?: string;
+  /** 变更记录 entry（缺省 'agent'；只有 mcp/run-tool.ts 定义的三档可选） */
+  entry?: ToolEntry;
+  /** 渠道调用域：注入 `ctx.scope.channelId`（QQ 按消息来源解析后传入；面板不带） */
+  channelId?: number;
+  /** 系统提示全文（缺省 = 面板提示，每轮按 `chat_write_mode` 重拼） */
+  systemPrompt?: string;
+  /** 兜底文案：模型没返回内容 / 达到轮次上限（面板与 QQ 措辞不同） */
+  fallbacks?: { empty?: string; truncated?: string };
 }
 
 export interface AgentTurnResult {
@@ -77,9 +103,10 @@ export function chatBlockedReason(deps: PanelDeps): string | null {
 }
 
 /**
- * 跑一轮对话（面板单会话）：
+ * 跑一轮对话：
  * 用户消息先落库，再按上面的循环推进，最后把终答落库并返回。
- * LLM 彻底失败（路由全挂 / 熔断）抛 502；未装配 / 未启用等前置问题抛 400。
+ * 入口差异（面板 / QQ）全部来自 `opts`；LLM 彻底失败（路由全挂 / 熔断）抛 502；
+ * 未装配 / 未启用等前置问题抛 400。
  */
 export async function runAgentTurn(
   deps: PanelDeps,
@@ -91,19 +118,28 @@ export async function runAgentTurn(
   const message = userMessage.trim();
   if (message === '') throw new HttpError(400, '消息不能为空');
 
-  const scope = adminScope();
+  const scope = opts.scope ?? adminScope();
+  const role = opts.role ?? 'admin';
+  const actor = opts.actor ?? AGENT_ACTOR;
+  const entry = opts.entry ?? 'agent';
   const maxSteps = opts.maxSteps ?? AGENT_MAX_STEPS;
   const completeChat = opts.completeChat ?? defaultCompleteChat(deps);
+  // 身份与调用域只由接入层构造（能力层只读）：channelId 缺席 = admin 全量，在场 = 限定该渠道
+  const toolCtx: McpAuth = {
+    name: actor,
+    role,
+    scope: opts.channelId === undefined ? {} : { channelId: opts.channelId },
+  };
 
-  // 工具面 = admin 角色可见 ∩ 未被排除名单挖掉（「哪些进 agent 工具面」只有 tool-schema.ts 一处信源）
-  const exposed = toolDefsForRole('admin').filter((d) => isAgentExposed(d.name));
+  // 工具面 = 该角色可见 ∩ 未被排除名单挖掉（「哪些进 agent 工具面」只有 tool-schema.ts 一处信源）
+  const exposed = toolDefsForRole(role).filter((d) => isAgentExposed(d.name));
   const specs = agentToolSpecs(exposed);
   const defByName = new Map(exposed.map((d) => [d.name, d]));
 
-  // 历史（前几轮的 user / assistant / tool 往来）原样回放；system 每轮按当前 mode 重拼
+  // 历史（前几轮的 user / assistant / tool 往来）原样回放；system 每轮重拼（面板随 mode 变，QQ 固定变体）
   const history = toLlmMessages(store.messages(scope));
   const messages: ChatMessage[] = [
-    { role: 'system', content: buildSystemPrompt(getChatWriteMode(deps.db)) },
+    { role: 'system', content: opts.systemPrompt ?? buildSystemPrompt(getChatWriteMode(deps.db)) },
     ...history,
     { role: 'user', content: message },
   ];
@@ -121,7 +157,7 @@ export async function runAgentTurn(
     }
 
     if (out.toolCalls.length === 0) {
-      const reply = out.content.trim() === '' ? '（模型没有返回内容，请再问一次）' : out.content;
+      const reply = out.content.trim() === '' ? (opts.fallbacks?.empty ?? EMPTY_REPLY) : out.content;
       store.append(scope, { role: 'assistant', content: reply });
       return { reply, steps: step, toolCalls: executed, truncated: false };
     }
@@ -130,14 +166,15 @@ export async function runAgentTurn(
     store.append(scope, { role: 'assistant', content: out.content, toolCalls: out.toolCalls });
     messages.push({ role: 'assistant', content: out.content, toolCalls: out.toolCalls });
     for (const call of out.toolCalls) {
-      const text = await runOneTool(deps, defByName, call);
+      const text = await runOneTool(deps, defByName, call, toolCtx, entry);
       executed++;
       store.append(scope, { role: 'tool', content: text, toolCallId: call.id });
       messages.push({ role: 'tool', content: text, toolCallId: call.id });
     }
   }
 
-  const reply = `（连续 ${maxSteps} 轮工具调用仍没有得出结论，先停下了。可以把问题拆小一点再问，或直接在面板上操作。）`;
+  const reply = opts.fallbacks?.truncated
+    ?? `（连续 ${maxSteps} 轮工具调用仍没有得出结论，先停下了。可以把问题拆小一点再问，或直接在面板上操作。）`;
   store.append(scope, { role: 'assistant', content: reply });
   return { reply, steps: maxSteps, toolCalls: executed, truncated: true };
 }
@@ -155,11 +192,14 @@ function defaultCompleteChat(deps: PanelDeps): (req: LlmRequest) => Promise<Chat
  * 执行一次模型请求的工具调用，返回**回填给模型的文本**（成功 = 结果 JSON；
  * 失败 = `错误：…` 中文文案，模型据此自我纠正）。
  * 参数只在这里做 JSON 解析——业务校验一律交给 `runTool` 的 zod 层（与 /mcp 同一份）。
+ * ctx 由调用方（接入层）解析后顺着传下来：loop 从不从模型参数里读身份。
  */
 async function runOneTool(
   deps: PanelDeps,
   defByName: Map<string, McpToolDef>,
   call: ToolCall,
+  ctx: McpAuth,
+  entry: ToolEntry,
 ): Promise<string> {
   const def = defByName.get(call.name);
   if (!def) return `错误：没有这个工具：${call.name}（只能调用工具列表里给出的工具）`;
@@ -173,8 +213,8 @@ async function runOneTool(
   if (typeof args !== 'object' || args === null || Array.isArray(args)) {
     return `错误：${call.name} 的参数必须是 JSON 对象`;
   }
-  // entry='agent'：审计与变更记录都能区分「agent 写的」与面板人手点的
-  const r = await runToolTracked(deps, def, args as Record<string, unknown>, AGENT_TOOL_CTX, 'agent');
+  // 审计与变更记录都能区分入口来源（entry）与调用者（ctx.name = actor）
+  const r = await runToolTracked(deps, def, args as Record<string, unknown>, ctx, entry);
   return r.text;
 }
 

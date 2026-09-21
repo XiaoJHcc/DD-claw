@@ -324,6 +324,12 @@ const INVENTORY: InventoryEntry[] = [
     coverage: 'excluded', exposeToAgent: false,
     reason: '同上（weibo-cookies.json）',
   },
+  {
+    method: 'POST', path: '/onebot', label: 'POST /onebot',
+    coverage: 'excluded', exposeToAgent: false,
+    reason: 'OneBot 11 事件入口（NapCat 直连 P3）：消息入口而非主人能力面；'
+      + '路由自身只写 chat_messages 与经工具面落快照的渠道栈写（entry=agent）',
+  },
 ];
 
 /**
