@@ -4,9 +4,12 @@
  *
  * 权限模型（详见 auth.ts 头注释）：工具参数不可信（LLM 生成，可被 prompt injection 伪造），
  * 可信的只有连接级 token 角色。因此 admin 工具在 gateway 连接上根本不注册（tools/list
- * 不可见），而不是注册后拒绝。gateway 唯一可写的是「群推送规则自助」，服务端强制：
- * 只能选已启用的 QQ 群渠道、主播必须在监听名单、规则打 createdBy='mcp' 标记、
- * 只能删同标记规则、单渠道 ≤ 20 条、写操作限流。
+ * 不可见），而不是注册后拒绝。gateway 唯一可写的是「群/私聊推送规则自助」，服务端强制：
+ * **渠道只来自调用域 `ctx.scope.channelId`（令牌绑定）——身份字段永不进工具 schema**
+ * （LLM 填的渠道声明会被 zod 剥离，见 run-tool.ts），未绑渠道一律 403 不回落；
+ * 该渠道必须是已启用的 onebot group/private；读侧按 scope 服务端裁剪（不把别渠道的规则喂进上下文）；
+ * 主播必须在监听名单、规则打 createdBy='mcp'、删除先校验渠道归属、多渠道规则走 copy-on-write 拆分、
+ * 单渠道 ≤ 20 条、写操作按渠道限流。契约见 docs/mcp.md「gateway 写/读的服务端强制」。
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -22,7 +25,7 @@ import {
   parseXAccountPatch, parseXPatch, parseXTestRequest, syncStreamerWeiboLink, watchStreamer,
 } from '../panel/http-util.js';
 import { scheduleInfo } from '../panel/schedule.js';
-import { setPushEnabled } from '../core/push.js';
+import { setPushEnabled, splitPushRuleChannel, type PushChannel } from '../core/push.js';
 import { setListen, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
 import { setChatWriteMode, type ChatWriteMode } from '../agent/system-prompt.js';
 import { X_INTERVAL_MAX, X_INTERVAL_MIN } from '../core/x-config.js';
@@ -30,11 +33,11 @@ import { getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS } from '../c
 import { isLlmEnabled, setLlmEnabled } from '../analysis/providers.js';
 import { llmProviderSchema } from '../config/schema.js';
 import type { StreamerInput } from '../core/streamers.js';
-import { mcpWriteLimiter } from './rate-limit.js';
-import { runToolTracked, undoScopeOf } from './run-tool.js';
+import { mcpWriteLimiter, writeLimitBucket } from './rate-limit.js';
+import { runToolTracked, scopeChannelId, undoScopeOf } from './run-tool.js';
 import type { McpAuth } from './auth.js';
 
-/** gateway 群自助：单渠道 MCP 规则上限 */
+/** gateway 渠道自助：单渠道 MCP 规则上限 */
 const MAX_MCP_RULES_PER_CHANNEL = 20;
 
 type ToolRole = 'shared' | 'admin' | 'gateway';
@@ -82,6 +85,45 @@ function checkFullPermutation(ids: number[], existing: number[], what: string): 
   if (ids.length !== set.size || new Set(ids).size !== ids.length || ids.some((id) => !set.has(id))) {
     throw new HttpError(400, `ids 必须与现有${what}一一对应`);
   }
+}
+
+// ---- 调用域（scope）：渠道是 QQ 入口唯一可信的锚点，只由接入层/令牌解析后注入 ----
+// 工具 schema 里没有任何渠道字段（见 run-tool.ts 头注释）：LLM 在参数里声明的渠道会被 zod 剥离，
+// 能力层只认 ctx.scope.channelId。读 / 写 / 限流共用这一个锚点。
+
+/**
+ * 读侧裁剪用的调用域渠道：admin（面板 / Claude Code / 进程内 agent）无 scope = 不裁剪（全量，行为不变）；
+ * gateway 未绑渠道 = **拒绝服务**（绝不回落默认渠道，也绝不回落「全部」——否则一句话就能读到别人的配置）。
+ */
+function scopeChannelForRead(ctx: McpAuth): number | undefined {
+  const ch = scopeChannelId(ctx);
+  if (ch !== undefined || ctx.role === 'admin') return ch;
+  throw new HttpError(403, '本令牌未绑定渠道：推送规则自助只服务令牌绑定的渠道，请让主人给令牌绑定渠道');
+}
+
+/** gateway 自助工具的渠道（必给）：未绑定即拒；admin 走全量 CRUD，不该出现在这里 */
+function requireScopeChannel(ctx: McpAuth): number {
+  const ch = scopeChannelForRead(ctx);
+  if (ch !== undefined) return ch;
+  throw new HttpError(
+    403,
+    'admin 令牌没有渠道 scope：本工具只服务「令牌绑定的渠道」自助，'
+    + '管理侧请用 upsert_push_rule / delete_push_rule（channels 参数显式给）',
+  );
+}
+
+/** 自助可用的渠道：已启用的 onebot 群或私聊（私聊一视同仁，见 plan P2「渠道类型放开」） */
+function isSelfServiceChannel(c: PushChannel): boolean {
+  return c.notifier === 'onebot' && (c.targetType === 'group' || c.targetType === 'private') && c.enabled;
+}
+
+/** 调用域渠道行 + 自助资格（渠道被停用/删掉/换成 toast 时拒绝，绝不静默改到别处） */
+function selfServiceChannel(deps: PanelDeps, channelId: number): PushChannel {
+  const c = deps.db.listPushChannels().find((x) => x.id === channelId);
+  if (!c || !isSelfServiceChannel(c)) {
+    throw new HttpError(400, '本渠道不是已启用的 QQ 群/私聊渠道，不能自助配置推送规则（先 list_group_channels 看可选渠道）');
+  }
+  return c;
 }
 
 // ---- 共享只读工具 ----
@@ -162,10 +204,20 @@ const sharedTools: McpToolDef[] = [
   },
   {
     name: 'list_push_rules',
-    description: '推送规则列表（全局 sort 序）：分类引用（null=任意开播）× 生效主播集合（空=全部）× 渠道 × 推送词覆盖；createdBy=mcp 的是群自助规则',
+    description: '推送规则列表（全局 sort 序）：分类引用（null=任意开播）× 生效主播集合（空=全部）× 渠道 × 推送词覆盖；'
+      + 'createdBy=mcp 的是渠道自助规则。gateway 令牌只能看到推送给**本渠道**的规则'
+      + '（含与其他渠道共享的多渠道规则，那类带 sharedWithOtherChannels=true）',
     schema: {},
     role: 'shared',
-    handler: (deps) => deps.db.listPushRules(),
+    handler: (deps, _args, ctx) => {
+      const rules = deps.db.listPushRules();
+      const ch = scopeChannelForRead(ctx);
+      if (ch === undefined) return rules; // admin / 面板：全量（行为与改造前一致）
+      // 读侧服务端裁剪（plan「渠道隔离」第 2 条）：别的渠道的规则不进调用方上下文
+      return rules
+        .filter((r) => r.channels.includes(ch))
+        .map((r) => ({ ...r, sharedWithOtherChannels: r.channels.length > 1 }));
+    },
   },
   {
     name: 'list_categories',
@@ -176,10 +228,15 @@ const sharedTools: McpToolDef[] = [
   },
   {
     name: 'list_channels',
-    description: '推送渠道列表：toast=系统通知，onebot=QQ（targetType group/private + targetId 群号/QQ号）',
+    description: '推送渠道列表：toast=系统通知，onebot=QQ（targetType group/private + targetId 群号/QQ号）。'
+      + 'gateway 令牌只能看到本渠道这一条（别的渠道不在可见范围内）',
     schema: {},
     role: 'shared',
-    handler: (deps) => deps.db.listPushChannels(),
+    handler: (deps, _args, ctx) => {
+      const all = deps.db.listPushChannels();
+      const ch = scopeChannelForRead(ctx);
+      return ch === undefined ? all : all.filter((c) => c.id === ch);
+    },
   },
   {
     name: 'search_posts',
@@ -1030,24 +1087,28 @@ const adminTools: McpToolDef[] = [
   },
 ];
 
-// ---- gateway 专属（群推送规则自助；服务端强制收敛，不信任任何调用方声明的群号/身份）----
+// ---- gateway 专属（渠道推送规则自助；渠道只由令牌绑定的调用域确定，不信任任何调用方声明的身份）----
 
 const gatewayTools: McpToolDef[] = [
   {
     name: 'list_group_channels',
-    description: '可自助配置的 QQ 群渠道列表（已启用的 onebot 群渠道）',
+    description: '本渠道（令牌绑定的 QQ 群/私聊）信息：id / 名称 / targetType / 群号或 QQ 号。'
+      + '只回本渠道一条——别的渠道不在本渠道的可见范围内',
     schema: {},
     role: 'gateway',
-    handler: (deps) =>
-      deps.db.listPushChannels()
-        .filter((c) => c.notifier === 'onebot' && c.targetType === 'group' && c.enabled)
-        .map((c) => ({ id: c.id, name: c.name, groupId: c.targetId })),
+    handler: (deps, _args, ctx) => {
+      const channelId = requireScopeChannel(ctx);
+      const c = deps.db.listPushChannels().find((x) => x.id === channelId);
+      if (!c || !isSelfServiceChannel(c)) return []; // 令牌绑的渠道不可自助（toast/停用/已删）→ 空列表
+      return [{ id: c.id, name: c.name, targetType: c.targetType, groupId: c.targetId }];
+    },
   },
   {
     name: 'add_group_push_rule',
-    description: `往某个 QQ 群渠道添加主播开播推送规则。限制：主播必须已在监听名单（否则先让主人在面板添加）；单群最多 ${MAX_MCP_RULES_PER_CHANNEL} 条自助规则；同主播同分类去重`,
+    description: `往**本渠道**（令牌绑定的 QQ 群/私聊，渠道不需要也不接受传参）添加主播开播推送规则。`
+      + `限制：主播必须已在监听名单（否则先让主人在面板添加）；本渠道自助规则最多 ${MAX_MCP_RULES_PER_CHANNEL} 条；同主播同分类去重`,
+    // 身份字段不进 schema：渠道由 ctx.scope.channelId 注入（LLM 填了也会被 zod 剥离）
     schema: {
-      channelId: idSchema.describe('群渠道 id（先 list_group_channels 获取）'),
       uid: uidSchema.describe('主播 uid（先 search_streamers 确认）'),
       categoryId: idSchema.nullable().optional().describe('分类 id（list_categories 获取）；null/不传 = 任意开播都推'),
       messageTemplate: z.string().optional().describe('推送词覆盖，{liver}/{uname}/{title} 占位；不传 = 内置默认'),
@@ -1056,12 +1117,9 @@ const gatewayTools: McpToolDef[] = [
     role: 'gateway',
     write: true,
     handler: (deps, args, ctx) => {
-      if (!mcpWriteLimiter.allow(ctx.name)) throw new HttpError(429, '操作太频繁，请稍后再试');
-      const channelId = args.channelId as number;
-      const ch = deps.db.listPushChannels().find((c) => c.id === channelId);
-      if (!ch || ch.notifier !== 'onebot' || ch.targetType !== 'group' || !ch.enabled) {
-        throw new HttpError(400, '只能往已启用的 QQ 群渠道添加规则（先 list_group_channels 看可选渠道）');
-      }
+      const channelId = requireScopeChannel(ctx);
+      if (!mcpWriteLimiter.allow(writeLimitBucket(ctx))) throw new HttpError(429, '操作太频繁，请稍后再试');
+      selfServiceChannel(deps, channelId);
       const uid = args.uid as string;
       if (!deps.db.getStreamer(uid)) {
         throw new HttpError(400, '该主播不在监听名单（想监听新主播请联系主人在面板添加）');
@@ -1073,7 +1131,7 @@ const gatewayTools: McpToolDef[] = [
       const mine = deps.db.listPushRules()
         .filter((r) => r.createdBy === 'mcp' && r.channels.includes(channelId));
       if (mine.length >= MAX_MCP_RULES_PER_CHANNEL) {
-        throw new HttpError(400, `该群的自助规则已达上限（${MAX_MCP_RULES_PER_CHANNEL} 条），请先删除不需要的`);
+        throw new HttpError(400, `本渠道的自助规则已达上限（${MAX_MCP_RULES_PER_CHANNEL} 条），请先删除不需要的`);
       }
       const dup = mine.find((r) => r.uids.includes(uid) && r.categoryId === categoryId);
       if (dup) throw new HttpError(409, `已有相同规则：#${dup.id} ${dup.name}`);
@@ -1092,20 +1150,41 @@ const gatewayTools: McpToolDef[] = [
   },
   {
     name: 'remove_group_push_rule',
-    description: '删除群自助推送规则（只能删 add_group_push_rule 创建的规则，面板创建的规则动不了）',
+    description: '让本渠道不再收到某条推送规则（只处理令牌绑定的渠道，id 从 list_push_rules 取）：'
+      + '自助规则整条删除；主人配置的规则不整条删——只把本渠道移出'
+      + '（它还推别的渠道时其余渠道原样保留；唯一渠道就是本渠道时渠道置空、规则行与内容全留）',
     schema: { id: idSchema.describe('规则 id（list_push_rules 获取）') },
     role: 'gateway',
     write: true,
     handler: (deps, args, ctx) => {
-      if (!mcpWriteLimiter.allow(ctx.name)) throw new HttpError(429, '操作太频繁，请稍后再试');
+      const channelId = requireScopeChannel(ctx);
+      if (!mcpWriteLimiter.allow(writeLimitBucket(ctx))) throw new HttpError(429, '操作太频繁，请稍后再试');
       const id = args.id as number;
       const rule = deps.db.listPushRules().find((r) => r.id === id);
       if (!rule) throw new HttpError(404, '规则不存在');
-      if (rule.createdBy !== 'mcp') {
-        throw new HttpError(403, '只能删除群自助创建的规则（createdBy=mcp），面板规则请联系主人');
+      // 渠道归属校验（不再只认 createdBy）：不推本渠道的规则，本渠道碰不到
+      if (!rule.channels.includes(channelId)) {
+        throw new HttpError(403, `规则 #${id} 不推送本渠道，本渠道无权改动（只能动 list_push_rules 里列出的规则）`);
       }
-      deps.db.deletePushRule(id);
-      return { ok: true };
+      const selfCreated = rule.createdBy === 'mcp';
+      // copy-on-write（plan「多渠道规则」）：多渠道规则先拆出只含本渠道的一条（createdBy='mcp'），
+      // 后续写只操作这条——原规则保留其余渠道、内容一行不动；单渠道就是就地操作。
+      // 拆分与后续写同一个事务：不留半成品，也不存在「拆了却没删」的中间态。
+      let split = false;
+      const ruleRemoved = deps.db.transaction(() => {
+        if (!selfCreated && rule.channels.length === 1) {
+          // 非 mcp 规则只允许**渠道级操作**（不得整条删除）：本渠道是它唯一渠道时，
+          // 移出 = channels 置空——行与内容全留（主人在面板可见可删），createdBy 原样不动。
+          // 这类规则没有「其余的渠道」可保留，因此不拆新行（拆出来也只是随即删掉）。
+          deps.db.upsertPushRule({ id, channels: [], createdBy: rule.createdBy });
+          return false;
+        }
+        const target = splitPushRuleChannel(deps.db, rule, channelId);
+        split = target.split;
+        deps.db.deletePushRule(target.id);
+        return target.id === id;
+      });
+      return { ok: true, id, split, ruleRemoved };
     },
   },
 ];

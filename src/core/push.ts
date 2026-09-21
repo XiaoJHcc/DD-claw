@@ -166,6 +166,48 @@ export function rowToRule(r: PushRuleRow): PushRule {
   };
 }
 
+/**
+ * copy-on-write 拆分（docs/plan/agent-access.md「多渠道规则：copy-on-write 拆分」）：
+ * 自助要动一条**多渠道**规则时先把它拆开——原规则保留其余渠道（`created_by` **原样不动**），
+ * 另建一条只含 `channelId` 的规则（`created_by='mcp'`）；后续自助写只操作新拆出的这条。
+ * 原规则本就只剩本渠道时**不拆**（返回原 id，就地操作）。
+ *
+ * 两侧的 `created_by` 都必须显式设定：`upsertPushRule` 不传 createdBy 时沿用原值（见 db.ts），
+ * 沿用会把面板规则标成 mcp 规则——gateway 的越权面就是这么开出来的。
+ * 拆出的副本与对原规则的改写在一个事务里（拆分与后续写同一事务的前提）。
+ *
+ * @returns `{ id, split }`：`id` = 后续写应操作的目标（拆出的一条 or 原规则），`split` = 是否真的拆了。
+ */
+export function splitPushRuleChannel(
+  db: Db,
+  rule: PushRule,
+  channelId: number,
+): { id: number; split: boolean } {
+  if (!rule.channels.includes(channelId)) {
+    throw new Error(`规则 #${rule.id} 不含渠道 #${channelId}，不能拆分（调用方须先做渠道归属校验）`);
+  }
+  if (rule.channels.length <= 1) return { id: rule.id, split: false };
+  return {
+    id: db.transaction(() => {
+      db.upsertPushRule({
+        id: rule.id,
+        channels: rule.channels.filter((c) => c !== channelId),
+        createdBy: rule.createdBy,
+      });
+      return db.upsertPushRule({
+        name: rule.name,
+        categoryId: rule.categoryId,
+        uids: rule.uids,
+        channels: [channelId],
+        messageTemplate: rule.messageTemplate,
+        enabled: rule.enabled,
+        createdBy: 'mcp',
+      });
+    }),
+    split: true,
+  };
+}
+
 // ---- verdicts：每场直播的分类判定结果 ----
 
 export interface VerdictRow {

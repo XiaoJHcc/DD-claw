@@ -1,7 +1,8 @@
 /**
  * MCP 端点测试：真实 http.Server + SDK client 走完整 Streamable HTTP 链路。
- * 覆盖：token 鉴权（401/503）、角色工具面过滤、群规则自助约束（渠道类型/名单/配额/created_by 隔离）、
- * admin 写路径（watch/运行时参数/LLM key）、写限流、search_posts 检索。
+ * 覆盖：token 鉴权（401/503）、角色工具面过滤、渠道自助约束（scope 注入的渠道类型/名单/配额/
+ * created_by 隔离/渠道归属校验/copy-on-write 拆分/未绑渠道拒绝）、读侧服务端裁剪、按渠道限流、
+ * admin 行为（写路径 + 不在自助面上）、写快照与撤销接线、search_posts 检索。
  */
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,7 +12,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Db } from '../core/db.js';
 import { createPanelServer, type PanelDeps, type PanelStatus } from '../panel/server.js';
-import { saveMcpTokens } from '../mcp/auth.js';
+import { listMcpTokens, saveMcpTokens, type McpTokenEntry } from '../mcp/auth.js';
 import { resetMcpWriteLimiter } from '../mcp/rate-limit.js';
 import { runTool } from '../mcp/run-tool.js';
 import { allToolDefs } from '../mcp/tools.js';
@@ -173,6 +174,40 @@ function seedBase(db: Db): { groupChannelId: number; toastChannelId: number; cat
   return { groupChannelId, toastChannelId, categoryId };
 }
 
+/** 追加令牌（叠加在 fixture 已有令牌上）：绑渠道的 gateway 令牌要等渠道建出来才定得下 id */
+function addTokens(db: Db, ...entries: McpTokenEntry[]): void {
+  saveMcpTokens(db, [...listMcpTokens(db), ...entries]);
+}
+
+/** 绑渠道的 gateway 客户端（渠道 id 由 seed 决定，故只能在 seed 之后调） */
+async function gwClient(f: Fixture, name: string, channelId: number): Promise<Client> {
+  const token = `ddc_${name}`;
+  addTokens(f.db, { name, role: 'gateway', token, channelId });
+  return mcpClient(f, token);
+}
+
+/** 预置：A/B 两个群渠道 + 一个私聊渠道 + 一个 toast 渠道 + 一分类 + 两主播（渠道隔离测试用） */
+function seedChannels(db: Db): {
+  a: number; b: number; priv: number; toast: number; categoryId: number;
+} {
+  const a = db.upsertPushChannel({
+    name: 'A群', notifier: 'onebot', targetType: 'group', targetId: '111', enabled: true,
+  });
+  const b = db.upsertPushChannel({
+    name: 'B群', notifier: 'onebot', targetType: 'group', targetId: '222', enabled: true,
+  });
+  const priv = db.upsertPushChannel({
+    name: '私聊', notifier: 'onebot', targetType: 'private', targetId: '333', enabled: true,
+  });
+  const toast = db.upsertPushChannel({ name: '系统通知', notifier: 'toast', enabled: true });
+  const categoryId = db.upsertCategory({
+    name: '歌回', llmPrompt: null, keywords: ['歌'], areas: [], condMode: 'and', enabled: true,
+  });
+  db.upsertStreamer({ uid: '7706705', uname: '阿梓从小就很可爱', watch: true });
+  db.upsertStreamer({ uid: '1001', uname: '七海Nana7mi', watch: true });
+  return { a, b, priv, toast, categoryId };
+}
+
 beforeEach(() => resetMcpWriteLimiter());
 
 // ---- 鉴权 ----
@@ -209,68 +244,240 @@ test('gateway 看不到 admin 工具，admin 看不到 gateway 工具', async (t
   assert.ok(!admTools.includes('add_group_push_rule')); // admin 走全量规则 CRUD
 });
 
-// ---- gateway 群规则自助 ----
+// ---- gateway 渠道自助（渠道只来自令牌绑定的调用域）----
 
-test('add_group_push_rule：正常建（createdBy=mcp）+ 渠道类型/名单/分类约束', async (t) => {
+test('add_group_push_rule：渠道由 scope 注入（参数里没有渠道）；名单/分类/去重/渠道类型约束', async (t) => {
   const f = await setup(t);
   const { groupChannelId, toastChannelId, categoryId } = seedBase(f.db);
-  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const gw = await gwClient(f, 'gwA', groupChannelId);
 
-  const ok = (await call(gw, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705', categoryId })) as { id: number };
+  const ok = (await call(gw, 'add_group_push_rule', { uid: '7706705', categoryId })) as { id: number };
   const rule = f.db.listPushRules().find((r) => r.id === ok.id)!;
   assert.equal(rule.createdBy, 'mcp');
-  assert.deepEqual(rule.channels, [groupChannelId]);
+  assert.deepEqual(rule.channels, [groupChannelId], '渠道 = 令牌绑定的那条');
   assert.deepEqual(rule.uids, ['7706705']);
 
-  // toast 渠道拒、不存在的主播拒、不存在的分类拒、重复拒
-  await assert.rejects(call(gw, 'add_group_push_rule', { channelId: toastChannelId, uid: '7706705' }), /群渠道/);
-  await assert.rejects(call(gw, 'add_group_push_rule', { channelId: groupChannelId, uid: '999' }), /不在监听名单/);
-  await assert.rejects(call(gw, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705', categoryId: 9999 }), /分类不存在/);
-  await assert.rejects(call(gw, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705', categoryId }), /已有相同规则/);
+  // 身份字段不进 schema：tools/list 里看不到，参数里塞了也会被 zod 剥离
+  const schema = (await gw.listTools()).tools.find((x) => x.name === 'add_group_push_rule')!.inputSchema;
+  assert.equal('channelId' in (schema.properties ?? {}), false, 'add_group_push_rule 的 schema 里没有渠道字段');
+  const spoof = (await call(gw, 'add_group_push_rule', {
+    uid: '7706705', channelId: toastChannelId, groupId: '999',
+  })) as { id: number };
+  assert.deepEqual(f.db.listPushRules().find((r) => r.id === spoof.id)!.channels, [groupChannelId],
+    '参数里的渠道声明无效（写在令牌绑定的渠道上）');
 
-  // list_group_channels 只回群渠道
-  const groups = (await call(gw, 'list_group_channels')) as Array<{ id: number; groupId: string }>;
-  assert.deepEqual(groups, [{ id: groupChannelId, name: '粉丝群', groupId: '12345' }]);
+  // 不存在的主播拒、不存在的分类拒、重复拒
+  await assert.rejects(call(gw, 'add_group_push_rule', { uid: '999' }), /不在监听名单/);
+  await assert.rejects(call(gw, 'add_group_push_rule', { uid: '7706705', categoryId: 9999 }), /分类不存在/);
+  await assert.rejects(call(gw, 'add_group_push_rule', { uid: '7706705', categoryId }), /已有相同规则/);
+
+  // 渠道类型：绑到 toast 渠道的令牌自助被拒（空列表 + add 拒绝）
+  const gwToast = await gwClient(f, 'gwToast', toastChannelId);
+  await assert.rejects(call(gwToast, 'add_group_push_rule', { uid: '7706705' }), /QQ 群\/私聊渠道/);
+  assert.deepEqual(await call(gwToast, 'list_group_channels'), []);
+
+  // list_group_channels 只回本渠道一条
+  const groups = (await call(gw, 'list_group_channels')) as Array<{ id: number; targetType: string; groupId: string }>;
+  assert.deepEqual(groups, [{ id: groupChannelId, name: '粉丝群', targetType: 'group', groupId: '12345' }]);
 });
 
-test('remove_group_push_rule：只能删 createdBy=mcp 的规则', async (t) => {
+test('渠道类型放开：私聊渠道一视同仁（list_group_channels 回本渠道、add 成功）', async (t) => {
+  const f = await setup(t);
+  const { priv, categoryId } = seedChannels(f.db);
+  const gw = await gwClient(f, 'gwPriv', priv);
+
+  assert.deepEqual(await call(gw, 'list_group_channels'), [
+    { id: priv, name: '私聊', targetType: 'private', groupId: '333' },
+  ]);
+  const ok = (await call(gw, 'add_group_push_rule', { uid: '7706705', categoryId })) as { id: number };
+  assert.deepEqual(f.db.listPushRules().find((r) => r.id === ok.id)!.channels, [priv], '私聊渠道与群同一条路径');
+});
+
+test('未绑渠道的 gateway：读写一律拒绝（绝不回落默认渠道，也不回落「全部」）', async (t) => {
+  const f = await setup(t);
+  seedBase(f.db);
+  const gw = await mcpClient(f, GATEWAY_TOKEN); // fixture 的 gateway 令牌未绑渠道
+
+  await assert.rejects(call(gw, 'add_group_push_rule', { uid: '7706705' }), /未绑定渠道/);
+  await assert.rejects(call(gw, 'remove_group_push_rule', { id: 1 }), /未绑定渠道/);
+  await assert.rejects(call(gw, 'list_push_rules'), /未绑定渠道/);
+  await assert.rejects(call(gw, 'list_group_channels'), /未绑定渠道/);
+  assert.deepEqual(f.db.listPushRules(), [], '一行都没写');
+});
+
+test('remove_group_push_rule：非 mcp 单渠道规则也移出本渠道（channels 置空、行与内容保留、可撤销）', async (t) => {
   const f = await setup(t);
   const { groupChannelId } = seedBase(f.db);
-  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const gw = await gwClient(f, 'gwA', groupChannelId);
 
-  // 面板规则（createdBy=null）动不了
-  const panelRuleId = f.db.upsertPushRule({ name: '面板规则', categoryId: null, uids: [], channels: [groupChannelId], messageTemplate: null, enabled: true });
-  await assert.rejects(call(gw, 'remove_group_push_rule', { id: panelRuleId }), /群自助/);
+  // 面板规则（createdBy=null）且只推本渠道：只允许渠道级操作 → channels 置空，不整条删
+  const panelRuleId = f.db.upsertPushRule({
+    name: '面板规则', categoryId: null, uids: ['7706705'], channels: [groupChannelId],
+    messageTemplate: '{liver} 来了', enabled: true,
+  });
+  const r = (await call(gw, 'remove_group_push_rule', { id: panelRuleId })) as {
+    ok: boolean; id: number; split: boolean; ruleRemoved: boolean;
+  };
+  assert.deepEqual(r, { ok: true, id: panelRuleId, split: false, ruleRemoved: false },
+    '渠道级移出（不是整条删除，也没有可拆的其余渠道）');
 
-  const created = (await call(gw, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705' })) as { id: number };
-  await call(gw, 'remove_group_push_rule', { id: created.id });
-  assert.equal(f.db.listPushRules().some((r) => r.id === created.id), false);
-  assert.ok(f.db.listPushRules().some((r) => r.id === panelRuleId)); // 面板规则还在
+  const kept = f.db.listPushRules().find((x) => x.id === panelRuleId)!;
+  assert.deepEqual(kept.channels, [], '本渠道已移出（规则不再推任何地方）');
+  assert.equal(kept.createdBy, null, 'createdBy 保持原值（不是自助规则）');
+  assert.equal(kept.name, '面板规则', '行与内容全留（主人可在面板删除）');
+  assert.equal(kept.messageTemplate, '{liver} 来了');
+  assert.deepEqual(kept.uids, ['7706705']);
+  assert.equal(kept.categoryId, null);
+  assert.equal(kept.enabled, true);
+
+  // 渠道级移出也是写路径：走本渠道撤销栈，撤销即还原
+  await call(gw, 'undo_last_change');
+  assert.deepEqual(f.db.listPushRules().find((x) => x.id === panelRuleId)!.channels, [groupChannelId],
+    '撤销还原本渠道');
+});
+
+test('remove_group_push_rule：自助规则只推本渠道 → 就地整条删除', async (t) => {
+  const f = await setup(t);
+  const { groupChannelId } = seedBase(f.db);
+  const gw = await gwClient(f, 'gwA', groupChannelId);
+
+  const created = (await call(gw, 'add_group_push_rule', { uid: '7706705' })) as { id: number };
+  const r = (await call(gw, 'remove_group_push_rule', { id: created.id })) as {
+    ok: boolean; id: number; split: boolean; ruleRemoved: boolean;
+  };
+  assert.deepEqual(r, { ok: true, id: created.id, split: false, ruleRemoved: true });
+  assert.equal(f.db.listPushRules().some((x) => x.id === created.id), false, '自助规则整条删除');
+});
+
+test('remove_group_push_rule：渠道归属校验——推别的渠道的规则碰不到', async (t) => {
+  const f = await setup(t);
+  const { a, b } = seedChannels(f.db);
+  const gwA = await gwClient(f, 'gwA', a);
+  const gwB = await gwClient(f, 'gwB', b);
+  const bRule = (await call(gwB, 'add_group_push_rule', { uid: '7706705' })) as { id: number };
+
+  await assert.rejects(call(gwA, 'remove_group_push_rule', { id: bRule.id }), /不推送本渠道/);
+  assert.ok(f.db.listPushRules().some((r) => r.id === bRule.id), 'B 群的规则一行不动');
+  await call(gwB, 'remove_group_push_rule', { id: bRule.id }); // 自己那条照删
+});
+
+test('remove_group_push_rule：多渠道规则走 copy-on-write（原规则保留其余渠道、内容一行不动）', async (t) => {
+  const f = await setup(t);
+  const { a, b } = seedChannels(f.db);
+  const gwA = await gwClient(f, 'gwA', a);
+
+  // 面板规则推 A+B（本渠道是其中一条）
+  const sharedId = f.db.upsertPushRule({
+    name: '双群规则', categoryId: null, uids: ['7706705'], channels: [a, b],
+    messageTemplate: '{liver} 来了', enabled: true,
+  });
+  const r = (await call(gwA, 'remove_group_push_rule', { id: sharedId })) as {
+    ok: boolean; id: number; split: boolean; ruleRemoved: boolean;
+  };
+  assert.deepEqual(r, { ok: true, id: sharedId, split: true, ruleRemoved: false });
+
+  const rules = f.db.listPushRules();
+  assert.equal(rules.length, 1, '拆出的副本随同一次写删掉，不留半成品');
+  const kept = rules[0]!;
+  assert.equal(kept.id, sharedId, '原规则还是它自己（不是新拆的那条）');
+  assert.deepEqual(kept.channels, [b], '原规则保留其余渠道');
+  assert.equal(kept.createdBy, null, '原规则 createdBy 原样，没被标成 mcp 规则');
+  assert.equal(kept.name, '双群规则', '内容一行不动');
+  assert.equal(kept.messageTemplate, '{liver} 来了');
+  assert.deepEqual(kept.uids, ['7706705']);
+
+  // 自助的多渠道规则同理（admin 给它加了别的渠道后，本渠道只能把自己移出）
+  const mcpId = (await call(gwA, 'add_group_push_rule', { uid: '7706705' })) as { id: number };
+  const mcpRule = f.db.listPushRules().find((x) => x.id === mcpId.id)!;
+  f.db.upsertPushRule({ id: mcpId.id, channels: [...mcpRule.channels, b] }); // 不动 createdBy → 仍是 mcp 规则
+  const r2 = (await call(gwA, 'remove_group_push_rule', { id: mcpId.id })) as { split: boolean; ruleRemoved: boolean };
+  assert.deepEqual(r2, { ok: true, id: mcpId.id, split: true, ruleRemoved: false });
+  assert.deepEqual(f.db.listPushRules().find((x) => x.id === mcpId.id)!.channels, [b], '原规则保留 B 群');
 });
 
 test('add_group_push_rule：单渠道 20 条配额上限', async (t) => {
   const f = await setup(t);
   const { groupChannelId } = seedBase(f.db);
   for (let i = 1; i <= 20; i++) f.db.upsertStreamer({ uid: String(1000 + i), uname: `主播${i}` });
-  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const gw = await gwClient(f, 'gwA', groupChannelId);
   for (let i = 1; i <= 20; i++) {
-    await call(gw, 'add_group_push_rule', { channelId: groupChannelId, uid: String(1000 + i) });
+    await call(gw, 'add_group_push_rule', { uid: String(1000 + i) });
   }
   resetMcpWriteLimiter(); // 绕过限流，专测配额
   await assert.rejects(
-    call(gw, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705', categoryId: null, name: 'x', messageTemplate: 'y' }),
+    call(gw, 'add_group_push_rule', { uid: '7706705', categoryId: null, name: 'x', messageTemplate: 'y' }),
     /已达上限/,
   );
 });
 
-test('gateway 写限流：20 次/10 分钟后拒绝', async (t) => {
+test('gateway 写限流：20 次/10 分钟后拒绝（按渠道分桶：A 群打满不影响 B 群）', async (t) => {
   const f = await setup(t);
-  seedBase(f.db);
-  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const { a, b } = seedChannels(f.db);
+  const gwA = await gwClient(f, 'gwA', a);
+  const gwB = await gwClient(f, 'gwB', b);
   for (let i = 0; i < 20; i++) {
-    await assert.rejects(call(gw, 'remove_group_push_rule', { id: 99999 }), /规则不存在/);
+    await assert.rejects(call(gwA, 'remove_group_push_rule', { id: 99999 }), /规则不存在/);
   }
-  await assert.rejects(call(gw, 'remove_group_push_rule', { id: 99999 }), /太频繁/);
+  await assert.rejects(call(gwA, 'remove_group_push_rule', { id: 99999 }), /太频繁/);
+
+  // 另一个渠道的桶是独立的：B 群照常能写（A 群吵不影响 B 群）
+  const okB = (await call(gwB, 'add_group_push_rule', { uid: '7706705' })) as { id: number };
+  assert.ok(okB.id > 0, 'B 群的桶没被 A 群打满');
+
+  // 同一渠道的另一条令牌共桶（一渠道一桶，换令牌不改桶）
+  const gwA2 = await gwClient(f, 'gwA2', a);
+  await assert.rejects(call(gwA2, 'remove_group_push_rule', { id: 99999 }), /太频繁/);
+});
+
+// ---- 读侧服务端裁剪 + admin 行为不变 ----
+
+test('读侧服务端裁剪：gateway 只看到本渠道规则与渠道；admin 全量（行为不变）', async (t) => {
+  const f = await setup(t);
+  const { a, b, priv, toast } = seedChannels(f.db);
+  const gwA = await gwClient(f, 'gwA', a);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  const rA = f.db.upsertPushRule({ name: 'A 规则', categoryId: null, uids: [], channels: [a], messageTemplate: null, enabled: true });
+  const rB = f.db.upsertPushRule({ name: 'B 规则', categoryId: null, uids: [], channels: [b], messageTemplate: null, enabled: true });
+  const rShared = f.db.upsertPushRule({ name: 'A+B 共享', categoryId: null, uids: [], channels: [a, b], messageTemplate: null, enabled: true });
+
+  const mine = (await call(gwA, 'list_push_rules')) as Array<{ id: number; sharedWithOtherChannels: boolean }>;
+  assert.deepEqual(mine.map((r) => r.id), [rA, rShared], '只回本渠道的规则（含与其他渠道共享的多渠道规则）');
+  assert.equal(mine.find((r) => r.id === rShared)!.sharedWithOtherChannels, true, '共享的多渠道规则带标注');
+  assert.equal(mine.find((r) => r.id === rA)!.sharedWithOtherChannels, false);
+  assert.equal(mine.some((r) => r.id === rB), false, '别渠道的规则不进上下文');
+
+  const chans = (await call(gwA, 'list_channels')) as Array<{ id: number }>;
+  assert.deepEqual(chans.map((c) => c.id), [a], 'gateway 只看到本渠道一条渠道（别渠道的群号不进上下文）');
+
+  // admin / 面板：全量、形状与改造前一致（不带裁剪标注）
+  const all = (await call(adm, 'list_push_rules')) as Array<{ id: number; sharedWithOtherChannels?: boolean }>;
+  assert.deepEqual(all.map((r) => r.id), [rA, rB, rShared]);
+  assert.equal('sharedWithOtherChannels' in all[0]!, false, 'admin 拿到的规则对象形状不变');
+  assert.deepEqual(((await call(adm, 'list_channels')) as Array<{ id: number }>).map((c) => c.id), [a, b, priv, toast]);
+});
+
+test('admin 行为不变：自助工具对 admin 不可见；落到自助 handler 上被明确拒绝（不静默写某个渠道）', async (t) => {
+  const f = await setup(t);
+  const { a, b } = seedChannels(f.db);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const admTools = (await adm.listTools()).tools.map((x) => x.name);
+  for (const name of ['add_group_push_rule', 'remove_group_push_rule', 'list_group_channels']) {
+    assert.equal(admTools.includes(name), false, `admin 不应看到渠道自助工具 ${name}`);
+  }
+
+  // admin 侧指定渠道一直有别的形状：upsert_push_rule 的 channels 参数（全量 CRUD，行为不变）
+  const { id } = (await call(adm, 'upsert_push_rule', { name: '双群规则', channels: [a, b] })) as { id: number };
+  assert.deepEqual(f.db.listPushRules().find((r) => r.id === id)!.channels, [a, b]);
+  assert.equal(f.db.listPushRules().find((r) => r.id === id)!.createdBy, null, 'admin 建的是面板规则（非 mcp 标记）');
+
+  // 万一有别的接线用 admin ctx 直调自助工具：明确 403 指路，绝不静默挑渠道
+  const def = allToolDefs().find((d) => d.name === 'add_group_push_rule')!;
+  const r = await runTool({} as PanelDeps, def, { uid: '7706705' }, { name: 'panel', role: 'admin', scope: {} });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 403);
+  assert.match(r.error, /admin 令牌没有渠道 scope/);
+  assert.equal(f.db.listPushRules().length, 1, '拒绝时一行都不写');
 });
 
 // ---- admin 写路径 ----
@@ -770,9 +977,9 @@ test('MCP 写落变更记录：admin 进全局栈；gateway 按令牌绑定渠�
   const adm = await mcpClient(f, ADMIN_TOKEN);
   await call(adm, 'set_push_enabled', { enabled: false });
   const gw7 = await mcpClient(f, 'ddc_gw7');
-  await call(gw7, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705' });
+  await call(gw7, 'add_group_push_rule', { uid: '7706705' });
   // 失败调用不落记录
-  await assert.rejects(call(gw7, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705' }), /已有相同规则/);
+  await assert.rejects(call(gw7, 'add_group_push_rule', { uid: '7706705' }), /已有相同规则/);
 
   const adminHist = f.undo.history({ scope: adminScope() });
   assert.equal(adminHist.length, 1);
@@ -810,7 +1017,7 @@ test('undo_last_change：未绑渠道的 gateway 拒绝；gateway 只撤本渠�
 
   // admin 写一笔进全局栈；gateway 写一笔进本渠道栈
   await call(adm, 'set_push_enabled', { enabled: false });
-  const rule = (await call(gw7, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705' })) as { id: number };
+  const rule = (await call(gw7, 'add_group_push_rule', { uid: '7706705' })) as { id: number };
 
   // 未绑渠道的 gateway 拒绝（绝不回落 admin 全局栈——否则 QQ 侧一句话就能回退主人配置）
   await assert.rejects(call(gw, 'undo_last_change'), /本令牌未绑定渠道，不能撤销变更/);
