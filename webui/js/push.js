@@ -420,11 +420,11 @@ makeSortable(document.getElementById('rule-list'), {
 });
 
 // 主播详情弹窗的规则行（streamers.js 渲染，data-action 委托到这张表）：关详情弹窗 →
-// 切到设置视图 → 直接打开该规则的编辑弹窗（刷新缓存后开，规则已删则 toast 提示）
+// 切到主播视图（推送规则卡已随直播设置搬入主播分页）→ 直接打开该规则的编辑弹窗（刷新缓存后开，规则已删则 toast 提示）
 ACTIONS['goto-push-rule'] = function (el) {
   const rid = Number(el.getAttribute('data-rid'));
   closeSheet(1);
-  const nav = document.querySelector('.nav-item[data-view="settings"]');
+  const nav = document.querySelector('.nav-item[data-view="streamers"]');
   if (nav) nav.click();
   loadPush().then(function () { openPushRuleSheet(rid); });
 };

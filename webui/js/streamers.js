@@ -1,4 +1,4 @@
-// 面板前端 · 主播列表视图（v2 竖版严格三段式卡片 .st-card）+ 详情弹窗（字段编辑 + 生效推送规则纯展示）。
+// 面板前端 · 主播分页（v2 竖版严格三段式卡片 .st-card）+ 详情弹窗（字段编辑 + 生效推送规则纯展示）。
 //   ① 关键帧横幅 = 独立卡片头（16/9，在播粉色描边只描头部块）：粉底 LIVE 角标融开播时长、
 //      右上在线人数次要胶囊；标题/分区叠在只包文字区域的磨砂圆角衬底上；
 //      下播 = 压灰画面 + 底部一行下播时间，无画面 = video-off 占位。
@@ -131,7 +131,7 @@ export function loadStreamers() {
         (((b.live && b.live.lastLiveAt) || 0) - ((a.live && a.live.lastLiveAt) || 0));
     });
     document.getElementById('streamer-list').innerHTML =
-      active.map(streamerCard).join('') || '<p class="hint">名单为空（从设置视图的关注列表加入）。</p>';
+      active.map(streamerCard).join('') || '<p class="hint">名单为空（从下方关注列表加入）。</p>';
     // 侧栏在播计数
     const cnt = document.getElementById('side-live-count');
     if (cnt) cnt.textContent = String(active.filter(function (s) { return s.live && s.live.isLive; }).length);
@@ -239,7 +239,7 @@ function loadModalRules() {
     }).catch(function (e) { toast(e.message, true); });
 }
 
-// 点击规则行（data-action="goto-push-rule"）由 push.js 处理：关弹窗 → 切设置视图 → 直接打开编辑弹窗
+// 点击规则行（data-action="goto-push-rule"）由 push.js 处理：关弹窗 → 切主播视图 → 直接打开编辑弹窗
 
 // ---- 启动与轮询：监听卡 60s（listen.js），主播列表 30s（弹窗 DOM 不被重建） ----
 loadStreamers();

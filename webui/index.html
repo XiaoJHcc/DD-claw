@@ -14,9 +14,9 @@
 </div>
 <nav class="side-nav">
 <button class="nav-item active" data-action="nav-view" data-view="schedule"><i data-icon="calendar"></i><span>时间表</span></button>
-<button class="nav-item" data-action="nav-view" data-view="streamers"><i data-icon="users"></i><span>主播列表</span></button>
-<button class="nav-item" data-action="nav-view" data-view="settings"><i data-icon="gear"></i><span>设置</span></button>
+<button class="nav-item" data-action="nav-view" data-view="streamers"><i data-icon="users"></i><span>主播</span></button>
 <button class="nav-item" data-action="nav-view" data-view="x"><i data-icon="send"></i><span>图文</span></button>
+<button class="nav-item" data-action="nav-view" data-view="settings"><i data-icon="gear"></i><span>设置</span></button>
 </nav>
 <div class="side-foot">
 <span class="live-count"><i class="pulse"></i>在播 <b id="side-live-count">0</b></span>
@@ -34,11 +34,7 @@
 </div>
 
 <div class="view hidden" id="view-streamers">
-<div class="st-grid" id="streamer-list">加载中…</div>
-</div>
-
-<div class="view hidden" id="view-settings">
-<div class="set-grid" id="settings-grid">
+<div class="set-grid">
 <section class="card set-card acc-pink" id="card-listen">
 <div class="card-head"><span class="card-ic" data-icon="headphone"></span><h2>监听</h2></div>
 <div id="listen-rows">加载中…</div>
@@ -47,6 +43,37 @@
 </div>
 </section>
 
+<section class="card set-card acc-amber" id="card-categories">
+<div class="card-head"><span class="card-ic" data-icon="tag"></span><h2>分类规则</h2></div>
+<div id="category-list">加载中…</div>
+<div class="card-actions">
+<button class="btn btn-ghost" data-action="add-category"><span data-icon="plus"></span>新增分类</button>
+</div>
+</section>
+
+<section class="card set-card acc-mint" id="card-rules">
+<div class="card-head"><span class="card-ic" data-icon="list"></span><h2>推送规则</h2></div>
+<div id="rule-list">加载中…</div>
+<div class="card-actions">
+<button class="btn btn-ghost" data-action="add-push-rule"><span data-icon="plus"></span>添加规则</button>
+</div>
+</section>
+</div>
+
+<div class="st-grid" id="streamer-list">加载中…</div>
+
+<section class="card acc-blue" id="card-follows">
+<div class="card-head"><span class="card-ic" data-icon="users"></span><h2>关注列表</h2>
+<div class="card-head-end">
+<div class="search-box"><i data-icon="search"></i><input class="inp" id="follow-search" data-input="follow-search" placeholder="搜索昵称 / UID"></div>
+</div>
+</div>
+<div id="follow-list" class="follow-grid">加载中…</div>
+</section>
+</div>
+
+<div class="view hidden" id="view-settings">
+<div class="set-grid" id="settings-grid">
 <section class="card set-card acc-cyan" id="card-napcat">
 <div class="card-head"><span class="card-ic" data-icon="bot"></span><h2>NapCat</h2>
 <div class="card-head-end">
@@ -85,32 +112,7 @@
 <button class="btn btn-line" data-action="open-push-settings"><span data-icon="sliders"></span>推送设置</button>
 </div>
 </section>
-
-<section class="card set-card acc-amber" id="card-categories">
-<div class="card-head"><span class="card-ic" data-icon="tag"></span><h2>分类规则</h2></div>
-<div id="category-list">加载中…</div>
-<div class="card-actions">
-<button class="btn btn-ghost" data-action="add-category"><span data-icon="plus"></span>新增分类</button>
 </div>
-</section>
-
-<section class="card set-card acc-mint" id="card-rules">
-<div class="card-head"><span class="card-ic" data-icon="list"></span><h2>推送规则</h2></div>
-<div id="rule-list">加载中…</div>
-<div class="card-actions">
-<button class="btn btn-ghost" data-action="add-push-rule"><span data-icon="plus"></span>添加规则</button>
-</div>
-</section>
-</div>
-
-<section class="card acc-blue" id="card-follows">
-<div class="card-head"><span class="card-ic" data-icon="users"></span><h2>关注列表</h2>
-<div class="card-head-end">
-<div class="search-box"><i data-icon="search"></i><input class="inp" id="follow-search" data-input="follow-search" placeholder="搜索昵称 / UID"></div>
-</div>
-</div>
-<div id="follow-list" class="follow-grid">加载中…</div>
-</section>
 </div>
 
 <div class="view hidden" id="view-x">

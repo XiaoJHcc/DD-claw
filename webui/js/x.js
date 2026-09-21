@@ -383,8 +383,7 @@ function postRuleRowHtml(r) {
 function renderPostRules() {
   const box = document.getElementById('post-rule-list');
   if (!box) return;
-  box.innerHTML = postRuleCache.map(postRuleRowHtml).join('') ||
-    '<p class="hint">还没有图文规则——新建一条，符合筛选的新帖就会推送</p>';
+  box.innerHTML = postRuleCache.map(postRuleRowHtml).join('');
 }
 
 // 拖拽排序：规则全局顺序落库
@@ -805,8 +804,7 @@ function renderSheetRules() {
   // 规则平台无关：列全部规则，任何账号可选用任何规则
   box.innerHTML = postRuleCache.map(function (r) {
     return pickRuleRowHtml(r, picked.indexOf(String(r.id)) >= 0);
-  }).join('') ||
-    '<p class="hint">还没有图文规则——去页面上方「图文规则」卡新建</p>';
+  }).join('');
 }
 
 // 选用/取消选用：PUT 账号 ruleIds 即改即存（规则的启用状态仍在规则卡上单独管）

@@ -474,6 +474,10 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
    ③ 动态段（极浅灰内嵌容器，弱化定高：默认展开第一条三行带图，hover 其余行互斥换展、总高恒定）
    ============================================================ */
 .st-grid{display:grid;gap:var(--pad);grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+/* 主播分页三段（顶部直播设置卡组 → 主播网格 → 底部关注列表）：段间用壳层大间距 --sp-5
+   （set-grid 自带的 --pad 底距是卡片区内部间距，这里升级为分段间距） */
+#view-streamers .set-grid{margin-bottom:var(--sp-5)}
+#view-streamers .st-grid{margin-bottom:var(--sp-5)}
 .st-card{position:relative;display:flex;flex-direction:column;background:var(--card-bg);border-radius:var(--r-lg);
   box-shadow:var(--shadow);cursor:pointer;
   /* hover = 正面 3D 浮起（教科书式单函数写法，零补偿）：
