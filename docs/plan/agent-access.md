@@ -303,9 +303,13 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
 
 **P2 不是「DD-claw 零改动」**：渠道类型放开 / copy-on-write 拆分 / 删除路径渠道归属校验 / 按渠道限流审计，共四处改动 + 调用域地基。详案见下文「P2 详案」。
 
+**已落地（2026-09-22）**：DD-claw 侧 = gateway 渠道隔离收敛（`channelId` 移出 `add_group_push_rule` schema 改 `ctx.scope.channelId` 注入、未绑渠道 403 不回落；`list_push_rules` / `list_channels` / `list_group_channels` 服务端按 scope 裁剪；渠道类型放开 `group|private`；copy-on-write 拆分原语 `splitPushRuleChannel`（`src/core/push.ts`）+ 删除路径渠道归属校验（自助规则整条删 / 多渠道拆分移出 / 非 mcp 规则只移出本渠道——唯一渠道即本渠道时 `channels` 置空、行保留，已拍板）；写限流改按 `ch:<channelId>` 分桶）。插件侧 = 独立目录 `dd-claw-maibot-plugin/`（`plugin.py` 三个 `@Tool` 动作 + httpx 客户端 SSE/JSON 双解析 + initialize 兜底 + `@Command`），本机 **MaiBot 1.1.4 + maibot_sdk 2.7.1 实测 146 用例全过**；版本假设与 SDK 下限见插件 README。
+
 ### P3：NapCat 直连
 
 前置 = 决定绕过 MaiBot（或 MaiBot 不监听群聊）。~200 行（事件接收 + 触发纪律 + 对话限流）+ P1 的 loop + P0 地基。**斜杠命令（确定性）与 LLM 对话（复用 P1 loop）两条路共存、可同时启用**——确定性命令在 P2 插件侧同样可用（`@Command`），所以「斜杠优先」不构成选 P3 的理由。
+
+**已落地（2026-09-22，`src/qqbot/`，与 P2 并存、用户任选）**：`POST /onebot` 事件接收（不在 /api 下，恒 200 + 动作摘要）；loop 泛化（`AgentOptions` 传 scope/role/actor/systemPrompt，面板行为零变化）；触发纪律 = `/reset`、`/help` 确定性命令 + 群聊 @机器人或前缀（缺省 `dd`）进 LLM + **私聊直通**（产品解释见 `docs/modules/qqbot.md`）；会话→渠道映射 `settings.qq_channel_map`（查不到 = 拒绝服务不回落）；按渠道对话限流（10 轮/分钟）；回执裁剪（450 字保守阈值）+ 上下文阈值 `/reset` 附言；NapCat 上报地址条目自管（`network.httpClients` 的 `dd-claw-qqbot` 条目，幂等 + 热重载，手工兜底步骤见模块文档）。变更记录 entry=`agent`、actor=`qqbot-<会话键>`、撤销走本渠道栈。
 
 ### 共享新组件（一次投入，多前端复用）
 

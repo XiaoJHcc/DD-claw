@@ -37,6 +37,7 @@
 | /mcp | MCP 端点（Bearer token 鉴权 + 按角色注册工具面），实现委托 src/mcp/ |
 | GET /api/undo/history · POST /api/undo | 变更历史（新→旧：`{id,tool,entry,actor,scope,at(秒),undone,tables(去重),rows}`）与撤销执行器；**POST 忽略 body**，撤 admin 全局栈栈顶——空栈 404、逐行比对中止 409（一行不动）；**唯一不经注册表的写路由**（写由 UndoStore 完成、不入快照，路由直接调 `deps.undoLast`，热生效回调在装配根） |
 | GET /api/chat/history · POST /api/chat · POST /api/chat/reset · PUT /api/chat/mode | WebUI Agent 对话（P1）：history 回 `{messages:[{role,content,at(秒)}],mode,usage}`（tool 结果与空轮次不上屏）；POST /api/chat 跑 `runAgentTurn`（空消息/LLM 未就绪 400、调用失败 502）；reset 清消息保会话行（非配置写，不入撤销）；mode 经注册表 `set_chat_mode`（`chat_write_mode`，缺省 ask=写前询问） |
+| POST /onebot | OneBot 11 事件接收（NapCat 直连 P3）：qqbot dep 存在才挂，**不在 /api 下**（消息入口非主人能力面），恒 200 + 动作摘要 `{ok,action,reason?}`；详见 docs/modules/qqbot.md |
 | GET/PUT /api/x · POST /api/x/test | X 连接配置与探测（GET **只读快照、绝不打网络**；POST 测试允许未保存的输入值「先测后存」，只有测已保存配置才更新快照；配置变了相关旧结论作废） |
 | /api/x/accounts · /:id | X 独立名单 CRUD；新建时走免登录存在性校验（账号不存在 400 / 链路不通照收并回报 `verify`），**POST 后经 `kickAccount` 即时首拉**（不等周期、不在全量轮里排队）；`biliUid` 必须在监听名单；`ruleIds` 选用图文帖规则（规则存在即可，规则平台无关） |
 | /api/weibo · /api/weibo/accounts · /:id | 微博运行状态快照（GET 只读；**面板当前不消费**，保留给后续可视化）+ 微博独立名单 CRUD；POST 时 `uid` 与 `nickname` 二选一（只填昵称走匿名解析链补 uid），重名 409、非数字 uid 400；`displayName` 为自定义显示名（卡片优先展示，留空 = 用昵称）；`ruleIds` 口径同 X（规则平台无关）；POST 后同样经 `kickAccount` 即时首拉 |

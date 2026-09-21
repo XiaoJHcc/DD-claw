@@ -43,11 +43,11 @@
 ### 轴 B — 能力面与接入
 
 ```
-                      ┌─ Web UI REST（/api/*，人点鼠标）        [已落地，待收敛到注册表]
-一个能力面            ├─ MCP over HTTP（/mcp，进程外 Host）     [已落地 v1]
+                      ┌─ Web UI REST（/api/*，人点鼠标）        [已收敛到注册表]
+一个能力面            ├─ MCP over HTTP（/mcp，进程外 Host）     [已落地 v1 + gateway 渠道隔离]
 src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [已落地 P1]
-（schema + handler    ├─ MaiBot 插件（HTTP 调 /mcp）           [目标 P2]
- + 角色标注）         └─ NapCat 直连（OneBot 事件 → 进程内）   [目标 P3]
+（schema + handler    ├─ MaiBot 插件（HTTP 调 /mcp）           [已落地 P2（插件在独立目录 dd-claw-maibot-plugin）]
+ + 角色标注）         └─ NapCat 直连（OneBot 事件 → 进程内）   [已落地 P3（src/qqbot/）]
 ```
 
 - **能力层与传输层解耦**：注册表是纯数据结构（工具名 + zod schema + handler + role），前端直接消费；`/mcp` 只是「进程外 Host」接线。
@@ -166,10 +166,11 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/mcp/handler.ts` — `/mcp` 无状态处理
 - `src/mcp/rate-limit.ts` — gateway 写限流
 - `src/agent/tool-schema.ts` — 注册表 → LLM 工具面（`AGENT_EXCLUDED_TOOLS` 显式排除名单，与 write-path-inventory 测试互锁）
-- `src/agent/loop.ts` — **WebUI Agent 的 agent loop**（`runAgentTurn` / `chatBlockedReason` / `AGENT_MAX_STEPS=8`）：面板单会话（scope=adminScope）读历史 → `[system, ...history, user]` → 循环 `deps.llm.router.completeChat`（可注入假 LLM）→ tool_calls 逐个经 `runToolTracked`（entry='agent'）执行、结果或错误文本回填 → 无 tool_calls 即终答；往来全部落 ChatStore。**不按 mode 硬拦写工具**（写纪律在系统提示层）
-- `src/agent/system-prompt.ts` — 系统提示 + 写操作模式（`settings.chat_write_mode`，缺省 `ask`=写前询问 / `auto`）：`buildSystemPrompt` / `getChatWriteMode` / `setChatWriteMode`（`set_chat_mode` 工具用它，且**不在 agent 工具面**）
-- `src/panel/server.ts` 的 `/api/chat/{history,reset,mode}` 与 `POST /api/chat` 是 WebUI Agent 的接线（chat dep 不注入则 404）
-- 细节见 `docs/modules/panel.md`、`docs/mcp.md`、`docs/plan/agent-access.md`（P1）
+- `src/agent/loop.ts` — **agent loop**（`runAgentTurn` / `chatBlockedReason` / `AGENT_MAX_STEPS=8`）：读历史 → `[system, ...history, user]` → 循环 `deps.llm.router.completeChat`（可注入假 LLM）→ tool_calls 逐个经 `runToolTracked` 执行、结果或错误文本回填 → 无 tool_calls 即终答；往来全部落 ChatStore。面板（admin 单会话）与 QQ 渠道（gateway、scope=渠道栈）共用同一 loop，`AgentOptions` 传 scope/role/actor/systemPrompt 泛化。**不按 mode 硬拦写工具**（写纪律在系统提示层）
+- `src/agent/system-prompt.ts` — 系统提示 + 写操作模式（`settings.chat_write_mode`，缺省 `ask`=写前询问 / `auto`）：`buildSystemPrompt`（面板）/ `buildQqbotSystemPrompt`（QQ 渠道变体）/ `getChatWriteMode` / `setChatWriteMode`（`set_chat_mode` 工具用它，且**不在 agent 工具面**）
+- `src/panel/server.ts` 的 `/api/chat/{history,reset,mode}` 与 `POST /api/chat` 是 WebUI Agent 的接线（chat dep 不注入则 404）；`POST /onebot` 是 NapCat 直连的事件入口（qqbot dep 存在才挂，不在 /api 下）
+- `src/qqbot/` — **NapCat 直连（P3）**：onebot-event（事件解析/@识别）· settings（`qqbot_enabled` / `qq_channel_map` / `qqbot_trigger_prefix`）· trigger（触发纪律：斜杠命令确定性 + @/前缀进 LLM，私聊直通）· reply（回执裁剪 + /reset 附言）· bot（编排，不抛异常）· napcat-post（上报地址条目自管）。细节见 `docs/modules/qqbot.md`
+- 细节见 `docs/modules/panel.md`、`docs/mcp.md`、`docs/plan/agent-access.md`
 
 ### 装配 / 工具 / 前端 / 脚本
 
@@ -223,7 +224,8 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - **B站动态图文来源 + 图文规则重构**：已落地（`bili_accounts` 独立名单〔动态型 UP 主不开播也能监听〕/ `DynamicSource` 轮询对象 = 监听主播 ∪（图文开关开着时的）动态名单，`feed_post` 只对名单账号发，名单账号头像·uname 回写 / `feed_post` 三平台推送分支 / 图文规则改为**平台无关通用规则 + 账号侧 `rule_ids` 选用**〔post_rules 去 account_ids 与 platform 两个维度〕/ 图文页「图文规则」卡 + B站账号卡与平台筛选胶囊 / MCP 三工具 / 旧规则 scope 一次性迁移到账号）。**2026-09-21 修订**：监听开关拆分（监听主播动态归档随登录常开，`listen_dynamic` 只管动态账号名单）、开播动态（LIVE_RCMD）彻底舍弃（不入库 + 一次性清旧行）、FORWARD 在 source 归一成 `retweet`、三平台账号的 ID 与平台昵称锁定为平台事实（输入面不可改，X 昵称经 verify 种入 / 抓取回写）。计划与实现记录见 `docs/plan/bili-dynamic-posts.md`
 - **图文补推语义（三平台统一，2026-09-21 拍板）**：主动关闭（账号停用→重新启用 / 图文开关手动关→重开）恢复轮**一律静默不补推**（账号表 `silent_next` 恢复位）；服务未运行期间（重启/崩溃/登录态丢失）与添加账号之前默认不推，推送设置开 `backlog_push_enabled`（「补推未运行期间的图文」）后按**时间窗（默认 6h）+ 每账号条数上限（默认 3、取最新）**双重封顶补推；三种轮次归档永不受影响，正常轮新帖全推。语义唯一权威在 `src/core/backlog.ts`
 - **能力面 P0 地基（全部落地）**：后端（切片 A–C）=`runTool` 共享执行器 + 写快照与撤销（`UndoStore` 差分前像 / 逐行比对中止 / 每渠道一栈 / 四张混合表按列过滤——`streamers` + 三张图文账号名单）+ 撤销执行器（`PanelDeps.undoLast` + `undoEffects` 热生效映射 + `POST /api/undo` / `GET /api/undo/history` + 内部工具 `undo_last_change`）+ 面板配置写 REST 全部收敛到注册表 + 鉴权口径启动日志；面板侧（P0b）= 设置页底部「变更历史」卡（`webui/js/undo.js`，栈顶撤销 + 冲突标注）。切片记录见 `docs/plan/agent-access.md`
-- **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、WebUI Agent 真机验收（P1 验收口径的实操项）、MaiBot 插件 / NapCat 直连、弹幕抓取
+- **能力面 P1–P3（QQ 入口已全落地）**：P1 = WebUI Agent（`src/agent/loop.ts` + 第五个视图「Agent」聊天面板 + 写模式开关）；P2 = MaiBot 插件（独立目录 `d:\Git\dd-claw-maibot-plugin`，3 个动作 + 渠道绑定令牌，本机 MaiBot 1.1.4 + SDK 2.7.1 实测 146 用例全过）；P3 = NapCat 直连（`src/qqbot/`：OneBot 上报接收 + 触发纪律 + 按渠道限流 + 回执裁剪）。共用前提 = **gateway 渠道隔离收敛**（`channelId` 移出 schema 改 scope 注入、读侧服务端裁剪、copy-on-write 拆分、删除渠道归属校验、限流按渠道分桶、群/私聊一视同仁）。切片记录见 `docs/plan/agent-access.md`
+- **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、WebUI Agent / QQ 入口真机验收（P1 验收口径的实操项）、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 
 
