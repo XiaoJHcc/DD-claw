@@ -6,10 +6,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { z } from 'zod';
 import { Db } from '../core/db.js';
+import { UndoStore } from '../core/undo.js';
 import type { PanelDeps } from '../panel/server.js';
 import { HttpError } from '../panel/http-util.js';
 import { resolveMcpAuth, saveMcpTokens, type McpAuth } from './auth.js';
-import { runTool, scopeChannelId, type ToolCall } from './run-tool.js';
+import { runTool, runToolTracked, scopeChannelId, undoScopeOf, type ToolCall } from './run-tool.js';
 import type { McpToolDef } from './tools.js';
 
 /** runTool 不解释 deps，测试用空壳即可 */
@@ -168,4 +169,41 @@ test('调用域解析：令牌绑定渠道 → scope；admin 与非法绑定不�
   assert.deepEqual(resolveMcpAuth(db, `Bearer ddc_gws`), { name: 'gw-str', role: 'gateway', scope: {} });
   assert.equal(resolveMcpAuth(db, 'Bearer nope'), null);
   assert.equal(resolveMcpAuth(db, undefined), null);
+});
+// ---- 撤销接线（切片 C）：scope 解析与「撤销不进快照」 ----
+
+test('undoScopeOf：admin 走全局栈；gateway 必须绑渠道，未绑定抛 403（绝不回落）', () => {
+  assert.equal(undoScopeOf(admin), 'admin');
+  assert.equal(undoScopeOf(gateway), 'ch:7');
+  const unbound: McpAuth = { name: 'gw0', role: 'gateway', scope: {} };
+  assert.throws(
+    () => undoScopeOf(unbound),
+    (e: unknown) => e instanceof HttpError && e.status === 403 && /未绑定渠道/.test(e.message),
+    '未绑渠道的 gateway 不得回落 admin 全局栈',
+  );
+});
+
+test('track:false 的写工具不进快照（撤销执行器专用）；同一写路径缺省就进', async (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+  const undo = new UndoStore(db.raw);
+  undo.migrate();
+  const toolDeps = { db, undo } as unknown as PanelDeps;
+
+  const mk = (value: string, track?: false): McpToolDef => toolDef({
+    name: 'set_push_enabled',
+    write: true,
+    ...(track === false ? { track: false as const } : {}),
+    handler: (d) => { d.db.setSetting('push_enabled', value); return { ok: true }; },
+  });
+
+  const r = await runToolTracked(toolDeps, mk('0', false), {}, admin, 'mcp');
+  assert.equal(r.ok, true);
+  assert.deepEqual(undo.history(), [], '撤销执行器这类写（track:false）不得进快照栈——否则撤销自己可撤');
+
+  await runToolTracked(toolDeps, mk('1'), {}, admin, 'mcp');
+  const hist = undo.history();
+  assert.equal(hist.length, 1, '缺省 track 的写工具照常落记录');
+  assert.equal(hist[0]!.tool, 'set_push_enabled');
+  assert.deepEqual(hist[0]!.rows[0]!.pk, { key: 'push_enabled' });
 });

@@ -6,6 +6,7 @@
  * 本文件从 server.ts 源码里**提取**写路由，任何新增且未分类的写路由都会让测试失败，
  * 强制动手的人回答两个概念上分开的问题：
  *   ① coverage（回滚覆盖）：这条写是否必须过工具注册表——决定 P0「写操作彻底可撤销」是否成立；
+ *      （唯一的第三种取值 `executor` = 撤销执行器本身：写由 UndoStore 完成，不得进快照）
  *   ② exposeToAgent（工具暴露）：这条写 LLM 是否看得见——「①成立」不等于「②开放」。
  *
  * 维护方式：加了写路由 → 在 INVENTORY 补一行 → 填 tool / toolStatus；
@@ -73,9 +74,16 @@ interface InventoryEntry {
   path: string;
   /** 人类可读标签 */
   label: string;
-  /** ① 回滚覆盖：'registry' = 必须过工具注册表（P0 收敛目标）；'excluded' = 明知而未纳入 */
-  coverage: 'registry' | 'excluded';
-  /** coverage='registry' 时对应的注册表工具名 */
+  /**
+   * ① 回滚覆盖：
+   * - `registry`  必须过工具注册表（写经 runToolTracked → 落快照）
+   * - `executor`  撤销执行器本身：写由 UndoStore 直接完成（撤的是已记录的前像），**不得进快照**
+   *               （否则撤销自己会成为下一条可撤销记录）。它对应注册表工具，但 REST 路由
+   *               直接调 `deps.undoLast` 而不经 runPanelTool（两者语义等价，工具侧同样 track:false）
+   * - `excluded`  明知而未纳入（docs/plan/agent-access.md「变更记录遗漏面」）
+   */
+  coverage: 'registry' | 'executor' | 'excluded';
+  /** coverage≠excluded 时对应的注册表工具名 */
   tool?: string;
   /** 该工具现在有没有（exists = 已在 tools.ts；planned = P0 待补） */
   toolStatus?: 'exists' | 'planned';
@@ -265,6 +273,15 @@ const INVENTORY: InventoryEntry[] = [
     reason: '网络探测 + 失败计熔断，非 DB 写 → 不暴露给 agent',
   },
 
+  // ---- 撤销执行器（唯一不进快照的写面：它就是回滚动作本身）----
+  {
+    method: 'POST', path: '/api/undo', label: 'POST /api/undo',
+    coverage: 'executor', tool: 'undo_last_change', toolStatus: 'exists', exposeToAgent: true,
+    reason: '撤销执行器：写由 UndoStore.undo() 完成（把已记录的前像写回去），进快照会让撤销自己'
+      + '成为下一条可撤销记录；对应注册表工具 undo_last_change（同样 track:false），'
+      + '但 REST 路由直接调 deps.undoLast（不经 runPanelTool）',
+  },
+
   // ---- 明知而未纳入（docs/plan/agent-access.md「变更记录遗漏面」） ----
   {
     method: 'PUT', path: '/api/napcat', label: 'PUT /api/napcat',
@@ -316,7 +333,8 @@ test('写路径清单与 server.ts 源码完全对齐（新增未分类的写路
     unclassified.map((r) => `server.ts:${r.line}  ${r.method} ${r.pattern}`),
     [],
     '发现未分类的 REST 写路径。请在 INVENTORY 里补一行，并回答两件事：\n' +
-      '  ① coverage：是否纳入回滚覆盖（写必须过工具注册表）\n' +
+      '  ① coverage：默认纳入回滚覆盖（写必须过工具注册表）；' +
+      '只有「写由 UndoStore 直接完成」的撤销执行器用 executor，明知遗漏用 excluded\n' +
       '  ② exposeToAgent：这条能力是否让 LLM/agent 看得见\n' +
       '（背景见 docs/plan/agent-access.md「配置写路径缺口清单」）',
   );
@@ -336,15 +354,22 @@ test('planned / exists 状态与 tools.ts 注册表一致（表不能骗人）',
   const defs = new Map(allToolDefs().map((d) => [d.name, d]));
 
   for (const e of INVENTORY) {
-    if (e.coverage !== 'registry') {
+    if (e.coverage === 'excluded') {
       assert.equal(e.tool, undefined, `${e.label}: excluded 条目不应声明工具名`);
       continue;
     }
-    assert.ok(e.tool, `${e.label}: coverage=registry 但没写 tool`);
+    assert.ok(e.tool, `${e.label}: coverage=${e.coverage} 但没写 tool`);
     const def = defs.get(e.tool!);
     if (e.toolStatus === 'exists') {
       assert.ok(def, `${e.label}: 表里标 exists 的工具「${e.tool}」在 tools.ts 里不存在（改名了？）`);
       assert.equal(def!.write, true, `${e.label}: 写路径映射到了非写工具「${e.tool}」`);
+      if (e.coverage === 'executor') {
+        // 撤销执行器与「撤销不入栈」互锁：工具体必须声明不带快照（见 McpToolDef.track 注释）
+        assert.equal(
+          def!.track, false,
+          `${e.label}: 撤销执行器「${e.tool}」必须 track:false（否则撤销自己会进变更记录）`,
+        );
+      }
     }
     if (e.toolStatus === 'planned') {
       assert.equal(
@@ -362,7 +387,7 @@ test('planned / exists 状态与 tools.ts 注册表一致（表不能骗人）',
 
 test('工具暴露策略闭环：exposeToAgent 与生产侧 AGENT_EXCLUDED_TOOLS 互为反面', () => {
   for (const e of INVENTORY) {
-    if (e.coverage !== 'registry' || e.tool === undefined) continue;
+    if (e.coverage === 'excluded' || e.tool === undefined) continue;
     const policyExposed = !AGENT_EXCLUDED_TOOLS.includes(e.tool);
     assert.equal(
       e.exposeToAgent, policyExposed,

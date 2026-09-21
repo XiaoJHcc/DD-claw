@@ -14,7 +14,7 @@ import { saveNapcatConfig } from '../notify/napcat.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { defaultPostFilters } from '../core/post-rules.js';
-import { UndoStore } from '../core/undo.js';
+import { UndoStore, undoEffects, type UndoEffect, type UndoResult } from '../core/undo.js';
 
 interface Fixture {
   db: Db;
@@ -22,6 +22,8 @@ interface Fixture {
   llmRouter?: LlmRouter;
   /** 注入 undo dep 时（opts.undo）可取到，验证写快照落库 */
   undo?: UndoStore;
+  /** 注入 undo dep 时装配的撤销执行器触发计数（按 undoEffects 标签分桶） */
+  undoFired?: Record<UndoEffect, number>;
 }
 
 /** 记录 listen dep 的 onChanged 被调用次数（面板改开关 → 热启停源） */
@@ -111,9 +113,21 @@ async function setup(
   }
   const undoStore = opts.undo ? new UndoStore(db.raw) : undefined;
   undoStore?.migrate();
+  // 撤销执行器（生产装配形状：撤栈顶 + 按 core/undo.ts 的 undoEffects 触发热生效回调）。
+  // 回调闭包在 index.ts，测试里用计数桩代替——映射函数本身是生产代码，不是测试自己的复刻。
+  const undoFired: Record<UndoEffect, number> = { runtime: 0, listen: 0, llm: 0, notifiers: 0 };
+  const undoLast = undoStore === undefined
+    ? undefined
+    : (scope?: string): UndoResult => {
+        const r = undoStore.undo(scope ?? 'admin');
+        if (!r.ok) return r;
+        for (const e of undoEffects(r)) undoFired[e]++;
+        return r;
+      };
   const server: Server = createPanelServer({
     db,
     ...(undoStore ? { undo: undoStore } : {}),
+    ...(undoLast ? { undoLast } : {}),
     weiboResolver: opts.weiboResolver,
     status: () => ({
       ...status,
@@ -154,7 +168,10 @@ async function setup(
     db.close();
   });
   const { port } = server.address() as AddressInfo;
-  return { db, base: `http://127.0.0.1:${port}`, llmRouter: llm?.router, ...(undoStore ? { undo: undoStore } : {}) };
+  return {
+    db, base: `http://127.0.0.1:${port}`, llmRouter: llm?.router,
+    ...(undoStore ? { undo: undoStore, undoFired } : {}),
+  };
 }
 
 interface ApiResult {
@@ -2480,3 +2497,95 @@ test('写快照：删分类级联停用收敛为同一笔记录（事务化差�
   assert.equal(db.listPushRules().find((x) => x.name === 'r1')!.enabled, true, '撤销后规则恢复启用');
 });
 
+// ---- P0 撤销执行器（切片 C）：/api/undo/history 与 POST /api/undo ----
+
+test('撤销端点：写 → history 可见 → undo 还原并触发热生效回调；空栈 404', async (t) => {
+  const { db, base, undo, undoFired } = await setup(t, { undo: true, listen: { weibo: true } });
+  const before = Math.floor(Date.now() / 1000);
+
+  // 面板写一笔（listen 开关：want=false ≠ ready=true → 落手动值 '0'）
+  const w = await api(base, '/api/listen/weibo', 'PUT', { enabled: false });
+  assert.equal(w.status, 200);
+  assert.equal(db.getSetting('listen_weibo'), '0', '手动关 = 落 settings');
+
+  // history：新→旧，契约形状逐字（at 秒级、tables 去重、rows = 受影响行数）
+  const h = await api(base, '/api/undo/history');
+  assert.equal(h.status, 200);
+  const changes = h.json.changes as Array<Record<string, unknown>>;
+  assert.equal(changes.length, 1);
+  const c = changes[0]!;
+  assert.equal(typeof c.id, 'number');
+  assert.equal(c.tool, 'set_listen');
+  assert.equal(c.entry, 'panel');
+  assert.equal(c.actor, 'panel');
+  assert.equal(c.scope, 'admin');
+  assert.equal(c.undone, false);
+  assert.deepEqual(c.tables, ['settings']);
+  assert.equal(c.rows, 1);
+  assert.ok((c.at as number) >= before && (c.at as number) <= Math.floor(Date.now() / 1000));
+  assert.ok((c.at as number) < 1e10, 'at 是秒级时间戳');
+
+  // POST /api/undo：忽略 body，撤 admin 全局栈栈顶
+  const u = await api(base, '/api/undo', 'POST', { anything: '忽略' });
+  assert.equal(u.status, 200);
+  assert.deepEqual(u.json, { ok: true, change: { id: c.id, tool: 'set_listen' } });
+  assert.equal(db.getSetting('listen_weibo'), null, '撤销 = 回到 auto（key 被删，区别于写值）');
+  assert.equal(undoFired!.listen, 1, '撤 listen 开关要跑 reconcileListen');
+  assert.equal(undoFired!.runtime + undoFired!.llm + undoFired!.notifiers, 0);
+
+  // 历史全量保留（只标记 undone）；撤销自身不入栈
+  const h2 = await api(base, '/api/undo/history');
+  const changes2 = h2.json.changes as Array<Record<string, unknown>>;
+  assert.equal(changes2.length, 1, '撤销不产生新记录（撤销自己不该可撤）');
+  assert.equal(changes2[0]!.undone, true);
+  assert.equal(undo!.peek('admin'), null);
+
+  // 第二次撤销：栈已空
+  const empty = await api(base, '/api/undo', 'POST');
+  assert.equal(empty.status, 404);
+  assert.equal(empty.json.error, '没有可撤销的变更');
+});
+
+test('撤销端点：撤 runtime config 走 reconcileRuntime；撤渠道走通道重装配', async (t) => {
+  const { db, base, undoFired } = await setup(t, { undo: true });
+
+  await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 30, backlogPushEnabled: true });
+  const u1 = await api(base, '/api/undo', 'POST');
+  assert.equal(u1.status, 200);
+  assert.equal(db.getSetting('poll_interval_sec'), null, '撤销后回代码默认值（key 不存在）');
+  assert.equal(db.getSetting('backlog_push_enabled'), null);
+  assert.equal(undoFired!.runtime, 1, '撤运行参数要跑 reconcileRuntime');
+
+  // 撤渠道行：装配级重同步（幂等；dispatcher 逐条读表，这里按「撤了什么就重跑什么」）
+  const ch = await api(base, '/api/channels', 'POST', { name: '群', notifier: 'onebot', targetType: 'group', targetId: '12345' });
+  assert.equal(ch.status, 201);
+  const u2 = await api(base, '/api/undo', 'POST');
+  assert.equal(u2.status, 200);
+  assert.equal(db.listPushChannels().length, 0, '新建的渠道被撤销删除');
+  assert.equal(undoFired!.notifiers, 1);
+});
+
+test('撤销中止：后像 ≠ 当前值 → 409 且一行不动、不触发回调', async (t) => {
+  const { db, base, undo, undoFired } = await setup(t, { undo: true });
+  await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 30 });
+
+  // 第三方入口（绕过注册表直写库，等价于另一个入口的写）改了同一行
+  db.setSetting('poll_interval_sec', '45');
+
+  const r = await api(base, '/api/undo', 'POST');
+  assert.equal(r.status, 409);
+  assert.equal(r.json.error, '该设置已被其他入口修改，无法撤销本次');
+  assert.equal(db.getSetting('poll_interval_sec'), '45', '中止时一行都不动');
+  assert.equal(undo!.history()[0]!.undoneAt, null, '中止不得把记录标记为已撤销');
+  assert.deepEqual(undoFired, { runtime: 0, listen: 0, llm: 0, notifiers: 0 }, '中止不触发热生效');
+
+  // 冲突解除后仍可撤（栈没被动过）
+  db.setSetting('poll_interval_sec', '30');
+  assert.equal((await api(base, '/api/undo', 'POST')).status, 200);
+});
+
+test('撤销端点未装配 → 404（两个端点各自按 dep 挂载）', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/undo/history')).status, 404);
+  assert.equal((await api(base, '/api/undo', 'POST')).status, 404);
+});

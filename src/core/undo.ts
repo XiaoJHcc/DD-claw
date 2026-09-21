@@ -18,12 +18,21 @@
  * 撤销语义：栈式逆序（只撤最近一次、可连续撤、不跳序）、**每来源渠道一条独立栈**（面板 admin 另有全局栈）、
  * 逐行比对「后像 == 当前值」不等则**中止且一行都不动**（宁中止不丢写）、历史全量保留（只标记 undone，不删记录）。
  *
- * 集成状态：**已接线**（切片 A 装配建表 + 切片 B 写路径落记录）：`Db.raw` 暴露句柄，装配根实例化并挂
- * `PanelDeps`；写工具经 `runToolTracked` → `track()` 落变更记录（REST 与 /mcp 两个入口同走）。
- * 热生效回调（reconcileRuntime / reconcileListen / 重建 router）由撤销执行器在 `undo()` 成功后
- * 按「表 → 回调」映射触发（切片 C）。
+ * 另外两条（切片 C 裁决）：
+ * - **「配置 + 归档」混合表按列过滤**（`DEFAULT_IGNORE_COLUMNS`）：轮询源回写的游标/心跳/头像列既不算差分、
+ *   也不参与比对与还原——面板 / agent 对这些行的配置写因此可撤销，且不会被轮询写频繁打断。
+ * - **撤销本身不进快照**：撤销是把已记录的前像写回去（写工具带 `track: false`），再记一笔会把自己变成
+ *   下一条可撤销记录。它的痕迹在历史里由 `undone_at` 承载。
+ *
+ * 集成状态：**已接线**（切片 A 装配建表 + 切片 B 写路径落记录 + 切片 C 撤销执行器）：`Db.raw` 暴露句柄，
+ * 装配根实例化并挂 `PanelDeps`；写工具经 `runToolTracked` → `track()` 落变更记录（REST 与 /mcp 两个入口同走）；
+ * 撤销经 `PanelDeps.undoLast`（装配根注入 = `undo(scope)` + 热生效回调）与注册表工具 `undo_last_change`。
+ *
+ * **热生效回调不进本层**：`undo()` 只回「实际还原了哪些表 / 哪些 settings 键」，由 `undoEffects()`
+ * 把受影响面**分类**成装配根认识的标签，回调闭包本身只写在 index.ts。理由见「撤销语义」最后一条。
  */
 import type Database from 'better-sqlite3';
+import { isRuntimeConfigKey } from './runtime-config.js';
 
 export type Row = Record<string, unknown>;
 
@@ -72,19 +81,50 @@ export interface UndoResult {
   refill?: string[];
   /** reason='conflict' 时的定位信息 */
   detail?: string;
+  // ---- 以下三项仅 ok=true 时给出，供入口层做响应形状与热生效（撤销执行器不持有回调）----
+  /** 产生这次变更的工具名（响应文案 / agent 回话用） */
+  tool?: string;
+  /** 实际被还原的表（去重，按记录里行出现顺序） */
+  tables?: string[];
+  /** 实际被还原的 settings 键（表里只有它一个 kv 面；键名决定该触发哪个热生效回调） */
+  settingKeys?: string[];
 }
 
 export type RedactPredicate = (table: string, column: string, row: Row) => boolean;
 
 /**
- * 参与快照的配置表。`streamers` **暂不纳入**：它是配置与归档的混合体
- * （面板改 watch/alias，同时关注源会覆写 uname/face），纳入后撤销比对会被轮询写频繁打断、
- * 撤不掉反而更常见；收敛 streamers 的写路径时再裁决。归档表（room_state/posts/verdicts/live_segments）
- * 一律不进来——计划明确「不把轮询数据回滚」。
+ * 参与快照的配置表。`streamers` **不纳入**（整表排除）：它是配置与归档的混合体
+ * （面板改 watch/alias，同时关注源会覆写 uname/face），而轮询写的是**同一行**——
+ * 逐行比对照旧会被打断，且它没有「游标列」可过滤（watch/alias/uname/face 全在一行里）。
+ * 三张图文账号名单（x_accounts / weibo_accounts / bili_accounts）是同类混合体，但它们的
+ * 配置列与轮询列**可分**，故纳入快照 + 按列过滤（见 DEFAULT_IGNORE_COLUMNS）。
+ * 归档表（room_state/posts/verdicts/live_segments）一律不进来——计划明确「不把轮询数据回滚」。
  */
 export const DEFAULT_CONFIG_TABLES: readonly string[] = [
-  'settings', 'push_rules', 'categories', 'push_channels', 'post_rules', 'x_accounts',
+  'settings', 'push_rules', 'categories', 'push_channels', 'post_rules',
+  'x_accounts', 'weibo_accounts', 'bili_accounts',
 ];
+
+/**
+ * 「配置 + 归档」混合表的每表忽略列（切片 C 裁决；切片 B 记的已知限制在此解除）。
+ *
+ * 这些列由轮询源经 `touch*` 回写，不是人的配置意图：游标（`last_tweet_id` / `last_post_id` 等）、
+ * 心跳（last_ok_at）、头像文件名（avatar，抓取下载后回写）、恢复位（silent_next，源消费时清位）、
+ * 平台昵称（nickname / uname：平台事实，抓取回写，输入面本就不收或只在新建时种入）、
+ * 以及随每次写变化的 updated_at。忽略掉以后：
+ * ① 轮询回写不再落进 track() 的差分窗口被捎带（不会再凭空产生一条变更记录）；
+ * ② 撤销比对照旧只看配置列——游标前进不会把一次配置写变成「已被其他入口修改」；
+ * ③ 撤销还原不写这些列（计划要求「不把轮询数据回滚」）。
+ * 差分 / 比对 / 还原三处都按本表过滤，故「忽略」在各处口径一致。
+ */
+export const DEFAULT_IGNORE_COLUMNS: Record<string, readonly string[]> = {
+  // touchXAccount 所写列
+  x_accounts: ['last_tweet_id', 'last_tweet_at', 'last_ok_at', 'nickname', 'avatar', 'silent_next', 'updated_at'],
+  // touchWeiboAccount 所写列（昵称只在新建时种入，之后由抓取回写）
+  weibo_accounts: ['last_post_id', 'last_post_at', 'last_ok_at', 'nickname', 'avatar', 'silent_next', 'updated_at'],
+  // touchBiliAccount 所写列（uname 同 weibo nickname：平台事实）
+  bili_accounts: ['uname', 'last_ok_at', 'avatar', 'silent_next', 'updated_at'],
+};
 
 /** 隐私例外（计划里的唯一一条）：LLM key 不落明文 */
 export const redactLlmKey: RedactPredicate = (table, column, row) =>
@@ -128,6 +168,8 @@ function rowEq(a: Row | null, b: Row | null, columns: readonly string[]): boolea
 export interface UndoStoreOptions {
   /** 参与快照的表；缺省 DEFAULT_CONFIG_TABLES */
   tables?: readonly string[];
+  /** 每表忽略列（差分 / 比对 / 还原三处一致过滤）；缺省 DEFAULT_IGNORE_COLUMNS */
+  ignoreColumns?: Record<string, readonly string[]>;
   /** 时钟（测试可注入） */
   now?: () => number;
   /** 隐私例外判定；缺省 redactLlmKey */
@@ -138,6 +180,8 @@ export class UndoStore {
   private readonly tables: readonly string[];
   private readonly now: () => number;
   private readonly redact: RedactPredicate;
+  /** 每表忽略列（见 DEFAULT_IGNORE_COLUMNS 与 compareColumns） */
+  private readonly ignore: Map<string, ReadonlySet<string>>;
   private readonly meta = new Map<string, TableMeta>();
   /** track() 的内部串行队列：所有走 track 的写调用排队执行，差分窗口互不交错 */
   private queue: Promise<unknown> = Promise.resolve();
@@ -147,6 +191,9 @@ export class UndoStore {
     if (this.tables.includes(TABLE)) throw new Error(`${TABLE} 不能作为快照表（记录自身不该被记录）`);
     this.now = opts.now ?? (() => Date.now());
     this.redact = opts.redact ?? redactLlmKey;
+    this.ignore = new Map(
+      Object.entries(opts.ignoreColumns ?? DEFAULT_IGNORE_COLUMNS).map(([t, cols]) => [t, new Set(cols)]),
+    );
   }
 
   /** 建表（幂等）。接线时在 `Db` 的迁移段调一次 */
@@ -194,10 +241,10 @@ export class UndoStore {
    * - 「写 → 后像差分 → 落记录」三步在 fn resolve 后是连续同步代码，单线程下实际原子。
    *   残留窗口 = insertRecord 自身失败（磁盘级故障）：此时写已提交而记录没落——方向上是
    *   「写了却撤不掉」，但仅在存储层故障时发生，且错误会抛给调用方（人知道出事了）。
-   * - 已知限制：不走 track 的写（轮询源回写，如 TwitterFeedSource.touchXAccount 写 x_accounts
-   *   的游标/头像列）可能在窗口内插入而被差分捎带。x_accounts 是配置+归档混合表（同 streamers
-   *   被排除的理由），这类污染的后果是撤销时逐行比对「后像==当前值」更易中止——宁中止不丢写，
-   *   方向可接受；彻底解法是快照按列过滤或把游标列拆表，留待撤销执行器切片裁决。
+   * - 差分窗口污染（切片 B 的已知限制，**切片 C 已解除**）：不走 track 的写（轮询源回写，如
+   *   TwitterFeedSource.touchXAccount 写 x_accounts 的游标/头像列）仍可能在窗口内实插，但混合表
+   *   的轮询列已被 `DEFAULT_IGNORE_COLUMNS` 排除在差分与比对之外，故既不会凭空产生记录，
+   *   也不会让撤销无故中止。
    */
   async track<T>(meta: ChangeMeta, fn: () => Promise<T>): Promise<{ value: T; changeId: number | null }> {
     const run = async (): Promise<{ value: T; changeId: number | null }> => {
@@ -230,8 +277,10 @@ export class UndoStore {
   }
 
   /**
-   * 撤销该栈顶。逐行比对后像与当前值，**不等则中止且一行都不改**；隐私行只比对存在性，
-   * 撤销动作一律是清空该行（值本来就没落库），并在结果里给出 refill 提示。
+   * 撤销该栈顶。逐行比对后像与当前值（**只看非忽略列**，见 DEFAULT_IGNORE_COLUMNS），
+   * 不等则中止且一行都不改；隐私行只比对存在性，撤销动作一律是清空该行
+   * （值本来就没落库），并在结果里给出 refill 提示。
+   * 成功时附带「实际还原了哪些表 / 哪些 settings 键」，供入口层触发热生效回调。
    */
   undo(scope: string): UndoResult {
     const rec = this.peek(scope);
@@ -247,7 +296,7 @@ export class UndoStore {
           }
           continue;
         }
-        if (!rowEq(cur, img.after, this.columnsOf(img.table))) {
+        if (!rowEq(cur, img.after, this.compareColumns(img.table))) {
           return { ok: false, reason: 'conflict', detail: `${img.table} ${pkLabel(img)} 已被其他入口修改` };
         }
       }
@@ -278,9 +327,11 @@ export class UndoStore {
       this.db
         .prepare(`UPDATE ${TABLE} SET undone_at = ?, undone_note = ? WHERE id = ?`)
         .run(this.now(), refill.length > 0 ? `需重填: ${refill.join(', ')}` : null, rec.id);
-      return refill.length > 0
-        ? { ok: true, id: rec.id, applied, refill }
-        : { ok: true, id: rec.id, applied };
+      const tables = changeTables(rec);
+      const settingKeys = changeSettingKeys(rec);
+      const base = { ok: true as const, id: rec.id, applied, tables, settingKeys };
+      const withTool = rec.tool === undefined ? base : { ...base, tool: rec.tool };
+      return refill.length > 0 ? { ...withTool, refill } : withTool;
     });
     return run();
   }
@@ -301,6 +352,16 @@ export class UndoStore {
 
   private columnsOf(table: string): readonly string[] {
     return this.ensureMeta(table)?.columns ?? [];
+  }
+
+  /**
+   * 参与差分 / 比对 / 还原的列 = 该表全部列 − 该表忽略列（见 DEFAULT_IGNORE_COLUMNS）。
+   * 三处走同一个函数，故「忽略」不会出现口径不一致（例如比对看不见、还原却写回）。
+   */
+  private compareColumns(table: string): readonly string[] {
+    const ignore = this.ignore.get(table);
+    const cols = this.columnsOf(table);
+    return ignore === undefined ? cols : cols.filter((c) => !ignore.has(c));
   }
 
   private snapshot(): Map<string, Map<string, Row>> {
@@ -324,19 +385,22 @@ export class UndoStore {
     for (const table of new Set([...before.keys(), ...after.keys()])) {
       const meta = this.ensureMeta(table);
       if (!meta) continue;
+      const columns = this.compareColumns(table);
       const b = before.get(table) ?? new Map<string, Row>();
       const a = after.get(table) ?? new Map<string, Row>();
       for (const key of new Set([...b.keys(), ...a.keys()])) {
         const rb = b.get(key) ?? null;
         const ra = a.get(key) ?? null;
-        if (rowEq(rb, ra, meta.columns)) continue;
+        // 只有忽略列变化不算一次配置写（轮询回写不进记录）
+        if (rowEq(rb, ra, columns)) continue;
         const vals = JSON.parse(key) as unknown[];
         const pk: Row = {};
         meta.pk.forEach((c, i) => { pk[c] = vals[i] ?? null; });
-        const redacted = this.isRedacted(table, rb, ra, meta.columns);
+        const redacted = this.isRedacted(table, rb, ra, columns);
         out.push({
           table,
           pk,
+          // 前像/后像保留整行（含忽略列）：撤销一次「删除」要按前像整行重插，缺列会丢数据
           before: redacted ? null : rb,
           after: redacted ? null : ra,
           beforeExists: rb !== null,
@@ -379,9 +443,15 @@ export class UndoStore {
     this.db.prepare(sql).run(...cols.map((c) => norm(row[c])));
   }
 
+  /**
+   * 还原一行：按前像写回**非忽略列**（忽略列不动——游标/心跳/头像是轮询数据，
+   * 撤销配置写不该把它们回滚；这也让撤销与比对的可比列集合完全一致）。
+   */
   private updateRow(table: string, pk: Row, before: Row): void {
     const meta = this.ensureMeta(table)!;
-    const cols = Object.keys(before).filter((c) => !meta.pk.includes(c));
+    const ignore = this.ignore.get(table);
+    const cols = Object.keys(before)
+      .filter((c) => !meta.pk.includes(c) && !(ignore?.has(c) ?? false));
     if (cols.length === 0) return;
     const where = meta.pk.map((c) => `${ident(c)} = ?`).join(' AND ');
     const sql = `UPDATE ${ident(table)} SET ${cols.map((c) => `${ident(c)} = ?`).join(', ')} WHERE ${where}`;
@@ -426,4 +496,48 @@ export class UndoStore {
 export function pkLabel(img: RowImage): string {
   const parts = Object.entries(img.pk).map(([k, v]) => `${k}=${String(v)}`);
   return parts.length > 0 ? `(${parts.join(', ')})` : '(未知主键)';
+}
+
+// ---- 变更记录的用户面视图与热生效分类（入口层用；本层不持有任何回调）----
+
+/** 记录里受影响的表（去重，按行出现顺序——面板按它排「改了哪些面」） */
+export function changeTables(rec: ChangeRecord): string[] {
+  return [...new Set(rec.rows.map((r) => r.table))];
+}
+
+/** 记录里被改的 settings 键（表里只有 settings 是 kv；键名决定该触发哪个热生效回调） */
+export function changeSettingKeys(rec: ChangeRecord): string[] {
+  const keys = rec.rows
+    .filter((r) => r.table === 'settings' && typeof r.pk.key === 'string')
+    .map((r) => r.pk.key as string);
+  return [...new Set(keys)];
+}
+
+/**
+ * 撤销后该触发哪些热生效动作——**纯分类**，与装配根的回调一一对应（判据 6：撤销与面板手写等价）：
+ * - `runtime`   → `reconcileRuntime`（settings 的运行参数键：NUM_SPECS / BOOL_SPECS）
+ * - `listen`    → `reconcileListen`（`listen_*` 开关；三张图文账号名单同路——它们的「源名单」
+ *                  变化在装配处也是走同一个启停入口）
+ * - `llm`       → 重建 llm router（`settings.llm_providers` / `llm_key:*`；撤 key = 清空 + 重填提示）
+ * - `notifiers` → `rebuildNotifiers`（`push_channels` 行；`napcat_*` 配置同面板保存后的重装配口径）
+ */
+export type UndoEffect = 'runtime' | 'listen' | 'llm' | 'notifiers';
+
+const FEED_TABLES = new Set(['x_accounts', 'weibo_accounts', 'bili_accounts']);
+
+export function undoEffects(r: Pick<UndoResult, 'tables' | 'settingKeys'>): UndoEffect[] {
+  const out = new Set<UndoEffect>();
+  for (const key of r.settingKeys ?? []) {
+    if (key.startsWith('listen_')) out.add('listen');
+    else if (key === 'llm_providers' || key.startsWith('llm_key:')) out.add('llm');
+    else if (key.startsWith('napcat_')) out.add('notifiers');
+    else if (isRuntimeConfigKey(key)) out.add('runtime');
+  }
+  for (const table of r.tables ?? []) {
+    if (FEED_TABLES.has(table)) out.add('listen');
+    // 渠道行本身由 dispatcher 逐条读表，理论上无需回调；撤销按「撤了什么就重跑什么」做一次
+    // 装配级重同步（幂等、与 NapCat 配置撤销同路），避免装配态与库态不一致留暗坑
+    else if (table === 'push_channels') out.add('notifiers');
+  }
+  return [...out];
 }

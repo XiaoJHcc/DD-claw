@@ -39,7 +39,7 @@ import type { NewPushChannel } from './core/push.js';
 import { isListenEnabled, shouldRunListen } from './core/listen.js';
 import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
 import { seedOnboardingDefaults } from './core/onboarding.js';
-import { UndoStore } from './core/undo.js';
+import { adminScope, UndoStore, undoEffects, type UndoResult } from './core/undo.js';
 import { ChatStore } from './core/chat-store.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
@@ -234,8 +234,8 @@ async function main(): Promise<void> {
   const db = new Db(secrets.dbPath);
 
   // P0 地基（docs/plan/agent-access.md）：写操作快照/撤销 + agent 会话存储，与 Db 同库。
-  // 本切片只装配建表并挂进 PanelDeps——面板路由不消费，runTool 的 beforeWrite 快照钩子
-  // 留空（撤销栈接线属后续切片）
+  // 写路径经 runToolTracked → UndoStore.track() 落变更记录；撤销执行器（undo 栈顶 + 热生效回调）
+  // 在下面 rebuildNotifiers 之后装配（回调闭包都在本函数里，故不进 Db / UndoStore 层）
   const undoStore = new UndoStore(db.raw);
   undoStore.migrate();
   const chatStore = new ChatStore(db.raw);
@@ -618,6 +618,27 @@ async function main(): Promise<void> {
     log.info(`推送通道已热更新：${dispatcher.channels.join('/') || '无'}`);
   });
 
+  // 撤销执行器（P0 判据 6）：撤栈顶 → 按记录实际还原的表/键触发热生效，与面板手写等价。
+  // 分类是 core/undo.ts 的纯函数 undoEffects（不认识 Db 也不持回调）；这里只把标签接到闭包上。
+  const applyUndoEffects = (r: UndoResult): void => {
+    for (const e of undoEffects(r)) {
+      if (e === 'runtime') reconcileRuntime();
+      else if (e === 'listen') reconcileListen();
+      else if (e === 'llm') llmDep.onProvidersChanged?.();
+      else if (e === 'notifiers') void rebuildNotifiers();
+    }
+  };
+  const undoLast = (scope: string = adminScope()): UndoResult => {
+    const r = undoStore.undo(scope);
+    if (!r.ok) return r;
+    log.info(
+      `撤销变更 #${r.id}（${r.tool ?? '未命名'}，scope=${scope}，还原 ${r.applied ?? 0} 行）` +
+      `${r.refill ? `；需重填: ${r.refill.join(', ')}` : ''}`,
+    );
+    applyUndoEffects(r);
+    return r;
+  };
+
   // 凭据功能：cookies.json 不存在 → 停用并说明；坏 JSON → loadCookies 抛
   // ConfigError，启动即失败。cookie 值绝不进日志，只传拼好的 Cookie 头。
   const cookies = loadCookies(resolve(projectRoot, 'cookies.json'));
@@ -650,6 +671,7 @@ async function main(): Promise<void> {
     panel = createPanelServer({
       db,
       undo: undoStore,
+      undoLast,
       chat: chatStore,
       weiboResolver: createWeiboResolver(),
       llm: llmDep,

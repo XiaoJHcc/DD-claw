@@ -36,7 +36,8 @@ import { isPushEnabled } from '../core/push.js';
 import type { XConfig } from '../core/x-config.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
-import type { UndoStore } from '../core/undo.js';
+import type { UndoResult, UndoStore } from '../core/undo.js';
+import { changeTables, type ChangeRecord } from '../core/undo.js';
 import type { ChatStore } from '../core/chat-store.js';
 
 const log = makeLogger('panel');
@@ -192,8 +193,15 @@ export interface PanelDeps {
   };
   /** 测试推送（假消息走完整推送链路）；不注入则 POST /api/push/test 一律 404 */
   testPush?: () => Promise<{ total: number; succeeded: number }>;
-  /** 写操作快照与撤销（P0 地基，core/undo.ts）；本切片仅装配建表，面板路由尚未消费 */
+  /** 写操作快照与撤销（P0 地基，core/undo.ts）；历史查询端点消费它 */
   undo?: UndoStore;
+  /**
+   * 撤销执行入口（P0 判据 6）：撤该栈顶（缺省 = admin 全局栈）并**触发热生效回调**。
+   * 映射在装配根（回调闭包都在 index.ts），本层只转发——故撤销与面板手写等价：
+   * 撤 runtime config → reconcileRuntime、撤 listen → reconcileListen、撤 provider/key → 重建 router、
+   * 撤渠道 → 重建通知通道。不注入则 POST /api/undo 一律 404。
+   */
+  undoLast?: (scope?: string) => UndoResult;
   /** agent 会话存储（P0 地基，core/chat-store.ts）；本切片仅装配建表，面板路由尚未消费 */
   chat?: ChatStore;
   /**
@@ -940,6 +948,24 @@ async function handle(
     }
   }
 
+  // ---- 变更历史与撤销（P0 判据 1/2/6；undo dep 存在才挂）----
+  // 这两个路由是**唯一不经注册表**的写面：它本身就是撤销执行器——撤销的写是把已记录的前像写回去，
+  // 再进快照会把自己变成下一条可撤销记录（工具 undo_last_change 也不带快照，见 mcp/run-tool.ts）。
+  if (deps.undo && method === 'GET' && path === '/api/undo/history') {
+    sendJson(res, 200, { changes: deps.undo.history().map(undoChangeInfo) });
+    return;
+  }
+  if (deps.undoLast && method === 'POST' && path === '/api/undo') {
+    // body 一律忽略：撤销的语义是「撤这个栈的栈顶」，没有任何可选参数（不提 scope = admin 全局栈）
+    const r = deps.undoLast();
+    if (!r.ok) {
+      if (r.reason === 'empty') throw new HttpError(404, '没有可撤销的变更');
+      throw new HttpError(409, '该设置已被其他入口修改，无法撤销本次');
+    }
+    sendJson(res, 200, { ok: true, change: { id: r.id, tool: r.tool ?? null } });
+    return;
+  }
+
   // ---- MCP 端点（Bearer token 鉴权；工具面按角色过滤，见 src/mcp/）----
   if (path === '/mcp') {
     await handleMcp(deps, req, res);
@@ -947,6 +973,24 @@ async function handle(
   }
 
   throw new HttpError(404, '未知路由');
+}
+
+/**
+ * 变更记录 → 历史端点形状（webui 契约，逐字冻结）：`at` 秒级（库里是毫秒）、
+ * `tables` 去重、`rows` = 受影响行数、`undone` 布尔。
+ */
+function undoChangeInfo(c: ChangeRecord): Record<string, unknown> {
+  return {
+    id: c.id,
+    tool: c.tool ?? null,
+    entry: c.entry,
+    actor: c.actor,
+    scope: c.scope,
+    at: Math.floor(c.at / 1000),
+    undone: c.undoneAt !== null,
+    tables: changeTables(c),
+    rows: c.rows.length,
+  };
 }
 
 // ---- 头像代理（/api/avatar）----

@@ -18,7 +18,7 @@ import { allToolDefs } from '../mcp/tools.js';
 import { saveLlmProviders, listLlmProviders } from '../analysis/providers.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
-import { UndoStore, adminScope, channelScope } from '../core/undo.js';
+import { UndoStore, adminScope, channelScope, undoEffects, type UndoEffect } from '../core/undo.js';
 
 const ADMIN_TOKEN = 'ddc_test_admin';
 const GATEWAY_TOKEN = 'ddc_test_gateway';
@@ -30,6 +30,10 @@ interface Fixture {
   advancedChanged: { count: number };
   /** 写快照（P0 接线后所有写工具都经它落变更记录） */
   undo: UndoStore;
+  /** 撤销执行器实际用过的栈标识（验证调用域解析：admin=全局、gateway=本渠道） */
+  undoScopes: string[];
+  /** 撤销后按 undoEffects 触发的热生效计数 */
+  undoFired: Record<UndoEffect, number>;
   /** 该测试开过的 MCP client（teardown 先关 client 再关 server，否则 keep-alive 连接拖住 server.close） */
   clients: Client[];
 }
@@ -60,12 +64,24 @@ async function setup(
   const advancedChanged = { count: 0 };
   const undo = new UndoStore(db.raw);
   undo.migrate();
+  // 撤销执行器（生产装配形状：撤栈顶 + 按 core/undo.ts 的 undoEffects 触发热生效回调；
+  // 回调闭包在 index.ts，测试里用计数桩代替——映射函数是生产代码）
+  const undoScopes: string[] = [];
+  const undoFired: Record<UndoEffect, number> = { runtime: 0, listen: 0, llm: 0, notifiers: 0 };
+  const undoLast: NonNullable<PanelDeps['undoLast']> = (scope) => {
+    const s = scope ?? adminScope();
+    undoScopes.push(s);
+    const r = undo.undo(s);
+    if (r.ok) for (const e of undoEffects(r)) undoFired[e]++;
+    return r;
+  };
   // X 分页 dep（生产装配形状）：配置落 settings，探测/校验走网络（测试里不触发）
   const xChanged = { count: 0 };
   const weiboChanged = { count: 0 };
   const deps: PanelDeps = {
     db,
     undo,
+    undoLast,
     status: () => status,
     listen: {
       login: () => ({ bili: true, weibo: true, twitter: getXConfig(db).proxyUrl.trim() !== '' }),
@@ -120,7 +136,9 @@ async function setup(
     db.close();
   });
   const { port } = server.address() as AddressInfo;
-  return { db, base: `http://127.0.0.1:${port}`, listenChanged, advancedChanged, undo, clients };
+  return {
+    db, base: `http://127.0.0.1:${port}`, listenChanged, advancedChanged, undo, undoScopes, undoFired, clients,
+  };
 }
 
 /** SDK client（stateless 模式，Bearer 头走 requestInit）；登记进 fixture 统一 teardown */
@@ -767,4 +785,72 @@ test('MCP 写落变更记录：admin 进全局栈；gateway 按令牌绑定渠�
   assert.equal(gwHist[0]!.tool, 'add_group_push_rule');
   assert.equal(gwHist[0]!.actor, 'gw7');
   assert.equal(gwHist[0]!.rows[0]!.table, 'push_rules');
+});
+// ---- 撤销工具（切片 C）：admin 撤全局栈、gateway 撤本渠道栈（scope 隔离）----
+
+test('undo_last_change：未绑渠道的 gateway 拒绝；gateway 只撤本渠道栈，admin 全局栈不受影响', async (t) => {
+  const f = await setup(t);
+  const { groupChannelId } = seedBase(f.db);
+  saveMcpTokens(f.db, [
+    { name: 'adm', role: 'admin', token: ADMIN_TOKEN },
+    { name: 'gw', role: 'gateway', token: GATEWAY_TOKEN }, // 未绑渠道
+    { name: 'gw7', role: 'gateway', token: 'ddc_gw7', channelId: groupChannelId },
+  ]);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const gw7 = await mcpClient(f, 'ddc_gw7');
+
+  // 撤销是内部工具（不为它设专门命令）：两个角色都看得见，栈由调用域决定
+  const admTools = (await adm.listTools()).tools.map((x) => x.name);
+  const gwTools = (await gw.listTools()).tools.map((x) => x.name);
+  assert.ok(admTools.includes('undo_last_change') && gwTools.includes('undo_last_change'));
+
+  // 空栈：中文文案（与面板端点同一句）
+  await assert.rejects(call(adm, 'undo_last_change'), /没有可撤销的变更/);
+
+  // admin 写一笔进全局栈；gateway 写一笔进本渠道栈
+  await call(adm, 'set_push_enabled', { enabled: false });
+  const rule = (await call(gw7, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705' })) as { id: number };
+
+  // 未绑渠道的 gateway 拒绝（绝不回落 admin 全局栈——否则 QQ 侧一句话就能回退主人配置）
+  await assert.rejects(call(gw, 'undo_last_change'), /本令牌未绑定渠道，不能撤销变更/);
+  assert.equal(f.db.getSetting('push_enabled'), '0', '拒绝时不得动 admin 的栈顶');
+  assert.deepEqual(f.undoScopes, ['admin'], '拒绝发生在解析调用域时，没进任何栈');
+
+  // 渠道栈撤销：只撤自己的规则；撤的是本渠道那条记录
+  const r = (await call(gw7, 'undo_last_change')) as {
+    ok: boolean; change: { id: number; tool: string }; applied: number;
+  };
+  assert.equal(r.ok, true);
+  assert.equal(r.change.tool, 'add_group_push_rule');
+  assert.equal(r.applied, 1);
+  assert.equal(f.db.listPushRules().some((x) => x.id === rule.id), false, '群自助规则被撤销删除');
+  assert.equal(f.db.getSetting('push_enabled'), '0', 'admin 的写不受渠道撤销影响');
+  assert.deepEqual(f.undoScopes, ['admin', channelScope(groupChannelId)], '撤销走的是令牌绑定的渠道栈');
+  assert.equal(f.undo.peek(channelScope(groupChannelId)), null, '渠道栈顶已撤完');
+  assert.equal(f.undo.peek(adminScope())!.tool, 'set_push_enabled', 'admin 栈顶原样保留');
+  // 撤销自身不入栈（工具体 track:false）：历史里仍只有最初那一条
+  assert.equal(f.undo.history({ scope: channelScope(groupChannelId) }).length, 1);
+  // gateway 能产生的记录只有 push_rules（无热生效对象），故该路径映射结果为空集
+  assert.deepEqual(f.undoFired, { runtime: 0, listen: 0, llm: 0, notifiers: 0 });
+
+  // admin 撤全局栈：首写的前像 = key 不存在 → 撤销把 key 删掉
+  const r2 = (await call(adm, 'undo_last_change')) as { change: { tool: string }; applied: number };
+  assert.equal(r2.change.tool, 'set_push_enabled');
+  assert.equal(f.db.getSetting('push_enabled'), null);
+  assert.equal(f.undo.peek(adminScope()), null);
+  assert.deepEqual(f.undoScopes, ['admin', channelScope(groupChannelId), adminScope()]);
+});
+
+test('undo_last_change：撤 LLM key = 清空 + refill 提示，且触发 router 重建', async (t) => {
+  const f = await setup(t, { withLlm: true });
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  await call(adm, 'set_llm_key', { name: 'TestLLM', value: 'sk-live-1' });
+
+  const r = (await call(adm, 'undo_last_change')) as { refill?: string[]; change: { tool: string } };
+  assert.equal(r.change.tool, 'set_llm_key');
+  assert.deepEqual(r.refill, ['settings.(key=llm_key:TestLLM)'], '隐私例外：值不落库，撤销后要点名重填');
+  assert.equal(f.db.getSetting('llm_key:TestLLM'), null, '撤销 = 清空该 key');
+  assert.equal(f.undoFired.llm, 1, '撤 key 要重建 router（与面板手写等价）');
+  assert.deepEqual(Object.entries(f.undoFired).filter(([, n]) => n > 0), [['llm', 1]]);
 });

@@ -65,6 +65,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 | `DecisionRule.decide(event, signal, classifications?)` | `src/rules/types.ts` | 机械去重 / 防抖属于这层（不是用户偏好过滤）；第三参可空数组 | ✅ M1 版 |
 | `Notifier.send(msg)` | `src/notify/types.ts` | 载荷是 `PushMessage`；`capabilities` 声明能否带图；`alert()` 供健康告警（当前仅 toast） | ✅ |
 | 能力面 tool def | `src/mcp/tools.ts` | 工具名 + zod schema + handler + role；前端不得绕过注册表私接 Db | ✅ v1 |
+| 撤销入口 | `src/panel/server.ts` `PanelDeps.undoLast` + `src/core/undo.ts` `undoEffects` | 撤该调用域栈顶 + 按受影响表/键触发**装配根**的热生效回调（回调不进 Db / UndoStore 层）；撤销自身 `track: false`，不进变更记录 | ✅ |
 
 `PushMessage.priority` 目前是**预留字段、无消费者**，等优先级产品方案定了再补。
 
@@ -80,7 +81,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/scheduler.ts` — `PeriodicTask` 通用周期任务器
 - `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送；`feed_post` 是与之平行的图文帖分支，X / 微博 / B站动态同分支）
 - `src/core/db.ts` — SQLite 表群 + 仓储；`ensureColumn` 在线补列；`raw` 只读句柄与 `transaction` 同步事务包装（供 UndoStore / 级联写）；`migrateWeiboAccounts` / `migratePostRuleScopes` / `dropLiveRcmdPosts` 一次性数据搬家与清理
-- `src/core/undo.ts` — 写操作快照与撤销：`capture`（同步事务版）/ `track`（异步段串行版，写工具的实际记录点）；逐行比对撤销、每渠道一栈、LLM key 不落明文
+- `src/core/undo.ts` — 写操作快照与撤销：`capture`（同步事务版）/ `track`（异步段串行版，写工具的实际记录点）；逐行比对撤销、每渠道一栈、LLM key 不落明文；`DEFAULT_IGNORE_COLUMNS`（混合表轮询列不参与差分/比对/还原）、`undoEffects`（撤销后热生效分类，纯函数不持回调）
 - `src/core/streamers.ts` — streamers / follows 行类型与映射
 - `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
 - `src/core/posts.ts` — posts 行类型与映射（pics JSON）
@@ -154,13 +155,13 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 
 ### panel / mcp
 
-- `src/panel/server.ts` — node:http + 静态内嵌 + `/api/*` + `/mcp`；**写路由一律经 `runPanelTool`/`callTool` 走注册表**（校验/审计/快照在能力层，路由只做状态码与形状映射）
+- `src/panel/server.ts` — node:http + 静态内嵌 + `/api/*` + `/mcp`；**写路由一律经 `runPanelTool`/`callTool` 走注册表**（校验/审计/快照在能力层，路由只做状态码与形状映射）；**唯一例外 `POST /api/undo`**（撤销执行器本身，直接调 `deps.undoLast` 且不入快照）
 - `src/panel/http-util.ts` — 解析/校验/响应 + 面板与 MCP 共用逻辑
 - `src/panel/schedule.ts` — 时间表查询（北京 06:00 日界）
 - `src/panel/webui-assets.gen.ts` — 构建期生成物（勿手改）
 - `src/mcp/auth.ts` — token 模型 + `resolveMcpAuth`（调用域：gateway 令牌绑渠道）
-- `src/mcp/tools.ts` — 工具注册表（按角色；`registerTools` 走 `runToolTracked`）
-- `src/mcp/run-tool.ts` — **能力层唯一执行入口**：`runTool`（zod 再校验 + 审计 + 错误归一）+ `runToolTracked`（写工具经 UndoStore.track 落变更记录）+ `toolChangeMeta` / `PANEL_TOOL_CTX`（REST 入口身份）
+- `src/mcp/tools.ts` — 工具注册表（按角色；`registerTools` 走 `runToolTracked`）；`undo_last_change` 是唯一 `track: false` 的写工具（撤销不进快照栈）
+- `src/mcp/run-tool.ts` — **能力层唯一执行入口**：`runTool`（zod 再校验 + 审计 + 错误归一）+ `runToolTracked`（写工具经 UndoStore.track 落变更记录；`def.track === false` 的撤销执行器跳过）+ `toolChangeMeta` / `undoScopeOf`（调用域 → 撤销栈，gateway 未绑渠道拒绝）/ `PANEL_TOOL_CTX`（REST 入口身份）
 - `src/mcp/handler.ts` — `/mcp` 无状态处理
 - `src/mcp/rate-limit.ts` — gateway 写限流
 - `src/agent/tool-schema.ts` — 注册表 → LLM 工具面（`AGENT_EXCLUDED_TOOLS` 显式排除名单，与 write-path-inventory 测试互锁）
@@ -217,7 +218,8 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - **微博图文来源（与 X 同构的第二条图文链路）**：已落地（`weibo_accounts` 独立名单 / `WeiboFeedSource` 轮独立名单 + 运行状态快照 + 头像本地化 / `feed_post` 双平台推送分支（微博图直连下载）/ `post_rules.platform` 平台分流 / 图文页单墙混排 + 平台筛选胶囊 / MCP 三工具 / 老库一次性数据搬家）。计划与实现记录见 `docs/plan/weibo-source.md`
 - **B站动态图文来源 + 图文规则重构**：已落地（`bili_accounts` 独立名单〔动态型 UP 主不开播也能监听〕/ `DynamicSource` 轮询对象 = 监听主播 ∪（图文开关开着时的）动态名单，`feed_post` 只对名单账号发，名单账号头像·uname 回写 / `feed_post` 三平台推送分支 / 图文规则改为**平台无关通用规则 + 账号侧 `rule_ids` 选用**〔post_rules 去 account_ids 与 platform 两个维度〕/ 图文页「图文规则」卡 + B站账号卡与平台筛选胶囊 / MCP 三工具 / 旧规则 scope 一次性迁移到账号）。**2026-09-21 修订**：监听开关拆分（监听主播动态归档随登录常开，`listen_dynamic` 只管动态账号名单）、开播动态（LIVE_RCMD）彻底舍弃（不入库 + 一次性清旧行）、FORWARD 在 source 归一成 `retweet`、三平台账号的 ID 与平台昵称锁定为平台事实（输入面不可改，X 昵称经 verify 种入 / 抓取回写）。计划与实现记录见 `docs/plan/bili-dynamic-posts.md`
 - **图文补推语义（三平台统一，2026-09-21 拍板）**：主动关闭（账号停用→重新启用 / 图文开关手动关→重开）恢复轮**一律静默不补推**（账号表 `silent_next` 恢复位）；服务未运行期间（重启/崩溃/登录态丢失）与添加账号之前默认不推，推送设置开 `backlog_push_enabled`（「补推未运行期间的图文」）后按**时间窗（默认 6h）+ 每账号条数上限（默认 3、取最新）**双重封顶补推；三种轮次归档永不受影响，正常轮新帖全推。语义唯一权威在 `src/core/backlog.ts`
-- **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、**能力面 P0 地基（`runTool` + 写快照/撤销 + 面板 REST 收敛 + `/mcp` 鉴权口径）**、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
+- **能力面 P0 后端地基（切片 A–C 已落地）**：`runTool` 共享执行器 + 写快照与撤销（`UndoStore` 差分前像 / 逐行比对中止 / 每渠道一栈 / 混合表按列过滤）+ 撤销执行器（`PanelDeps.undoLast` + `undoEffects` 热生效映射 + `POST /api/undo` / `GET /api/undo/history` + 内部工具 `undo_last_change`）+ 面板配置写 REST 全部收敛到注册表 + 鉴权口径启动日志。切片记录见 `docs/plan/agent-access.md`；**变更历史 UI（P0b）属面板侧**，不在本项
+- **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、变更历史 UI（P0b）、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 
 

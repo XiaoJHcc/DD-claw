@@ -5,7 +5,9 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import Database from 'better-sqlite3';
-import { adminScope, channelScope, UndoStore } from './undo.js';
+import {
+  adminScope, channelScope, DEFAULT_CONFIG_TABLES, undoEffects, UndoStore,
+} from './undo.js';
 
 const DDL = `
   CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -23,6 +25,22 @@ const DDL = `
     enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   CREATE TABLE archive_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT);
+  -- 三张「配置 + 归档」混合表（列名照抄 core/db.ts，silent_next 由 ensureColumn 补）
+  CREATE TABLE x_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, screen_name TEXT NOT NULL UNIQUE, nickname TEXT,
+    display_name TEXT, bili_uid TEXT, enabled INTEGER NOT NULL DEFAULT 1, rule_ids TEXT NOT NULL DEFAULT '[]',
+    last_tweet_id TEXT, last_tweet_at INTEGER, last_ok_at INTEGER, avatar TEXT,
+    silent_next INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  CREATE TABLE weibo_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE, nickname TEXT,
+    display_name TEXT, bili_uid TEXT, enabled INTEGER NOT NULL DEFAULT 1, rule_ids TEXT NOT NULL DEFAULT '[]',
+    last_post_id TEXT, last_post_at INTEGER, last_ok_at INTEGER, avatar TEXT,
+    silent_next INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  CREATE TABLE bili_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE, uname TEXT,
+    display_name TEXT, enabled INTEGER NOT NULL DEFAULT 1, rule_ids TEXT NOT NULL DEFAULT '[]',
+    last_ok_at INTEGER, avatar TEXT,
+    silent_next INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 `;
 
 function setup(t: TestContext, opts: ConstructorParameters<typeof UndoStore>[1] = {}) {
@@ -68,7 +86,8 @@ test('插入 → 撤销按 id 删除该行', (t) => {
   assert.equal(rec.rows[0]!.after!.name, '新规则');
 
   const r = store.undo(adminScope());
-  assert.deepEqual(r, { ok: true, id: rec.id, applied: 1 });
+  // 记录无工具名（capture 直接调）时结果不带 tool 键；tables/settingKeys 是入口层用的受影响面
+  assert.deepEqual(r, { ok: true, id: rec.id, applied: 1, tables: ['push_rules'], settingKeys: [] });
   assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM push_rules`).get() as { n: number }).n, 0);
 });
 
@@ -305,7 +324,7 @@ test('写路径内部自己开事务（模拟 Db.upsertXxx）：嵌套 savepoint
 });
 
 test('未建的表（尚未升级的库）被跳过，不影响其它表', (t) => {
-  const { db, store } = setup(t); // 测试库里没有 post_rules / x_accounts
+  const { db, store } = setup(t, { tables: [...DEFAULT_CONFIG_TABLES, 'post_rules'] }); // 测试库里没有 post_rules
   const { changeId } = store.capture(META, () => {
     db.prepare(`INSERT INTO settings (key, value) VALUES ('a', 'b')`).run();
   });
@@ -365,4 +384,138 @@ test('track：并发写调用串行化，差分互不污染', async (t) => {
   assert.deepEqual(recB.rows.map((r) => (r.after as { name: string }).name), ['规则B'], 'B 的记录只含 B 的写');
   const recA = history.find((h) => h.id === ra.changeId)!;
   assert.deepEqual(recA.rows.map((r) => (r.after as { name: string }).name), ['规则A'], 'A 的记录只含 A 的写');
+});
+// ---- 混和表按列过滤（切片 C 裁决：x_accounts / weibo_accounts / bili_accounts）----
+
+/** 三张混合表的形状：配置列（面板 / agent 能改）与轮询列（touch* 回写的游标 / 心跳） */
+const ACCOUNT_SHAPES = [
+  { table: 'x_accounts', keyCol: 'screen_name', keyVal: 'someone', cursorCol: 'last_tweet_id' },
+  { table: 'weibo_accounts', keyCol: 'uid', keyVal: '2203177060', cursorCol: 'last_post_id' },
+  { table: 'bili_accounts', keyCol: 'uid', keyVal: '7706705', cursorCol: 'last_ok_at' },
+];
+
+function seedAccount(db: Database.Database, s: (typeof ACCOUNT_SHAPES)[number]): number {
+  const info = db
+    .prepare(
+      `INSERT INTO ${s.table} (${s.keyCol}, display_name, enabled, rule_ids, ${s.cursorCol}, last_ok_at, created_at, updated_at)
+       VALUES (?, NULL, 1, '[]', 500, 500, 500, 500)`,
+    )
+    .run(s.keyVal);
+  return Number(info.lastInsertRowid);
+}
+
+/** 轮询回写一行（模拟 touch*：游标 / 心跳 / 时间戳一起写） */
+function pollTouch(db: Database.Database, s: (typeof ACCOUNT_SHAPES)[number], id: number, at: number): void {
+  const set = s.cursorCol === 'last_ok_at' ? 'last_ok_at = ?' : `${s.cursorCol} = ?, last_ok_at = ?`;
+  const args = s.cursorCol === 'last_ok_at' ? [at] : [`tw-${at}`, at];
+  db.prepare(`UPDATE ${s.table} SET ${set}, updated_at = ? WHERE id = ?`).run(...args, at, id);
+}
+
+test('混合表列过滤：轮询回写不落记录、不污染撤销，撤销也不回滚游标', (t) => {
+  const { db, store } = setup(t);
+  assert.ok(
+    DEFAULT_CONFIG_TABLES.includes('x_accounts')
+    && DEFAULT_CONFIG_TABLES.includes('weibo_accounts')
+    && DEFAULT_CONFIG_TABLES.includes('bili_accounts'),
+    '三张图文名单都是「配置 + 归档」混合表：纳入快照 + 按列过滤',
+  );
+  assert.ok(!DEFAULT_CONFIG_TABLES.includes('streamers'), 'streamers 维持整表不纳入（无可分的游标列）');
+
+  for (const s of ACCOUNT_SHAPES) {
+    const id = seedAccount(db, s);
+
+    // ① 只有轮询列变化 → 不算一次配置写（切片 B 的「差分窗口被轮询写捎带」在此解除）
+    pollTouch(db, s, id, 600);
+    const only = store.capture(META, () => pollTouch(db, s, id, 700));
+    assert.equal(only.changeId, null, `${s.table}: 轮询回写不落变更记录`);
+
+    // ② 配置写（停用 + 选规则）+ 同一窗口里的轮询回写 → 记录只记这一行
+    const { changeId } = store.capture({ ...META, tool: 'upsert_account' }, () => {
+      db.prepare(`UPDATE ${s.table} SET enabled = 0, rule_ids = '[3]' WHERE id = ?`).run(id);
+      pollTouch(db, s, id, 800);
+    });
+    assert.ok(changeId, `${s.table}: 配置写要落记录`);
+    const rec = store.peek(adminScope())!;
+    assert.equal(rec.rows.length, 1, `${s.table}: 轮询列不额外产生行`);
+    assert.deepEqual(rec.rows[0]!.pk, { id });
+
+    // ③ 撤销前游标又前进（撤销时当前值已与后像不同）→ 比对只看配置列，仍然撤得掉
+    pollTouch(db, s, id, 900);
+    const u = store.undo(adminScope());
+    assert.equal(u.ok, true, `${s.table}: 游标前进不该让撤销中止`);
+    assert.deepEqual(u.tables, [s.table]);
+    const row = db.prepare(`SELECT * FROM ${s.table} WHERE id = ?`).get(id) as Record<string, unknown>;
+    assert.equal(row.enabled, 1, `${s.table}: 配置列还原`);
+    assert.equal(row.rule_ids, '[]', `${s.table}: 配置列还原`);
+    assert.equal(row.last_ok_at, 900, `${s.table}: 游标列保持撤销前的值（不把轮询数据回滚）`);
+    assert.equal(row.updated_at, 900, `${s.table}: updated_at 同属轮询列`);
+  }
+});
+
+test('列过滤不削弱冲突检测：配置列被第三方改过仍然中止且一行不动', (t) => {
+  const { db, store } = setup(t);
+  const s = ACCOUNT_SHAPES[0]!;
+  const id = seedAccount(db, s);
+
+  store.capture(META, () => {
+    db.prepare(`UPDATE ${s.table} SET enabled = 0 WHERE id = ?`).run(id);
+    pollTouch(db, s, id, 800);
+  });
+  // 第三方（另一个入口）把配置列改成别的值：后像 ≠ 当前值 → 中止
+  db.prepare(`UPDATE ${s.table} SET enabled = 1, rule_ids = '[9]' WHERE id = ?`).run(id);
+
+  const r = store.undo(adminScope());
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'conflict');
+  assert.match(r.detail!, new RegExp(`${s.table} \\(id=${id}\\)`));
+  const row = db.prepare(`SELECT * FROM ${s.table} WHERE id = ?`).get(id) as Record<string, unknown>;
+  assert.equal(row.rule_ids, '[9]', '冲突中止时第三方写的值必须原样留着');
+});
+
+test('撤销结果带 tables / settingKeys / tool（入口层据此触发热生效）', (t) => {
+  const { db, store } = setup(t);
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('listen_weibo', '1')`).run();
+  store.capture({ ...META, tool: 'set_listen' }, () =>
+    db.prepare(`UPDATE settings SET value = '0' WHERE key = 'listen_weibo'`).run());
+
+  const u = store.undo(adminScope());
+  assert.equal(u.ok, true);
+  assert.equal(u.tool, 'set_listen');
+  assert.deepEqual(u.tables, ['settings']);
+  assert.deepEqual(u.settingKeys, ['listen_weibo']);
+  assert.deepEqual(undoEffects(u), ['listen']);
+
+  // 隐私例外（LLM key）也在 settingKeys 里点名（主键没打码，值才打码）
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('llm_key:p', 'sk-a')`).run();
+  store.capture(META, () => db.prepare(`UPDATE settings SET value = 'sk-b' WHERE key = 'llm_key:p'`).run());
+  const u2 = store.undo(adminScope());
+  assert.deepEqual(u2.settingKeys, ['llm_key:p']);
+  assert.deepEqual(u2.refill, ['settings.(key=llm_key:p)']);
+  assert.deepEqual(undoEffects(u2), ['llm'], '撤 key = 清空 + 重填提示，且要重建 router');
+
+  // 空栈/中止不带这些字段（入口层据此只做错误映射）
+  assert.deepEqual(store.undo(adminScope()), { ok: false, reason: 'empty' });
+});
+
+test('undoEffects：受影响表 / settings 键 → 热生效标签（P0 判据 6 的映射表）', () => {
+  // settings 键：运行参数 → reconcileRuntime；listen_* → reconcileListen；llm_* → 重建 router；
+  // napcat_* → 重装配通道；其余（推送总开关等由 pipeline 逐条读表）无回调
+  assert.deepEqual(undoEffects({ settingKeys: ['poll_interval_sec'] }), ['runtime']);
+  assert.deepEqual(undoEffects({ settingKeys: ['notify_on_first_run'] }), ['runtime']);
+  assert.deepEqual(undoEffects({ settingKeys: ['listen_dynamic'] }), ['listen']);
+  assert.deepEqual(undoEffects({ settingKeys: ['llm_providers'] }), ['llm']);
+  assert.deepEqual(undoEffects({ settingKeys: ['llm_key:p1'] }), ['llm']);
+  assert.deepEqual(undoEffects({ settingKeys: ['napcat_enabled'] }), ['notifiers']);
+  assert.deepEqual(undoEffects({ settingKeys: ['push_enabled'] }), []);
+  // 表：三张图文名单 = 源名单变化 → 同一个启停入口；渠道行 → 装配级重同步；其余无回调
+  assert.deepEqual(undoEffects({ tables: ['x_accounts'] }), ['listen']);
+  assert.deepEqual(undoEffects({ tables: ['weibo_accounts', 'bili_accounts'] }), ['listen']);
+  assert.deepEqual(undoEffects({ tables: ['push_channels'] }), ['notifiers']);
+  assert.deepEqual(undoEffects({ tables: ['settings', 'push_rules', 'categories', 'post_rules'] }), []);
+  // 一条记录跨面时全部给出，顺序稳定（settings 键在前）
+  assert.deepEqual(
+    undoEffects({ tables: ['settings', 'x_accounts'], settingKeys: ['listen_weibo', 'llm_key:a'] }),
+    ['listen', 'llm'],
+  );
+  assert.deepEqual(undoEffects({}), []);
 });

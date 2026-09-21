@@ -30,7 +30,7 @@ import { isLlmEnabled, setLlmEnabled } from '../analysis/providers.js';
 import { llmProviderSchema } from '../config/schema.js';
 import type { StreamerInput } from '../core/streamers.js';
 import { mcpWriteLimiter } from './rate-limit.js';
-import { runToolTracked } from './run-tool.js';
+import { runToolTracked, undoScopeOf } from './run-tool.js';
 import type { McpAuth } from './auth.js';
 
 /** gateway 群自助：单渠道 MCP 规则上限 */
@@ -47,6 +47,11 @@ export interface McpToolDef {
   role: ToolRole;
   /** 写操作：记审计日志 */
   write?: boolean;
+  /**
+   * 该写工具是否进快照栈（缺省进）。只有一个工具设 false：撤销执行器 `undo_last_change`——
+   * 它的写是把已记录的前像写回去，入栈会把自己变成下一条可撤销记录（见 core/undo.ts）。
+   */
+  track?: false;
   handler: (deps: PanelDeps, args: Record<string, unknown>, ctx: McpAuth) => unknown | Promise<unknown>;
 }
 
@@ -230,6 +235,35 @@ const sharedTools: McpToolDef[] = [
     schema: {},
     role: 'shared',
     handler: (deps) => ({ rules: deps.db.listPostRules() }),
+  },
+  // 撤销是**内部工具**（计划「撤销的用户面」）：不设专门命令，agent 侧自然语言说「撤销刚才那个」即可。
+  // 两个角色都该有——admin 撤全局栈，gateway 撤本渠道栈（调用域由令牌解析，不在参数里）。
+  // 唯一的写工具塞在 shared 里：ToolRole 是按角色过滤的，要让两种角色都看得见只能用 shared。
+  {
+    name: 'undo_last_change',
+    description: '撤销最近一次配置变更（本调用域的栈顶：admin 撤全局栈，gateway 撤本渠道栈）。'
+      + '逐行比对后像与当前值，若该设置已被其他入口改过则中止且一行都不动（宁中止不丢写）；'
+      + '撤销会触发热生效（等同于在面板上改回来）。撤回的是上一次写，不是「把某项改回默认」',
+    schema: {},
+    role: 'shared',
+    write: true,
+    // 撤销是把已记录的前像写回去，不能再进快照（否则撤销自己成了下一条可撤销记录）
+    track: false,
+    handler: (deps, _args, ctx) => {
+      if (!deps.undoLast) throw new HttpError(400, '撤销未装配');
+      const r = deps.undoLast(undoScopeOf(ctx));
+      if (!r.ok) {
+        if (r.reason === 'empty') throw new HttpError(404, '没有可撤销的变更');
+        throw new HttpError(409, '该设置已被其他入口修改，无法撤销本次');
+      }
+      return {
+        ok: true,
+        change: { id: r.id, tool: r.tool ?? null },
+        applied: r.applied,
+        // 隐私例外（LLM key）：值没落库，撤销 = 清空；这里点名要重填的字段
+        ...(r.refill ? { refill: r.refill } : {}),
+      };
+    },
   },
 ];
 

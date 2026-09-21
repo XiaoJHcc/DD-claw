@@ -71,6 +71,23 @@ export function scopeChannelId(ctx: McpAuth): number | undefined {
   return ctx.scope.channelId;
 }
 
+/** 变更记录/撤销栈的归属：gateway 按令牌绑定渠道独立栈；admin（含面板）共用全局栈 */
+export function scopeOf(ctx: McpAuth): string {
+  const ch = scopeChannelId(ctx);
+  return ch === undefined ? adminScope() : channelScope(ch);
+}
+
+/**
+ * 撤销栈标识：admin 一律全局栈；gateway 必须绑渠道，未绑定**拒绝**（绝不回落 admin 栈——
+ * 否则 QQ 侧一句「撤销」就能回退主人的全局配置）。
+ */
+export function undoScopeOf(ctx: McpAuth): string {
+  if (ctx.role === 'admin') return adminScope();
+  const ch = scopeChannelId(ctx);
+  if (ch === undefined) throw new HttpError(403, '本令牌未绑定渠道，不能撤销变更');
+  return channelScope(ch);
+}
+
 /** zod 校验：只有过了这一关的 args 才可能进 handler（第二个适配器也绕不过） */
 function validateArgs(
   def: McpToolDef,
@@ -141,9 +158,8 @@ export const PANEL_TOOL_CTX: McpAuth = { name: 'panel', role: 'admin', scope: {}
 
 /** 变更记录归属：gateway 按令牌绑定渠道独立栈；admin / 面板共用全局栈（主人只有一个） */
 export function toolChangeMeta(ctx: McpAuth, entry: 'panel' | 'mcp', tool: string): ChangeMeta {
-  const ch = scopeChannelId(ctx);
   return {
-    scope: ch === undefined ? adminScope() : channelScope(ch),
+    scope: scopeOf(ctx),
     actor: ctx.name,
     entry,
     tool,
@@ -154,6 +170,9 @@ export function toolChangeMeta(ctx: McpAuth, entry: 'panel' | 'mcp', tool: strin
  * 写工具的快照接线（P0 判据 3 的执行形态）：`def.write` 且装配了 UndoStore 时，
  * 整个调用经 `UndoStore.track()` 串行落变更记录（前像/后像差分方案与取舍见 undo.ts）；
  * 否则直退 runTool（校验/审计/错误归一不变）。写路径的两类入口（/mcp 与面板 REST）都走这里。
+ *
+ * `def.track === false` 的写工具（只有撤销执行器 `undo_last_change`）照常审计，但**不进快照**：
+ * 它的写是把已记录的前像写回去，再记一笔会把自己变成下一条可撤销记录。
  */
 export async function runToolTracked(
   deps: PanelDeps,
@@ -163,7 +182,7 @@ export async function runToolTracked(
   entry: 'panel' | 'mcp',
 ): Promise<ToolResult> {
   const hooks: RunToolHooks = { audit: (call) => auditLine(entry === 'panel' ? '面板' : 'MCP', call) };
-  if (!def.write || !deps.undo) return runTool(deps, def, args, ctx, hooks);
+  if (!def.write || def.track === false || !deps.undo) return runTool(deps, def, args, ctx, hooks);
   const { value } = await deps.undo.track(
     toolChangeMeta(ctx, entry, def.name),
     () => runTool(deps, def, args, ctx, hooks),

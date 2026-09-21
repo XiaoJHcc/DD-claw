@@ -41,6 +41,7 @@ claude mcp add --transport http dd-claw http://127.0.0.1:8787/mcp \
 |---|---|---|
 | 典型持有者 | 主人本机（Claude Code / 其他 Agent） | MaiBot 插件（群里所有人间接调用） |
 | 只读查询 | ✔ 全部 | ✔ 全部 |
+| 撤销本调用域的变更（`undo_last_change`） | ✔ 全局栈 | ✔ 本渠道栈（未绑渠道拒绝） |
 | 设置/名单/规则/渠道/LLM 写 | ✔ | ✘（工具不存在） |
 | 群推送规则自助 | ✘（用全量规则 CRUD） | ✔（受限，见下） |
 
@@ -63,6 +64,9 @@ claude mcp add --transport http dd-claw http://127.0.0.1:8787/mcp \
 - 单群渠道自助规则 ≤ 20 条；写操作限流 20 次/10 分钟（每令牌）
 - 同主播同分类去重；全部写操作落审计日志（`[mcp] MCP 写操作 [角色:令牌名] 工具 参数`）
 
+`undo_last_change` 的撤销栈同样由**令牌 scope** 决定（admin = 全局栈，gateway = 绑定渠道栈），
+未绑渠道的 gateway 一律 403——调用方声明不了自己的栈，也就撤不到别人的写；撤销自身不进变更记录。
+
 残留风险（如实说明）：gateway 令牌的调用方若被 prompt injection 诱导，渠道参数本身不可验证，
 理论上可给**任意已启用**群渠道加规则。爆炸半径被限制在「往某群加开播推送」这种可撤销的骚扰级；
 要锁死「每个群只能操作本群」，必须在调用方事件层钉死群身份——即 MaiBot 插件方案
@@ -81,6 +85,9 @@ claude mcp add --transport http dd-claw http://127.0.0.1:8787/mcp \
 - **只读（两角色共享）**：`get_status` / `get_live_now` / `get_schedule` / `list_streamers` /
   `search_streamers` / `list_push_rules` / `list_categories` / `list_channels` / `search_posts` /
   `list_x_accounts` / `list_weibo_accounts` / `list_bili_accounts` / `list_post_rules`
+- **两角色共享的写（唯一一个）**：`undo_last_change`——撤**本调用域**的栈顶（admin = 全局栈，
+  gateway = 令牌绑定渠道的栈；未绑渠道直接拒绝，不回落），逐行比对后像与当前值，不一致则中止且一行不动；
+  撤完触发热生效（等同面板上改回来）。它自身**不进变更记录**（撤销不该可再撤，见 `UndoStore`）。
 - **admin 写**：`watch_streamer` / `unwatch_streamer` / `set_streamer` / `set_push_enabled` /
   `set_llm_enabled` / `set_listen` / `update_runtime_config` / `upsert_category` / `delete_category` /
   `upsert_push_rule` / `delete_push_rule` / `upsert_channel` / `delete_channel` /

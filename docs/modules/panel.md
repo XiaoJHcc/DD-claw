@@ -35,6 +35,7 @@
 | PUT /api/llm/enabled | LLM 总开关（settings.llm_enabled，缺省关） |
 | GET/PUT /api/napcat · POST /api/napcat/launch | NapCat 通道；GET 回生效配置（含 autorestart）+ 端点 + 实时三态探测 + taskRegistered；PUT 校验（布尔/纯数字，**空串 = 清空字段，settings 唯一信源无回落**）后 await save——autorestart 开 = 建拉起任务（失败 400 透传、不落开关）、关 = 移除任务；launch 失败 400 透传原因 |
 | /mcp | MCP 端点（Bearer token 鉴权 + 按角色注册工具面），实现委托 src/mcp/ |
+| GET /api/undo/history · POST /api/undo | 变更历史（新→旧：`{id,tool,entry,actor,scope,at(秒),undone,tables(去重),rows}`）与撤销执行器；**POST 忽略 body**，撤 admin 全局栈栈顶——空栈 404、逐行比对中止 409（一行不动）；**唯一不经注册表的写路由**（写由 UndoStore 完成、不入快照，路由直接调 `deps.undoLast`，热生效回调在装配根） |
 | GET/PUT /api/x · POST /api/x/test | X 连接配置与探测（GET **只读快照、绝不打网络**；POST 测试允许未保存的输入值「先测后存」，只有测已保存配置才更新快照；配置变了相关旧结论作废） |
 | /api/x/accounts · /:id | X 独立名单 CRUD；新建时走免登录存在性校验（账号不存在 400 / 链路不通照收并回报 `verify`），**POST 后经 `kickAccount` 即时首拉**（不等周期、不在全量轮里排队）；`biliUid` 必须在监听名单；`ruleIds` 选用图文帖规则（规则存在即可，规则平台无关） |
 | /api/weibo · /api/weibo/accounts · /:id | 微博运行状态快照（GET 只读；**面板当前不消费**，保留给后续可视化）+ 微博独立名单 CRUD；POST 时 `uid` 与 `nickname` 二选一（只填昵称走匿名解析链补 uid），重名 409、非数字 uid 400；`displayName` 为自定义显示名（卡片优先展示，留空 = 用昵称）；`ruleIds` 口径同 X（规则平台无关）；POST 后同样经 `kickAccount` 即时首拉 |

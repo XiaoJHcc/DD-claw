@@ -203,7 +203,7 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
 
 **快照实现取向（对「写操作快照与撤销」一节的落实方式，2026-09-17）**：采用**表级前像快照 + 差分**，而不是让每条写路径自己声明「影响了哪些行」。理由是计划里点名的五种形状（级联停用 N 条 / 排序整表重写 / 新建 `sort=MAX+1` / settings 删除式写 / provider 复合写两行）在差分下**自动收敛为同一种记录**，且顺带拿到后像——撤销插入/删除才做得出来；代价是每次配置写整表 SELECT 一遍，但这只发生在配置写路径（面板点一下 / 一次 MCP 调用），配置表几十到几百行，绝不进轮询循环。两个附带决定：① `streamers` **暂不纳入**快照表——它是配置与归档的混合体（面板改 watch/alias，关注源同时覆写 uname/face），纳入后撤销比对会被轮询写频繁打断，撤不掉反而更常见，收敛其写路径时再裁决；② 除 LLM key 外**不做其它隐私例外**，即 `mcp_tokens` 的值会被快照（同库已有明文，未新增暴露面，且换来「撤销令牌轮换」能还原旧令牌）；若要求同口径打码，改一行 `redact` 判定即可。
 
-**快照接线落地（切片 B，2026-09-21）**：记录点 = `UndoStore.track()`（异步段版 capture）：进 handler 前取前像，`runTool` 成功后同步做「后像 → 差分 → 落记录」，所有写调用经内部队列串行化防差分窗口交错。两个已知取舍（详见 `undo.ts` track() 注释）：① 前像读取不在事务里（事务不能跨 await），残留窗口 = 写已提交而记录 INSERT 失败（磁盘级故障），此时错误抛给调用方；② 不走 track 的写（轮询源回写 `x_accounts` 的游标/头像列）可能落进差分窗口被捎带——x_accounts 与 streamers 同为「配置+归档混合表」，后果是撤销比对更易中止（宁中止不丢写），彻底解法（按列过滤或拆表）留待撤销执行器切片裁决。① 的 `streamers` 口径已随接线生效：`watch_streamer` / `set_streamer` / `unwatch_streamer` 照常过 runTool + 审计，但差分恒空、不落变更记录（`set_streamer` 联动的 weibo_accounts 写同理不纳入）。
+**快照接线落地（切片 B，2026-09-21）**：记录点 = `UndoStore.track()`（异步段版 capture）：进 handler 前取前像，`runTool` 成功后同步做「后像 → 差分 → 落记录」，所有写调用经内部队列串行化防差分窗口交错。两个已知取舍（详见 `undo.ts` track() 注释）：① 前像读取不在事务里（事务不能跨 await），残留窗口 = 写已提交而记录 INSERT 失败（磁盘级故障），此时错误抛给调用方；② 不走 track 的写（轮询源回写 `x_accounts` 的游标/头像列）可能落进差分窗口被捎带——x_accounts 与 streamers 同为「配置+归档混合表」，后果是撤销比对更易中止（宁中止不丢写）。**② 已由切片 C 的按列过滤解除**（`DEFAULT_IGNORE_COLUMNS`：三张图文账号名单的轮询列不参与差分/比对/还原，见下「切片 C 落地」）。① 的 `streamers` 口径已随接线生效：`watch_streamer` / `set_streamer` / `unwatch_streamer` 照常过 runTool + 审计，但差分恒空、不落变更记录（`set_streamer` 联动的 weibo_accounts 写同理不纳入）。
 
 **接线进展**：
 - **切片 A（2026-09-17 后）**：`registerTools` 已改走 `runTool`（MCP 侧 content 文本逐字不变，run-tool 契约测试钉住）；
@@ -218,9 +218,19 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
   REST 收敛需要的工具语义对齐（additive/趋严，MCP 契约不破坏）：`set_streamer` 补 analyze/notify、
   `upsert_llm_provider` 补 keyEnvs、`upsert_x_account` 新建并入 verify（not-found 拒 / link 照收 /
   ok 种昵称，响应增 `verify` 键）、`upsert_post_rule` 的 filters 改 strictObject。
-- **仍未接线**：撤销执行器与历史查询端点（`/api/undo*`）、「表 → 热生效回调」映射（撤销后触发
-  reconcileRuntime / reconcileListen / 重建 router）、变更历史 UI（P0b）——均属切片 C；
+- **仍未接线**：变更历史 UI（P0b，面板侧）——`/api/undo*` 与「表 → 热生效回调」映射已于**切片 C** 落地（下条）；
   `completeChat` 与 `agentToolSpecs` 目前**没有任何调用方**（agent loop 尚未写），对现有链路零行为变化。
+
+**切片 C 落地（2026-09-21，后端收尾）**：
+
+| 项 | 落点 | 说明 |
+|---|---|---|
+| ✅ 撤销执行器 | `src/core/undo.ts`（`undo` 回 `tables` / `settingKeys` / `tool`）+ `src/mcp/run-tool.ts`（`undoScopeOf`）+ `src/index.ts`（`undoLast`） | `PanelDeps.undoLast(scope?)`：撤栈顶 + 触发热生效（判据 6）。**回调闭包只在装配根**，能力层拿到的是纯分类结果 `undoEffects()` |
+| ✅ 「表 / 键 → 回调」映射 | `undo.ts` 的 `undoEffects()`（纯函数，不认识 Db 也不持回调） | `settings` 运行参数键 → `reconcileRuntime`；`listen_*` → `reconcileListen`；`llm_providers` / `llm_key:*` → 重建 router（撤 key = 清空 + refill）；`push_channels` / `napcat_*` → `rebuildNotifiers`；三张图文账号名单 → `reconcileListen`（源名单同一启停入口）；`push_enabled` / 规则 / 分类无回调（逐条读表） |
+| ✅ REST 端点 | `src/panel/server.ts` | `GET /api/undo/history` → `{changes:[{id,tool,entry,actor,scope,at(秒),undone,tables,rows}]}`（新→旧）；`POST /api/undo`（忽略 body）→ 200 `{ok,change:{id,tool}}` / 空栈 404 / 比对中止 409。**唯一不经注册表的写路由**，直接调 `deps.undoLast` |
+| ✅ 撤销内部工具 | `src/mcp/tools.ts` `undo_last_change`（shared = 两角色可见） | admin → 全局栈；gateway → 令牌绑定渠道栈，**未绑渠道拒绝不回落**；默认暴露给 agent（不进 `AGENT_EXCLUDED_TOOLS`）；`track: false` ——撤销自身不入栈 |
+| ✅ `POST /api/undo` 的清单分类 | `write-path-inventory.test.ts` 新增第三种 `coverage: 'executor'` | 机器校验：该路由对应的工具必须 `exists` + `write` + `track === false`（与「撤销不入栈」互锁），暴露策略仍与 `AGENT_EXCLUDED_TOOLS` 对齐 |
+| ✅ `x_accounts` 混合表裁决（切片 B 遗留） | `undo.ts` `DEFAULT_IGNORE_COLUMNS` | 三张图文账号名单的轮询列（游标 / `last_ok_at` / `avatar` / `silent_next` / 平台昵称 `nickname` / `uname` / `updated_at`）不参与差分、比对与还原：轮询写不再被捎带，游标前进不再让撤销中止，撤销也不回滚轮询数据。`streamers` 仍整表不纳入（无可分列） |
 
 **快照与写入的同事务**：better-sqlite3 事务不能跨 await，故 `runTool` 内不做完整 capture；
 切片 B 的实际记录点与取舍见上「快照实现取向」的落地补充。
