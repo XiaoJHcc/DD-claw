@@ -226,42 +226,42 @@ const INVENTORY: InventoryEntry[] = [
   // ---- 已收敛但 P0 待补工具（「①成不成立」的答案：成立，写必须过注册表；②暂关） ----
   {
     method: 'PUT', path: '/api/post-rules/order', label: 'PUT /api/post-rules/order',
-    coverage: 'registry', tool: 'reorder_post_rules', toolStatus: 'planned', exposeToAgent: false,
+    coverage: 'registry', tool: 'reorder_post_rules', toolStatus: 'exists', exposeToAgent: false,
     reason: '排序类：先进注册表以纳入回滚覆盖；是否暴露给 agent 单独决定',
   },
   {
     method: 'POST', path: '/api/x/test', label: 'POST /api/x/test',
-    coverage: 'registry', tool: 'test_x_connection', toolStatus: 'planned', exposeToAgent: false,
+    coverage: 'registry', tool: 'test_x_connection', toolStatus: 'exists', exposeToAgent: false,
     reason: '网络探测（代理/Nitter/免登录）+ 探测状态快照写 settings → 不暴露给 agent',
   },
   {
     method: 'PUT', path: '/api/channels/order', label: 'PUT /api/channels/order',
-    coverage: 'registry', tool: 'reorder_channels', toolStatus: 'planned', exposeToAgent: false,
+    coverage: 'registry', tool: 'reorder_channels', toolStatus: 'exists', exposeToAgent: false,
     reason: '排序类：先进注册表以纳入回滚覆盖；是否暴露给 agent 单独决定',
   },
   {
     method: 'PUT', path: '/api/categories/order', label: 'PUT /api/categories/order',
-    coverage: 'registry', tool: 'reorder_categories', toolStatus: 'planned', exposeToAgent: false,
+    coverage: 'registry', tool: 'reorder_categories', toolStatus: 'exists', exposeToAgent: false,
     reason: '同上',
   },
   {
     method: 'PUT', path: '/api/rules/order', label: 'PUT /api/rules/order',
-    coverage: 'registry', tool: 'reorder_push_rules', toolStatus: 'planned', exposeToAgent: false,
+    coverage: 'registry', tool: 'reorder_push_rules', toolStatus: 'exists', exposeToAgent: false,
     reason: '同上',
   },
   {
     method: 'PUT', path: '/api/llm/providers/order', label: 'PUT /api/llm/providers/order',
-    coverage: 'registry', tool: 'reorder_llm_providers', toolStatus: 'planned', exposeToAgent: false,
+    coverage: 'registry', tool: 'reorder_llm_providers', toolStatus: 'exists', exposeToAgent: false,
     reason: '同上',
   },
   {
     method: 'POST', path: '/api/push/test', label: 'POST /api/push/test',
-    coverage: 'registry', tool: 'test_push', toolStatus: 'planned', exposeToAgent: false,
+    coverage: 'registry', tool: 'test_push', toolStatus: 'exists', exposeToAgent: false,
     reason: '有对外副作用（真发一条消息）、不可撤销 → 不暴露给 agent',
   },
   {
     method: 'POST', path: String.raw`^\/api\/llm\/providers\/([^/]+)\/test$`, label: 'POST /api/llm/providers/:name/test',
-    coverage: 'registry', tool: 'test_llm_provider', toolStatus: 'planned', exposeToAgent: false,
+    coverage: 'registry', tool: 'test_llm_provider', toolStatus: 'exists', exposeToAgent: false,
     reason: '网络探测 + 失败计熔断，非 DB 写 → 不暴露给 agent',
   },
 
@@ -342,7 +342,7 @@ test('planned / exists 状态与 tools.ts 注册表一致（表不能骗人）',
     }
     assert.ok(e.tool, `${e.label}: coverage=registry 但没写 tool`);
     const def = defs.get(e.tool!);
-    if (e.toolStatus === 'exists' && e.exposeToAgent) {
+    if (e.toolStatus === 'exists') {
       assert.ok(def, `${e.label}: 表里标 exists 的工具「${e.tool}」在 tools.ts 里不存在（改名了？）`);
       assert.equal(def!.write, true, `${e.label}: 写路径映射到了非写工具「${e.tool}」`);
     }

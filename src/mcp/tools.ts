@@ -10,7 +10,6 @@
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { makeLogger } from '../logger.js';
 import type { PanelDeps } from '../panel/server.js';
 import {
   HttpError, checkAccountRuleIds, checkCategoryConditions, checkChannelShape, checkPostFiltersUsable,
@@ -20,7 +19,7 @@ import {
   parseNewBiliAccount, parseNewCategory, parseNewChannel, parseNewPostRule, parseNewRule, parseNewWeiboAccount,
   parseNewXAccount,
   parsePostRulePatch, parseRulePatch, parseRuntimePatch, parseStreamerPatch, parseWeiboAccountPatch,
-  parseXAccountPatch, parseXPatch, syncStreamerWeiboLink, watchStreamer,
+  parseXAccountPatch, parseXPatch, parseXTestRequest, syncStreamerWeiboLink, watchStreamer,
 } from '../panel/http-util.js';
 import { scheduleInfo } from '../panel/schedule.js';
 import { setPushEnabled } from '../core/push.js';
@@ -31,9 +30,8 @@ import { isLlmEnabled, setLlmEnabled } from '../analysis/providers.js';
 import { llmProviderSchema } from '../config/schema.js';
 import type { StreamerInput } from '../core/streamers.js';
 import { mcpWriteLimiter } from './rate-limit.js';
+import { runTool } from './run-tool.js';
 import type { McpAuth } from './auth.js';
-
-const log = makeLogger('mcp');
 
 /** gateway 群自助：单渠道 MCP 规则上限 */
 const MAX_MCP_RULES_PER_CHANNEL = 20;
@@ -70,6 +68,14 @@ function checkXBiliUidForMcp(deps: PanelDeps, uid: string | null): void {
 /** 微博账号的关联主播校验（与 checkXBiliUidForMcp 同一条纪律） */
 function checkWeiboBiliUidForMcp(deps: PanelDeps, uid: string | null): void {
   if (uid && !deps.db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
+}
+
+/** 排序类工具的公共校验：ids 必须是现有行的全排列（与面板 put*Order 同一口径、同一句文案） */
+function checkFullPermutation(ids: number[], existing: number[], what: string): void {
+  const set = new Set(existing);
+  if (ids.length !== set.size || new Set(ids).size !== ids.length || ids.some((id) => !set.has(id))) {
+    throw new HttpError(400, `ids 必须与现有${what}一一对应`);
+  }
 }
 
 // ---- 共享只读工具 ----
@@ -835,6 +841,132 @@ const adminTools: McpToolDef[] = [
       return { ok: true, provider: name };
     },
   },
+  // ---- 排序与测试类（P0 补齐：与对应 REST 路由同一套校验与 Db 调用；
+  // 进注册表是为纳入回滚覆盖/审计，agent 工具面由 AGENT_EXCLUDED_TOOLS 排除）----
+  {
+    name: 'reorder_channels',
+    description: '推送渠道排序：ids 必须是现有渠道 id 的全排列（长度一致/无重复/无增删），按数组顺序重写展示顺序',
+    schema: { ids: z.array(idSchema) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const ids = args.ids as number[];
+      checkFullPermutation(ids, deps.db.listPushChannels().map((c) => c.id), '渠道');
+      deps.db.reorderPushChannels(ids);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'reorder_categories',
+    description: '内容分类排序：ids 必须是现有分类 id 的全排列（长度一致/无重复/无增删），按数组顺序重写展示顺序',
+    schema: { ids: z.array(idSchema) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const ids = args.ids as number[];
+      checkFullPermutation(ids, deps.db.listCategories().map((c) => c.id), '分类');
+      deps.db.reorderCategories(ids);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'reorder_push_rules',
+    description: '推送规则排序：ids 必须是全部规则 id 的全排列（长度一致/无重复/无增删），按数组顺序重写全局匹配优先级',
+    schema: { ids: z.array(idSchema) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const ids = args.ids as number[];
+      checkFullPermutation(ids, deps.db.listPushRules().map((r) => r.id), '规则');
+      deps.db.reorderPushRules(ids);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'reorder_post_rules',
+    description: '图文帖规则排序：ids 必须是全部图文帖规则 id 的全排列（长度一致/无重复/无增删），按数组顺序重写',
+    schema: { ids: z.array(idSchema) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const ids = args.ids as number[];
+      checkFullPermutation(ids, deps.db.listPostRules().map((r) => r.id), '图文帖规则');
+      deps.db.reorderPostRules(ids);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'reorder_llm_providers',
+    description: 'LLM provider 排序：names 必须是现有 provider 名单的一个排列（长度一致/无重复/无增删）；顺序 = 路由优先级，保存后路由热重建',
+    schema: { names: z.array(z.string().min(1)) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const store = deps.llm?.store;
+      if (!store) throw new HttpError(400, 'LLM provider 管理未装配');
+      const names = args.names as string[];
+      if (new Set(names).size !== names.length) throw new HttpError(400, 'names 有重复');
+      const list = store.list();
+      const byName = new Map(list.map((p) => [p.name, p]));
+      if (names.length !== list.length || names.some((n) => !byName.has(n))) {
+        throw new HttpError(400, 'names 必须与现有 provider 名单一一对应');
+      }
+      store.save(names.map((n) => byName.get(n)!));
+      deps.llm?.onProvidersChanged?.();
+      return { ok: true };
+    },
+  },
+  {
+    name: 'test_push',
+    description: '测试推送：假开播消息走完整推送链路（会真发一条消息到所有启用渠道），返回 总数/成功数',
+    schema: {},
+    role: 'admin',
+    write: true,
+    handler: async (deps) => {
+      if (!deps.testPush) throw new HttpError(400, '测试推送未装配');
+      const r = await deps.testPush();
+      return { ok: true, ...r };
+    },
+  },
+  {
+    name: 'test_llm_provider',
+    description: '测试某个 LLM provider：绕过熔断发一个最小 ping，返回毫秒耗时；失败照常计入熔断统计（与面板「测试」按钮同一语义）',
+    schema: { name: z.string().min(1) },
+    role: 'admin',
+    write: true,
+    handler: async (deps, args) => {
+      const router = deps.llm?.router;
+      if (!router) throw new HttpError(400, 'LLM 未装配');
+      const name = args.name as string;
+      const status = router.providerStatus(name);
+      if (status === null) throw new HttpError(404, 'provider 不存在');
+      if (status.startsWith('缺 key')) throw new HttpError(400, '缺 key，请先填写');
+      try {
+        const ms = await router.ping(name);
+        return { ok: true, ms };
+      } catch (e) {
+        // 同 REST 的 502：错误信息只含 HTTP 状态/对端响应摘要，不含 key
+        throw new HttpError(502, e instanceof Error ? e.message : String(e));
+      }
+    },
+  },
+  {
+    name: 'test_x_connection',
+    description: 'X/推特 连通性探测（代理 / Nitter 实例 / 免登录回退）。允许传入尚未保存的覆盖值（先测后存）；'
+      + '测的就是已保存配置时，探测结果快照写 settings（面板卡片读它）',
+    schema: {
+      target: z.enum(['all', 'proxy', 'instances', 'web']).optional().describe('探测目标，缺省 all'),
+      proxyUrl: z.string().optional().describe('覆盖已保存的代理地址（先测后存）'),
+      instances: z.string().optional().describe('覆盖已保存的 Nitter 实例 host（逗号分隔）'),
+      screenName: z.string().optional().describe('探测用账号（免登录路线）；缺省用基准账号'),
+    },
+    role: 'admin',
+    write: true,
+    handler: async (deps, args) => {
+      if (!deps.x) throw new HttpError(400, 'X 分页未装配');
+      return deps.x.test(parseXTestRequest(pickBody(args, ['target', 'proxyUrl', 'instances', 'screenName'])));
+    },
+  },
 ];
 
 // ---- gateway 专属（群推送规则自助；服务端强制收敛，不信任任何调用方声明的群号/身份）----
@@ -926,30 +1058,20 @@ export function toolDefsForRole(role: McpAuth['role']): McpToolDef[] {
   return allToolDefs().filter((t) => t.role === 'shared' || t.role === role);
 }
 
-/** 审计日志：写操作落日志（角色 + 工具 + 参数摘要；llm key 值打码） */
-function auditLog(ctx: McpAuth, tool: string, args: Record<string, unknown>): void {
-  const sanitized = { ...args };
-  if (tool === 'set_llm_key' && 'value' in sanitized) sanitized.value = '***';
-  if ('key' in sanitized) sanitized.key = '***';
-  log.info(`MCP 写操作 [${ctx.role}:${ctx.name}] ${tool} ${JSON.stringify(sanitized)}`);
-}
-
-/** 按角色把工具注册进 SDK server（每请求一个新 server 实例，无状态模式） */
+/** 按角色把工具注册进 SDK server（每请求一个新 server 实例，无状态模式）。
+ *  执行统一走 runTool（能力层唯一执行入口：zod 再校验 + 审计 + 错误归一）；
+ *  text 映射保持与改造前逐字一致（契约见 run-tool.ts 头注释）。 */
 export function registerTools(server: McpServer, deps: PanelDeps, ctx: McpAuth): void {
   for (const def of toolDefsForRole(ctx.role)) {
     server.registerTool(
       def.name,
       { description: def.description, inputSchema: def.schema },
-      // args 已由 SDK 按 zod shape 校验过，handler 内部按 Record 取用
+      // args 已由 SDK 按 zod shape 校验过；runTool 再校验一次（第二个适配器也绕不过）
       (async (args: Record<string, unknown>) => {
-        try {
-          if (def.write) auditLog(ctx, def.name, args);
-          const result = await def.handler(deps, args, ctx);
-          return { content: [{ type: 'text' as const, text: JSON.stringify(result ?? { ok: true }, null, 2) }] };
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          return { content: [{ type: 'text' as const, text: `错误：${msg}` }], isError: true as const };
-        }
+        const r = await runTool(deps, def, args, ctx);
+        return r.ok
+          ? { content: [{ type: 'text' as const, text: r.text }] }
+          : { content: [{ type: 'text' as const, text: r.text }], isError: true as const };
       }) as never,
     );
   }

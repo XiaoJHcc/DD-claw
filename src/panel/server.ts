@@ -45,6 +45,8 @@ import { isPushEnabled, setPushEnabled } from '../core/push.js';
 import type { XConfig } from '../core/x-config.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
+import type { UndoStore } from '../core/undo.js';
+import type { ChatStore } from '../core/chat-store.js';
 
 const log = makeLogger('panel');
 
@@ -199,6 +201,10 @@ export interface PanelDeps {
   };
   /** 测试推送（假消息走完整推送链路）；不注入则 POST /api/push/test 一律 404 */
   testPush?: () => Promise<{ total: number; succeeded: number }>;
+  /** 写操作快照与撤销（P0 地基，core/undo.ts）；本切片仅装配建表，面板路由尚未消费 */
+  undo?: UndoStore;
+  /** agent 会话存储（P0 地基，core/chat-store.ts）；本切片仅装配建表，面板路由尚未消费 */
+  chat?: ChatStore;
   /**
    * 头像代理 fetch 注入点（测试用）；缺省用全局 fetch。/api/avatar 恒挂载，
    * 按 uid 反代主播头像以规避 B站图床无 CORS 导致的画布污染（颜色条取平均色用）。

@@ -13,6 +13,8 @@ import { Db } from '../core/db.js';
 import { createPanelServer, type PanelDeps, type PanelStatus } from '../panel/server.js';
 import { saveMcpTokens } from '../mcp/auth.js';
 import { resetMcpWriteLimiter } from '../mcp/rate-limit.js';
+import { runTool } from '../mcp/run-tool.js';
+import { allToolDefs } from '../mcp/tools.js';
 import { saveLlmProviders, listLlmProviders } from '../analysis/providers.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
@@ -64,11 +66,25 @@ async function setup(
       onChanged: () => listenChanged.count++,
     },
     advanced: { onChanged: () => advancedChanged.count++ },
-    llm: { store: { list: () => listLlmProviders(db), save: (ps) => saveLlmProviders(db, ps) } },
+    llm: {
+      store: { list: () => listLlmProviders(db), save: (ps) => saveLlmProviders(db, ps) },
+      // test_llm_provider 用的最小桩：状态按 settings 里的 key 推导，ping 不真实打网络
+      router: {
+        providerStatus: (name: string) =>
+          listLlmProviders(db).some((p) => p.name === name)
+            ? (db.getSetting(`llm_key:${name}`) ? '正常' : '缺 key')
+            : null,
+        ping: async (name: string) => {
+          if (name === 'Broken') throw new Error('connect ECONNREFUSED');
+          return 12;
+        },
+        refreshKeys: () => {},
+      } as unknown as NonNullable<PanelDeps['llm']>['router'],
+    },
     x: {
       info: () => ({ config: getXConfig(db), status: { proxy: { ok: false, message: '尚未测试', checkedAt: null }, instances: [], web: { ok: false, message: '尚未测试', checkedAt: null }, feed: emptyXFeedSnapshot(), updatedAt: null } }),
       save: (patch) => { saveXConfig(db, patch); return getXConfig(db); },
-      test: async () => ({ status: 'not-called' }),
+      test: async (req) => ({ echo: req }),
       verify: async (screenName) => (screenName.includes('ghost')
         ? { checked: true, ok: false, kind: 'not-found' as const, message: '账号不存在' }
         : { checked: true, ok: true, kind: 'ok' as const, message: '账号存在' }),
@@ -85,6 +101,7 @@ async function setup(
     weiboResolver: {
       resolveUid: async (nick) => (nick === '渡瀬結月' ? '2203177060' : null),
     },
+    testPush: async () => ({ total: 2, succeeded: 2 }),
   };
   const server: Server = createPanelServer(deps);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -592,4 +609,124 @@ test('图文帖规则：gateway 能看不能改（list 共享、写是 admin 专
   assert.equal(tools.includes('list_post_rules'), true, '只读对群友可见');
   assert.equal(tools.includes('upsert_post_rule'), false, '写是 admin 专属');
   assert.equal(tools.includes('delete_post_rule'), false);
+});
+
+// ---- P0 补齐的排序/测试类工具（write-path-inventory 的 8 条 planned → exists）----
+
+test('reorder_channels / reorder_categories：全排列校验 + 落库顺序', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const { groupChannelId, toastChannelId, categoryId } = seedBase(f.db);
+
+  await call(adm, 'reorder_channels', { ids: [toastChannelId, groupChannelId] });
+  assert.deepEqual(f.db.listPushChannels().map((c) => c.id), [toastChannelId, groupChannelId]);
+
+  const cat2 = f.db.upsertCategory({ name: '杂谈', llmPrompt: null, keywords: ['杂谈'], areas: [], condMode: 'and', enabled: true });
+  await call(adm, 'reorder_categories', { ids: [cat2, categoryId] });
+  assert.deepEqual(f.db.listCategories().map((c) => c.id), [cat2, categoryId]);
+
+  // 非全排列（少一个 / 多一个 / 有重复）一律 400 口径
+  await assert.rejects(call(adm, 'reorder_channels', { ids: [toastChannelId] }), /必须与现有渠道一一对应/);
+  await assert.rejects(call(adm, 'reorder_channels', { ids: [toastChannelId, groupChannelId, 999] }), /一一对应/);
+  await assert.rejects(call(adm, 'reorder_categories', { ids: [cat2, cat2] }), /一一对应/);
+});
+
+test('reorder_push_rules / reorder_post_rules：全排列校验 + 落库顺序', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const { groupChannelId } = seedBase(f.db);
+
+  const r1 = f.db.upsertPushRule({ name: 'r1', categoryId: null, uids: [], channels: [groupChannelId], messageTemplate: null, enabled: true });
+  const r2 = f.db.upsertPushRule({ name: 'r2', categoryId: null, uids: [], channels: [], messageTemplate: null, enabled: true });
+  await call(adm, 'reorder_push_rules', { ids: [r2, r1] });
+  assert.deepEqual(f.db.listPushRules().map((r) => r.id), [r2, r1]);
+  await assert.rejects(call(adm, 'reorder_push_rules', { ids: [r1] }), /必须与现有规则一一对应/);
+
+  const p1 = f.db.upsertPostRule({ name: 'p1' });
+  const p2 = f.db.upsertPostRule({ name: 'p2' });
+  await call(adm, 'reorder_post_rules', { ids: [p2, p1] });
+  assert.deepEqual(f.db.listPostRules().map((r) => r.id), [p2, p1]);
+  await assert.rejects(call(adm, 'reorder_post_rules', { ids: [p1, 999] }), /必须与现有图文帖规则一一对应/);
+});
+
+test('reorder_llm_providers：names 全排列，保存后名单顺序即路由优先级', async (t) => {
+  const f = await setup(t, { withLlm: true });
+  saveLlmProviders(f.db, [
+    ...listLlmProviders(f.db),
+    { name: 'Second', baseURL: 'http://127.0.0.1:2/v1', model: 'm2', vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema', api: 'chat-completions' },
+  ]);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  await call(adm, 'reorder_llm_providers', { names: ['Second', 'TestLLM'] });
+  assert.deepEqual(listLlmProviders(f.db).map((p) => p.name), ['Second', 'TestLLM']);
+
+  await assert.rejects(call(adm, 'reorder_llm_providers', { names: ['TestLLM'] }), /一一对应/);
+  await assert.rejects(call(adm, 'reorder_llm_providers', { names: ['TestLLM', 'TestLLM'] }), /names 有重复/);
+  await assert.rejects(call(adm, 'reorder_llm_providers', { names: ['TestLLM', 'Nope'] }), /一一对应/);
+});
+
+test('test_push：走装配的测试推送链路并回传统计', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const r = (await call(adm, 'test_push')) as { ok: boolean; total: number; succeeded: number };
+  assert.deepEqual(r, { ok: true, total: 2, succeeded: 2 });
+});
+
+test('test_llm_provider：404 / 缺 key / ping 成功 / ping 失败（502 口径）', async (t) => {
+  const f = await setup(t, { withLlm: true });
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  await assert.rejects(call(adm, 'test_llm_provider', { name: 'Nope' }), /provider 不存在/);
+  await assert.rejects(call(adm, 'test_llm_provider', { name: 'TestLLM' }), /缺 key/);
+
+  f.db.setSetting('llm_key:TestLLM', 'sk-x');
+  const ok = (await call(adm, 'test_llm_provider', { name: 'TestLLM' })) as { ok: boolean; ms: number };
+  assert.deepEqual(ok, { ok: true, ms: 12 });
+
+  // ping 失败：错误归一为 502 口径文本（失败计熔断由 router.ping 自身保证）
+  saveLlmProviders(f.db, [
+    ...listLlmProviders(f.db),
+    { name: 'Broken', baseURL: 'http://127.0.0.1:3/v1', model: 'm', vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema', api: 'chat-completions' },
+  ]);
+  f.db.setSetting('llm_key:Broken', 'sk-y');
+  await assert.rejects(call(adm, 'test_llm_provider', { name: 'Broken' }), /ECONNREFUSED/);
+});
+
+test('test_x_connection：覆盖值透传 + 缺省 target=all；快照写库语义在 deps.x.test 内（同 REST）', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  const def = (await call(adm, 'test_x_connection')) as { echo: { target: string } };
+  assert.equal(def.echo.target, 'all', '缺省探测目标 = all（parseXTestRequest 同 REST）');
+
+  const r = (await call(adm, 'test_x_connection', {
+    target: 'proxy', proxyUrl: ' http://127.0.0.1:7890 ', screenName: '@Some_One',
+  })) as { echo: { target: string; proxyUrl: string; screenName: string } };
+  assert.equal(r.echo.target, 'proxy');
+  assert.equal(r.echo.proxyUrl, 'http://127.0.0.1:7890', '覆盖值 trim 与 REST 同口径');
+  assert.equal(r.echo.screenName, '@Some_One', 'screenName 只 trim 不去 @（与 REST 同口径）');
+
+  await assert.rejects(call(adm, 'test_x_connection', { target: 'bogus' }));
+});
+
+test('排序/测试类工具：admin 可见、gateway 不可见；schema 校验错误经 runTool 归一', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const admTools = (await adm.listTools()).tools.map((x) => x.name);
+  const gwTools = (await gw.listTools()).tools.map((x) => x.name);
+  for (const name of [
+    'reorder_channels', 'reorder_categories', 'reorder_push_rules', 'reorder_post_rules',
+    'reorder_llm_providers', 'test_push', 'test_llm_provider', 'test_x_connection',
+  ]) {
+    assert.ok(admTools.includes(name), `admin 应可见 ${name}`);
+    assert.ok(!gwTools.includes(name), `gateway 不应可见 ${name}`);
+  }
+
+  // runTool 的校验归一（第二个适配器也绕不过的那层）：handler 不被调用、文案「错误：参数不合法：…」
+  const def = allToolDefs().find((d) => d.name === 'reorder_channels')!;
+  const r = await runTool({} as PanelDeps, def, { ids: 'not-an-array' }, { name: 'adm', role: 'admin', scope: {} });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 400);
+  assert.match(r.text, /^错误：参数不合法：/);
 });

@@ -39,6 +39,8 @@ import type { NewPushChannel } from './core/push.js';
 import { isListenEnabled, shouldRunListen } from './core/listen.js';
 import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
 import { seedOnboardingDefaults } from './core/onboarding.js';
+import { UndoStore } from './core/undo.js';
+import { ChatStore } from './core/chat-store.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
 import {
@@ -230,6 +232,14 @@ async function main(): Promise<void> {
   }
 
   const db = new Db(secrets.dbPath);
+
+  // P0 地基（docs/plan/agent-access.md）：写操作快照/撤销 + agent 会话存储，与 Db 同库。
+  // 本切片只装配建表并挂进 PanelDeps——面板路由不消费，runTool 的 beforeWrite 快照钩子
+  // 留空（撤销栈接线属后续切片）
+  const undoStore = new UndoStore(db.raw);
+  undoStore.migrate();
+  const chatStore = new ChatStore(db.raw);
+  chatStore.migrate();
 
   // 发布后首启默认值：空表才种入分类/推送规则/「系统通知」渠道（settings 一次性闸门，
   // 用户清空后不复活）。默认值由 npm run demo:fixtures 归一化生成。
@@ -639,6 +649,8 @@ async function main(): Promise<void> {
   if (app.panel.enabled) {
     panel = createPanelServer({
       db,
+      undo: undoStore,
+      chat: chatStore,
       weiboResolver: createWeiboResolver(),
       llm: llmDep,
       status: () => {
@@ -827,6 +839,8 @@ async function main(): Promise<void> {
     panel.on('error', (e) => log.error('控制面板启动失败（不影响主流程）', e));
     panel.listen(app.panel.port, '127.0.0.1', () => {
       log.info(`控制面板: http://127.0.0.1:${app.panel.port}`);
+      // 鉴权口径（docs/plan/agent-access.md，2026-09-16 定；P0 判据 4 要求启动即明示）
+      log.info('鉴权口径：/api/* 回环免 token = admin（绑 127.0.0.1 即主人）；/mcp 必须带 Bearer（缺失/无效 401，零令牌 503）');
     });
   }
 

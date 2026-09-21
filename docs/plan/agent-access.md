@@ -203,10 +203,14 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
 
 **快照实现取向（对「写操作快照与撤销」一节的落实方式，2026-09-17）**：采用**表级前像快照 + 差分**，而不是让每条写路径自己声明「影响了哪些行」。理由是计划里点名的五种形状（级联停用 N 条 / 排序整表重写 / 新建 `sort=MAX+1` / settings 删除式写 / provider 复合写两行）在差分下**自动收敛为同一种记录**，且顺带拿到后像——撤销插入/删除才做得出来；代价是每次配置写整表 SELECT 一遍，但这只发生在配置写路径（面板点一下 / 一次 MCP 调用），配置表几十到几百行，绝不进轮询循环。两个附带决定：① `streamers` **暂不纳入**快照表——它是配置与归档的混合体（面板改 watch/alias，关注源同时覆写 uname/face），纳入后撤销比对会被轮询写频繁打断，撤不掉反而更常见，收敛其写路径时再裁决；② 除 LLM key 外**不做其它隐私例外**，即 `mcp_tokens` 的值会被快照（同库已有明文，未新增暴露面，且换来「撤销令牌轮换」能还原旧令牌）；若要求同口径打码，改一行 `redact` 判定即可。
 
-**有意未接线**（都在被 `main` 在制品占用的文件里，接线各 1–5 行）：`registerTools` 未改走 `runTool`（需动 `tools.ts` 尾部）；
-鉴权口径启动日志（判据 4）未加（需动 `index.ts`）；面板 REST 收敛与撤销栈未开工（需动 `server.ts` / `db.ts` / `index.ts`）；
-`UndoStore` / `ChatStore` 需要 `Db` 暴露原始句柄（现 `src/core/db.ts:239` 是 `private readonly db`）后才好接线；
-`completeChat` 与 `agentToolSpecs` 目前**没有任何调用方**（agent loop 尚未写），所以对现有链路是零行为变化。
+**接线进展**（切片 A，2026-09-17 后）：`registerTools` 已改走 `runTool`（MCP 侧 content 文本逐字不变，run-tool 契约测试钉住）；
+鉴权口径启动日志已加（`index.ts`，判据 4）；`Db` 已暴露原始句柄（`Db.raw` 只读 getter），
+`UndoStore` / `ChatStore` 已在装配根实例化并建表、挂进 `PanelDeps`（面板路由尚未消费，`beforeWrite` 快照钩子保持空）；
+缺口清单的 8 条 planned 工具（5 个 `reorder_*` + `test_push` / `test_llm_provider` / `test_x_connection`）已补进注册表
+（admin、write、agent 工具面继续排除），逻辑与对应 REST 路由同口径，**REST 路由未动**。
+**仍未接线**：面板 REST 收敛（写路由改走 `runTool`，`server.ts` 行为零变化是下一切片的约束）与撤销快照
+（`beforeWrite` 钩子接线、热生效回调映射）；`completeChat` 与 `agentToolSpecs` 目前**没有任何调用方**
+（agent loop 尚未写），对现有链路零行为变化。
 快照与写入的**同事务**保证不在 `runTool` 内（better-sqlite3 事务不能跨 await），属收敛每条写路径时的工作。
 
 **顺带修正的过期内容**（动手前先按最新代码复核）：
