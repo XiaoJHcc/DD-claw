@@ -20,6 +20,8 @@ import { mapLimit } from '../../core/concurrency.js';
 import type { Signal } from '../../core/types.js';
 import { STREAK_QQ_ALERT_AFTER_SEC } from '../../core/types.js';
 import type { NewPost } from '../../core/posts.js';
+import { pickBacklogPush, roundKind } from '../../core/backlog.js';
+import { getPostBacklogConfig } from '../../core/runtime-config.js';
 import type { WeiboAccount } from '../../core/weibo-accounts.js';
 import { emptyWeiboFeedSnapshot, type WeiboFeedSnapshot } from '../../core/weibo-accounts.js';
 import type { Source, SourceContext } from '../types.js';
@@ -221,7 +223,8 @@ function newerId(a: string | null, b: string): string {
  * 登录态心跳折进同步周期：每轮 fetchWeiboSelf，运行中发现意外失效（本进程内此前
  * 成功登录过）才发一次 health_alert 并跳过整轮抓取，恢复复位；本来就没登录
  * （启动起从未成功）只记日志不告警；每轮 onLoginState 上报面板（驱动微博平台状态点）。
- * 冷启动政策：每个账号首轮只归档不发信号（同 dynamic/twitter）。
+ * 轮次政策（core/backlog.ts）：缺口轮（首轮）默认只归档，补推开关开了才按时间窗+
+ * 条数上限补推；主动关闭恢复轮（silent_next）一律静默。
  */
 export class WeiboFeedSource implements Source {
   readonly name = 'weibo/feed';
@@ -229,7 +232,7 @@ export class WeiboFeedSource implements Source {
   private ctx?: SourceContext;
   private task?: PeriodicTask;
   private status: WeiboFeedSnapshot = emptyWeiboFeedSnapshot();
-  /** 已成功跑过一轮的账号 uid（首轮静默归档，不发信号） */
+  /** 已成功跑过一轮的账号 uid（本实例内不再算缺口轮；语义见 core/backlog.ts） */
   private polled = new Set<string>();
   private failures = new Map<string, number>();
   private uidAlerted = new Set<string>();
@@ -356,7 +359,7 @@ export class WeiboFeedSource implements Source {
     });
   }
 
-  /** 面板添加账号后的即时首拉（不等下个轮询周期、不在全量轮里排队；首轮静默政策同样生效） */
+  /** 面板添加账号后的即时首拉（不等下个轮询周期、不在全量轮里排队；缺口轮语义同样生效） */
   async kickAccount(uid: string): Promise<void> {
     const ctx = this.ctx;
     if (!ctx) return;
@@ -411,27 +414,41 @@ export class WeiboFeedSource implements Source {
       ...(newest ? { lastPostId: newest } : {}),
       ...(newestPost ? { lastPostAt: newestPost.pubTs } : {}),
       ...(nicknameOf(items[0]) ? { nickname: nicknameOf(items[0]) } : {}),
+      // 恢复位消费：本轮按 resume 轮静默处理过了，顺手清位
+      ...(account.silentNext ? { silentNext: false } : {}),
     });
 
-    if (firstRound) {
+    // 轮次语义（core/backlog.ts）：resume=主动关闭恢复，一律静默；gap=本实例首轮
+    // （服务未运行期间 / 新加账号），默认静默、开了补推开关才按时间窗+条数上限补推；
+    // normal=新帖全推
+    const kind = roundKind(account.silentNext, firstRound);
+    const backlog = kind === 'gap' ? getPostBacklogConfig(ctx.db) : null;
+    const emitIdx = kind === 'resume' ? [] :
+      kind === 'normal' ? inserted :
+      backlog && backlog.enabled ? pickBacklogPush(posts, inserted, backlog, nowSec) : [];
+    for (const i of emitIdx) {
+      const p = posts[i]!;
+      const sig: Signal = {
+        source: this.name,
+        kind: 'feed_post',
+        uid: weiboUid,
+        roomId: '',
+        ts: nowSec,
+        payload: {
+          platform: p.platform, itemId: p.itemId, type: p.type,
+          text: p.text, pics: p.pics, pubTs: p.pubTs, url: p.url,
+        },
+      };
+      ctx.bus.emit(sig);
+    }
+    if (kind === 'resume') {
+      log.info(`微博 ${weiboUid} 恢复轮静默归档 ${inserted.length} 条（主动关闭期间的内容不补推）`);
+    } else if (kind === 'normal') {
+      if (inserted.length > 0) log.info(`微博 ${weiboUid} 新帖 ${inserted.length} 条`);
+    } else if (emitIdx.length === 0) {
       log.info(`微博 ${weiboUid} 首轮归档 ${inserted.length} 条（静默，不发信号）`);
     } else {
-      for (const i of inserted) {
-        const p = posts[i]!;
-        const sig: Signal = {
-          source: this.name,
-          kind: 'feed_post',
-          uid: weiboUid,
-          roomId: '',
-          ts: nowSec,
-          payload: {
-            platform: p.platform, itemId: p.itemId, type: p.type,
-            text: p.text, pics: p.pics, pubTs: p.pubTs, url: p.url,
-          },
-        };
-        ctx.bus.emit(sig);
-      }
-      if (inserted.length > 0) log.info(`微博 ${weiboUid} 新帖 ${inserted.length} 条`);
+      log.info(`微博 ${weiboUid} 首轮补推 ${emitIdx.length} 条，上限外跳过 ${inserted.length - emitIdx.length} 条`);
     }
 
     // 头像最后做：下载慢也不能挡 feed_post 信号。已有本地头像不重复下载，失败静默下轮再试。

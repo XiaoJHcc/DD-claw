@@ -11,7 +11,8 @@
  * - 单账号连续失败到阈值发一次 health_alert，持续失败超阈值再报一次，恢复复位；
  * - 「登录态心跳」在这里换成**代理/实例可用性心跳**（X 没有登录态）。
  *
- * 冷启动政策同 dynamic/weibo：每个账号首轮只归档不发信号。
+ * 轮次政策见 core/backlog.ts：缺口轮（首轮）默认只归档，补推开关开了才按时间窗+
+ * 条数上限补推；主动关闭恢复轮（silent_next）一律静默。
  */
 import { makeLogger } from '../../logger.js';
 import { PeriodicTask } from '../../core/scheduler.js';
@@ -19,6 +20,8 @@ import { mapLimit } from '../../core/concurrency.js';
 import type { Signal } from '../../core/types.js';
 import { STREAK_QQ_ALERT_AFTER_SEC } from '../../core/types.js';
 import type { NewPost } from '../../core/posts.js';
+import { pickBacklogPush, roundKind } from '../../core/backlog.js';
+import { getPostBacklogConfig } from '../../core/runtime-config.js';
 import { emptyXFeedSnapshot, type XFeedSnapshot } from '../../core/x-config.js';
 import type { Source, SourceContext } from '../types.js';
 import { fetchFromAnyInstance, type NitterFetchResult, type ParsedTweet } from './nitter.js';
@@ -36,6 +39,8 @@ export interface TimelineFetch {
   host: string | null;
   /** 顺手抠到的账号头像 URL（pbs.twimg.com 形态）；两条路线都可能给不了 → null */
   avatarUrl: string | null;
+  /** 顺手抠到的账号显示名（免登录路线 og:title）；Nitter RSS 给不了 → null */
+  authorName: string | null;
 }
 
 export interface TwitterFeedSourceOpts {
@@ -52,7 +57,7 @@ export interface TwitterFeedSourceOpts {
   avatarSaver?: (url: string, dir: string, proxyUrl: string) => Promise<string | null>;
   /** 注入点（单测用；默认走真实网络） */
   rssFetcher?: (hosts: string[], screen: string) => Promise<NitterFetchResult>;
-  webFetcher?: (screen: string, sinceId: string | null) => Promise<{ tweets: ParsedTweet[]; avatarUrl?: string | null; bytes: number; ms: number }>;
+  webFetcher?: (screen: string, sinceId: string | null) => Promise<{ tweets: ParsedTweet[]; avatarUrl?: string | null; authorName?: string | null; bytes: number; ms: number }>;
   onStatus?: (s: XFeedSnapshot) => void;
 }
 
@@ -77,7 +82,7 @@ export class TwitterFeedSource implements Source {
   private ctx?: SourceContext;
   private task?: PeriodicTask;
   private status: XFeedSnapshot = emptyXFeedSnapshot();
-  /** 已成功跑过一轮的账号（首轮静默归档，不发信号） */
+  /** 已成功跑过一轮的账号（本实例内不再算缺口轮；语义见 core/backlog.ts） */
   private polled = new Set<string>();
   private failures = new Map<string, number>();
   private uidAlerted = new Set<string>();
@@ -152,7 +157,7 @@ export class TwitterFeedSource implements Source {
     });
   }
 
-  /** 面板添加账号后的即时首拉（不等下个轮询周期、不在全量轮里排队；首轮静默政策同样生效） */
+  /** 面板添加账号后的即时首拉（不等下个轮询周期、不在全量轮里排队；缺口轮语义同样生效） */
   async kickAccount(screenName: string): Promise<void> {
     const ctx = this.ctx;
     if (!ctx) return;
@@ -193,32 +198,48 @@ export class TwitterFeedSource implements Source {
     ctx.db.touchXAccount(acc.id, {
       lastOkAt: nowSec,
       ...(newest ? { lastTweetId: newest.id, lastTweetAt: newest.pubTs } : {}),
+      // 昵称（平台显示名）是平台事实：拿到非空才回写（免登录路线 og:title 能给，
+      // Nitter RSS 给不了——RSS 主路线下昵称靠添加时 verify 种入后保持）
+      ...(fetched.authorName ? { nickname: fetched.authorName } : {}),
+      // 恢复位消费：本轮按 resume 轮静默处理过了，顺手清位
+      ...(acc.silentNext ? { silentNext: false } : {}),
     });
 
-    if (!firstRound) {
-      for (const i of inserted) {
-        const p = posts[i]!;
-        const src = fetched.tweets[i]; // posts 与 tweets 同序（posts 就是 tweets.map 出来的）
-        const sig: Signal = {
-          source: this.name,
-          kind: 'feed_post',
-          uid: screenName,
-          roomId: '',
-          ts: nowSec,
-          payload: {
-            platform: p.platform, itemId: p.itemId, type: p.type,
-            text: p.text, pics: p.pics, pubTs: p.pubTs, url: p.url,
-            // 引用只在免登录回退路线可知；RSS 帖缺省 = 未知（规则里的 quote 筛选据此不命中）
-            ...(src?.isQuote !== undefined ? { isQuote: src.isQuote } : {}),
-          },
-        };
-        ctx.bus.emit(sig);
-      }
-      if (inserted.length > 0) {
-        log.info(`@${screenName} 新推文 ${inserted.length} 条（via ${fetched.via}${fetched.host ? ' ' + fetched.host : ''}）`);
-      }
-    } else {
+    // 轮次语义（core/backlog.ts）：resume=主动关闭恢复，一律静默；gap=本实例首轮
+    // （服务未运行期间 / 新加账号），默认静默、开了补推开关才按时间窗+条数上限补推；
+    // normal=新帖全推
+    const kind = roundKind(acc.silentNext, firstRound);
+    const backlog = kind === 'gap' ? getPostBacklogConfig(ctx.db) : null;
+    const emitIdx = kind === 'resume' ? [] :
+      kind === 'normal' ? inserted :
+      backlog && backlog.enabled ? pickBacklogPush(posts, inserted, backlog, nowSec) : [];
+    for (const i of emitIdx) {
+      const p = posts[i]!;
+      const src = fetched.tweets[i]; // posts 与 tweets 同序（posts 就是 tweets.map 出来的）
+      const sig: Signal = {
+        source: this.name,
+        kind: 'feed_post',
+        uid: screenName,
+        roomId: '',
+        ts: nowSec,
+        payload: {
+          platform: p.platform, itemId: p.itemId, type: p.type,
+          text: p.text, pics: p.pics, pubTs: p.pubTs, url: p.url,
+          // 引用只在免登录回退路线可知；RSS 帖缺省 = 未知（规则里的 quote 筛选据此不命中）
+          ...(src?.isQuote !== undefined ? { isQuote: src.isQuote } : {}),
+        },
+      };
+      ctx.bus.emit(sig);
+    }
+    const viaNote = `（via ${fetched.via}${fetched.host ? ' ' + fetched.host : ''}）`;
+    if (kind === 'resume') {
+      log.info(`@${screenName} 恢复轮静默归档 ${inserted.length} 条（主动关闭期间的内容不补推）`);
+    } else if (kind === 'normal') {
+      if (inserted.length > 0) log.info(`@${screenName} 新推文 ${inserted.length} 条${viaNote}`);
+    } else if (emitIdx.length === 0) {
       log.info(`@${screenName} 首轮归档 ${inserted.length} 条（静默，不发信号）`);
+    } else {
+      log.info(`@${screenName} 首轮补推 ${emitIdx.length} 条，上限外跳过 ${inserted.length - emitIdx.length} 条${viaNote}`);
     }
 
     // 头像最后做：下载慢也不能挡 feed_post 信号。账号还没有本地头像且这轮抠到了 URL
@@ -243,7 +264,7 @@ export class TwitterFeedSource implements Source {
         const rss = this.opts.rssFetcher
           ? await this.opts.rssFetcher(instances, screenName)
           : await fetchFromAnyInstance(instances, screenName, proxyUrl);
-        return { tweets: rss.tweets, via: 'nitter', host: rss.host, avatarUrl: rss.avatarCdn ?? null };
+        return { tweets: rss.tweets, via: 'nitter', host: rss.host, avatarUrl: rss.avatarCdn ?? null, authorName: null };
       } catch (e) {
         rssError = e instanceof Error ? e.message : String(e);
       }
@@ -255,7 +276,7 @@ export class TwitterFeedSource implements Source {
       const web = this.opts.webFetcher
         ? await this.opts.webFetcher(screenName, sinceId)
         : await fetchWebTimeline(screenName, proxyUrl, { sinceId });
-      return { tweets: web.tweets, via: 'web', host: null, avatarUrl: web.avatarUrl ?? null };
+      return { tweets: web.tweets, via: 'web', host: null, avatarUrl: web.avatarUrl ?? null, authorName: web.authorName ?? null };
     } catch (e) {
       const webError = e instanceof Error ? e.message : String(e);
       throw new Error(rssError ? `Nitter 失败（${rssError}）；回退也失败（${webError}）` : `回退路线失败（${webError}）`);

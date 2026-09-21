@@ -79,11 +79,12 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/state.ts` — `diffRoom → Signal`；轮播=未开播；title_change=标题/分区变更
 - `src/core/scheduler.ts` — `PeriodicTask` 通用周期任务器
 - `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送；`feed_post` 是与之平行的图文帖分支，X / 微博 / B站动态同分支）
-- `src/core/db.ts` — SQLite 十六表 + 仓储；`ensureColumn` 在线补列；`migrateWeiboAccounts` 一次性数据搬家
+- `src/core/db.ts` — SQLite 十六表 + 仓储；`ensureColumn` 在线补列；`migrateWeiboAccounts` / `migratePostRuleScopes` / `dropLiveRcmdPosts` 一次性数据搬家与清理
 - `src/core/streamers.ts` — streamers / follows 行类型与映射
 - `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
 - `src/core/posts.ts` — posts 行类型与映射（pics JSON）
-- `src/core/listen.ts` — 监听功能开关（settings `listen_<feature>`）
+- `src/core/listen.ts` — 监听功能开关（settings `listen_<feature>`）；`dynamic` 只管动态账号名单（bili_accounts）的轮询，监听主播的动态归档随 B站登录常开；手动关→重开 = 该平台启用账号全部进入恢复轮静默
+- `src/core/backlog.ts` — 图文补推语义（轮次判定 resume/gap/normal + 时间窗/条数上限挑选；三源共用的唯一权威定义）
 - `src/core/runtime-config.ts` — 运行时参数（settings 唯一信源）
 - `src/core/onboarding.ts` — 首启默认值种入（一次性闸门）
 - `src/core/onboarding-defaults.gen.ts` — 构建期生成物（勿手改）
@@ -109,7 +110,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/sources/bili/qrcode.ts` — passport 扫码客户端（要响应头）
 - `src/sources/bili/followings.ts` — `x/relation/followings` 分页（50/页，无 WBI）
 - `src/sources/bili/follows.ts` — `FollowsSource`（正轮成功才落库；不自动入监听）
-- `src/sources/bili/dynamic.ts` — `DynamicSource`：`feed/space`（无 WBI）→ posts；轮询对象 = 监听主播 ∪ bili_accounts 启用账号；名单账号回写 uname/last_ok_at/头像；`kickAccount` 添加后即时首拉
+- `src/sources/bili/dynamic.ts` — `DynamicSource`：`feed/space`（无 WBI）→ posts；轮询对象 = 监听主播 ∪（图文开关开着时的）bili_accounts 启用账号，`feed_post` **只对名单账号发**（监听主播只归档）；FORWARD 归一 `retweet`、LIVE_RCMD 彻底舍弃；名单账号回写 uname/last_ok_at/头像；`kickAccount` 添加后即时首拉
 - `src/sources/bili/avatar.ts` — B站头像本地化（**直连下载**，hdslb 境内可达且不校验 Referer；md5 文件名入库，面板按文件名读）
 - `src/sources/bili/dm.ts` — dm 设备指纹参数（RSSHub 算法）
 - `src/sources/media/keyframe.ts` — `KeyframeCache`（md5 去重、相对路径入库）
@@ -120,8 +121,8 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/sources/weibo/resolve.ts` — 昵称↔UID 匿名解析链（昵称→uid 实测；uid→昵称走 getIndex userInfo）
 - `src/sources/twitter/probe.ts` — **X 连通性探测**（代理 / 实例 RSS / 免登录回退），`npm run probe-x` 与 `/api/x/test` 共用
 - `src/sources/twitter/nitter.ts` — Nitter RSS 解析（主路线：唯一能区分原创/转发）；多实例轮询
-- `src/sources/twitter/web.ts` — 免登录回退：`x.com` HTML 发现 id + 单推接口补详情；账号存在性校验
-- `src/sources/twitter/feed.ts` — `TwitterFeedSource`：轮询 `x_accounts` → posts → `feed_post`（模子与 weibo/feed 互为参照）；顺手抠头像 URL 落盘回写
+- `src/sources/twitter/web.ts` — 免登录回退：`x.com` HTML 发现 id + 单推接口补详情；账号存在性校验（og:title 顺手抠显示名，verify 回报）
+- `src/sources/twitter/feed.ts` — `TwitterFeedSource`：轮询 `x_accounts` → posts → `feed_post`（模子与 weibo/feed 互为参照）；顺手抠头像 URL 落盘回写、免登录路线回写平台昵称
 - `src/sources/twitter/avatar.ts` — X 头像本地化（代理隧道下载 → cache/x-avatars，md5 文件名入库；面板经 `/api/x-avatar` 读）
 
 ### analysis / rules
@@ -210,7 +211,8 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - **已落地主干**：开播通知（NapCat/Toast 已实测）、规模化 + 内容判定（名单迁库 / 扫码登录 / 关注同步 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2）、时间轴统计、控制面板 v1+v2、MCP v1、NapCat 双平台托管
 - **X/推特（独立于 B站的一条路径）**：**P0–P3 全部落地**（隧道 fetch / X 配置 / 连通性探测 / `/api/x*` / 图文分页 `#view-x`（X + 微博，账号卡片墙：身份段 + 选用图文规则 + 帖子段）/ 免登录源 Nitter RSS + 回退 / `x_accounts` 独立名单 / 监听开关 `listen_twitter` / `post_rules` 图文帖规则与 `feed_post` 推送分支（X 图经代理本地化后交 NapCat 用 file://）/ 规则级 LLM 判定与翻译（失败回退机械筛选）/ MCP 工具 / `npm run probe-x`）。计划见 `docs/plan/twitter-source.md`，调研见 `docs/research/twitter.md`
 - **微博图文来源（与 X 同构的第二条图文链路）**：已落地（`weibo_accounts` 独立名单 / `WeiboFeedSource` 轮独立名单 + 运行状态快照 + 头像本地化 / `feed_post` 双平台推送分支（微博图直连下载）/ `post_rules.platform` 平台分流 / 图文页单墙混排 + 平台筛选胶囊 / MCP 三工具 / 老库一次性数据搬家）。计划与实现记录见 `docs/plan/weibo-source.md`
-- **B站动态图文来源 + 图文规则重构**：已落地（`bili_accounts` 独立名单〔动态型 UP 主不开播也能监听〕/ `DynamicSource` 轮询对象 = 监听主播 ∪ 动态名单 + 名单账号头像·uname 回写 / `feed_post` 三平台推送分支 / 图文规则改为**平台无关通用规则 + 账号侧 `rule_ids` 选用**〔post_rules 去 account_ids 与 platform 两个维度〕/ 图文页「图文规则」卡 + B站账号卡与平台筛选胶囊 / MCP 三工具 / 旧规则 scope 一次性迁移到账号）。计划与实现记录见 `docs/plan/bili-dynamic-posts.md`
+- **B站动态图文来源 + 图文规则重构**：已落地（`bili_accounts` 独立名单〔动态型 UP 主不开播也能监听〕/ `DynamicSource` 轮询对象 = 监听主播 ∪（图文开关开着时的）动态名单，`feed_post` 只对名单账号发，名单账号头像·uname 回写 / `feed_post` 三平台推送分支 / 图文规则改为**平台无关通用规则 + 账号侧 `rule_ids` 选用**〔post_rules 去 account_ids 与 platform 两个维度〕/ 图文页「图文规则」卡 + B站账号卡与平台筛选胶囊 / MCP 三工具 / 旧规则 scope 一次性迁移到账号）。**2026-09-21 修订**：监听开关拆分（监听主播动态归档随登录常开，`listen_dynamic` 只管动态账号名单）、开播动态（LIVE_RCMD）彻底舍弃（不入库 + 一次性清旧行）、FORWARD 在 source 归一成 `retweet`、三平台账号的 ID 与平台昵称锁定为平台事实（输入面不可改，X 昵称经 verify 种入 / 抓取回写）。计划与实现记录见 `docs/plan/bili-dynamic-posts.md`
+- **图文补推语义（三平台统一，2026-09-21 拍板）**：主动关闭（账号停用→重新启用 / 图文开关手动关→重开）恢复轮**一律静默不补推**（账号表 `silent_next` 恢复位）；服务未运行期间（重启/崩溃/登录态丢失）与添加账号之前默认不推，推送设置开 `backlog_push_enabled`（「补推未运行期间的图文」）后按**时间窗（默认 6h）+ 每账号条数上限（默认 3、取最新）**双重封顶补推；三种轮次归档永不受影响，正常轮新帖全推。语义唯一权威在 `src/core/backlog.ts`
 - **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、面板 REST 收敛到能力面、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 

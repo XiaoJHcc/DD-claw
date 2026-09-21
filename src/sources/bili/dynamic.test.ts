@@ -41,13 +41,15 @@ function harness(
     biliAccounts?: Array<{ uid: string; enabled?: boolean }>;
     avatarDir?: string;
     avatarSaver?: (url: string, dir: string) => Promise<string | null>;
+    /** 图文页「监听动态」开关（只管 bili_accounts 部分）；缺省 = 开 */
+    biliAccountsEnabled?: () => boolean;
   },
 ): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));
   const db = new Db(join(dir, 'test.db'));
   for (const uid of uids) db.upsertStreamer({ uid, watch: true });
   for (const a of opts?.biliAccounts ?? []) {
-    db.upsertBiliAccount({ uid: a.uid, uname: null, displayName: null, enabled: a.enabled ?? true });
+    db.upsertBiliAccount({ uid: a.uid, displayName: null, enabled: a.enabled ?? true });
   }
   const bus = new Bus();
   const signals: Signal[] = [];
@@ -60,6 +62,7 @@ function harness(
     onLoginState: (s) => { loginStates.push(s); },
     avatarDir: opts?.avatarDir,
     avatarSaver: opts?.avatarSaver,
+    biliAccountsEnabled: opts?.biliAccountsEnabled,
   });
   src.bind({ bus, db, config: cfg() });
   return {
@@ -141,17 +144,8 @@ const FORWARD = {
   },
 };
 
-test('解析 LIVE_RCMD：二次 JSON.parse 取 live_play_info.title / cover', () => {
-  const p = parseDynamicItem(LIVE_RCMD, '7706705')!;
-  assert.equal(p.platform, 'bili_dynamic');
-  assert.equal(p.uid, '7706705');
-  assert.equal(p.itemId, '1001');
-  assert.equal(p.type, 'DYNAMIC_TYPE_LIVE_RCMD');
-  assert.equal(p.text, '唱会歌！');
-  assert.deepEqual(p.pics, ['https://i0.hdslb.com/bfs/live/cover.jpg']);
-  assert.equal(p.pubTs, 1_754_000_000);
-  assert.equal(p.url, 'https://t.bilibili.com/1001');
-  assert.ok(p.raw!.includes('LIVE_RCMD'), 'raw 整 item 归档');
+test('解析 LIVE_RCMD：彻底舍弃——返回 null，不归档不发信号（2026-09-20 用户决策）', () => {
+  assert.equal(parseDynamicItem(LIVE_RCMD, '7706705'), null);
 });
 
 test('解析 WORD：desc.text', () => {
@@ -166,11 +160,13 @@ test('解析 DRAW：desc.text + draw.items[].src', () => {
   assert.deepEqual(p.pics, ['https://i0.hdslb.com/bfs/p1.jpg', 'https://i0.hdslb.com/bfs/p2.jpg']);
 });
 
-test('解析 FORWARD：拼「//转发自 @原作者」摘要，图取原动态', () => {
+test('解析 FORWARD：拼「//转发自 @原作者」摘要，图取原动态；type 归一成三平台共用的 retweet', () => {
   const p = parseDynamicItem(FORWARD, '1')!;
   assert.equal(p.text, '好好好\n//转发自 @原po主: 原动态正文');
   assert.deepEqual(p.pics, ['https://i0.hdslb.com/bfs/orig.jpg']);
   assert.equal(p.itemId, '1004', '去重 id 用转发自己的 id_str');
+  assert.equal(p.type, 'retweet', 'FORWARD 在 source 归一（其余 DYNAMIC_TYPE_* 原样保留）');
+  assert.equal(parseDynamicItem(WORD, '1')!.type, 'DYNAMIC_TYPE_WORD', '非转发保留原始枚举（主播卡细分标签用）');
 });
 
 test('解析：缺 id_str 的 item 返回 null 跳过', () => {
@@ -205,7 +201,8 @@ test('fetchDynamics：URL 带 host_mid/features/dm 三参，头带 cookie 与 sp
 
 test('首轮静默归档不发信号；第二轮新帖逐条 emit feed_post；重复轮询零信号（去重）', async (t) => {
   let round = [WORD, DRAW];
-  const h = harness(async () => round);
+  // feed_post 只对动态名单账号发：uid 1 同时挂进 bili_accounts（监听名单也在，Set 去重只拉一次）
+  const h = harness(async () => round, ['1'], undefined, { biliAccounts: [{ uid: '1' }] });
   t.after(h.cleanup);
 
   // 第一轮：归档但静默
@@ -213,22 +210,34 @@ test('首轮静默归档不发信号；第二轮新帖逐条 emit feed_post；�
   assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 2, '首轮归档入库');
   assert.equal(h.signals.length, 0, '首轮不发任何信号');
 
-  // 第二轮：新增 1 条 → 恰好 1 个 feed_post
-  round = [LIVE_RCMD, WORD, DRAW];
+  // 第二轮：新增 1 条转发 → 恰好 1 个 feed_post（type 已在 source 归一成三平台共用的 retweet）
+  round = [FORWARD, WORD, DRAW];
   await h.src.pollOnce();
   const feeds = h.signals.filter((s) => s.kind === 'feed_post');
   assert.equal(feeds.length, 1);
   assert.equal(feeds[0]!.source, 'bili/dynamic');
   assert.equal(feeds[0]!.uid, '1');
   const pl = feeds[0]!.payload as { itemId: string; type: string; text: string; pubTs: number; url: string };
-  assert.equal(pl.itemId, '1001');
-  assert.equal(pl.type, 'DYNAMIC_TYPE_LIVE_RCMD');
-  assert.equal(pl.text, '唱会歌！');
-  assert.equal(pl.url, 'https://t.bilibili.com/1001');
+  assert.equal(pl.itemId, '1004');
+  assert.equal(pl.type, 'retweet', 'FORWARD 在 source 归一');
+  assert.equal(pl.text, '好好好\n//转发自 @原po主: 原动态正文');
+  assert.equal(pl.url, 'https://t.bilibili.com/1004');
 
   // 第三轮：无新增 → 0 信号（去重只靠 UNIQUE，不靠时间戳）
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 1);
+});
+
+test('监听主播的动态只归档不推送：不在 bili_accounts 名单的 uid 不发 feed_post', async (t) => {
+  let seq = 3000;
+  // 每轮每个 uid 都有一条新动态（id 递增），如果发信号两边都会发
+  const h = harness(async () => { seq++; return [{ ...WORD, id_str: String(seq) }]; }, ['1']);
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  await h.src.pollOnce();
+  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 2, '监听主播的动态照常归档');
+  assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 0, '不在名单 → 只归档不推送');
 });
 
 test('多个监听 uid：各 uid 首轮各自静默', async (t) => {
@@ -344,6 +353,40 @@ test('轮询对象 = 监听主播 ∪ 动态名单启用账号（Set 去重，di
 
   await h.src.pollOnce();
   assert.deepEqual([...called].sort(), ['1', '2'], '重复 uid 只拉一次，disabled 账号不拉');
+});
+
+test('图文开关（biliAccountsEnabled）：关 = 名单账号不进轮询、kick 跳过；开 = 只对名单账号发信号', async (t) => {
+  let seq = 3000;
+  let gate = false;
+  const called: string[] = [];
+  // 每轮每个 uid 都有一条新动态（id 递增）：该发信号的只有名单账号
+  const h = harness(
+    async (_c, uid) => { called.push(uid); seq++; return [{ ...WORD, id_str: String(seq) }]; },
+    ['1'],
+    undefined,
+    { biliAccounts: [{ uid: '2' }], biliAccountsEnabled: () => gate },
+  );
+  t.after(h.cleanup);
+
+  // 关：名单账号不进轮询（只拉监听主播），kick 也跳过
+  await h.src.pollOnce();
+  assert.deepEqual(called, ['1'], '关着时名单账号不进轮询');
+  await h.src.kickAccount('2');
+  assert.deepEqual(called, ['1'], '关着时名单账号的即时首拉也跳过');
+  assert.equal(h.db.listRecentPosts(['2'], 10).get('2'), undefined, '名单账号没被抓');
+
+  // 开：下一轮名单账号进轮询（首轮静默归档），监听主播的新帖只归档
+  gate = true;
+  await h.src.pollOnce();
+  assert.deepEqual([...called].sort(), ['1', '1', '2'], '名单账号随开关进入轮询');
+  assert.equal(h.db.listRecentPosts(['2'], 10).get('2')!.length, 1, '名单账号首轮归档');
+  assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 0, '两边的首轮都静默');
+
+  // 再一轮：两边都有新帖 → 只有名单账号（uid 2）发 feed_post
+  await h.src.pollOnce();
+  const feeds = h.signals.filter((s) => s.kind === 'feed_post');
+  assert.equal(feeds.length, 1, '监听主播只归档，名单账号才推');
+  assert.equal(feeds[0]!.uid, '2');
 });
 
 test('名单账号拉取成功回写 uname/lastOkAt；非名单 uid（仅监听主播）不回写', async (t) => {
@@ -514,4 +557,70 @@ test('kickAccount：面板添加账号后的即时首拉（不等周期；首轮
   const acc = h.db.getBiliAccountByUid('7')!;
   assert.equal(acc.uname, '阿梓从小就很可爱');
   assert.ok(acc.lastOkAt && acc.lastOkAt > 0);
+});
+
+// ---- 轮次语义（core/backlog.ts）：缺口轮补推 / 恢复轮静默 ----
+
+test('缺口轮补推（开关开）：只对名单账号、窗内按条数上限；监听主播不受影响', async (t) => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const dyn = (id: string, secAgo: number) => ({
+    ...WORD, id_str: id,
+    modules: { ...WORD.modules, module_author: { ...AUTHOR, pub_ts: nowSec - secAgo } },
+  });
+  const unknownTs = {
+    ...WORD, id_str: '7005',
+    modules: { ...WORD.modules, module_author: { ...AUTHOR, pub_ts: 'garbage' } },
+  };
+  // 7001 窗外（30h 前，窗 24h）；7002-7004 窗内；7005 时间未知
+  const round = [dyn('7001', 3600 * 30), dyn('7002', 400), dyn('7003', 300), dyn('7004', 200), unknownTs];
+  // uid 2 是监听主播但不在名单：即使开了补推开关也只归档
+  const h = harness(
+    async (_c, uid) => (uid === '2' ? [dyn('7100', 100)] : round),
+    ['1', '2'], undefined, { biliAccounts: [{ uid: '1' }] },
+  );
+  t.after(h.cleanup);
+  h.db.setSetting('backlog_push_enabled', '1');
+  h.db.setSetting('backlog_max_age_hours', '24');
+  h.db.setSetting('backlog_max_per_account', '2');
+
+  await h.src.pollOnce();
+  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 5, '名单账号全部归档');
+  assert.equal(h.db.listRecentPosts(['2'], 10).get('2')!.length, 1, '监听主播也归档');
+  assert.deepEqual(
+    h.signals.filter((s) => s.kind === 'feed_post').map((f) => (f.payload as { itemId: string }).itemId),
+    ['7003', '7004'],
+    '只有名单账号补推，窗内最新 2 条正序；主播的与窗外/未知时间的只归档',
+  );
+});
+
+test('恢复轮（停用→重新启用）：开了补推开关也静默，消费后清位；下一轮回正常轮', async (t) => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const dyn = (id: string, secAgo: number) => ({
+    ...WORD, id_str: id,
+    modules: { ...WORD.modules, module_author: { ...AUTHOR, pub_ts: nowSec - secAgo } },
+  });
+  let round = [dyn('7201', 100)];
+  const h = harness(async () => round, ['1'], undefined, { biliAccounts: [{ uid: '1' }] });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 0, '缺口轮默认静默');
+
+  h.db.setSetting('backlog_push_enabled', '1');
+  const id = h.db.getBiliAccountByUid('1')!.id;
+  h.db.upsertBiliAccount({ id, enabled: false });
+  h.db.upsertBiliAccount({ id, enabled: true });
+  assert.equal(h.db.getBiliAccountByUid('1')!.silentNext, true, '重新启用置位');
+
+  round = [dyn('7202', 50), ...round]; // 停用期间的新动态
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 0, '恢复轮静默：主动关闭期间的动态不补推（开关开了也不推）');
+  assert.equal(h.db.listRecentPosts(['1'], 10).get('1')!.length, 2, '归档照常完整');
+  assert.equal(h.db.getBiliAccountByUid('1')!.silentNext, false, '恢复轮消费后清位');
+
+  round = [dyn('7203', 5), ...round];
+  await h.src.pollOnce();
+  const feeds = h.signals.filter((s) => s.kind === 'feed_post');
+  assert.equal(feeds.length, 1);
+  assert.equal((feeds[0]!.payload as { itemId: string }).itemId, '7203', '清位后回正常轮');
 });

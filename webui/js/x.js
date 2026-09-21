@@ -129,7 +129,8 @@ function renderXStatus() {
 
 // ---- 微博卡 / B站动态卡：登录态（整行可点 → 扫码弹窗）+ 卡片头监听开关 ----
 // 这两张卡保持同构：只有登录态一行。抓取运行状态不在这里显示。
-// B站动态的前提是 B站登录态（listen_dynamic 的 ready 判据），登录行同微博行写法。
+// B站动态卡的开关只管「动态账号名单」（bili_accounts）的抓取与推送；监听主播的
+// 动态归档随 B站登录常开（直播预告分析等要用），不受这个开关影响。
 function platformByKey(key) {
   const ps = (listenState && listenState.platforms) || [];
   for (let i = 0; i < ps.length; i++) if (ps[i].key === key) return ps[i];
@@ -446,11 +447,12 @@ function rulesFor(a) {
 }
 
 // 帖子行：与主播动态同一套结构（.st-post），streamers.js 的全局 hover 委托直接生效。
-// 微博的「转发」在抓取层就折进 type='retweet'（正文带 //转发自 @原作者），标签语义一致；
-// B站动态没有原创/转发二分，统一标「动态」。
+// 「转发」三平台共用（type='retweet'：X/微博在抓取层折进、B站 FORWARD 在源归一）；
+// B站的非转发帖统一标「动态」（细分标签 DYNAMIC_TYPE_* 在主播卡第三栏才有）。
 function postRowHtml(p, open) {
-  const [label, cls] = p.platform === 'bili_dynamic' ? ['动态', 'tag-pink']
-    : p.type === 'retweet' ? ['转发', 'tag-purple'] : ['原创', 'tag-blue'];
+  const [label, cls] = p.type === 'retweet' ? ['转发', 'tag-purple']
+    : p.platform === 'bili_dynamic' ? ['动态', 'tag-pink']
+    : ['原创', 'tag-blue'];
   // 微博图床防盗链（no-referrer 也 403）：帖子图经 /api/weibo-image 反代（服务端带 Referer + 落盘缓存）
   const pic = p.pics && p.pics[0]
     ? (p.platform === 'weibo' ? '/api/weibo-image?url=' + encodeURIComponent(p.pics[0]) : p.pics[0])
@@ -644,11 +646,9 @@ function captureAcctDraft() {
     if ((v = val('wa-nick')) !== null) acctDraft.nick = v;
     if ((v = val('wa-uid')) !== null) acctDraft.uid = v;
   } else if (sheetPlatform === 'bili') {
-    if ((v = val('ba-uname')) !== null) acctDraft.uname = v;
     if ((v = val('ba-uid')) !== null) acctDraft.uid = v;
   } else {
     if ((v = val('xa-name')) !== null) acctDraft.name = v;
-    if ((v = val('xa-nick')) !== null) acctDraft.nick = v;
   }
   const dispId = sheetPlatform === 'weibo' ? 'wa-display' : sheetPlatform === 'bili' ? 'ba-display' : 'xa-display';
   if ((v = val(dispId)) !== null) acctDraft.display = v;
@@ -656,9 +656,14 @@ function captureAcctDraft() {
   if (sheetPlatform !== 'bili' && (v = val(biliId)) !== null) acctDraft.bili = v;
 }
 
-/** 账号表单（X = ID + 昵称 / 显示名 / 关联主播；微博 = 昵称 + uid / 显示名 / 关联主播；
- *  B站 = 名称 + uid / 显示名（同微博行结构，只是没有关联主播，也没有昵称↔uid 解析链——那是微博专属接口））。
- *  编辑态 uid 只读回显：uid 是账号身份，改它等于换账号，历史帖子会串到别人名下——要换就删了重加。 */
+/**
+ * 账号表单（X = ID / 显示名 / 关联主播；微博 = 昵称 + uid / 显示名 / 关联主播；
+ *  B站 = uid / 显示名）。
+ *  **ID 与平台昵称/用户名是平台事实**：编辑态一律只读回显（改它等于换账号，历史帖子会
+ *  串到别人名下——要换就删了重加）；X 的昵称不收手填（添加时校验种入、抓取回写），
+ *  B站的名称同理（抓到自动回写）。微博的「昵称」在**新建时**是解析键（填昵称 → 解析出
+ *  uid），编辑态同样只读。自定义显示名 / 关联主播是用户自己的标注，随时可改。
+ */
 function acctFormHtml(a) {
   const d = acctDraft || {};
   if (sheetPlatform === 'weibo') {
@@ -668,9 +673,11 @@ function acctFormHtml(a) {
     // 昵称与 uid 并排（uid 在右）：两个独立 field，label 各在输入框上方（同抓取设置的 field 结构）；
     // 昵称框 placeholder 只放一个 @——@昵称 是微博 ID 的常规词头（后端 normalizeWeiboNick 会剥掉开头的 @）；
     // uid 框接受直接粘贴主页链接（失焦提取纯数字，见 wa-uid-change）
+    const nickInput = a
+      ? `<input class="inp" id="wa-nick" value="${esc(a.nickname || '')}" disabled title="平台昵称（抓取回写），不可手改">`
+      : `<input class="inp" id="wa-nick" placeholder="@" data-change="wa-resolve-nick" value="${esc(d.nick || '')}">`;
     return '<div class="field-row">' +
-        `<div class="field"><label class="field-label">昵称</label>` +
-        `<input class="inp" id="wa-nick" placeholder="@" data-change="wa-resolve-nick" value="${esc(a ? (a.nickname || '') : (d.nick || ''))}"></div>` +
+        `<div class="field"><label class="field-label">昵称</label>${nickInput}</div>` +
         `<div class="field field-uid"><label class="field-label">UID（主页链接）</label>${uidInput}</div>` +
       '</div>' +
       field('显示名', `<input class="inp" id="wa-display" value="${esc(a ? (a.displayName || '') : (d.display || ''))}">`) +
@@ -678,28 +685,29 @@ function acctFormHtml(a) {
       rulesSectionHtml(a);
   }
   if (sheetPlatform === 'bili') {
-    // 名称与 uid 并排（uid 窄列在右，同微博的「昵称 / uid」行结构）；名称只是展示字段
-    // （抓到会回写，也可手填）；uid 框接受直接粘贴主页链接（失焦提取纯数字，见 ba-uid-change）
+    // uid 框接受直接粘贴主页链接（失焦提取纯数字，见 ba-uid-change）；
+    // 名称（uname）是平台事实：抓到自动回写，不收手填——想立刻有可读名字就填「显示名」
     const uidInput = a
       ? `<input class="inp" id="ba-uid" value="${esc(a.uid)}" disabled>`
       : `<input class="inp" id="ba-uid" data-change="ba-uid-change" value="${esc(d.uid || '')}">`;
-    return '<div class="field-row">' +
-        `<div class="field"><label class="field-label">名称</label>` +
-        `<input class="inp" id="ba-uname" value="${esc(a ? (a.uname || '') : (d.uname || ''))}"></div>` +
-        `<div class="field field-uid"><label class="field-label">UID（主页链接）</label>${uidInput}</div>` +
-      '</div>' +
+    const nameRow = a
+      ? field('名称（抓取回写）', `<input class="inp" value="${esc(a.uname || '（还没抓到）')}" disabled title="B站用户名（抓取回写），不可手改">`)
+      : '';
+    return nameRow +
+      field('UID（主页链接）', uidInput) +
       field('显示名', `<input class="inp" id="ba-display" value="${esc(a ? (a.displayName || '') : (d.display || ''))}">`) +
       rulesSectionHtml(a);
   }
-  // X 三段名称：ID（@handle，唯一标识）/ 昵称（X 的 display name，可手填）/ 显示名（自定义，卡片优先）；
-  // ID 与昵称并排（同微博的「昵称 / uid」行结构：两个独立 field，label 各在输入框上方）；
-  // ID 框的 placeholder 只放一个 @——格式提示（@ 可省，后端归一化会去掉），不是废话
-  return '<div class="field-row">' +
-      `<div class="field"><label class="field-label">ID</label>` +
-      `<input class="inp" id="xa-name" placeholder="@" value="${esc(a ? a.screenName : (d.name || ''))}"></div>` +
-      `<div class="field"><label class="field-label">昵称</label>` +
-      `<input class="inp" id="xa-nick" value="${esc(a ? (a.nickname || '') : (d.nick || ''))}"></div>` +
-    '</div>' +
+  // X：ID（@handle，唯一标识）/ 显示名（自定义，卡片优先）/ 关联主播；
+  // 昵称是平台事实（添加时校验种入 og:title 显示名、抓取回写），不收手填——编辑态只读回显
+  const idInput = a
+    ? `<input class="inp" id="xa-name" value="${esc(a.screenName)}" disabled title="X 的 ID 是身份锚点，不可改；要换账号就删除重加">`
+    : `<input class="inp" id="xa-name" placeholder="@" value="${esc(d.name || '')}">`;
+  const nickRow = a
+    ? field('昵称（平台显示名）', `<input class="inp" value="${esc(a.nickname || '（还没抓到）')}" disabled title="X 的显示名（校验种入 / 抓取回写），不可手改">`)
+    : '';
+  return field('ID', idInput) +
+    nickRow +
     field('显示名', `<input class="inp" id="xa-display" value="${esc(a ? (a.displayName || '') : (d.display || ''))}">`) +
     field('关联主播', dropdownHtml('xa-bili', biliOptions(), a && a.biliUid ? String(a.biliUid) : (d.bili || ''))) +
     rulesSectionHtml(a);
@@ -832,17 +840,19 @@ function reloadAfterAdd() {
 function saveXAccount(el) {
   const err = document.getElementById('acct-err');
   if (err) err.textContent = '';
-  const name = document.getElementById('xa-name').value.trim();
-  if (!name) { if (err) err.textContent = '请填 ID'; return; }
   const biliVal = document.getElementById('xa-bili').value;
-  // enabled 不在浮窗编辑（卡片右上角开关即改即存），POST 新建走后端默认 true
+  // enabled 不在浮窗编辑（卡片右上角开关即改即存），POST 新建走后端默认 true；
+  // screenName 只在新建时提交（身份锚点不可改），昵称不提交（平台事实：verify 种入 / 抓取回写）
+  const idAttr = el.getAttribute('data-id');
   const body = {
-    screenName: name,
-    nickname: document.getElementById('xa-nick').value.trim() || null,
     displayName: document.getElementById('xa-display').value.trim() || null,
     biliUid: biliVal === '' ? null : biliVal,
   };
-  const idAttr = el.getAttribute('data-id');
+  if (!idAttr) {
+    const name = document.getElementById('xa-name').value.trim();
+    if (!name) { if (err) err.textContent = '请填 ID'; return; }
+    body.screenName = name;
+  }
   const req = idAttr ? api('/api/x/accounts/' + idAttr, 'PUT', body) : api('/api/x/accounts', 'POST', body);
   req.then(function (r) {
     if (idAttr) {
@@ -878,7 +888,8 @@ ACTIONS['del-feed-account'] = function (el) {
 };
 
 // 微博账号保存：新建时 uid 与昵称至少填一个（浮窗里填一个通常会即时解析出另一个；
-// 都没解析出来则由后端走匿名解析链补 uid，解析不到就地 400）
+// 都没解析出来则由后端走匿名解析链补 uid，解析不到就地 400）。
+// 编辑态昵称/uid 都只读（平台事实，抓取回写），不提交这两个字段
 function saveWeiboAccount(el) {
   const err = document.getElementById('acct-err');
   if (err) err.textContent = '';
@@ -896,7 +907,7 @@ function saveWeiboAccount(el) {
     biliUid: biliVal === '' ? null : biliVal,
   };
   if (!idAttr && uid) body.uid = uid;
-  if (nick) body.nickname = nick;
+  if (!idAttr && nick) body.nickname = nick;
   const req = idAttr ? api('/api/weibo/accounts/' + idAttr, 'PUT', body) : api('/api/weibo/accounts', 'POST', body);
   req.then(function () {
     if (idAttr) {
@@ -910,16 +921,13 @@ function saveWeiboAccount(el) {
   }).catch(function (e) { if (err) err.textContent = e.message; });
 }
 
-// B站动态账号保存：名称 + uid / 显示名（同微博格式，无关联主播）；uid 可粘 space 链接（后端归一化）。
-// 编辑可改名称/显示名（uid 只读，理由同微博）
+// B站动态账号保存：uid 可粘 space 链接（后端归一化）+ 显示名。名称（uname）是平台事实
+// （抓到自动回写），不提交；编辑态 uid 只读（理由同微博）
 function saveBiliAccount(el) {
   const err = document.getElementById('acct-err');
   if (err) err.textContent = '';
   const idAttr = el.getAttribute('data-id');
   const body = { displayName: document.getElementById('ba-display').value.trim() || null };
-  const uname = document.getElementById('ba-uname').value.trim();
-  if (uname) body.uname = uname;
-  else if (idAttr) body.uname = null;
   if (!idAttr) {
     const uid = document.getElementById('ba-uid').value.trim();
     if (!uid) { if (err) err.textContent = '请填 uid 或空间链接'; return; }

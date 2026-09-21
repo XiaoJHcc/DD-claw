@@ -341,24 +341,31 @@ for (const p of store.twitterPosts) {
   }
   if (path === '/api/x/accounts' && method === 'POST') {
     const b = body();
+    // 与真实后端 parseNewXAccount 同构：昵称不收（平台事实——verify 种入 / 抓取回写）
+    if (b.nickname !== undefined) return json(400, { error: '未知字段: nickname' });
     const screenName = String(b.screenName || '').trim().replace(/^@+/, '').toLowerCase();
     if (!/^[a-z0-9_]{1,15}$/.test(screenName)) return json(400, { error: 'X 账号格式不对（字母 / 数字 / 下划线，1~15 位）' });
     if (store.xAccounts.some((a) => a.screenName === screenName)) return json(409, { error: `@${screenName} 已在名单里` });
     // 演示口径：名单里已有 3 个 + nhk_news 算「存在」，其余给「账号不存在」，便于看 400 那条路
     const known = ['watase_yuzuki', 'hololive_en', 'nhk_news'].includes(screenName);
     if (!known) return json(400, { error: `X 账号不存在：@${screenName}` });
+    if (b.biliUid != null && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
+      return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
+    }
     if (b.ruleIds !== undefined && !checkRuleIds(b.ruleIds)) {
       return json(400, { error: '规则不存在' });
     }
+    // 演示的 verify 显示名（真实后端从 og:title 抠出，种进 nickname）
+    const demoNames = { watase_yuzuki: '渡瀬 結月', hololive_en: 'hololive English', nhk_news: 'NHKニュース' };
     const row = {
-      id: ++store.xAccountSeq, screenName, nickname: b.nickname ? String(b.nickname) : null,
+      id: ++store.xAccountSeq, screenName, nickname: demoNames[screenName] || null,
       displayName: b.displayName ? String(b.displayName) : null,
       biliUid: b.biliUid ? String(b.biliUid) : null, enabled: b.enabled !== false,
       ruleIds: (b.ruleIds || []).map(Number),
       lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null, createdAt: nowSec, updatedAt: nowSec,
     };
     store.xAccounts.push(row);
-    return ok({ account: xAccountView(row), verify: { checked: true, ok: true, kind: 'ok', message: '账号存在（页面含 7 条推文）' } });
+    return ok({ account: xAccountView(row), verify: { checked: true, ok: true, kind: 'ok', name: demoNames[screenName] || null, message: `账号存在（页面含 7 条推文）` } });
   }
   {
     const xa = path.match(/^\/api\/x\/accounts\/(\d+)$/);
@@ -366,10 +373,15 @@ for (const p of store.twitterPosts) {
       const row = store.xAccounts.find((a) => a.id === Number(xa[1]));
       if (!row) return json(404, { error: 'X 账号不存在' });
       const b = body();
-      if (typeof b.screenName === 'string') row.screenName = b.screenName.trim().replace(/^@+/, '').toLowerCase();
-      if (b.nickname !== undefined) row.nickname = b.nickname === null ? null : String(b.nickname);
-      if (b.biliUid !== undefined) row.biliUid = b.biliUid === null ? null : String(b.biliUid);
+      // 与真实后端 parseXAccountPatch 同构：ID 与昵称是平台事实不可改（未知字段 400）
+      if (b.screenName !== undefined) return json(400, { error: '未知字段: screenName' });
+      if (b.nickname !== undefined) return json(400, { error: '未知字段: nickname' });
+      if (b.biliUid !== undefined && b.biliUid !== null
+        && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
+        return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
+      }
       if (b.displayName !== undefined) row.displayName = b.displayName === null ? null : String(b.displayName);
+      if (b.biliUid !== undefined) row.biliUid = b.biliUid === null ? null : String(b.biliUid);
       if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
       if (b.ruleIds !== undefined) {
         if (!checkRuleIds(b.ruleIds)) return json(400, { error: '规则不存在' });
@@ -489,19 +501,13 @@ for (const p of store.twitterPosts) {
       if (!row) return json(404, { error: '微博账号不存在' });
       if (method === 'PUT') {
         const b = body();
-        if (b.uid !== undefined && !/^\d{1,20}$/.test(String(b.uid))) {
-          return json(400, { error: '微博 uid 必须是数字' });
-        }
-        if (b.uid !== undefined && String(b.uid) !== row.uid
-          && store.weiboAccounts.some((a) => a.uid === String(b.uid))) {
-          return json(409, { error: `微博 ${b.uid} 已在名单里` });
-        }
+        // 与真实后端 parseWeiboAccountPatch 同构：uid 与昵称是平台事实不可改（未知字段 400）
+        if (b.uid !== undefined) return json(400, { error: '未知字段: uid' });
+        if (b.nickname !== undefined) return json(400, { error: '未知字段: nickname' });
         if (b.biliUid !== undefined && b.biliUid !== null
           && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
           return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
         }
-        if (b.uid !== undefined) row.uid = String(b.uid);
-        if (b.nickname !== undefined) row.nickname = b.nickname;
         if (b.displayName !== undefined) row.displayName = b.displayName;
         if (b.biliUid !== undefined) row.biliUid = b.biliUid;
         if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
@@ -535,6 +541,8 @@ for (const p of store.twitterPosts) {
   }
   if (path === '/api/bili/accounts' && method === 'POST') {
     const b = body();
+    // 与真实后端 parseNewBiliAccount 同构：uname 是平台事实（抓取回写），不收
+    if (b.uname !== undefined) return json(400, { error: '未知字段: uname' });
     const raw = String(b.uid || '').trim();
     const m = raw.match(/space\.bilibili\.com\/(\d+)/);
     const uid = m ? m[1] : raw;
@@ -544,7 +552,7 @@ for (const p of store.twitterPosts) {
       return json(400, { error: '规则不存在' });
     }
     const row = {
-      id: ++store.biliAccountSeq, uid, uname: b.uname ? String(b.uname) : null,
+      id: ++store.biliAccountSeq, uid, uname: null,
       displayName: b.displayName ? String(b.displayName) : null,
       enabled: b.enabled !== false, ruleIds: (b.ruleIds || []).map(Number),
       lastOkAt: null, avatar: null, createdAt: nowSec, updatedAt: nowSec,
@@ -559,7 +567,9 @@ for (const p of store.twitterPosts) {
       if (!row) return json(404, { error: 'B站动态账号不存在' });
       if (method === 'PUT') {
         const b = body();
-        if (b.uname !== undefined) row.uname = b.uname;
+        // 与真实后端 parseBiliAccountPatch 同构：uid 是身份锚点、uname 是平台事实，都不可改
+        if (b.uid !== undefined) return json(400, { error: '未知字段: uid' });
+        if (b.uname !== undefined) return json(400, { error: '未知字段: uname' });
         if (b.displayName !== undefined) row.displayName = b.displayName;
         if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
         if (b.ruleIds !== undefined) {

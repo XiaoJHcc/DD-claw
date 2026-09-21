@@ -12,7 +12,7 @@
  */
 import { parseProxyUrl, tunnelFetch, describeTunnelError } from '../../core/proxy.js';
 import { normalizeScreenName } from '../../core/x-accounts.js';
-import type { ParsedTweet } from './nitter.js';
+import { decodeEntities, type ParsedTweet } from './nitter.js';
 
 const TWEET_RESULT_HOST = 'cdn.syndication.twimg.com';
 
@@ -20,6 +20,8 @@ export interface WebIdsResult {
   ids: string[];
   /** 页面 `og:image` 抠出的账号头像（pbs.twimg.com 直链）；抠不到为 null */
   avatarUrl: string | null;
+  /** 页面 `og:title` 抠出的账号显示名（`名字 (@handle) / X` 形态）；抠不到为 null */
+  authorName: string | null;
   bytes: number;
   ms: number;
 }
@@ -32,6 +34,22 @@ export function parseOgImage(html: string): string | null {
   if (!content) return null;
   const url = content[1]!.replace(/&amp;/g, '&').trim();
   return /^https?:\/\//.test(url) ? url : null;
+}
+
+/**
+ * 免登录 HTML → `og:title` 里的账号显示名。形态是 `渡瀬 結月 (@Watase_Yuzuki) / X`：
+ * 贪婪匹配剥掉尾部的 `(@handle)`（显示名本身可能含括号，取最后一个）与 ` / X` 后缀。
+ * 形态对不上（页面结构变了）返回 null——昵称缺失不影响抓取主流程。
+ */
+export function parseOgTitleName(html: string): string | null {
+  const tagM = html.match(/<meta[^>]*(?:property|name)="og:title"[^>]*>/);
+  if (!tagM) return null;
+  const content = tagM[0].match(/content="([^"]+)"/);
+  if (!content) return null;
+  const raw = decodeEntities(content[1]!).trim();
+  const m = raw.match(/^(.*)\s*\(@[A-Za-z0-9_]+\)(?:\s*\/\s*X)?\s*$/);
+  const name = (m ? m[1]! : '').trim();
+  return name || null;
 }
 
 /** 免登录 HTML → 推文 id 列表（降序）。返回空数组 = 页面结构变了或没有推文 */
@@ -56,7 +74,13 @@ export async function fetchWebTweetIds(
   if (res.status !== 200) throw new Error(`x.com HTTP ${res.status}`);
   const ids = [...new Set([...res.text.matchAll(/rest_id:"(\d{15,25})"/g)].map((m) => m[1]!))]
     .sort((a, b) => (BigInt(b) > BigInt(a) ? 1 : -1));
-  return { ids, avatarUrl: parseOgImage(res.text), bytes: res.body.length, ms: Date.now() - started };
+  return {
+    ids,
+    avatarUrl: parseOgImage(res.text),
+    authorName: parseOgTitleName(res.text),
+    bytes: res.body.length,
+    ms: Date.now() - started,
+  };
 }
 
 export interface AccountVerify {
@@ -65,6 +89,9 @@ export interface AccountVerify {
   /** ok=账号存在；not-found=账号不存在；link=链路原因，判不了 */
   kind: 'ok' | 'not-found' | 'link';
   message: string;
+  /** 账号显示名（og:title 抠出）——面板添加账号时顺手种进 nickname（平台事实不收手填）；
+   *  链路不通或抠不到为 null，之后由抓取回写补上 */
+  name?: string | null;
 }
 
 /**
@@ -86,7 +113,7 @@ export async function verifyAccount(
     return { checked: true, ok: false, kind: 'link', message: e instanceof Error ? e.message : String(e) };
   }
   if (res.ids.length > 0) {
-    return { checked: true, ok: true, kind: 'ok', message: `账号存在（页面含 ${res.ids.length} 条推文）` };
+    return { checked: true, ok: true, kind: 'ok', name: res.authorName, message: `账号存在（页面含 ${res.ids.length} 条推文）` };
   }
   // 免登录 HTML 的 id 列表为空：用页面文案区分「账号不存在」与「页面结构变了」
   const proxy = parseProxyUrl(proxyUrl);
@@ -200,7 +227,7 @@ export async function fetchWebTimeline(
   screen: string,
   proxyUrl: string,
   opts: { sinceId?: string | null; maxDetails?: number; timeoutMs?: number } = {},
-): Promise<{ tweets: ParsedTweet[]; avatarUrl: string | null; bytes: number; ms: number }> {
+): Promise<{ tweets: ParsedTweet[]; avatarUrl: string | null; authorName: string | null; bytes: number; ms: number }> {
   const started = Date.now();
   const listed = await fetchWebTweetIds(screen, proxyUrl, opts);
   const since = opts.sinceId && /^\d+$/.test(opts.sinceId) ? BigInt(opts.sinceId) : null;
@@ -220,5 +247,11 @@ export async function fetchWebTimeline(
   if (tweets.length === 0 && failures.length > 0) {
     throw new Error(`单推详情全部失败：${failures.join('；')}`);
   }
-  return { tweets: tweets.sort((a, b) => b.pubTs - a.pubTs), avatarUrl: listed.avatarUrl, bytes: listed.bytes, ms: Date.now() - started };
+  return {
+    tweets: tweets.sort((a, b) => b.pubTs - a.pubTs),
+    avatarUrl: listed.avatarUrl,
+    authorName: listed.authorName,
+    bytes: listed.bytes,
+    ms: Date.now() - started,
+  };
 }

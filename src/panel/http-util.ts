@@ -461,7 +461,11 @@ export function parseXTestRequest(body: unknown): XTestRequest {
 
 // ---- X 关注账号（独立名单，不挂 B站主播；biliUid 仅可选关联）----
 
-const X_ACCOUNT_KEYS = ['screenName', 'nickname', 'biliUid', 'displayName', 'enabled', 'ruleIds'] as const;
+// 身份（screenName）与平台昵称（nickname）都是平台事实：POST 只收身份——昵称由添加时的
+// verify 顺手种入、抓取回写（见 sources/twitter/web.ts / feed.ts）；PUT 一律不可改
+//（要换账号就删除重加，改了只会让 posts.uid 历史孤立）
+const X_ACCOUNT_KEYS = ['screenName', 'biliUid', 'displayName', 'enabled', 'ruleIds'] as const;
+const X_PATCH_KEYS = ['biliUid', 'displayName', 'enabled', 'ruleIds'] as const;
 
 /** screen name 归一化 + 形状校验（`@abc` / `ABC` 都收，统一成小写） */
 function asScreenName(v: unknown, field = 'screenName'): string {
@@ -473,23 +477,22 @@ function asScreenName(v: unknown, field = 'screenName'): string {
   return s;
 }
 
-/** POST /api/x/accounts：screenName 必填；nickname / biliUid / displayName 可选（存在性在路由层校验）；enabled 缺省 true；ruleIds 缺省 []（平台一致性在路由层校验） */
+/** POST /api/x/accounts：screenName 必填；biliUid / displayName 可选（存在性在路由层校验）；
+ * enabled 缺省 true；ruleIds 缺省 []。昵称不收（平台事实：verify 种入 / 抓取回写） */
 export function parseNewXAccount(body: unknown): {
-  screenName: string; nickname: string | null; displayName: string | null; biliUid: string | null; enabled: boolean;
+  screenName: string; biliUid: string | null; displayName: string | null; enabled: boolean;
   ruleIds: number[];
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, X_ACCOUNT_KEYS);
   if (!('screenName' in o)) throw new HttpError(400, 'screenName 必填');
-  const out: { screenName: string; nickname: string | null; displayName: string | null; biliUid: string | null; enabled: boolean; ruleIds: number[] } = {
+  const out: { screenName: string; biliUid: string | null; displayName: string | null; enabled: boolean; ruleIds: number[] } = {
     screenName: asScreenName(o.screenName),
-    nickname: null,
-    displayName: null,
     biliUid: null,
+    displayName: null,
     enabled: true,
     ruleIds: [],
   };
-  if ('nickname' in o) out.nickname = asNullableString(o.nickname, 'nickname');
   if ('biliUid' in o && o.biliUid !== null) out.biliUid = parseUid(o.biliUid, 'biliUid');
   if ('displayName' in o) out.displayName = asNullableString(o.displayName, 'displayName');
   // enabled 必须被采纳：显式传 false 却被静默忽略会让人以为停用生效了
@@ -498,19 +501,18 @@ export function parseNewXAccount(body: unknown): {
   return out;
 }
 
-/** PUT /api/x/accounts/:id 的部分更新体；至少一个字段 */
+/** PUT /api/x/accounts/:id 的部分更新体；至少一个字段。ID 与昵称是平台事实不可改
+ *  （传入按未知字段 400；要换账号就删除后重新添加） */
 export function parseXAccountPatch(body: unknown): {
-  screenName?: string; nickname?: string | null; biliUid?: string | null; displayName?: string | null; enabled?: boolean;
+  biliUid?: string | null; displayName?: string | null; enabled?: boolean;
   ruleIds?: number[];
 } {
   const o = asObject(body);
-  rejectUnknownKeys(o, X_ACCOUNT_KEYS);
+  rejectUnknownKeys(o, X_PATCH_KEYS);
   const p: {
-    screenName?: string; nickname?: string | null; biliUid?: string | null; displayName?: string | null; enabled?: boolean;
+    biliUid?: string | null; displayName?: string | null; enabled?: boolean;
     ruleIds?: number[];
   } = {};
-  if ('screenName' in o) p.screenName = asScreenName(o.screenName);
-  if ('nickname' in o) p.nickname = asNullableString(o.nickname, 'nickname');
   if ('biliUid' in o) p.biliUid = o.biliUid === null ? null : parseUid(o.biliUid, 'biliUid');
   if ('displayName' in o) p.displayName = asNullableString(o.displayName, 'displayName');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
@@ -651,7 +653,10 @@ export function deletePostRuleSweepingRefs(db: Db, id: number): boolean {
 }
 
 // ---- 微博关注账号（独立名单，biliUid 仅可选关联；与 X 账号同一套语义）----
+// POST 的 nickname 是解析键（只填昵称 → 走匿名解析链补 uid），存下的即平台解析结果；
+// PUT 起 uid 与昵称都锁定——平台事实，抓取每轮回写（要换账号就删除重加）
 const WEIBO_ACCOUNT_KEYS = ['uid', 'nickname', 'displayName', 'biliUid', 'enabled', 'ruleIds'] as const;
+const WEIBO_PATCH_KEYS = ['displayName', 'biliUid', 'enabled', 'ruleIds'] as const;
 
 /** uid 归一化 + 形状校验（收 `2203177060` / `u/2203177060` / `weibo.com/u/2203177060`） */
 function asWeiboUid(v: unknown, field = 'uid'): string {
@@ -691,22 +696,18 @@ export function parseNewWeiboAccount(body: unknown): {
   return out;
 }
 
-/** PUT /api/weibo/accounts/:id 的部分更新体；至少一个字段 */
+/** PUT /api/weibo/accounts/:id 的部分更新体；至少一个字段。uid 与昵称是平台事实不可改
+ *  （传入按未知字段 400；要换账号就删除后重新添加） */
 export function parseWeiboAccountPatch(body: unknown): {
-  uid?: string; nickname?: string | null; displayName?: string | null; biliUid?: string | null; enabled?: boolean;
+  displayName?: string | null; biliUid?: string | null; enabled?: boolean;
   ruleIds?: number[];
 } {
   const o = asObject(body);
-  rejectUnknownKeys(o, WEIBO_ACCOUNT_KEYS);
+  rejectUnknownKeys(o, WEIBO_PATCH_KEYS);
   const p: {
-    uid?: string; nickname?: string | null; displayName?: string | null; biliUid?: string | null; enabled?: boolean;
+    displayName?: string | null; biliUid?: string | null; enabled?: boolean;
     ruleIds?: number[];
   } = {};
-  if ('uid' in o) p.uid = asWeiboUid(o.uid);
-  if ('nickname' in o) {
-    const nick = asNullableString(o.nickname, 'nickname');
-    p.nickname = nick === null ? null : normalizeWeiboNick(nick) || null;
-  }
   if ('displayName' in o) p.displayName = asNullableString(o.displayName, 'displayName');
   if ('biliUid' in o) p.biliUid = o.biliUid === null ? null : parseUid(o.biliUid, 'biliUid');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
@@ -716,8 +717,10 @@ export function parseWeiboAccountPatch(body: unknown): {
 }
 
 // ---- B站动态账号（独立名单：只管推送选用，抓取轮询对象由动态源自并监听主播）----
-const BILI_ACCOUNT_KEYS = ['uid', 'uname', 'displayName', 'enabled', 'ruleIds'] as const;
-const BILI_ACCOUNT_PATCH_KEYS = ['uname', 'displayName', 'enabled', 'ruleIds'] as const;
+// uid 是身份锚点（新建必填、PUT 不可改）；uname 是平台事实（抓取回写），输入面一概不收
+// ——要换账号就删除后重新添加，改了只会让 posts.uid 历史孤立
+const BILI_ACCOUNT_KEYS = ['uid', 'displayName', 'enabled', 'ruleIds'] as const;
+const BILI_ACCOUNT_PATCH_KEYS = ['displayName', 'enabled', 'ruleIds'] as const;
 
 /** uid 归一化 + 形状校验（收 `7706705` / `space.bilibili.com/7706705` 链接形态） */
 function asBiliUid(v: unknown, field = 'uid'): string {
@@ -729,37 +732,36 @@ function asBiliUid(v: unknown, field = 'uid'): string {
 
 /**
  * POST /api/bili/accounts：uid 必填（账号本身就是主播，身份锚点唯一）；
- * uname / displayName / enabled / ruleIds 可选。不做存在性校验——动态源首轮抓到才回写 uname，
- * 硬加校验等于把添加流程挂在 feed/space 的可用性上（与微博名单同一条纪律，见 docs/boundaries.md）。
+ * displayName / enabled / ruleIds 可选。uname 不收（平台事实，抓取回写）。不做存在性
+ * 校验——动态源首轮抓到才回写 uname，硬加校验等于把添加流程挂在 feed/space 的可用性上
+ * （与微博名单同一条纪律，见 docs/boundaries.md）。
  */
 export function parseNewBiliAccount(body: unknown): {
-  uid: string; uname: string | null; displayName: string | null; enabled: boolean; ruleIds: number[];
+  uid: string; displayName: string | null; enabled: boolean; ruleIds: number[];
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, BILI_ACCOUNT_KEYS);
   if (!('uid' in o)) throw new HttpError(400, 'uid 必填');
-  const out: { uid: string; uname: string | null; displayName: string | null; enabled: boolean; ruleIds: number[] } = {
+  const out: { uid: string; displayName: string | null; enabled: boolean; ruleIds: number[] } = {
     uid: asBiliUid(o.uid),
-    uname: null,
     displayName: null,
     enabled: true,
     ruleIds: [],
   };
-  if ('uname' in o) out.uname = asNullableString(o.uname, 'uname');
   if ('displayName' in o) out.displayName = asNullableString(o.displayName, 'displayName');
   if ('enabled' in o) out.enabled = asBoolean(o.enabled, 'enabled');
   if ('ruleIds' in o) out.ruleIds = asIdArray(o.ruleIds, 'ruleIds');
   return out;
 }
 
-/** PUT /api/bili/accounts/:id 的部分更新体；uid 是身份锚点不可改；至少一个字段 */
+/** PUT /api/bili/accounts/:id 的部分更新体；uid 是身份锚点不可改、uname 是平台事实不可改
+ *  （传入按未知字段 400）；至少一个字段 */
 export function parseBiliAccountPatch(body: unknown): {
-  uname?: string | null; displayName?: string | null; enabled?: boolean; ruleIds?: number[];
+  displayName?: string | null; enabled?: boolean; ruleIds?: number[];
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, BILI_ACCOUNT_PATCH_KEYS);
-  const p: { uname?: string | null; displayName?: string | null; enabled?: boolean; ruleIds?: number[] } = {};
-  if ('uname' in o) p.uname = asNullableString(o.uname, 'uname');
+  const p: { displayName?: string | null; enabled?: boolean; ruleIds?: number[] } = {};
   if ('displayName' in o) p.displayName = asNullableString(o.displayName, 'displayName');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
   if ('ruleIds' in o) p.ruleIds = asIdArray(o.ruleIds, 'ruleIds');

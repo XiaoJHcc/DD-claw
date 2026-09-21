@@ -390,15 +390,24 @@ test('微博工具：list/upsert/delete 账号；昵称解析补 uid；写路径
   assert.equal(created.account.uid, '9999');
   assert.equal(f.db.listWeiboAccounts().length, 2);
 
-  // 关联主播必须存在；更新带 id
+  // 关联主播必须存在；更新带 id。uid 与昵称是平台事实：更新时传入直接拒绝
   await assert.rejects(() => call(adm, 'upsert_weibo_account', { uid: '111', biliUid: '9999' }), /不在监听名单/);
   f.db.upsertStreamer({ uid: '1001', uname: '阿梓', watch: true });
-  await call(adm, 'upsert_weibo_account', { id: byNick.id, nickname: '阿梓', biliUid: '1001', enabled: false });
+  await assert.rejects(
+    () => call(adm, 'upsert_weibo_account', { id: byNick.id, nickname: '阿梓' }),
+    /平台事实不可改/,
+  );
+  await assert.rejects(
+    () => call(adm, 'upsert_weibo_account', { id: byNick.id, uid: '8888' }),
+    /平台事实不可改/,
+  );
+  await call(adm, 'upsert_weibo_account', { id: byNick.id, biliUid: '1001', enabled: false });
   const listed = (await call(adm, 'list_weibo_accounts')) as {
-    accounts: Array<{ uid: string; biliName: string | null; enabled: boolean }>;
+    accounts: Array<{ uid: string; nickname: string; biliName: string | null; enabled: boolean }>;
   };
   assert.equal(listed.accounts.find((a) => a.uid === '2203177060')!.biliName, '阿梓');
   assert.equal(listed.accounts.find((a) => a.uid === '2203177060')!.enabled, false);
+  assert.equal(listed.accounts.find((a) => a.uid === '2203177060')!.nickname, '渡瀬結月', '昵称是平台事实，更新改不动');
 
   await call(adm, 'delete_weibo_account', { id: byNick.id });
   await assert.rejects(() => call(adm, 'delete_weibo_account', { id: byNick.id }), /微博账号不存在/);
@@ -553,11 +562,19 @@ test('B站动态账号工具：list/upsert/delete；uid 链接归一化；gatewa
   assert.equal(created.account.enabled, true, '新增默认启用');
   await assert.rejects(() => call(adm, 'upsert_bili_account', { uid: '7706705' }), /已在名单里/);
 
-  // 更新（带 id）：启停 + 改名
-  await call(adm, 'upsert_bili_account', { id: created.id, enabled: false, uname: '阿梓从小就很可爱' });
+  // uname 是平台事实：新建/更新都不收手填，传入直接拒绝
+  await assert.rejects(() => call(adm, 'upsert_bili_account', { uid: '9', uname: '手填名' }), /不接受手填/);
+  await assert.rejects(
+    () => call(adm, 'upsert_bili_account', { id: created.id, uname: '阿梓从小就很可爱' }),
+    /不接受手填/,
+  );
+
+  // 更新（带 id）：启停；uid 是身份锚点不可改
+  await assert.rejects(() => call(adm, 'upsert_bili_account', { id: created.id, uid: '9' }), /身份锚点不可改/);
+  await call(adm, 'upsert_bili_account', { id: created.id, enabled: false });
   const acc = f.db.getBiliAccount(created.id)!;
   assert.equal(acc.enabled, false);
-  assert.equal(acc.uname, '阿梓从小就很可爱');
+  assert.equal(acc.uname, null, 'uname 由抓取回写（touch），输入面动不了');
 
   const listed = (await call(adm, 'list_bili_accounts')) as { accounts: Array<{ uid: string; enabled: boolean }> };
   assert.equal(listed.accounts.length, 1);

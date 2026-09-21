@@ -81,6 +81,9 @@ export const mockAdvanced = {
   notifyOnNewSubscription: true,
   keyframeIntervalSec: 300,
   keyframeEnabled: true,
+  backlogPushEnabled: false,
+  backlogMaxAgeHours: 6,
+  backlogMaxPerAccount: 3,
 };
 
 // ---- NapCat（demo 手写：已登录最简态，uin/alertQq 为占位假号）----
@@ -134,7 +137,8 @@ export const mockX = {
 // ruleIds = 该账号选用的图文规则（mockPostRules 的 id；规则本身不带账号 scope）
 export const mockXAccounts = [
   {
-    id: 1, screenName: 'watase_yuzuki', displayName: '渡濑结月', biliUid: null, enabled: true,
+    // nickname = 平台显示名（添加时校验种入 og:title / 抓取回写）；displayName = 用户自定义备注
+    id: 1, screenName: 'watase_yuzuki', nickname: '渡瀬 結月', displayName: '渡濑结月', biliUid: null, enabled: true,
     ruleIds: [1],
     lastTweetId: '2101671199457894850', lastTweetAt: 1, lastOkAt: 1,
     avatar: '661034f88371821109aed0e05c5389dc.jpg', createdAt: 1, updatedAt: 1,

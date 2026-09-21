@@ -28,6 +28,20 @@
 
 用户随后要求**取消规则必须绑定平台的设计**：post_rules 连 `platform` 维度也去掉（列保留停用），规则成为平台无关的通用规则——任何账号可选用任何规则，`checkAccountRuleIds` 只校验存在；quote/翻译差异从「按规则平台保存时拒绝」改为「按帖子平台运行时生效」（quote 仅 X 帖可识别、`llmTranslate` 仅对 X 帖附加，门控在 post-analyzer）。前端规则卡删平台 tag 与浮窗平台行，chip 恒定显示附小字提示。上表中「platform 分流」「跨平台 400」「新建选平台」以此节为准作废。
 
+## 修订（2026-09-21，审查后五项收口）
+
+架构审查后的修正与拆分，上表与本文件中与之冲突的描述以此节为准：
+
+1. **监听开关拆分**：上表「监听开关复用 listen_dynamic」作废。监听主播的空间动态归档**随 B站登录常开、无开关**（直播预告分析等要用；添加监听直播永远附赠动态归档）；`listen_dynamic` 只管 **bili_accounts（动态账号名单）**的轮询——`DynamicSource` 经 `biliAccountsEnabled` 回调每轮读取，开关热切换免重启，关 = 名单账号不进轮询、不发信号、`kickAccount` 也跳过。设置页监听卡的「监听动态」开关已删，开关只在图文页 B站动态卡。
+2. **`feed_post` 只对名单账号发**：原先「监听主播每轮也发信号、pipeline 丢弃」改为 source 侧就只对名单内且开关开着的账号发信号（pipeline 的名单查不到分支降级为防御）。连带修掉一个洞：停用的名单账号即使在监听名单里也不再推送（enabled 同时控制进轮询名单与发信号）。
+3. **开播动态（DYNAMIC_TYPE_LIVE_RCMD）彻底舍弃**：`parseDynamicItem` 直接跳过（不归档不发信号），`picsOf`/`textOf` 的 LIVE_RCMD 分支与 `livePlayInfo` 删除；旧库残留行由 `Db.dropLiveRcmdPosts` 一次性清理（settings 闸门）；主播卡第三栏的展示层过滤同步删除。开播信息由 live-status 源负责。
+4. **帖子 type 在 source 归一**：DYNAMIC_TYPE_FORWARD → 三平台共用的 `'retweet'`（原在 pipeline 归一），其余 DYNAMIC_TYPE_* 原样入库（主播卡细分标签用，原始枚举恒在 raw）；图文页帖子行对 B站转发帖也正确标「转发」。
+5. **三平台账号的 ID 与平台昵称锁定为平台事实**：X 的 `screenName`、微博的 `uid`、B站的 `uid` 与各自昵称/用户名一律不可改（面板编辑态只读、REST PUT 按未知字段 400、MCP 更新显式拒绝）——要换账号就删除重加，改了只会让 `posts.uid` 历史孤立或昵称错位。X 的昵称不再收手填：添加时 verify 从 og:title 顺手种入、免登录抓取路线回写（Nitter RSS 给不了显示名，靠 verify 兜底）；B站 uname 同理只由抓取回写；微博昵称仅在**新建时**作为解析键（填昵称 → 解析链补 uid）。`BiliAccountInput` 删 `uname`、`parse*Patch` 键分裂（POST/PUT 分开白名单）。
+
+同批顺手修：`shutdown()` 漏停 X 源、X 源告警阈值不热更（reconcileRuntime 补重启）、`search_posts` 描述两处不准（LIKE 对 ASCII 大小写不敏感 / 微博 uid 已是独立名单）、`web.test.ts` 不在 npm test 清单。
+
+**验证**：`npx tsc --noEmit` 零错误；`npm test` 595/595（含新增：LIVE_RCMD 舍弃、FORWARD 归一、图文开关门语义、LIVE_RCMD 迁移幂等、X 昵称 touch 语义、og:title 解析、三平台锁定字段的 400 路径）；`npm run build` 通过；mock 同构（PUT 锁定字段 400、X POST 昵称种入、B站 POST/PUT 拒 uname）。
+
 ## 验证
 
 - `npx tsc --noEmit` 零错误；`npm test` 581/581；`npm run build` 通过。

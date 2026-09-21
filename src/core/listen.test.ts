@@ -82,3 +82,27 @@ test('db.close() 可正常关闭', () => {
   db.setSetting('listen_dynamic', '1');
   db.close();
 });
+
+test('setListen 手动关→手动开：该平台启用账号进入恢复轮静默；关闭当下 / auto→手动开都不置位', () => {
+  const db = new Db(':memory:');
+  const x = db.upsertXAccount({ screenName: 'a', displayName: null, biliUid: null, enabled: true });
+  const w = db.upsertWeiboAccount({ uid: '100', nickname: null, biliUid: null, enabled: true });
+  const wOff = db.upsertWeiboAccount({ uid: '101', nickname: null, biliUid: null, enabled: false });
+  const b = db.upsertBiliAccount({ uid: '80397' });
+
+  setListen(db, 'weibo', false, true);
+  assert.equal(db.getWeiboAccount(w)!.silentNext, false, '关闭当下不置位（置位在重开那一刻）');
+
+  setListen(db, 'weibo', true, true);
+  assert.equal(db.getWeiboAccount(w)!.silentNext, true, '重开 = 主动暂停结束 → 恢复轮静默');
+  assert.equal(db.getWeiboAccount(wOff)!.silentNext, false, '停用行不动');
+  assert.equal(db.getXAccount(x)!.silentNext, false, '别的平台不受影响');
+  assert.equal(db.getSetting('listen_weibo'), null, '与 auto 一致 → 回 auto（key 删除）');
+
+  setListen(db, 'dynamic', false, true);
+  setListen(db, 'dynamic', true, true);
+  assert.equal(db.getBiliAccount(b)!.silentNext, true, 'B站名单同一语义');
+
+  setListen(db, 'twitter', true, false);
+  assert.equal(db.getXAccount(x)!.silentNext, false, 'auto→手动开不是「重开」，不置位');
+});

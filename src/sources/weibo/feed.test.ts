@@ -490,3 +490,80 @@ test('默认状态快照：未启动时 running=false 且各项为空（面板�
     running: false, lastRunAt: null, lastOkAt: null, accounts: 0, okAccounts: 0, lastError: null,
   });
 });
+
+// ---- 轮次语义（core/backlog.ts）：缺口轮补推 / 恢复轮静默 ----
+
+test('缺口轮：开关关=只归档（默认）；开关开=窗内按条数上限补推；正常轮不受上限', async (t) => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const mb = (id: string, secAgo: number, created?: string) => ({
+    idstr: id, mblogid: 'P' + id, isLongText: false,
+    text_raw: '内容' + id, created_at: created ?? new Date((nowSec - secAgo) * 1000).toISOString(), pics: [],
+  });
+
+  const roundA: unknown[] = [mb('9001', 60)];
+  const a = harness({ fetcher: async () => roundA });
+  t.after(a.cleanup);
+  await a.src.pollOnce();
+  assert.equal(a.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 1, '归档照常');
+  assert.equal(a.signals.filter((s) => s.kind === 'feed_post').length, 0, '默认不补推');
+
+  const roundB = [
+    mb('9002', 3600 * 30),       // 窗外（30h 前，窗 24h）
+    mb('9003', 400),
+    mb('9004', 300),
+    mb('9005', 200),
+    mb('9006', 0, 'garbage'),    // created_at 解析失败 → pubTs 0 → 只归档
+  ];
+  const b = harness({ fetcher: async () => roundB });
+  t.after(b.cleanup);
+  b.db.setSetting('backlog_push_enabled', '1');
+  b.db.setSetting('backlog_max_age_hours', '24');
+  b.db.setSetting('backlog_max_per_account', '2');
+  await b.src.pollOnce();
+  assert.equal(b.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 5, '归档永远完整');
+  assert.deepEqual(
+    b.signals.filter((s) => s.kind === 'feed_post').map((f) => (f.payload as { itemId: string }).itemId),
+    ['9004', '9005'],
+    '窗内最新 2 条、时间正序；窗外与未知时间的只归档',
+  );
+
+  roundB.unshift(mb('9007', 10), mb('9008', 10), mb('9009', 10));
+  await b.src.pollOnce();
+  assert.deepEqual(
+    b.signals.filter((s) => s.kind === 'feed_post').slice(2).map((f) => (f.payload as { itemId: string }).itemId),
+    ['9007', '9008', '9009'],
+    '正常轮新帖全推（上限只管缺口轮）',
+  );
+});
+
+test('恢复轮（停用→重新启用）：开了补推开关也静默，消费后清位；下一轮回正常轮', async (t) => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const mb = (id: string, secAgo: number) => ({
+    idstr: id, mblogid: 'P' + id, isLongText: false,
+    text_raw: '内容' + id, created_at: new Date((nowSec - secAgo) * 1000).toISOString(), pics: [],
+  });
+  let round: unknown[] = [mb('9101', 60)];
+  const h = harness({ fetcher: async () => round });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 0, '缺口轮默认静默');
+
+  h.db.setSetting('backlog_push_enabled', '1');
+  const id = h.db.getWeiboAccountByUid(W_UID)!.id;
+  h.db.upsertWeiboAccount({ id, enabled: false });
+  h.db.upsertWeiboAccount({ id, enabled: true });
+  assert.equal(h.db.getWeiboAccountByUid(W_UID)!.silentNext, true, '重新启用置位');
+
+  round = [mb('9102', 50), ...round]; // 停用期间的新帖
+  await h.src.pollOnce();
+  assert.equal(h.signals.filter((s) => s.kind === 'feed_post').length, 0, '恢复轮静默：主动关闭期间的帖子不补推（开关开了也不推）');
+  assert.equal(h.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 2, '归档照常完整');
+  assert.equal(h.db.getWeiboAccountByUid(W_UID)!.silentNext, false, '恢复轮消费后清位');
+
+  round = [mb('9103', 5), ...round];
+  await h.src.pollOnce();
+  const feeds = h.signals.filter((s) => s.kind === 'feed_post');
+  assert.equal(feeds.length, 1);
+  assert.equal((feeds[0]!.payload as { itemId: string }).itemId, '9103', '清位后回正常轮');
+});

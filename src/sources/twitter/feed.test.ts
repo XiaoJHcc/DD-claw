@@ -288,3 +288,73 @@ test('bind/stop 通过 onStatus 上报 running，面板据此显示源在跑', (
   h.src.stop();
   assert.equal(h.statuses[h.statuses.length - 1]!.running, false, 'stop 后 running=false');
 });
+// ---- 轮次语义（core/backlog.ts）：缺口轮补推 / 恢复轮静默 ----
+
+test('缺口轮：开关关=只归档（默认）；开关开=窗内按条数上限补推；正常轮不受上限', async (t) => {
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // 开关关（默认）：现状行为不变
+  const roundA = [tweet({ id: '300', pubTs: nowSec - 60 })];
+  const a = harness({ rssFetcher: async () => ({ host: 'nitter.a.example', tweets: roundA, avatarCdn: null, bytes: 100, ms: 5 }) });
+  t.after(a.cleanup);
+  await a.src.pollOnce();
+  assert.equal(a.posts().length, 1, '归档照常');
+  assert.equal(a.feeds().length, 0, '默认不补推');
+
+  // 开关开：窗外 / 窗内 / 未知时间混合，上限 2 条
+  const roundB = [
+    tweet({ id: '400', pubTs: nowSec - 3600 * 30 }), // 窗外（30h 前，窗 24h）
+    tweet({ id: '401', pubTs: nowSec - 400 }),
+    tweet({ id: '402', pubTs: nowSec - 300 }),
+    tweet({ id: '403', pubTs: nowSec - 200 }),
+    tweet({ id: '404', pubTs: 0 }),                  // 时间未知 → 只归档
+  ];
+  const b = harness({ rssFetcher: async () => ({ host: 'nitter.a.example', tweets: roundB, avatarCdn: null, bytes: 100, ms: 5 }) });
+  t.after(b.cleanup);
+  b.db.setSetting('backlog_push_enabled', '1');
+  b.db.setSetting('backlog_max_age_hours', '24');
+  b.db.setSetting('backlog_max_per_account', '2');
+  await b.src.pollOnce();
+  assert.equal(b.posts().length, 5, '归档永远完整（补推不影响归档）');
+  assert.deepEqual(
+    b.feeds().map((f) => (f.payload as { itemId: string }).itemId),
+    ['402', '403'],
+    '窗内最新 2 条、时间正序；窗外与未知时间的只归档',
+  );
+
+  // 正常轮不受上限：3 条新帖全推
+  roundB.unshift(tweet({ id: '405', pubTs: nowSec }), tweet({ id: '406', pubTs: nowSec }), tweet({ id: '407', pubTs: nowSec }));
+  await b.src.pollOnce();
+  assert.deepEqual(
+    b.feeds().slice(2).map((f) => (f.payload as { itemId: string }).itemId),
+    ['405', '406', '407'],
+    '正常轮新帖全推（上限只管缺口轮）',
+  );
+});
+
+test('恢复轮（停用→重新启用）：开了补推开关也静默，消费后清位；下一轮回正常轮', async (t) => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  let round = [tweet({ id: '500', pubTs: nowSec - 60 })];
+  const h = harness({ rssFetcher: async () => ({ host: 'nitter.a.example', tweets: round, avatarCdn: null, bytes: 100, ms: 5 }) });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.equal(h.feeds().length, 0, '缺口轮默认静默');
+
+  h.db.setSetting('backlog_push_enabled', '1');
+  const id = h.account().id;
+  h.db.upsertXAccount({ id, enabled: false });
+  h.db.upsertXAccount({ id, enabled: true });
+  assert.equal(h.account().silentNext, true, '重新启用置位');
+
+  round = [tweet({ id: '501', pubTs: nowSec - 50 }), ...round]; // 停用期间的新帖
+  await h.src.pollOnce();
+  assert.equal(h.feeds().length, 0, '恢复轮静默：主动关闭期间的帖子不补推（开关开了也不推）');
+  assert.equal(h.posts().length, 2, '归档照常完整');
+  assert.equal(h.account().silentNext, false, '恢复轮消费后清位');
+
+  round = [tweet({ id: '502', pubTs: nowSec - 5 }), ...round];
+  await h.src.pollOnce();
+  assert.equal(h.feeds().length, 1);
+  assert.equal((h.feeds()[0]!.payload as { itemId: string }).itemId, '502', '清位后回正常轮');
+});

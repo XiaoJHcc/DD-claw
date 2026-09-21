@@ -36,7 +36,7 @@ import {
   emptyWeiboFeedSnapshot, type WeiboFeedSnapshot,
 } from './core/weibo-accounts.js';
 import type { NewPushChannel } from './core/push.js';
-import { shouldRunListen } from './core/listen.js';
+import { isListenEnabled, shouldRunListen } from './core/listen.js';
 import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
 import { seedOnboardingDefaults } from './core/onboarding.js';
 import type { Server } from 'node:http';
@@ -431,11 +431,14 @@ async function main(): Promise<void> {
   const biliAvatarDir = join(dirname(secrets.dbPath), 'cache', 'bili-avatars');
   const startDynamic = (cookieHdr: string): void => {
     dynamicSrc?.stop();
-    // 登录态心跳在 DynamicSource 内部：关注同步未运行时这是 B站登录态来源之一
+    // 登录态心跳在 DynamicSource 内部：关注同步未运行时这是 B站登录态来源之一。
+    // 图文页「监听动态」开关只管 bili_accounts（动态账号）部分：源内每轮读取、热切换免重启；
+    // 监听主播的空间动态归档随登录常开（预告分析等要用），装配处不再看 listen_dynamic
     dynamicSrc = new DynamicSource({
       cookie: cookieHdr,
       avatarDir: biliAvatarDir,
       onLoginState: (s) => { biliLogin = s; },
+      biliAccountsEnabled: () => isListenEnabled(db, 'dynamic', true),
     });
     dynamicSrc.start({ bus, db, config: eff });
   };
@@ -512,13 +515,16 @@ async function main(): Promise<void> {
 
   // 动态 / 微博 / X 三个源的启停唯一入口：面板监听开关 + 各自运行前提共同决定
   const reconcileListen = (): void => {
-    if (shouldRunListen(db, 'dynamic', biliCookieHdr !== null)) {
+    // 动态源：B站登录即常开——添加监听直播永远附赠主播动态归档（直播预告分析等要用它，
+    // 2026-09-20 拆分决策）；「监听动态」开关（listen_dynamic）只管 bili_accounts 的轮询，
+    // 由源内 biliAccountsEnabled 回调每轮读取，这里无需启停
+    if (biliCookieHdr !== null) {
       if (!dynamicSrc) {
         log.info(`动态轮询：${db.listWatchedUids().length} 个监听对象，间隔 ${eff.dynamic.intervalSec}s`);
-        startDynamic(biliCookieHdr!);
+        startDynamic(biliCookieHdr);
       }
     } else if (dynamicSrc) {
-      log.info('动态轮询已停止（面板开关关闭 / 无 cookie）');
+      log.info('动态轮询已停止（无 cookie）');
       stopDynamic();
     }
     // 微博：开关 × 有 cookie × 名单非空；名单/间隔变了就地重启（新增账号要立刻抓）
@@ -581,6 +587,11 @@ async function main(): Promise<void> {
     if ((prev.weibo.intervalSec !== eff.weibo.intervalSec || thresholdChanged) && weiboFeedSrc) {
       log.info(`微博轮询参数已热更新（间隔 ${eff.weibo.intervalSec}s）`);
       startWeiboFeed(weiboCookieHdr!);
+    }
+    // X 源的告警阈值是构造时快照（startXFeed 传 opts），阈值变了也要重启它才能生效
+    if (thresholdChanged && xFeedSrc) {
+      log.info('X 时间线告警阈值已热更新');
+      startXFeed();
     }
     if (prev.llm.requestTimeoutMs !== eff.llm.requestTimeoutMs
       || prev.llm.circuitThreshold !== eff.llm.circuitThreshold
@@ -831,6 +842,7 @@ async function main(): Promise<void> {
     followsSrc?.stop();
     dynamicSrc?.stop();
     weiboFeedSrc?.stop();
+    xFeedSrc?.stop();
     panel?.close();
     db.close();
     process.exit(0);

@@ -439,6 +439,32 @@ test('微博迁移：weibo_uid 种入独立名单 + 历史微博帖归属由 B�
   assert.equal(db.listRecentPosts(['2203177060'], 5).get('2203177060')!.length, 1);
 });
 
+test('dropLiveRcmdPosts：开播动态（LIVE_RCMD）一次性清理，其余动态不动，幂等', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'live-rcmd.db');
+  db = new Db(path);
+  db.insertPosts([
+    { platform: 'bili_dynamic', uid: '1', itemId: 'r1', type: 'DYNAMIC_TYPE_LIVE_RCMD', text: '开播', pics: [], pubTs: 100, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '1', itemId: 'r2', type: 'DYNAMIC_TYPE_LIVE_RCMD', text: '又开播', pics: [], pubTs: 200, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '1', itemId: 'w1', type: 'DYNAMIC_TYPE_WORD', text: '正常动态', pics: [], pubTs: 300, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '1', itemId: 'f1', type: 'DYNAMIC_TYPE_FORWARD', text: '旧转发', pics: [], pubTs: 400, url: null, raw: null },
+    { platform: 'weibo', uid: '2', itemId: 'm1', type: 'mblog', text: '微博不受影响', pics: [], pubTs: 500, url: null, raw: null },
+  ]);
+  // 拨回「未迁移」状态再重开，模拟带 LIVE_RCMD 存量的旧库（构造器里跑迁移）
+  db.deleteSetting('migrated_drop_live_rcmd_posts_v1');
+  db.close();
+
+  db = new Db(path);
+  const types = db.searchPosts({ platform: 'bili_dynamic', limit: 50 }).map((p) => p.type);
+  assert.deepEqual([...new Set(types)].sort(), ['DYNAMIC_TYPE_FORWARD', 'DYNAMIC_TYPE_WORD'],
+    'LIVE_RCMD 已清，WORD/FORWARD 保留');
+  assert.equal(db.searchPosts({ platform: 'weibo' }).length, 1, '微博帖不受影响');
+  db.close();
+
+  db = new Db(path);
+  assert.equal(db.searchPosts({ platform: 'bili_dynamic' }).length, 2, '再开一次不重复删（闸门幂等）');
+});
+
 test('weibo_accounts CRUD：uid 唯一、抓取回写只动传入字段、解关联保留行', (t) => {
   const db = new Db(':memory:');
   t.after(() => db.close());
@@ -592,16 +618,34 @@ test('x/weibo 账号的 ruleIds：upsert 给了才更新，读出解析 JSON', (
   assert.deepEqual(db.getWeiboAccount(wId)!.ruleIds, [3]);
 });
 
+test('touchXAccount：昵称拿到非空才回写（X 的平台显示名，同 weibo nickname 纪律）', (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+
+  const id = db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true });
+  db.touchXAccount(id, { lastOkAt: 1800000000, nickname: '渡瀬 結月' });
+  assert.equal(db.getXAccount(id)!.nickname, '渡瀬 結月', '非空昵称回写');
+
+  db.touchXAccount(id, { nickname: null });
+  assert.equal(db.getXAccount(id)!.nickname, '渡瀬 結月', '空昵称不擦好名字');
+
+  db.touchXAccount(id, { nickname: '改名了' });
+  assert.equal(db.getXAccount(id)!.nickname, '改名了', '拿到新名就更新（昵称会改）');
+});
+
 // ---- bili_accounts：B站动态独立账号名单 ----
 
 test('bili_accounts CRUD：uid 唯一、upsert 保留未传字段、touch 只动传入字段', (t) => {
   const db = new Db(':memory:');
   t.after(() => db.close());
 
-  const id = db.upsertBiliAccount({ uid: '80397', uname: '阿梓从小就很可爱', ruleIds: [1] });
+  // uname 是平台事实（抓取回写）：upsert 输入面不收，测试里用 touch 模拟抓取种入
+  const id = db.upsertBiliAccount({ uid: '80397', ruleIds: [1] });
+  db.touchBiliAccount(id, { uname: '阿梓从小就很可爱' });
   assert.equal(db.getBiliAccountByUid('80397')!.id, id);
   assert.deepEqual(db.getBiliAccount(id)!.ruleIds, [1]);
   assert.equal(db.getBiliAccount(id)!.enabled, true, '默认启用');
+  assert.equal(db.getBiliAccount(id)!.uname, '阿梓从小就很可爱', 'touch 能种入 uname');
 
   db.touchBiliAccount(id, { lastOkAt: 1800000000, avatar: 'a.jpg' });
   const after = db.getBiliAccount(id)!;
@@ -626,3 +670,51 @@ test('bili_accounts CRUD：uid 唯一、upsert 保留未传字段、touch 只动
   assert.equal(db.deleteBiliAccount(id), false);
 });
 
+
+test('silent_next（主动关闭恢复位）：重新启用置位、编辑不停位、touch 清位、批量置位只动启用行', (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+
+  const x = db.upsertXAccount({ screenName: 'a', displayName: null, biliUid: null, enabled: true });
+  assert.equal(db.getXAccount(x)!.silentNext, false, '新账号新列默认 0');
+
+  db.upsertXAccount({ id: x, enabled: false });
+  assert.equal(db.getXAccount(x)!.silentNext, false, '停用本身不置位（置位在重新启用那一刻）');
+
+  db.upsertXAccount({ id: x, enabled: true });
+  assert.equal(db.getXAccount(x)!.silentNext, true, '重新启用 = 主动暂停结束 → 下轮静默');
+
+  db.upsertXAccount({ id: x, displayName: '备注' });
+  assert.equal(db.getXAccount(x)!.silentNext, true, '置位期间编辑别的字段不丢位');
+
+  db.touchXAccount(x, { lastOkAt: 123, silentNext: false });
+  assert.equal(db.getXAccount(x)!.silentNext, false, '源消费后清位');
+
+  const w = db.upsertWeiboAccount({ uid: '100', nickname: null, biliUid: null, enabled: true });
+  db.upsertWeiboAccount({ id: w, enabled: false });
+  db.upsertWeiboAccount({ id: w, enabled: true });
+  assert.equal(db.getWeiboAccount(w)!.silentNext, true, '微博同一语义');
+  db.touchWeiboAccount(w, { lastOkAt: 1, silentNext: false });
+  assert.equal(db.getWeiboAccount(w)!.silentNext, false);
+
+  const b = db.upsertBiliAccount({ uid: '80397' });
+  db.upsertBiliAccount({ id: b, enabled: false });
+  db.upsertBiliAccount({ id: b, enabled: true });
+  assert.equal(db.getBiliAccount(b)!.silentNext, true, 'B站名单同一语义');
+  db.touchBiliAccount(b, { lastOkAt: 1, silentNext: false });
+  assert.equal(db.getBiliAccount(b)!.silentNext, false);
+
+  // 批量置位（图文开关手动重开用）：只动启用行
+  db.upsertXAccount({ id: x, enabled: false });
+  const x2 = db.upsertXAccount({ screenName: 'b', displayName: null, biliUid: null, enabled: true });
+  db.markXAccountsSilentNext();
+  assert.equal(db.getXAccount(x2)!.silentNext, true, '启用行置位');
+  assert.equal(db.getXAccount(x)!.silentNext, false, '停用行不动');
+
+  const w2 = db.upsertWeiboAccount({ uid: '200', nickname: null, biliUid: null, enabled: true });
+  db.markWeiboAccountsSilentNext();
+  assert.equal(db.getWeiboAccount(w2)!.silentNext, true);
+  const b2 = db.upsertBiliAccount({ uid: '2' });
+  db.markBiliAccountsSilentNext();
+  assert.equal(db.getBiliAccount(b2)!.silentNext, true);
+});

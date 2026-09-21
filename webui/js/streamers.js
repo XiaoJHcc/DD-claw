@@ -21,9 +21,12 @@ let modalCats = [];
 let modalRules = [];
 
 // ---- 主播卡片列表 ----
-// 动态类型 → 人话小标签（微博 = 平台标签）
+// 动态类型 → 人话小标签（微博 = 平台标签）。'retweet' 是 source 归一后的三平台转发语义
+// （B站 FORWARD 新行存它；旧行还是 DYNAMIC_TYPE_FORWARD，两个键都留着）。开播动态
+// （LIVE_RCMD）已彻底舍弃：不再入库，旧库行由一次性迁移清理，这里无需再过滤
 const PT_TAG = {
   weibo: ['微博', 'tag-amber'],
+  retweet: ['转发', 'tag-purple'],
   DYNAMIC_TYPE_AV: ['视频', 'tag-blue'],
   DYNAMIC_TYPE_DRAW: ['图文', 'tag-mint'],
   DYNAMIC_TYPE_WORD: ['文字', ''],
@@ -90,8 +93,8 @@ function streamerCard(s) {
   const name = s.uname || String(s.uid);
   const live = s.live;
   const isLive = !!(live && live.isLive);
-  // 开播类型的动态（LIVE_RCMD）是自动生成的噪音，不展示；容器定高 166px，最多 3 条
-  const posts = (s.posts || []).filter(function (p) { return p.type !== 'DYNAMIC_TYPE_LIVE_RCMD'; }).slice(0, 3);
+  // 第三栏最多 3 条（容器定高 166px）；开播动态已彻底舍弃（不入库，旧行由迁移清理）
+  const posts = (s.posts || []).slice(0, 3);
   const ruleNames = (s.rules && s.rules.names) || [];
   const meta = `直播间 ${s.roomId ? esc(s.roomId) : '—'}` +
     ` · 微博 ${s.weiboNick ? esc(s.weiboNick) : (s.weiboUid ? esc(s.weiboUid) : '—')}`;

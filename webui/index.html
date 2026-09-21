@@ -40,11 +40,7 @@
 <div class="view hidden" id="view-settings">
 <div class="set-grid" id="settings-grid">
 <section class="card set-card acc-pink" id="card-listen">
-<div class="card-head"><span class="card-ic" data-icon="headphone"></span><h2>监听</h2>
-<div class="card-head-end">
-<label class="switch"><input type="checkbox" id="listen-dynamic-enabled" data-change="toggle-listen" data-feature="dynamic"><span class="knob"></span></label>
-</div>
-</div>
+<div class="card-head"><span class="card-ic" data-icon="headphone"></span><h2>监听</h2></div>
 <div id="listen-rows">加载中…</div>
 <div class="card-actions">
 <button class="btn btn-line" data-action="open-fetch-settings"><span data-icon="sliders"></span>抓取设置</button>
@@ -122,7 +118,7 @@
 <section class="card set-card acc-blue" id="card-x">
 <div class="card-head"><span class="card-ic" data-icon="send"></span><h2>X / 推特</h2>
 <div class="card-head-end">
-<label class="switch"><input type="checkbox" id="x-listen-enabled" data-change="toggle-x-listen"><span class="knob"></span></label>
+<label class="switch"><input type="checkbox" id="x-listen-enabled" data-change="toggle-x-listen" title="抓取 X 名单账号的新推文"><span class="knob"></span></label>
 </div>
 </div>
 <div id="x-status-rows">加载中…</div>
@@ -134,7 +130,7 @@
 <section class="card set-card acc-amber" id="card-weibo">
 <div class="card-head"><span class="card-ic" data-icon="eye"></span><h2>微博</h2>
 <div class="card-head-end">
-<label class="switch"><input type="checkbox" id="weibo-listen-enabled" data-change="toggle-weibo-listen"><span class="knob"></span></label>
+<label class="switch"><input type="checkbox" id="weibo-listen-enabled" data-change="toggle-weibo-listen" title="抓取微博名单账号的新微博"><span class="knob"></span></label>
 </div>
 </div>
 <div id="weibo-rows">加载中…</div>
@@ -146,7 +142,7 @@
 <section class="card set-card acc-pink" id="card-bili">
 <div class="card-head"><span class="card-ic" data-icon="paw"></span><h2>B站动态</h2>
 <div class="card-head-end">
-<label class="switch"><input type="checkbox" id="bili-listen-enabled" data-change="toggle-bili-listen"><span class="knob"></span></label>
+<label class="switch"><input type="checkbox" id="bili-listen-enabled" data-change="toggle-bili-listen" title="抓取动态账号名单的新动态；监听主播的动态归档常开（预告分析用），不受此开关影响"><span class="knob"></span></label>
 </div>
 </div>
 <div id="bili-rows">加载中…</div>

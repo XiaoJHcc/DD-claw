@@ -48,12 +48,14 @@ import { getNapcatAlertQq } from '../notify/napcat.js';
 
 const log = makeLogger('panel');
 
-/** X 账号存在性校验结果：`kind` 决定面板怎么处理（not-found 拒绝 / link 照收并提示） */
+/** X 账号存在性校验结果：`kind` 决定面板怎么处理（not-found 拒绝 / link 照收并提示）；
+ *  name 是 og:title 抠出的显示名——面板添加账号时顺手种进 nickname（平台事实不收手填） */
 export interface XAccountVerify {
   checked: boolean;
   ok: boolean;
   kind: 'ok' | 'not-found' | 'link';
   message: string;
+  name?: string | null;
 }
 
 export interface PlatformStatus {
@@ -380,7 +382,8 @@ async function handle(
     if (verify.checked && !verify.ok && verify.kind === 'not-found') {
       throw new HttpError(400, `X 账号不存在：@${input.screenName}`);
     }
-    const id = db.upsertXAccount(input);
+    // 昵称是平台事实：verify 顺手抠到的 og:title 显示名直接种入（抠不到为 null，抓取再回写）
+    const id = db.upsertXAccount({ ...input, nickname: verify.name ?? null });
     // 即时首拉：fire-and-forget，失败只进日志（源内有自己的失败纪律），不挡响应
     if (deps.x.kickAccount) void deps.x.kickAccount(input.screenName).catch(() => {});
     deps.x.onChanged();
@@ -391,11 +394,8 @@ async function handle(
   if (deps.x && xa && method === 'PUT') {
     const id = Number(xa[1]);
     if (!db.getXAccount(id)) throw new HttpError(404, 'X 账号不存在');
+    // ID 与昵称不可改（parseXAccountPatch 按未知字段 400）——要换账号就删除后重新添加
     const patch = parseXAccountPatch(await readJsonBody(req));
-    if (patch.screenName !== undefined) {
-      const dup = db.getXAccountByScreenName(patch.screenName);
-      if (dup && dup.id !== id) throw new HttpError(409, `@${patch.screenName} 已在名单里`);
-    }
     if (patch.biliUid !== undefined) checkXBiliUid(db, patch.biliUid);
     if (patch.ruleIds !== undefined) checkAccountRuleIds(db, patch.ruleIds);
     db.upsertXAccount({ ...patch, id });
@@ -474,11 +474,8 @@ async function handle(
   if (deps.weibo && wa && method === 'PUT') {
     const id = Number(wa[1]);
     if (!db.getWeiboAccount(id)) throw new HttpError(404, '微博账号不存在');
+    // uid 与昵称不可改（parseWeiboAccountPatch 按未知字段 400）——要换账号就删除后重新添加
     const patch = parseWeiboAccountPatch(await readJsonBody(req));
-    if (patch.uid !== undefined) {
-      const dup = db.getWeiboAccountByUid(patch.uid);
-      if (dup && dup.id !== id) throw new HttpError(409, `微博 ${patch.uid} 已在名单里`);
-    }
     if (patch.biliUid !== undefined) checkWeiboBiliUid(db, patch.biliUid);
     if (patch.ruleIds !== undefined) checkAccountRuleIds(db, patch.ruleIds);
     db.upsertWeiboAccount({ ...patch, id });

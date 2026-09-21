@@ -258,8 +258,8 @@ export class Pipeline {
         ? db.getWeiboAccountByUid(signal.uid)
         : db.getBiliAccountByUid(signal.uid);
     if (!account) {
-      // B站动态源对监听名单里每个 uid 每轮都可能发信号，「不在动态名单」是常态，
-      // 用 warn 会刷屏；X/微博源的名单与抓取同源，查不到才值得 warn
+      // 三条源的名单与抓取同源，正常不会走到这里（B站动态源只对名单内且开关开着的账号发
+      // 信号）；留着当防御分支，X/微博查不到值得 warn
       if (platform === 'bili_dynamic') {
         log.debug(`忽略 feed_post：${signal.uid} 不在 bili_accounts 名单`);
       } else {
@@ -286,10 +286,9 @@ export class Pipeline {
       ruleIds: account.ruleIds,
       screenName: ident.screenName,
       displayName: ident.displayName,
-      // B站动态的原始 type 是 DYNAMIC_TYPE_* 枚举，归一成 matcher 的原创/转发语义
-      type: platform === 'bili_dynamic'
-        ? (p.type === 'DYNAMIC_TYPE_FORWARD' ? 'retweet' : 'dynamic')
-        : p.type ?? (platform === 'weibo' ? 'mblog' : 'tweet'),
+      // type 已在各 source 归一（B站 FORWARD → 'retweet'，见 sources/bili/dynamic.ts）；
+      // 这里的平台缺省只是防御（信号不该缺 type）
+      type: p.type ?? (platform === 'weibo' ? 'mblog' : platform === 'bili_dynamic' ? 'dynamic' : 'tweet'),
       text: p.text ?? null,
       pics: p.pics ?? [],
       pubTs: p.pubTs ?? 0,

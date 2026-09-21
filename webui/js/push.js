@@ -429,20 +429,37 @@ ACTIONS['goto-push-rule'] = function (el) {
   loadPush().then(function () { openPushRuleSheet(rid); });
 };
 
-// ---- 推送设置（推送渠道卡底部按钮）：冷启动触发时机 2 项 ----
+// ---- 推送设置（推送渠道卡底部按钮）：直播推送 / 图文推送两组 ----
 function pushBoolRow(id, text, on) {
   return checkRowHtml(`id="${id}"`, on, `<span class="row-title">${esc(text)}</span>`);
 }
 
+function syncBacklogOpts() {
+  const cb = document.getElementById('ps-b-backlog');
+  const box = document.getElementById('ps-backlog-opts');
+  if (cb && box) box.style.display = cb.checked ? '' : 'none';
+}
+document.addEventListener('change', function (e) {
+  if (e.target && e.target.id === 'ps-b-backlog') syncBacklogOpts();
+});
+
 ACTIONS['open-push-settings'] = function () {
   api('/api/advanced').then(function (j) {
     openSheet('推送设置',
+      '<div class="adv-group">直播推送</div>' +
       pushBoolRow('ps-b-first', '启动时已在播也推送', j.notifyOnFirstRun) +
       pushBoolRow('ps-b-newsub', '新增订阅在播即推送', j.notifyOnNewSubscription) +
+      '<div class="adv-group">图文推送</div>' +
+      pushBoolRow('ps-b-backlog', '补推未运行期间的图文', j.backlogPushEnabled) +
+      '<div class="two" id="ps-backlog-opts">' +
+      field('补推时间限制（小时）', '<input class="inp" type="number" id="ps-n-age" value="' + j.backlogMaxAgeHours + '">') +
+      field('补推账号条数限制（1~50）', '<input class="inp" type="number" id="ps-n-count" value="' + j.backlogMaxPerAccount + '">') +
+      '</div>' +
       '<div class="add-row"><button class="btn btn-block" data-action="test-push">' +
       icon('bolt') + ' 测试推送渠道</button></div>' +
-      '<div class="sheet-foot"><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
+      '<div class="sheet-foot"><span id="ps-err" class="form-err"></span><button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
       '<button class="btn btn-primary" data-action="save-push-settings">保存</button></div>');
+    syncBacklogOpts();
   }).catch(function (e) { toast(e.message, true); });
 };
 
@@ -457,9 +474,16 @@ ACTIONS['test-push'] = function () {
 };
 
 ACTIONS['save-push-settings'] = function () {
+  const errEl = document.getElementById('ps-err');
+  const age = parseInt(document.getElementById('ps-n-age').value, 10);
+  const count = parseInt(document.getElementById('ps-n-count').value, 10);
+  if (isNaN(age) || isNaN(count)) { errEl.textContent = '补推上限请输入整数'; return; }
   api('/api/advanced', 'PUT', {
     notifyOnFirstRun: document.getElementById('ps-b-first').checked,
     notifyOnNewSubscription: document.getElementById('ps-b-newsub').checked,
+    backlogPushEnabled: document.getElementById('ps-b-backlog').checked,
+    backlogMaxAgeHours: age,
+    backlogMaxPerAccount: count,
   }).then(function () {
     closeSheet(1);
     toast('已保存并生效');

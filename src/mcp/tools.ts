@@ -173,9 +173,9 @@ const sharedTools: McpToolDef[] = [
     name: 'search_posts',
     description: '检索动态/微博/推特归档（uid/平台/正文关键词过滤，按发布时间倒序，limit ≤50）',
     schema: {
-      uid: uidSchema.optional().describe('作者标识（B站/微博=监听名单 uid；推特=screen name）'),
+      uid: uidSchema.optional().describe('作者标识（B站动态/微博=账号名单的 uid；推特=screen name）'),
       platform: z.enum(['bili_dynamic', 'weibo', 'twitter']).optional(),
-      keyword: z.string().optional().describe('正文子串（大小写敏感）'),
+      keyword: z.string().optional().describe('正文子串（SQLite LIKE：ASCII 大小写不敏感，其余精确）'),
       limit: z.number().int().min(1).max(50).optional().describe('返回条数，缺省 20'),
     },
     role: 'shared',
@@ -381,11 +381,13 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'upsert_x_account',
-    description: '新建/更新 X 关注账号（独立名单，不要求对应 B站主播）。带 id = 更新（未传字段保留原值），不带 = 新建；screenName 会归一化（去 @ 转小写）',
+    description: '新建/更新 X 关注账号（独立名单，不要求对应 B站主播）。带 id = 更新（未传字段保留原值），不带 = 新建；'
+      + 'screenName 会归一化（去 @ 转小写）。ID 与平台昵称不可手改：更新时传 screenName / nickname 会被拒绝'
+      + '（昵称由添加时校验种入、抓取回写；要换账号就删除后重新添加）',
     schema: {
       id: idSchema.optional(),
-      screenName: z.string().optional().describe('X 账号（@ 可省）'),
-      nickname: z.string().nullable().optional().describe('X 的昵称（平台 display name）；留空 = 未设置'),
+      screenName: z.string().optional().describe('X 账号（@ 可省）；新建必填，更新时不可改'),
+      nickname: z.string().nullable().optional().describe('已退役：昵称是平台事实（校验种入 / 抓取回写），不接受手填；传入会被拒绝'),
       displayName: z.string().nullable().optional().describe('自定义显示名（卡片优先展示；留空 = 用昵称）'),
       biliUid: uidSchema.nullable().optional().describe('可选关联主播 uid；null = 取消关联'),
       enabled: z.boolean().optional(),
@@ -395,7 +397,10 @@ const adminTools: McpToolDef[] = [
     write: true,
     handler: (deps, args) => {
       if (args.id === undefined) {
-        const input = parseNewXAccount(pickBody(args, ['screenName', 'nickname', 'displayName', 'biliUid', 'enabled', 'ruleIds']));
+        const input = parseNewXAccount(pickBody(args, ['screenName', 'displayName', 'biliUid', 'enabled', 'ruleIds']));
+        if (args.nickname !== undefined) {
+          throw new HttpError(400, '昵称是平台事实（添加校验种入 / 抓取回写），不接受手填');
+        }
         if (deps.db.getXAccountByScreenName(input.screenName)) {
           throw new HttpError(409, `@${input.screenName} 已在名单里`);
         }
@@ -407,11 +412,10 @@ const adminTools: McpToolDef[] = [
       }
       const id = Number(args.id);
       if (!deps.db.getXAccount(id)) throw new HttpError(404, 'X 账号不存在');
-      const patch = parseXAccountPatch(pickBody(args, ['screenName', 'nickname', 'biliUid', 'displayName', 'enabled', 'ruleIds']));
-      if (patch.screenName !== undefined) {
-        const dup = deps.db.getXAccountByScreenName(patch.screenName);
-        if (dup && dup.id !== id) throw new HttpError(409, `@${patch.screenName} 已在名单里`);
+      if (args.screenName !== undefined || args.nickname !== undefined) {
+        throw new HttpError(400, 'X 的 ID 与昵称是平台事实不可改；要换账号请删除后重新添加');
       }
+      const patch = parseXAccountPatch(pickBody(args, ['biliUid', 'displayName', 'enabled', 'ruleIds']));
       if (patch.biliUid !== undefined) checkXBiliUidForMcp(deps, patch.biliUid);
       if (patch.ruleIds !== undefined) checkAccountRuleIds(deps.db, patch.ruleIds);
       deps.db.upsertXAccount({ ...patch, id });
@@ -434,11 +438,12 @@ const adminTools: McpToolDef[] = [
   {
     name: 'upsert_weibo_account',
     description: '新建/更新 微博 关注账号（独立名单，不要求对应 B站主播）。带 id = 更新（未传字段保留原值），不带 = 新建；'
-      + '只填 nickname 时走微博昵称解析链补出 uid（需已装配 resolver）',
+      + '只填 nickname 时走微博昵称解析链补出 uid（需已装配 resolver）。uid 与昵称更新时不可改'
+      + '（昵称抓取每轮回写；要换账号就删除后重新添加）',
     schema: {
       id: idSchema.optional(),
-      uid: z.string().optional().describe('微博数字 uid（可从 weibo.com/u/<uid> 复制）'),
-      nickname: z.string().nullable().optional().describe('微博昵称；新建时与 uid 至少给一个（给昵称则自动解析 uid）'),
+      uid: z.string().optional().describe('微博数字 uid（可从 weibo.com/u/<uid> 复制）；新建时与 nickname 至少给一个，更新时不可改'),
+      nickname: z.string().nullable().optional().describe('微博昵称；**新建时**与 uid 至少给一个（给昵称则自动解析 uid）——更新时不可改（平台事实，抓取回写）'),
       displayName: z.string().nullable().optional().describe('自定义显示名（卡片优先展示；留空 = 用昵称）'),
       biliUid: uidSchema.nullable().optional().describe('可选关联主播 uid；null = 取消关联'),
       enabled: z.boolean().optional(),
@@ -468,11 +473,10 @@ const adminTools: McpToolDef[] = [
       }
       const id = Number(args.id);
       if (!deps.db.getWeiboAccount(id)) throw new HttpError(404, '微博账号不存在');
-      const patch = parseWeiboAccountPatch(pickBody(args, ['uid', 'nickname', 'displayName', 'biliUid', 'enabled', 'ruleIds']));
-      if (patch.uid !== undefined) {
-        const dup = deps.db.getWeiboAccountByUid(patch.uid);
-        if (dup && dup.id !== id) throw new HttpError(409, `微博 ${patch.uid} 已在名单里`);
+      if (args.uid !== undefined || args.nickname !== undefined) {
+        throw new HttpError(400, '微博 uid 与昵称是平台事实不可改（抓取会回写）；要换账号请删除后重新添加');
       }
+      const patch = parseWeiboAccountPatch(pickBody(args, ['displayName', 'biliUid', 'enabled', 'ruleIds']));
       if (patch.biliUid !== undefined) checkWeiboBiliUidForMcp(deps, patch.biliUid);
       if (patch.ruleIds !== undefined) checkAccountRuleIds(deps.db, patch.ruleIds);
       deps.db.upsertWeiboAccount({ ...patch, id });
@@ -495,11 +499,12 @@ const adminTools: McpToolDef[] = [
   {
     name: 'upsert_bili_account',
     description: '新建/更新 B站动态账号（独立名单，只管图文帖推送选用；抓取轮询对象由动态源自动并入监听主播）。'
-      + '带 id = 更新（未传字段保留原值），不带 = 新建；uid 可粘贴 space.bilibili.com/<uid> 链接（归一化成纯数字），更新时不可改',
+      + '带 id = 更新（未传字段保留原值），不带 = 新建；uid 可粘贴 space.bilibili.com/<uid> 链接（归一化成纯数字），'
+      + '新建必填、更新时不可改；uname 是平台事实（抓取回写），不接受手填',
     schema: {
       id: idSchema.optional(),
-      uid: z.string().optional().describe('B站数字 uid 或 space.bilibili.com/<uid> 链接；新建必填'),
-      uname: z.string().nullable().optional().describe('B站用户名（通常抓到自动回写，也可人填）'),
+      uid: z.string().optional().describe('B站数字 uid 或 space.bilibili.com/<uid> 链接；新建必填，更新时不可改'),
+      uname: z.string().nullable().optional().describe('已退役：B站用户名是平台事实（抓取回写），不接受手填；传入会被拒绝'),
       displayName: z.string().nullable().optional().describe('自定义显示名（卡片优先展示；留空 = 用用户名）'),
       enabled: z.boolean().optional(),
       ruleIds: z.array(idSchema).optional().describe('选用的图文帖规则 id（规则平台无关，见 list_post_rules）；空 = 这个账号的动态不推'),
@@ -507,8 +512,11 @@ const adminTools: McpToolDef[] = [
     role: 'admin',
     write: true,
     handler: (deps, args) => {
+      if (args.uname !== undefined) {
+        throw new HttpError(400, 'B站用户名是平台事实（抓取回写），不接受手填');
+      }
       if (args.id === undefined) {
-        const input = parseNewBiliAccount(pickBody(args, ['uid', 'uname', 'displayName', 'enabled', 'ruleIds']));
+        const input = parseNewBiliAccount(pickBody(args, ['uid', 'displayName', 'enabled', 'ruleIds']));
         if (deps.db.getBiliAccountByUid(input.uid)) throw new HttpError(409, `uid ${input.uid} 已在名单里`);
         checkAccountRuleIds(deps.db, input.ruleIds);
         const id = deps.db.upsertBiliAccount(input);
@@ -516,7 +524,10 @@ const adminTools: McpToolDef[] = [
       }
       const id = Number(args.id);
       if (!deps.db.getBiliAccount(id)) throw new HttpError(404, 'B站动态账号不存在');
-      const patch = parseBiliAccountPatch(pickBody(args, ['uname', 'displayName', 'enabled', 'ruleIds']));
+      if (args.uid !== undefined) {
+        throw new HttpError(400, 'uid 是身份锚点不可改；要换账号请删除后重新添加');
+      }
+      const patch = parseBiliAccountPatch(pickBody(args, ['displayName', 'enabled', 'ruleIds']));
       if (patch.ruleIds !== undefined) checkAccountRuleIds(deps.db, patch.ruleIds);
       deps.db.upsertBiliAccount({ ...patch, id });
       return { id, account: deps.db.getBiliAccount(id) };

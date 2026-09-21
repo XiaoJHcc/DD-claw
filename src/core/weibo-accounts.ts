@@ -18,6 +18,7 @@ export interface WeiboAccountRow {
   bili_uid: string | null;
   enabled: number;
   rule_ids: string;
+  silent_next: number;
   last_post_id: string | null;
   last_post_at: number | null;
   last_ok_at: number | null;
@@ -39,6 +40,9 @@ export interface WeiboAccount {
   enabled: boolean;
   /** 选用的图文帖规则（post_rules.id）；空 = 这个账号的帖子一律不推 */
   ruleIds: number[];
+  /** 主动关闭恢复位：重新启用（或图文开关重开，见 setListen）时置位，恢复轮询的
+   *  首轮静默归档不补推（「主动关闭意图：显然不推」），源消费后清位 */
+  silentNext: boolean;
   /** 增量游标：最近一次见到的微博 idstr（只往前推） */
   lastPostId: string | null;
   lastPostAt: number | null;
@@ -76,6 +80,8 @@ export interface WeiboAccountFetchTouch {
   nickname?: string | null;
   /** 本地头像缓存文件名（已下载成功才传） */
   avatar?: string | null;
+  /** 恢复位消费：源在恢复轮传 false 清位（置位只走重新启用/开关重开路径，抓取不置位） */
+  silentNext?: boolean;
 }
 
 /** uid 归一化：去空白、去 `u/` 前缀与 URL 残留，只留数字 */
@@ -105,6 +111,7 @@ export function rowToWeiboAccount(r: WeiboAccountRow): WeiboAccount {
     biliUid: r.bili_uid,
     enabled: r.enabled === 1,
     ruleIds: JSON.parse(r.rule_ids) as number[],
+    silentNext: r.silent_next === 1,
     lastPostId: r.last_post_id,
     lastPostAt: r.last_post_at,
     lastOkAt: r.last_ok_at,

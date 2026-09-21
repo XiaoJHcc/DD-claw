@@ -1,6 +1,7 @@
-// 面板前端 · 卡片1 监听：B站登录行（点击开统一扫码弹窗）；「监听动态」开关在卡片头右上角
-// （一卡一开关，同 NapCat/LLM/推送渠道卡形态）。直播间开播轮询不依赖登录，常开无开关，不在卡片里展示；
-// 微博行已搬到「图文」分页（x.js），扫码登录流程经 openPlatformLogin 导出复用（两平台同构，差异参数化）。
+// 面板前端 · 卡片1 监听：B站登录行（点击开统一扫码弹窗）。直播间开播轮询不依赖登录，
+// 常开无开关；监听主播的空间动态归档随 B站登录常开（预告分析等要用，2026-09-20 拆分决策）
+// ——「监听动态」开关已搬去「图文」分页的 B站动态卡，且只管动态账号名单（bili_accounts）。
+// 微博行也在「图文」分页（x.js），扫码登录流程经 openPlatformLogin 导出复用（两平台同构，差异参数化）。
 // 视觉 = v2：行 = 内嵌圆角矩形（白底 hover 浅底，主副双行 .row-2 恒 66）；
 // 登录行整行可点（.row-click），行尾二维码图标只是可点性提示（.row-afford），不是按钮。
 import { api, toast, ACTIONS, CHANGES, openSheet, closeSheet, sheetCleanups, checkRowHtml, esc, field } from './core.js';
@@ -23,9 +24,6 @@ function loadListen() {
   return api('/api/listen').then(function (s) {
     listenState = s;
     document.getElementById('listen-rows').innerHTML = loginRow('B站 登录', platformByKey('bili'), 'bili');
-    // 卡片头的「监听动态」开关是静态 markup，这里只同步勾选态
-    const sw = document.getElementById('listen-dynamic-enabled');
-    if (sw) sw.checked = s.rows.dynamic.enabled;
   }).catch(function (e) { toast(e.message, true); });
 }
 
@@ -40,13 +38,7 @@ function loginRow(name, plat, key) {
     '</div>';
 }
 
-CHANGES['toggle-listen'] = function (el) {
-  const on = el.checked;
-  api('/api/listen/' + el.getAttribute('data-feature'), 'PUT', { enabled: on }).then(function () {
-    toast(on ? '已开启' : '已关闭');
-    loadListen();
-  }).catch(function (e) { toast(e.message, true); loadListen(); });
-};
+// 「监听动态」等各监听开关统一在「图文」分页（x.js 的 toggle-*-listen）；本卡只有登录行
 
 // ---- 统一平台登录流程：两平台同构，差异全部参数化（id 标签 / 提示文案 / 二维码生成与轮询地址） ----
 // B站二维码用内嵌 qr 库渲染 svg；微博是 png 直链，直接 <img> 显示，不用内嵌二维码库。

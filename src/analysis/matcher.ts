@@ -78,8 +78,9 @@ export interface PostCandidate {
   screenName: string;
   /** 展示名：自定义显示名 → 平台昵称/用户名（再缺省回退标识本身，由渲染层兜底） */
   displayName?: string | null;
-  /** 'tweet'/'retweet'（X）、'mblog'/'retweet'（微博）、'dynamic'/'retweet'（B站动态，
-   *  DYNAMIC_TYPE_FORWARD 在 pipeline 归一成 retweet）——'retweet' 是三平台共用的转发语义 */
+  /** 'tweet'/'retweet'（X）、'mblog'/'retweet'（微博）、B站动态 DYNAMIC_TYPE_*
+   *  （FORWARD 已在 source 归一成 'retweet'，LIVE_RCMD 不再产出）——'retweet' 是
+   *  三平台共用的转发语义，matcher 只认它判转发，其余一律按原创 */
   type: string;
   text: string | null;
   pics: string[];

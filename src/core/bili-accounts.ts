@@ -19,6 +19,7 @@ export interface BiliAccountRow {
   display_name: string | null;
   enabled: number;
   rule_ids: string;
+  silent_next: number;
   last_ok_at: number | null;
   avatar: string | null;
   created_at: number;
@@ -29,13 +30,16 @@ export interface BiliAccount {
   id: number;
   /** B站数字 uid，一切外键锚点（posts.uid 也是它） */
   uid: string;
-  /** B站用户名（抓到时回写；也可人填） */
+  /** B站用户名——平台事实：抓取回写，输入面（面板 / MCP）不接受手填 */
   uname: string | null;
   /** 自定义显示名（卡片优先展示；留空 = 用 uname，同 x/weibo 的 displayName 语义） */
   displayName: string | null;
   enabled: boolean;
   /** 选用的图文帖规则（post_rules.id）；空 = 这个账号的动态一律不推 */
   ruleIds: number[];
+  /** 主动关闭恢复位：重新启用（或图文开关重开，见 setListen）时置位，恢复轮询的
+   *  首轮静默归档不补推（「主动关闭意图：显然不推」），源消费后清位 */
+  silentNext: boolean;
   /** 最近一次成功抓取（健康可视化：面板按它区分「抓过」与「从没成功」） */
   lastOkAt: number | null;
   /** 本地头像缓存文件名；未抓到为 null */
@@ -46,7 +50,6 @@ export interface BiliAccount {
 
 export interface NewBiliAccount {
   uid: string;
-  uname: string | null;
   displayName: string | null;
   enabled: boolean;
 }
@@ -54,7 +57,6 @@ export interface NewBiliAccount {
 export interface BiliAccountInput {
   id?: number;
   uid?: string;
-  uname?: string | null;
   displayName?: string | null;
   enabled?: boolean;
   ruleIds?: number[];
@@ -67,6 +69,8 @@ export interface BiliAccountFetchTouch {
   lastOkAt?: number;
   /** 本地头像缓存文件名（已下载成功才传） */
   avatar?: string | null;
+  /** 恢复位消费：源在恢复轮传 false 清位（置位只走重新启用/开关重开路径，抓取不置位） */
+  silentNext?: boolean;
 }
 
 /** uid 归一化：去空白、从 space.bilibili.com/<uid>（含 /dynamic 等后缀）提取，只留数字 */
@@ -90,6 +94,7 @@ export function rowToBiliAccount(r: BiliAccountRow): BiliAccount {
     displayName: r.display_name,
     enabled: r.enabled === 1,
     ruleIds: JSON.parse(r.rule_ids) as number[],
+    silentNext: r.silent_next === 1,
     lastOkAt: r.last_ok_at,
     avatar: r.avatar,
     createdAt: r.created_at,

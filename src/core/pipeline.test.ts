@@ -171,7 +171,8 @@ function weiboSig(over: {
   };
 }
 
-/** B站动态源的 feed_post：同一 kind，uid 就是 B站 uid，type 是 DYNAMIC_TYPE_* 枚举 */
+/** B站动态源的 feed_post：同一 kind，uid 就是 B站 uid，type 已在 source 归一
+ *  （DYNAMIC_TYPE_FORWARD → 'retweet'，其余保留 DYNAMIC_TYPE_*，见 sources/bili/dynamic.ts） */
 function biliDynSig(over: {
   payload?: Record<string, unknown>; uid?: string;
 } = {}): Signal {
@@ -896,21 +897,21 @@ test('B站动态 feed_post 命中规则 → 推送；文案「发了新动态」
   assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
 });
 
-test('B站动态：DYNAMIC_TYPE_FORWARD 归一成转发，默认「只推原创」不命中', async () => {
+test('B站动态：转发（source 已归一成 retweet）默认「只推原创」不命中', async () => {
   const h1 = biliDynHarness([postRule()]);
-  h1.bus.emit(biliDynSig({ payload: { type: 'DYNAMIC_TYPE_FORWARD' } }));
+  h1.bus.emit(biliDynSig({ payload: { type: 'retweet' } }));
   await h1.pipeline.whenIdle();
   assert.equal(h1.disp.sent.length, 0, '转发动态不命中「只推原创」');
 
   const h2 = biliDynHarness([postRule({
     filters: { ...defaultPostFilters(), original: false, retweet: true },
   })]);
-  h2.bus.emit(biliDynSig({ payload: { type: 'DYNAMIC_TYPE_FORWARD' } }));
+  h2.bus.emit(biliDynSig({ payload: { type: 'retweet' } }));
   await h2.pipeline.whenIdle();
   assert.equal(h2.disp.sent.length, 1, '勾了转发才推');
 });
 
-test('B站动态：不在 bili_accounts 名单的 uid 静默丢弃（监听主播每轮都发信号，是常态）', async () => {
+test('B站动态：不在 bili_accounts 名单的 uid 静默丢弃（防御分支——源只对名单账号发信号）', async () => {
   const h = biliDynHarness([postRule()], []);
   h.bus.emit(biliDynSig({ uid: '99999' }));
   await h.pipeline.whenIdle();

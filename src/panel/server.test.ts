@@ -1443,6 +1443,26 @@ test('/api/advanced：GET 默认值；PUT 校验、落库、触发 onChanged', a
   assert.equal(changed, 1, '保存成功触发热生效回调');
 });
 
+test('/api/advanced 图文补推三键：范围校验、落库、GET 回读', async (t) => {
+  const { base, db } = await setup(t);
+
+  const g = await api(base, '/api/advanced');
+  assert.equal(g.json['backlogPushEnabled'], false, '默认不补推');
+  assert.equal(g.json['backlogMaxAgeHours'], 6);
+  assert.equal(g.json['backlogMaxPerAccount'], 3);
+
+  assert.equal((await api(base, '/api/advanced', 'PUT', { backlogMaxAgeHours: 999 })).status, 400, '越界 400');
+  assert.equal((await api(base, '/api/advanced', 'PUT', { backlogPushEnabled: 1 })).status, 400, '布尔类型错 400');
+
+  const ok = await api(base, '/api/advanced', 'PUT', {
+    backlogPushEnabled: true, backlogMaxAgeHours: 48, backlogMaxPerAccount: 3,
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(db.getSetting('backlog_push_enabled'), '1');
+  assert.equal(db.getSetting('backlog_max_age_hours'), '48');
+  assert.equal(db.getSetting('backlog_max_per_account'), '3');
+});
+
 // ---- 时间表 /api/schedule ----
 
 /** 与 server 同口径：日界日串 → 起点 ts（北京时间 06:00） */
@@ -1744,12 +1764,13 @@ function makeXDep(db: Db, calls: string[]): NonNullable<PanelDeps['x']> {
       status = { ...status, updatedAt: now };
       return { ...out, status };
     },
-    // 存在性校验桩：名字里带 ghost 的算「不存在」，其余算存在（链路原因那条路在下面单独测）
+    // 存在性校验桩：名字里带 ghost 的算「不存在」，其余算存在（链路原因那条路在下面单独测）；
+    // ok 分支带 og:title 抠出的显示名（生产里 verify 顺手种入 nickname）
     verify: async (screenName) => (screenName.includes('ghost')
       ? { checked: true, ok: false, kind: 'not-found' as const, message: 'x.com 提示该账号不存在' }
       : screenName.includes('offline')
         ? { checked: true, ok: false, kind: 'link' as const, message: '代理不可达（ECONNREFUSED）' }
-        : { checked: true, ok: true, kind: 'ok' as const, message: '账号存在（页面含 7 条推文）' }),
+        : { checked: true, ok: true, kind: 'ok' as const, name: '渡瀬 結月', message: '账号存在（页面含 7 条推文）' }),
     onChanged: () => { calls.push('saved'); },
   };
 }
@@ -1837,14 +1858,16 @@ test('/api/x/accounts：空名单 / 新增成功（含校验回报）/ 重名 40
 
   const created = await api(base, '/api/x/accounts', 'POST', { screenName: '@Watase_Yuzuki' });
   assert.equal(created.status, 200);
-  const acc = created.json.account as { id: number; screenName: string; enabled: boolean };
+  const acc = created.json.account as { id: number; screenName: string; nickname: string | null; enabled: boolean };
   assert.equal(acc.screenName, 'watase_yuzuki', 'screen name 归一化（去 @ 转小写）');
   assert.equal(acc.enabled, true, '新增默认启用');
+  assert.equal(acc.nickname, '渡瀬 結月', '昵称由 verify 顺手种入（og:title 显示名，平台事实不收手填）');
   assert.equal((created.json.verify as { ok: boolean }).ok, true, '回报校验结果');
   assert.deepEqual(calls, ['saved'], '新增触发一次热生效回调');
 
   assert.equal((await api(base, '/api/x/accounts', 'POST', { screenName: 'watase_yuzuki' })).status, 409, '重名');
   assert.equal((await api(base, '/api/x/accounts', 'POST', { screenName: 'bad name!' })).status, 400, '格式非法');
+  assert.equal((await api(base, '/api/x/accounts', 'POST', { screenName: 'x', nickname: '手填昵称' })).status, 400, '昵称不接受手填（未知字段）');
   assert.equal((await api(base, '/api/x/accounts', 'POST', {})).status, 400, '缺 screenName');
 
   const list = (await api(base, '/api/x/accounts')).json.accounts as { screenName: string }[];
@@ -1885,7 +1908,8 @@ test('/api/x/accounts：关联主播必须存在；编辑/启停/删除与 404',
   assert.equal(put.status, 200);
   assert.equal((put.json.account as { enabled: boolean }).enabled, false, '启停生效');
 
-  assert.equal((await api(base, '/api/x/accounts/' + id, 'PUT', { screenName: 'd4dj_pj' })).status, 409, '改成已存在的名字 409');
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'PUT', { screenName: 'd4dj_pj' })).status, 400, 'screenName 是身份锚点不可改（未知字段 400）');
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'PUT', { nickname: '手填昵称' })).status, 400, '昵称是平台事实不可改（未知字段 400）');
   assert.equal((await api(base, '/api/x/accounts/' + id, 'PUT', {})).status, 400, '空 patch');
   assert.equal((await api(base, '/api/x/accounts/99999', 'PUT', { enabled: true })).status, 404);
 
@@ -2366,12 +2390,13 @@ test('/api/bili/accounts：CRUD + uid 链接归一化 + 重名 409 + 视图带�
   assert.deepEqual(list[0]!.posts.map((p) => p.pubTs), [4000, 3000, 2000], '倒序且不含别人账号的帖');
   assert.equal(list[0]!.posts[0]!.raw, undefined, 'raw 不下发');
 
-  // PUT：uid 是身份锚点不可改；其它字段部分更新
-  const put = await api(base, `/api/bili/accounts/${acc.id}`, 'PUT', { enabled: false, uname: '阿梓从小就很可爱' });
+  // PUT：uid 是身份锚点、uname 是平台事实，都不可改；其它字段部分更新
+  const put = await api(base, `/api/bili/accounts/${acc.id}`, 'PUT', { enabled: false });
   assert.equal(put.status, 200);
   assert.equal((put.json.account as { enabled: boolean }).enabled, false);
-  assert.equal((put.json.account as { uname: string }).uname, '阿梓从小就很可爱');
+  assert.equal((put.json.account as { uname: unknown }).uname, null, 'uname 由抓取回写，输入面动不了');
   assert.equal((await api(base, `/api/bili/accounts/${acc.id}`, 'PUT', { uid: '1' })).status, 400, 'uid 不可改');
+  assert.equal((await api(base, `/api/bili/accounts/${acc.id}`, 'PUT', { uname: '手填名' })).status, 400, 'uname 不可改');
   assert.equal((await api(base, `/api/bili/accounts/${acc.id}`, 'PUT', {})).status, 400, '空 patch');
   assert.equal((await api(base, '/api/bili/accounts/9999', 'PUT', { enabled: true })).status, 404);
 

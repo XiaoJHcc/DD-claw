@@ -16,6 +16,7 @@ export interface XAccountRow {
   bili_uid: string | null;
   enabled: number;
   rule_ids: string;
+  silent_next: number;
   last_tweet_id: string | null;
   last_tweet_at: number | null;
   last_ok_at: number | null;
@@ -28,7 +29,8 @@ export interface XAccount {
   id: number;
   /** 归一化后的 screen name（去 @、小写）——X 的「ID」（@handle，唯一标识），不是昵称 */
   screenName: string;
-  /** X 的昵称（平台 display name，user.name；抓取拿到才回写，也可人填） */
+  /** X 的昵称（平台 display name，user.name / og:title）——平台事实：添加时 verify 种入、
+   *  抓取回写，输入面（面板 / MCP）不接受手填 */
   nickname: string | null;
   /** 自定义显示名（卡片优先展示；留空 = 用昵称，同 weibo_accounts.display_name 语义） */
   displayName: string | null;
@@ -37,6 +39,9 @@ export interface XAccount {
   enabled: boolean;
   /** 选用的图文帖规则（post_rules.id）；空 = 这个账号的帖子一律不推 */
   ruleIds: number[];
+  /** 主动关闭恢复位：重新启用（或图文开关重开，见 setListen）时置位，恢复轮询的
+   *  首轮静默归档不补推（「主动关闭意图：显然不推」），源消费后清位 */
+  silentNext: boolean;
   /** 增量游标：最近一次见到的推文 id（只往前推） */
   lastTweetId: string | null;
   lastTweetAt: number | null;
@@ -71,8 +76,12 @@ export interface XAccountFetchTouch {
   lastTweetId?: string | null;
   lastTweetAt?: number | null;
   lastOkAt?: number;
+  /** 抓到的平台昵称（og:title / user.name；昵称会改，只有拿到非空才回写，同 weibo 纪律） */
+  nickname?: string | null;
   /** 本地头像缓存文件名（已下载成功才传） */
   avatar?: string | null;
+  /** 恢复位消费：源在恢复轮传 false 清位（置位只走重新启用/开关重开路径，抓取不置位） */
+  silentNext?: boolean;
 }
 
 /**
@@ -97,6 +106,7 @@ export function rowToXAccount(r: XAccountRow): XAccount {
     biliUid: r.bili_uid,
     enabled: r.enabled === 1,
     ruleIds: JSON.parse(r.rule_ids) as number[],
+    silentNext: r.silent_next === 1,
     lastTweetId: r.last_tweet_id,
     lastTweetAt: r.last_tweet_at,
     lastOkAt: r.last_ok_at,

@@ -247,6 +247,9 @@ const WEIBO_MIGRATION_KEY = 'migrated_weibo_accounts_v1';
 /** post_rules 生效范围搬家（account_ids → 账号侧 rule_ids）的一次性闸门（见 Db.migratePostRuleScopes） */
 const POST_RULE_SCOPE_MIGRATION_KEY = 'migrated_post_rule_scopes_v1';
 
+/** 开播动态（LIVE_RCMD）彻底舍弃、清理旧库残留行的一次性闸门（见 Db.dropLiveRcmdPosts） */
+const LIVE_RCMD_DROP_KEY = 'migrated_drop_live_rcmd_posts_v1';
+
 /** listTimeline 在播判定：last_seen 超过该秒数未刷新 = 已下播（崩溃/停机错过 live_end 的兜底） */
 const TIMELINE_LIVE_STALE_S = 600;
 
@@ -360,9 +363,15 @@ export class Db {
     // （规则只定义筛选+渠道+推送词）；旧库在线补列，默认空 = 不选用任何规则
     this.ensureColumn('x_accounts', 'rule_ids', "rule_ids TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn('weibo_accounts', 'rule_ids', "rule_ids TEXT NOT NULL DEFAULT '[]'");
+    // 主动关闭恢复位（图文补推语义见 core/backlog.ts）：重新启用/图文开关重开时置位，
+    // 恢复轮询的首轮静默归档不补推；旧库在线补列，默认 0 = 没有待消费的静默轮
+    this.ensureColumn('x_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('weibo_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('bili_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
     // weibo_accounts 本身由 SCHEMA 的 CREATE TABLE IF NOT EXISTS 建出；这里只做数据搬家
     this.migrateWeiboAccounts();
     this.migratePostRuleScopes();
+    this.dropLiveRcmdPosts();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -457,6 +466,23 @@ export class Db {
     this.setSetting(POST_RULE_SCOPE_MIGRATION_KEY, '1');
     if (moved > 0) {
       log.info(`图文帖规则生效范围迁移：${moved} 个账号行的 rule_ids 已写入`);
+    }
+  }
+
+  /**
+   * 开播动态（DYNAMIC_TYPE_LIVE_RCMD）彻底舍弃（2026-09-20 用户决策）：它是 B站自动生成的
+   * 噪音，开播信息由 live-status 源负责，图文规则也不该把它当「原创帖」推。source 已不再
+   * 入库，这里一次性清掉旧库的残留行（settings 闸门；删除不碰 raw 归档哲学——这些行没有
+   * 任何消费者，主播卡展示层此前就是过滤掉它们的）。
+   */
+  private dropLiveRcmdPosts(): void {
+    if (this.getSetting(LIVE_RCMD_DROP_KEY)) return;
+    const r = this.db
+      .prepare(`DELETE FROM posts WHERE platform = 'bili_dynamic' AND type = 'DYNAMIC_TYPE_LIVE_RCMD'`)
+      .run();
+    this.setSetting(LIVE_RCMD_DROP_KEY, '1');
+    if (r.changes > 0) {
+      log.info(`开播动态舍弃迁移：清理 ${r.changes} 条 LIVE_RCMD 历史动态`);
     }
   }
 
@@ -1343,9 +1369,11 @@ export class Db {
     const prev = input.id !== undefined ? this.getXAccount(input.id) : undefined;
     const screenName = normalizeScreenName(input.screenName ?? prev?.screenName ?? '');
     if (prev) {
+      // 重新启用 = 主动暂停结束：置恢复位，恢复轮询的首轮静默（停用期间的帖子不补推）
+      const reEnabled = !prev.enabled && (input.enabled ?? prev.enabled);
       this.db
         .prepare(
-          `UPDATE x_accounts SET screen_name=?, nickname=?, display_name=?, bili_uid=?, enabled=?, rule_ids=?, updated_at=? WHERE id=?`,
+          `UPDATE x_accounts SET screen_name=?, nickname=?, display_name=?, bili_uid=?, enabled=?, rule_ids=?, silent_next=?, updated_at=? WHERE id=?`,
         )
         .run(
           screenName,
@@ -1354,6 +1382,7 @@ export class Db {
           input.biliUid !== undefined ? input.biliUid : prev.biliUid,
           (input.enabled ?? prev.enabled) ? 1 : 0,
           JSON.stringify(input.ruleIds ?? prev.ruleIds),
+          reEnabled || prev.silentNext ? 1 : 0,
           now(),
           prev.id,
         );
@@ -1383,18 +1412,25 @@ export class Db {
     return this.db.prepare('DELETE FROM x_accounts WHERE id = ?').run(id).changes > 0;
   }
 
-  /** 抓取回写：只更新传入的字段（游标只往前推由调用方保证） */
+  /** 抓取回写：只更新传入的字段（游标只往前推由调用方保证；昵称拿到非空才写，不擦好名字） */
   touchXAccount(id: number, touch: XAccountFetchTouch): void {
     const sets: string[] = [];
     const args: Array<string | number | null> = [];
     if (touch.lastTweetId !== undefined) { sets.push('last_tweet_id = ?'); args.push(touch.lastTweetId); }
     if (touch.lastTweetAt !== undefined) { sets.push('last_tweet_at = ?'); args.push(touch.lastTweetAt); }
     if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
+    if (touch.nickname) { sets.push('nickname = ?'); args.push(touch.nickname); }
     if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
+    if (touch.silentNext !== undefined) { sets.push('silent_next = ?'); args.push(touch.silentNext ? 1 : 0); }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
     args.push(now(), id);
     this.db.prepare(`UPDATE x_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  }
+
+  /** 图文开关手动关→手动开（setListen 调用）：全部启用账号进入「恢复轮静默」 */
+  markXAccountsSilentNext(): void {
+    this.db.prepare('UPDATE x_accounts SET silent_next = 1, updated_at = ? WHERE enabled = 1').run(now());
   }
 
   // ---- weibo_accounts：微博独立名单（独立于 streamers，见 core/weibo-accounts.ts）----
@@ -1423,8 +1459,10 @@ export class Db {
     const prev = input.id !== undefined ? this.getWeiboAccount(input.id) : undefined;
     const uid = (input.uid ?? prev?.uid ?? '').trim();
     if (prev) {
+      // 重新启用 = 主动暂停结束：置恢复位，恢复轮询的首轮静默（停用期间的帖子不补推）
+      const reEnabled = !prev.enabled && (input.enabled ?? prev.enabled);
       this.db
-        .prepare('UPDATE weibo_accounts SET uid=?, nickname=?, display_name=?, bili_uid=?, enabled=?, rule_ids=?, updated_at=? WHERE id=?')
+        .prepare('UPDATE weibo_accounts SET uid=?, nickname=?, display_name=?, bili_uid=?, enabled=?, rule_ids=?, silent_next=?, updated_at=? WHERE id=?')
         .run(
           uid,
           input.nickname !== undefined ? input.nickname : prev.nickname,
@@ -1432,6 +1470,7 @@ export class Db {
           input.biliUid !== undefined ? input.biliUid : prev.biliUid,
           (input.enabled ?? prev.enabled) ? 1 : 0,
           JSON.stringify(input.ruleIds ?? prev.ruleIds),
+          reEnabled || prev.silentNext ? 1 : 0,
           now(),
           prev.id,
         );
@@ -1462,10 +1501,16 @@ export class Db {
     if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
     if (touch.nickname) { sets.push('nickname = ?'); args.push(touch.nickname); }
     if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
+    if (touch.silentNext !== undefined) { sets.push('silent_next = ?'); args.push(touch.silentNext ? 1 : 0); }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
     args.push(now(), id);
     this.db.prepare(`UPDATE weibo_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  }
+
+  /** 图文开关手动关→手动开（setListen 调用）：全部启用账号进入「恢复轮静默」 */
+  markWeiboAccountsSilentNext(): void {
+    this.db.prepare('UPDATE weibo_accounts SET silent_next = 1, updated_at = ? WHERE enabled = 1').run(now());
   }
 
   /** 解除某主播的微博关联（主播详情清空微博昵称时用）；账号行保留，历史微博不删 */
@@ -1496,19 +1541,22 @@ export class Db {
   /**
    * 带 id 且存在 = 改行（未提供字段保留原值）；否则按 uid 建行。
    * uid 撞 UNIQUE（同一账号加两遍）时抛错，由面板转成 409——不做静默合并。
+   * uname 是平台事实（抓取经 touchBiliAccount 回写），输入面不收。
    */
   upsertBiliAccount(input: BiliAccountInput): number {
     const prev = input.id !== undefined ? this.getBiliAccount(input.id) : undefined;
     const uid = (input.uid ?? prev?.uid ?? '').trim();
     if (prev) {
+      // 重新启用 = 主动暂停结束：置恢复位，恢复轮询的首轮静默（停用期间的帖子不补推）
+      const reEnabled = !prev.enabled && (input.enabled ?? prev.enabled);
       this.db
-        .prepare('UPDATE bili_accounts SET uid=?, uname=?, display_name=?, enabled=?, rule_ids=?, updated_at=? WHERE id=?')
+        .prepare('UPDATE bili_accounts SET uid=?, display_name=?, enabled=?, rule_ids=?, silent_next=?, updated_at=? WHERE id=?')
         .run(
           uid,
-          input.uname !== undefined ? input.uname : prev.uname,
           input.displayName !== undefined ? input.displayName : prev.displayName,
           (input.enabled ?? prev.enabled) ? 1 : 0,
           JSON.stringify(input.ruleIds ?? prev.ruleIds),
+          reEnabled || prev.silentNext ? 1 : 0,
           now(),
           prev.id,
         );
@@ -1518,10 +1566,10 @@ export class Db {
     const info = this.db
       .prepare(
         `INSERT INTO bili_accounts
-           (uid, uname, display_name, enabled, rule_ids, last_ok_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+           (uid, display_name, enabled, rule_ids, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, ?, ?)`,
       )
-      .run(uid, input.uname ?? null, input.displayName ?? null,
+      .run(uid, input.displayName ?? null,
         (input.enabled ?? true) ? 1 : 0, JSON.stringify(input.ruleIds ?? []), t, t);
     return Number(info.lastInsertRowid);
   }
@@ -1537,10 +1585,16 @@ export class Db {
     if (touch.uname) { sets.push('uname = ?'); args.push(touch.uname); }
     if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
     if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
+    if (touch.silentNext !== undefined) { sets.push('silent_next = ?'); args.push(touch.silentNext ? 1 : 0); }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
     args.push(now(), id);
     this.db.prepare(`UPDATE bili_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  }
+
+  /** 图文开关手动关→手动开（setListen 调用）：全部启用账号进入「恢复轮静默」 */
+  markBiliAccountsSilentNext(): void {
+    this.db.prepare('UPDATE bili_accounts SET silent_next = 1, updated_at = ? WHERE enabled = 1').run(now());
   }
 
   // ---- settings：kv（push_enabled / listen_* / llm_* / napcat_* 等）----
