@@ -6,6 +6,7 @@ import './llm.js';
 import './categories.js';
 import './push.js';
 import './napcat.js';
+import { loadUndoHistory } from './undo.js';
 import './x.js';
 import './streamers.js';
 import './follows.js';
@@ -19,6 +20,8 @@ function switchView(v, activeEl) {
   for (var j = 0; j < views.length; j++) views[j].classList.toggle('hidden', views[j].id !== 'view-' + v);
   // 时间表在 display:none 下解算出的行高无效（clientHeight 0），切回时重排
   if (v === 'schedule') schedRelayout();
+  // 变更历史只在进设置视图时拉取一次（不是常驻轮询的卡片——撤销栈只有写操作会变）
+  if (v === 'settings') loadUndoHistory();
 }
 ACTIONS['nav-view'] = function (el) { switchView(el.getAttribute('data-view'), el); };
 

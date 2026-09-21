@@ -218,7 +218,9 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
   REST 收敛需要的工具语义对齐（additive/趋严，MCP 契约不破坏）：`set_streamer` 补 analyze/notify、
   `upsert_llm_provider` 补 keyEnvs、`upsert_x_account` 新建并入 verify（not-found 拒 / link 照收 /
   ok 种昵称，响应增 `verify` 键）、`upsert_post_rule` 的 filters 改 strictObject。
-- **仍未接线**：变更历史 UI（P0b，面板侧）——`/api/undo*` 与「表 → 热生效回调」映射已于**切片 C** 落地（下条）；
+- **P0b 变更历史 UI 已落地（2026-09-21，与切片 C 并行）**：设置页底部通宽卡（`webui/js/undo.js`，进设置视图拉取，
+  栈式语义 = 只有最新未撤销条带「撤销」按钮；409 中止标「已被后续变更覆盖」、按钮保留）；`/api/undo*` 两条路由的
+  mock 已同步进 `webui/demo/mock-api.js`（`?demo=1` 可完整演示成功路径与空栈态，409 分支留代码路径不演示）。
   `completeChat` 与 `agentToolSpecs` 目前**没有任何调用方**（agent loop 尚未写），对现有链路零行为变化。
 
 **切片 C 落地（2026-09-21，后端收尾）**：

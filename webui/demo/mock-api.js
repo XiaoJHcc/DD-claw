@@ -70,6 +70,7 @@ const store = {
   twitterPosts: clone(M.mockTwitterPosts),
   pushEnabled: true,
   llmEnabled: true,
+  undoHistory: clone(M.mockUndoHistory),
   biliLoggedIn: true,
   weiboLoggedIn: true,
   listenSettings: { dynamic: 'auto', weibo: 'auto', twitter: 'auto' },
@@ -113,6 +114,9 @@ for (const p of store.biliPosts) {
   p.pubTs = nowSec - 2400 * p.id;
   p.createdAt = nowSec;
 }
+// 变更历史的 at 同样用冻结时刻（列表显示「x 分钟前」；偏移与 mockUndoHistory 顺序一一对应，恒新→旧）
+const undoAges = [40, 8 * 60, 25 * 60, 2 * 3600];
+store.undoHistory.forEach((c, i) => { c.at = nowSec - (undoAges[i] ?? 3600); });
 
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
@@ -874,6 +878,19 @@ for (const p of store.twitterPosts) {
         return ok({ ok: true });
       }
     }
+  }
+
+  // ---- 变更历史与撤销（P0b 撤销的用户面）：与 /api/undo* 逐字同构 ----
+  // 历史新→旧全量（只标 undone 不删行）；POST /api/undo 撤「最新一条未撤销的」（mock 只演成功路径：
+  // 点撤销把栈顶标 undone 并回对应形状；把四条都撤完后再点已无按钮，符合空栈 404 语义）。
+  if (path === '/api/undo/history' && method === 'GET') {
+    return ok({ changes: store.undoHistory });
+  }
+  if (path === '/api/undo' && method === 'POST') {
+    const top = store.undoHistory.find((c) => !c.undone);
+    if (!top) return err(404, '没有可撤销的变更');
+    top.undone = true;
+    return ok({ ok: true, change: { id: top.id, tool: top.tool } });
   }
 
   // ---- 时间表 ----

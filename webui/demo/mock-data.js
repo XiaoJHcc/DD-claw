@@ -264,3 +264,27 @@ export const mockTwitterPosts = [
     pubTs: 1, url: 'https://x.com/seigura/status/2101622144761537011', createdAt: 1,
   },
 ];
+
+// ---- 变更历史（P0b 撤销的用户面的 demo 态）：四条 = 保存分类 / 删分类（级联 2 表）/
+// 群渠道关推送（MCP 来源 + 渠道栈）/ 调整渠道顺序（已撤销——演示置灰行与「撤销」按钮只挂栈顶）。
+// 字段与 GET /api/undo/history 的每一条逐字同构（id / tool / entry / actor / scope / at / undone /
+// tables / rows），顺序恒为**新→旧**（id 降序）；at 由 mock-api 在冻结时刻后按偏移种入。
+// scope 取值同服务端：面板/本机 admin = 'admin'，渠道栈 = 'ch:<channelId>'。
+export const mockUndoHistory = [
+  {
+    id: 4, tool: 'upsert_category', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: false, tables: ['categories'], rows: 1,
+  },
+  {
+    id: 3, tool: 'delete_category', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: false, tables: ['categories', 'push_rules'], rows: 4,
+  },
+  {
+    id: 2, tool: 'set_push_enabled', entry: 'mcp', actor: 'maibot', scope: 'ch:2',
+    at: 0, undone: false, tables: ['settings'], rows: 1,
+  },
+  {
+    id: 1, tool: 'reorder_channels', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: true, tables: ['push_channels'], rows: 4,
+  },
+];

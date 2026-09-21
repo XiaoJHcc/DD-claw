@@ -844,3 +844,14 @@ input:disabled{opacity:.5;background:var(--fill)}
 .x-plat-bili{background:rgba(255,92,138,.10);color:var(--pink)}
 /* 微博/B站账号卡的身份行：平台角标叠在名称上方（与 X 卡同一三段式，只多这一行） */
 .x-plat-row{display:flex;align-items:center;gap:var(--sp-2);margin-bottom:2px}
+
+/* ============================================================
+   设置页 · 变更历史卡（P0b 撤销的用户面）：通宽卡片压在三张设置卡下方（不占视图）
+   行 = 通用 .row-2（主行：操作名 + 来源/受影响摘要/状态 tag；副行：时间 · 操作者 · 表名），
+   栈顶那条行尾挂一枚 ghost 按钮「撤销」（标准 .btn，不另造尺寸）。已撤销的行整行置灰
+   （同 .x-card.x-off 口径），空态/加载失败一行居中浅字
+   ============================================================ */
+.undo-row.undo-off{opacity:.55}
+/* 卡片内容区（无 .set-rows）与行同口径：左右 --inset 外边距、与卡片头同心 */
+.undo-empty{display:flex;align-items:center;justify-content:center;min-height:var(--row-h);
+  margin:0 var(--inset) var(--inset);font-size:var(--fs-sm);color:var(--text-2)}
