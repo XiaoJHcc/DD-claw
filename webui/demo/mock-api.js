@@ -55,14 +55,64 @@ const store = {
   llmProviders: clone(defaults?.llmProviders ?? []),
   advanced: { ...M.mockAdvanced },
   napcat: clone(M.mockNapcat),
+  x: clone(M.mockX),
+  xAccounts: clone(M.mockXAccounts),
+  xAccountSeq: M.mockXAccounts.length,
+  weibo: clone(M.mockWeibo),
+  weiboAccounts: clone(M.mockWeiboAccounts),
+  weiboAccountSeq: M.mockWeiboAccounts.length,
+  weiboPosts: clone(M.mockWeiboPosts),
+  biliAccounts: clone(fixtures?.biliAccounts ?? []),
+  biliAccountSeq: (fixtures?.biliAccounts ?? []).length,
+  biliPosts: clone(fixtures?.biliPosts ?? []),
+  postRules: clone(M.mockPostRules),
+  postRuleSeq: M.mockPostRules.length,
+  twitterPosts: clone(M.mockTwitterPosts),
   pushEnabled: true,
   llmEnabled: true,
   biliLoggedIn: true,
   weiboLoggedIn: true,
-  listenSettings: { dynamic: 'auto', weibo: 'auto' },
+  listenSettings: { dynamic: 'auto', weibo: 'auto', twitter: 'auto' },
   biliQrStep: 0,
   weiboQrStep: 0,
 };
+
+// X 快照的时间戳也用冻结时刻（连接卡副行要显示「上次测试 x/x xx:xx」）
+store.x.status.proxy.checkedAt = nowSec;
+store.x.status.web.checkedAt = nowSec;
+store.x.status.updatedAt = nowSec;
+store.x.status.feed.lastRunAt = nowSec - 120;
+store.x.status.feed.lastOkAt = nowSec - 120;
+for (const a of store.xAccounts) {
+  if (a.lastTweetAt) a.lastTweetAt = nowSec - 4200;
+  if (a.lastOkAt) a.lastOkAt = nowSec - 120;
+  a.createdAt = nowSec;
+  a.updatedAt = nowSec;
+}
+// 微博快照与名单同样用冻结时刻（卡片显示「微博 x 小时前」；快照本身面板不展示，保留以免与后端契约分叉）
+store.weibo.status.feed.lastRunAt = nowSec - 90;
+store.weibo.status.feed.lastOkAt = nowSec - 90;
+for (const a of store.weiboAccounts) {
+  if (a.lastPostAt) a.lastPostAt = nowSec - 3600 * 5;
+  if (a.lastOkAt) a.lastOkAt = nowSec - 90;
+  a.createdAt = nowSec;
+  a.updatedAt = nowSec;
+}
+// 微博帖子同样冻结（账号卡微博段显示「x 分钟前」读 pubTs）
+for (const p of store.weiboPosts) {
+  p.pubTs = nowSec - 2400 * p.id;
+  p.createdAt = nowSec;
+}
+// B站动态名单与帖子同样用冻结时刻（账号卡副行「动态 x 小时前」读最近一条帖子的 pubTs）
+for (const a of store.biliAccounts) {
+  if (a.lastOkAt) a.lastOkAt = nowSec - 100;
+  a.createdAt = nowSec;
+  a.updatedAt = nowSec;
+}
+for (const p of store.biliPosts) {
+  p.pubTs = nowSec - 2400 * p.id;
+  p.createdAt = nowSec;
+}
 
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
@@ -115,35 +165,132 @@ function handle(method, path, q, rawBody) {
     });
   }
 
-  // ---- 监听开关 ----
+  // 最近推文的时间戳也用冻结时刻（账号卡推文段要显示「x 小时前」）
+for (const p of store.twitterPosts) {
+  p.pubTs = nowSec - 1800 * p.id;
+  p.createdAt = nowSec;
+}
+
+// ---- 监听开关 ----
   if (path === '/api/listen' && method === 'GET') {
-    const row = (feature, loggedIn) => ({
+    // X 没有登录态：它的「运行前提」是代理已配置（与真实后端 listenReady 同构）
+    const ready = (feature) => feature === 'dynamic' ? store.biliLoggedIn
+      : feature === 'weibo' ? store.weiboLoggedIn
+      : Boolean(store.x.config.proxyUrl);
+    const row = (feature) => ({
       feature,
       setting: store.listenSettings[feature],
-      enabled: loggedIn && (store.listenSettings[feature] !== '0'),
+      enabled: ready(feature) && (store.listenSettings[feature] !== '0'),
     });
     return ok({
       biliLoggedIn: store.biliLoggedIn,
       weiboLoggedIn: store.weiboLoggedIn,
+      xProxyConfigured: Boolean(store.x.config.proxyUrl),
       platforms: M.mockPlatforms,
       rows: {
-        dynamic: row('dynamic', store.biliLoggedIn),
-        weibo: row('weibo', store.weiboLoggedIn),
+        dynamic: row('dynamic'),
+        weibo: row('weibo'),
+        twitter: row('twitter'),
       },
     });
   }
   {
-    const lm = path.match(/^\/api\/listen\/(dynamic|weibo)$/);
+    const lm = path.match(/^\/api\/listen\/(dynamic|weibo|twitter)$/);
     if (lm && method === 'PUT') {
       const b = body();
       const feature = lm[1];
-      const loggedIn = feature === 'dynamic' ? store.biliLoggedIn : store.weiboLoggedIn;
-      store.listenSettings[feature] = b.enabled === !loggedIn ? (b.enabled ? '1' : '0') : 'auto';
+      const ready = feature === 'dynamic' ? store.biliLoggedIn
+        : feature === 'weibo' ? store.weiboLoggedIn
+        : Boolean(store.x.config.proxyUrl);
+      store.listenSettings[feature] = b.enabled === !ready ? (b.enabled ? '1' : '0') : 'auto';
       return ok({
         feature,
-        enabled: loggedIn && (store.listenSettings[feature] !== '0'),
+        enabled: ready && (store.listenSettings[feature] !== '0'),
         setting: store.listenSettings[feature],
       });
+    }
+  }
+
+  // ---- 图文帖规则（X/推特 + 微博 + B站动态共用；与推送规则平行的另一张表）----
+  // 规则平台无关（无 platform 字段，传入按未知字段 400）、不带账号 scope——
+  // 账号侧用 ruleIds 选用（账号 POST/PUT 只校验规则存在，任何账号可选用任何规则）。
+  const checkPostRule = (b, rule) => {
+    if (b.platform !== undefined) return { error: '未知字段: platform（图文规则已平台无关）' };
+    const filters = Object.assign(
+      { original: true, retweet: false, quote: false, media: false, keywords: [] },
+      rule ? rule.filters : {}, b.filters || {},
+    );
+    if (!filters.original && !filters.retweet) {
+      return { error: '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中' };
+    }
+    const judge = b.llmJudge !== undefined ? b.llmJudge === true : (rule ? rule.llmJudge : false);
+    const prompt = b.judgePrompt !== undefined ? b.judgePrompt : (rule ? rule.judgePrompt : null);
+    if (judge && !String(prompt || '').trim()) return { error: '开启「LLM 判定」必须填判定提示词' };
+    if (Array.isArray(b.channels) && b.channels.some((id) => !store.channels.some((c) => c.id === id))) {
+      return { error: '渠道不存在' };
+    }
+    return { filters };
+  };
+  // 账号 ruleIds 校验：只校验规则存在（规则平台无关，不再校验平台一致）
+  const checkRuleIds = (ids) =>
+    Array.isArray(ids) && ids.every((id) => store.postRules.some((r) => r.id === id));
+
+  if (path === '/api/post-rules' && method === 'GET') {
+    return ok({ rules: clone(store.postRules) });
+  }
+  if (path === '/api/post-rules' && method === 'POST') {
+    const b = body();
+    const c = checkPostRule(b, null);
+    if (c.error) return json(400, { error: c.error });
+    const rule = {
+      id: ++store.postRuleSeq,
+      name: b.name || `图文帖规则 ${store.postRuleSeq}`,
+      channels: b.channels || [], filters: c.filters,
+      messageTemplate: b.messageTemplate ?? null,
+      llmJudge: b.llmJudge === true,
+      judgePrompt: b.judgePrompt ?? null,
+      llmTranslate: b.llmTranslate === true,
+      enabled: b.enabled !== false,
+      sort: store.postRules.length, createdAt: nowSec, updatedAt: nowSec,
+    };
+    store.postRules.push(rule);
+    return ok({ id: rule.id });
+  }
+  if (path === '/api/post-rules/order' && method === 'PUT') {
+    const ids = body().ids || [];
+    if (ids.length !== store.postRules.length) return json(400, { error: 'ids 必须与现有图文帖规则一一对应' });
+    store.postRules.sort((a, b2) => ids.indexOf(a.id) - ids.indexOf(b2.id));
+    store.postRules.forEach((r, i) => { r.sort = i; });
+    return ok({ ok: true });
+  }
+  {
+    const prm = path.match(/^\/api\/post-rules\/(\d+)$/);
+    if (prm) {
+      const rule = store.postRules.find((r) => r.id === Number(prm[1]));
+      if (!rule) return json(404, { error: '图文帖规则不存在' });
+      if (method === 'PUT') {
+        const b = body();
+        const c = checkPostRule(b, rule);
+        if (c.error) return json(400, { error: c.error });
+        if (b.name !== undefined) rule.name = b.name;
+        if (b.channels !== undefined) rule.channels = b.channels;
+        rule.filters = c.filters;
+        if (b.llmJudge !== undefined) rule.llmJudge = b.llmJudge === true;
+        if (b.judgePrompt !== undefined) rule.judgePrompt = b.judgePrompt;
+        if (b.llmTranslate !== undefined) rule.llmTranslate = b.llmTranslate === true;
+        if (b.messageTemplate !== undefined) rule.messageTemplate = b.messageTemplate;
+        if (typeof b.enabled === 'boolean') rule.enabled = b.enabled;
+        rule.updatedAt = nowSec;
+        return ok({ ok: true });
+      }
+      if (method === 'DELETE') {
+        store.postRules = store.postRules.filter((r) => r.id !== rule.id);
+        // 选用关系一并去掉（账号 ruleIds 不残留已删规则的 id）
+        for (const list of [store.xAccounts, store.weiboAccounts, store.biliAccounts]) {
+          for (const a of list) a.ruleIds = (a.ruleIds || []).filter((id) => id !== rule.id);
+        }
+        return ok({ ok: true });
+      }
     }
   }
 
@@ -171,6 +318,316 @@ function handle(method, path, q, rawBody) {
     const b = body();
     Object.assign(store.advanced, b);
     return ok({ ok: true, ...store.advanced });
+  }
+
+  // ---- X / 推特（独立分页；契约与真实后端同构：GET 只读快照，探测走 /test）----
+  if (path === '/api/x' && method === 'GET') {
+    return ok({ config: store.x.config, status: store.x.status });
+  }
+  // X 关注账号：独立名单 CRUD；视图 = 名单行 + 关联主播展示名 + 最近 3 条推文
+  // （与真实后端 server.ts 的 xAccountView 同构，账号卡身份段/推文段都读它）
+  const xAccountView = (a) => {
+    const bili = a.biliUid != null
+      ? store.streamers.find((s) => String(s.uid) === String(a.biliUid)) : null;
+    const posts = store.twitterPosts
+      .filter((p) => p.uid === a.screenName)
+      .sort((x2, y2) => y2.pubTs - x2.pubTs)
+      .slice(0, 3)
+      .map((p) => clone(p));
+    return { ...clone(a), biliName: bili ? (bili.alias || bili.uname || String(a.biliUid)) : null, biliFace: bili ? (bili.face ?? null) : null, posts };
+  };
+  if (path === '/api/x/accounts' && method === 'GET') {
+    return ok({ accounts: store.xAccounts.map(xAccountView) });
+  }
+  if (path === '/api/x/accounts' && method === 'POST') {
+    const b = body();
+    // 与真实后端 parseNewXAccount 同构：昵称不收（平台事实——verify 种入 / 抓取回写）
+    if (b.nickname !== undefined) return json(400, { error: '未知字段: nickname' });
+    const screenName = String(b.screenName || '').trim().replace(/^@+/, '').toLowerCase();
+    if (!/^[a-z0-9_]{1,15}$/.test(screenName)) return json(400, { error: 'X 账号格式不对（字母 / 数字 / 下划线，1~15 位）' });
+    if (store.xAccounts.some((a) => a.screenName === screenName)) return json(409, { error: `@${screenName} 已在名单里` });
+    // 演示口径：名单里已有 3 个 + nhk_news 算「存在」，其余给「账号不存在」，便于看 400 那条路
+    const known = ['watase_yuzuki', 'hololive_en', 'nhk_news'].includes(screenName);
+    if (!known) return json(400, { error: `X 账号不存在：@${screenName}` });
+    if (b.biliUid != null && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
+      return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
+    }
+    if (b.ruleIds !== undefined && !checkRuleIds(b.ruleIds)) {
+      return json(400, { error: '规则不存在' });
+    }
+    // 演示的 verify 显示名（真实后端从 og:title 抠出，种进 nickname）
+    const demoNames = { watase_yuzuki: '渡瀬 結月', hololive_en: 'hololive English', nhk_news: 'NHKニュース' };
+    const row = {
+      id: ++store.xAccountSeq, screenName, nickname: demoNames[screenName] || null,
+      displayName: b.displayName ? String(b.displayName) : null,
+      biliUid: b.biliUid ? String(b.biliUid) : null, enabled: b.enabled !== false,
+      ruleIds: (b.ruleIds || []).map(Number),
+      lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null, createdAt: nowSec, updatedAt: nowSec,
+    };
+    store.xAccounts.push(row);
+    return ok({ account: xAccountView(row), verify: { checked: true, ok: true, kind: 'ok', name: demoNames[screenName] || null, message: `账号存在（页面含 7 条推文）` } });
+  }
+  {
+    const xa = path.match(/^\/api\/x\/accounts\/(\d+)$/);
+    if (xa && method === 'PUT') {
+      const row = store.xAccounts.find((a) => a.id === Number(xa[1]));
+      if (!row) return json(404, { error: 'X 账号不存在' });
+      const b = body();
+      // 与真实后端 parseXAccountPatch 同构：ID 与昵称是平台事实不可改（未知字段 400）
+      if (b.screenName !== undefined) return json(400, { error: '未知字段: screenName' });
+      if (b.nickname !== undefined) return json(400, { error: '未知字段: nickname' });
+      if (b.biliUid !== undefined && b.biliUid !== null
+        && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
+        return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
+      }
+      if (b.displayName !== undefined) row.displayName = b.displayName === null ? null : String(b.displayName);
+      if (b.biliUid !== undefined) row.biliUid = b.biliUid === null ? null : String(b.biliUid);
+      if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
+      if (b.ruleIds !== undefined) {
+        if (!checkRuleIds(b.ruleIds)) return json(400, { error: '规则不存在' });
+        row.ruleIds = b.ruleIds.map(Number);
+      }
+      row.updatedAt = nowSec;
+      return ok({ account: xAccountView(row) });
+    }
+    if (xa && method === 'DELETE') {
+      const i = store.xAccounts.findIndex((a) => a.id === Number(xa[1]));
+      if (i < 0) return json(404, { error: 'X 账号不存在' });
+      store.xAccounts.splice(i, 1);
+      return ok({ ok: true });
+    }
+  }
+  if (path === '/api/x' && method === 'PUT') {
+    const b = body();
+    const prev = JSON.stringify(store.x.config);
+    if (typeof b.proxyUrl === 'string') store.x.config.proxyUrl = b.proxyUrl;
+    if (typeof b.instances === 'string') {
+      store.x.config.instances = b.instances.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (Number.isInteger(b.intervalSec)) store.x.config.intervalSec = b.intervalSec;
+    if (typeof b.fallbackHtml === 'boolean') store.x.config.fallbackHtml = b.fallbackHtml;
+    // 与真实后端 invalidateXStatus 同构：配置变了，相关旧结论作废（别让红点配着新地址）
+    const before = JSON.parse(prev);
+    const stale = { ok: false, message: '配置已改，请重新测试', checkedAt: null };
+    if (store.x.config.proxyUrl !== before.proxyUrl || store.x.config.fallbackHtml !== before.fallbackHtml) {
+      store.x.status.proxy = { ...stale };
+      store.x.status.web = { ...stale };
+    }
+    if (store.x.config.instances.join(',') !== before.instances.join(',')) {
+      store.x.status.instances = [];
+    }
+    return ok({ config: store.x.config, status: store.x.status });
+  }
+  // ---- 微博（图文分页第二个来源）：GET 只读快照 + 独立名单 CRUD ----
+  // 契约与真实后端 /api/weibo* 同构：uid 与昵称二选一（只填昵称 → 演示口径固定解析成 1158211483）
+  const weiboAccountView = (a) => {
+    const bili = a.biliUid != null
+      ? store.streamers.find((s) => String(s.uid) === String(a.biliUid)) : null;
+    const posts = store.weiboPosts
+      .filter((p) => p.uid === a.uid)
+      .sort((x2, y2) => y2.pubTs - x2.pubTs)
+      .slice(0, 3)
+      .map((p) => clone(p));
+    return {
+      ...clone(a),
+      biliName: bili ? (bili.alias || bili.uname || String(a.biliUid)) : null,
+      biliFace: bili ? (bili.face ?? null) : null,
+      posts,
+    };
+  };
+  if (path === '/api/weibo' && method === 'GET') {
+    return ok({
+      config: store.weibo.config,
+      status: { ...store.weibo.status, accounts: store.weiboAccounts.filter((a) => a.enabled).length },
+    });
+  }
+  if (path === '/api/weibo/accounts' && method === 'GET') {
+    return ok({ accounts: store.weiboAccounts.map(weiboAccountView) });
+  }
+  // 昵称 ↔ uid 即时互查（与真实后端同构；演示口径：名单里的账号 + 「阿梓」可解析，其余 404）
+  if (path === '/api/weibo/resolve' && method === 'GET') {
+    const nick = (q.get('nick') || '').trim();
+    const uidRaw = (q.get('uid') || '').trim();
+    if (nick) {
+      const hit = store.weiboAccounts.find((a) => a.nickname === nick);
+      if (hit) return ok({ uid: hit.uid, nickname: nick });
+      if (nick === '阿梓从小就很可爱' || nick === '阿梓') return ok({ uid: '2203177060', nickname: nick });
+      return json(404, { error: `微博上找不到这个昵称：${nick}` });
+    }
+    if (uidRaw) {
+      const hit = store.weiboAccounts.find((a) => a.uid === uidRaw);
+      if (hit) return ok({ uid: uidRaw, nickname: hit.nickname });
+      if (uidRaw === '2203177060') return ok({ uid: uidRaw, nickname: '阿梓从小就很可爱' });
+      return json(404, { error: `微博上找不到这个 uid：${uidRaw}` });
+    }
+    return json(400, { error: 'nick 与 uid 至少给一个' });
+  }
+  if (path === '/api/weibo/accounts' && method === 'POST') {
+    const b = body();
+    let uid = String(b.uid || '').trim();
+    let nickname = b.nickname ? String(b.nickname).trim() : null;
+    if (!uid && nickname) {
+      if (nickname !== '阿梓从小就很可爱' && nickname !== '阿梓') {
+        return json(400, { error: `微博上找不到这个昵称：${nickname}` });
+      }
+      uid = '2203177060';
+    }
+    // 与真实后端 normalizeWeiboUid 同构：可粘贴 weibo.com/u/<uid> 主页链接
+    const uidFromUrl = uid.match(/weibo\.com\/(?:u\/)?(\d+)/);
+    if (uidFromUrl) uid = uidFromUrl[1];
+    if (!uid) return json(400, { error: 'uid 与昵称至少填一个' });
+    if (!/^\d{1,20}$/.test(uid)) return json(400, { error: '微博 uid 必须是数字（可从 weibo.com/u/<uid> 复制）' });
+    if (store.weiboAccounts.some((a) => a.uid === uid)) return json(409, { error: `微博 ${uid} 已在名单里` });
+    if (b.biliUid != null && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
+      return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
+    }
+    if (b.ruleIds !== undefined && !checkRuleIds(b.ruleIds)) {
+      return json(400, { error: '规则不存在' });
+    }
+    const row = {
+      id: ++store.weiboAccountSeq, uid, nickname, displayName: b.displayName ? String(b.displayName) : null,
+      biliUid: b.biliUid ?? null,
+      enabled: b.enabled !== false, ruleIds: (b.ruleIds || []).map(Number),
+      lastPostId: null, lastPostAt: null, lastOkAt: null,
+      avatar: null, createdAt: nowSec, updatedAt: nowSec,
+    };
+    store.weiboAccounts.push(row);
+    return ok({ account: weiboAccountView(row) });
+  }
+  {
+    const wa = path.match(/^\/api\/weibo\/accounts\/(\d+)$/);
+    if (wa) {
+      const row = store.weiboAccounts.find((a) => a.id === Number(wa[1]));
+      if (!row) return json(404, { error: '微博账号不存在' });
+      if (method === 'PUT') {
+        const b = body();
+        // 与真实后端 parseWeiboAccountPatch 同构：uid 与昵称是平台事实不可改（未知字段 400）
+        if (b.uid !== undefined) return json(400, { error: '未知字段: uid' });
+        if (b.nickname !== undefined) return json(400, { error: '未知字段: nickname' });
+        if (b.biliUid !== undefined && b.biliUid !== null
+          && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
+          return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
+        }
+        if (b.displayName !== undefined) row.displayName = b.displayName;
+        if (b.biliUid !== undefined) row.biliUid = b.biliUid;
+        if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
+        if (b.ruleIds !== undefined) {
+          if (!checkRuleIds(b.ruleIds)) return json(400, { error: '规则不存在' });
+          row.ruleIds = b.ruleIds.map(Number);
+        }
+        row.updatedAt = nowSec;
+        return ok({ account: weiboAccountView(row) });
+      }
+      if (method === 'DELETE') {
+        store.weiboAccounts = store.weiboAccounts.filter((a) => a.id !== row.id);
+        return ok({ ok: true });
+      }
+    }
+  }
+
+  // ---- B站动态（图文分页第三个来源）：独立名单 CRUD，与 weibo 同构 ----
+  // uid 支持粘贴 space.bilibili.com 链接（归一化成纯数字）；头像文件名走 /api/bili-avatar
+  // （demo 下图片不经本拦截器，dev 静态服映射到 data/cache/bili-avatars，无缓存则前端兜底占位圆）
+  const biliAccountView = (a) => {
+    const posts = store.biliPosts
+      .filter((p) => p.uid === a.uid)
+      .sort((x2, y2) => y2.pubTs - x2.pubTs)
+      .slice(0, 3)
+      .map((p) => clone(p));
+    return { ...clone(a), posts };
+  };
+  if (path === '/api/bili/accounts' && method === 'GET') {
+    return ok({ accounts: store.biliAccounts.map(biliAccountView) });
+  }
+  if (path === '/api/bili/accounts' && method === 'POST') {
+    const b = body();
+    // 与真实后端 parseNewBiliAccount 同构：uname 是平台事实（抓取回写），不收
+    if (b.uname !== undefined) return json(400, { error: '未知字段: uname' });
+    const raw = String(b.uid || '').trim();
+    const m = raw.match(/space\.bilibili\.com\/(\d+)/);
+    const uid = m ? m[1] : raw;
+    if (!/^\d{1,20}$/.test(uid)) return json(400, { error: 'uid 必须是数字（可粘贴 space.bilibili.com/<uid> 链接）' });
+    if (store.biliAccounts.some((a) => a.uid === uid)) return json(409, { error: `uid ${uid} 已在名单里` });
+    if (b.ruleIds !== undefined && !checkRuleIds(b.ruleIds)) {
+      return json(400, { error: '规则不存在' });
+    }
+    const row = {
+      id: ++store.biliAccountSeq, uid, uname: null,
+      displayName: b.displayName ? String(b.displayName) : null,
+      enabled: b.enabled !== false, ruleIds: (b.ruleIds || []).map(Number),
+      lastOkAt: null, avatar: null, createdAt: nowSec, updatedAt: nowSec,
+    };
+    store.biliAccounts.push(row);
+    return ok({ account: biliAccountView(row) });
+  }
+  {
+    const ba = path.match(/^\/api\/bili\/accounts\/(\d+)$/);
+    if (ba) {
+      const row = store.biliAccounts.find((a) => a.id === Number(ba[1]));
+      if (!row) return json(404, { error: 'B站动态账号不存在' });
+      if (method === 'PUT') {
+        const b = body();
+        // 与真实后端 parseBiliAccountPatch 同构：uid 是身份锚点、uname 是平台事实，都不可改
+        if (b.uid !== undefined) return json(400, { error: '未知字段: uid' });
+        if (b.uname !== undefined) return json(400, { error: '未知字段: uname' });
+        if (b.displayName !== undefined) row.displayName = b.displayName;
+        if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
+        if (b.ruleIds !== undefined) {
+          if (!checkRuleIds(b.ruleIds)) return json(400, { error: '规则不存在' });
+          row.ruleIds = b.ruleIds.map(Number);
+        }
+        row.updatedAt = nowSec;
+        return ok({ account: biliAccountView(row) });
+      }
+      if (method === 'DELETE') {
+        store.biliAccounts = store.biliAccounts.filter((a) => a.id !== row.id);
+        return ok({ ok: true });
+      }
+    }
+  }
+
+  if (path === '/api/x/test' && method === 'POST') {
+    const b = body();
+    const target = b.target || 'all';
+    const proxyUrl = typeof b.proxyUrl === 'string' && b.proxyUrl ? b.proxyUrl : store.x.config.proxyUrl;
+    const hosts = typeof b.instances === 'string' && b.instances
+      ? b.instances.split(',').map((s) => s.trim()).filter(Boolean)
+      : store.x.config.instances;
+    const out = {};
+    // 演示口径：代理与免登录恒通；实例按已知名单给「两通一限速」，未知实例按 404 不可用
+    if (target === 'all' || target === 'proxy') {
+      // 与真实 probeProxy 同构：非法代理形状不抛错，而是回一条可读的失败原因
+      const looksValid = !proxyUrl || /^(https?:\/\/)?[a-z0-9.-]+(:\d{1,5})?$/i.test(proxyUrl);
+      out.proxy = !proxyUrl
+        ? { ok: false, kind: 'unconfigured', target: 'https://x.com/robots.txt', status: null, ms: 0, message: '未配置代理；境内直连 x.com 会 TLS 被重置，X 功能不可用' }
+        : !looksValid
+          ? { ok: false, kind: 'error', target: 'https://x.com/robots.txt', status: null, ms: 0, message: '配置有误：代理只支持 http://（CONNECT），收到 ' + proxyUrl.split(':')[0] + '://' }
+          : { ok: true, kind: 'ok', target: 'https://x.com/robots.txt', status: 200, ms: 1780, message: '代理可达 · x.com 200 · 1780ms' };
+    }
+    if (target === 'all' || target === 'instances') {
+      out.instances = hosts.map(function (h) {
+        if (h === 'nitter.kareem.one') return { host: h, ok: false, kind: 'blocked', status: 429, ms: 620, items: 0, message: '429 被限速' };
+        if (h === 'nitter.jaydenha.uk') return { host: h, ok: true, kind: 'ok', status: 200, ms: 940, items: 20, message: '可用 · 20 条 · 940ms' };
+        if (h === 'x.n0g.xyz') return { host: h, ok: true, kind: 'ok', status: 200, ms: 1120, items: 20, message: '可用 · 20 条 · 1120ms' };
+        return { host: h, ok: false, kind: 'error', status: 404, ms: 510, items: 0, message: 'HTTP 404' };
+      });
+    }
+    if (target === 'all' || target === 'web') {
+      out.web = { ok: true, screenName: 'watase_yuzuki', status: 200, ms: 1980, tweetIds: 7, latestId: '2100025416010661982', latestAt: nowSec - 3600 * 10, message: '免登录可用 · 7 个 id' };
+    }
+    const now = Math.floor(Date.now() / 1000);
+    // 与真实后端 isSavedConfigTest 同构：测的是未保存的输入值 → 只回结果，不动卡片快照
+    const proxySame = b.proxyUrl === undefined || String(b.proxyUrl).trim() === store.x.config.proxyUrl.trim();
+    const instSame = b.instances === undefined
+      || String(b.instances).split(',').map((s) => s.trim()).filter(Boolean).join(',') === store.x.config.instances.join(',');
+    if (!(proxySame && instSame)) return ok({ ...out, status: store.x.status });
+    if (out.proxy) store.x.status.proxy = { ok: out.proxy.ok, message: out.proxy.message, checkedAt: now };
+    if (out.instances) {
+      store.x.status.instances = out.instances.map((i) => ({ host: i.host, ok: i.ok, message: i.message }));
+    }
+    if (out.web) store.x.status.web = { ok: out.web.ok, message: out.web.message, checkedAt: now };
+    store.x.status.updatedAt = now;
+    return ok({ ...out, status: store.x.status });
   }
 
   // ---- 快照 / 头像：demo 下不经本拦截器 ----

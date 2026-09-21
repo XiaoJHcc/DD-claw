@@ -27,6 +27,18 @@
 | 直播原画画质 | [实测] `qn=10000` 静默降级到 250 | SESSDATA（本项目不需要） |
 | 动态评论区 | [文档] 需 `type=17` + 动态 id | 未跑通，见 feeds.md |
 
+### 需要代理出网（境内直连不可达）
+
+以下都是 **X / 推特** 的能力，2026-09-16 在本机实测：**免凭据可用，但必须先有可用 HTTP 代理**（直连 `x.com` TLS 被重置、`pbs.twimg.com` 直接超时）。详见 [research/twitter.md](research/twitter.md)。
+
+| 能力 | 接口 / 手段 | 验证 |
+|---|---|---|
+| **账号最新推文（含正文）** | 免登录 `x.com/<screen>` HTML 内嵌数据 | [实测] 拿到当天 00:54Z 的推文 |
+| 单推详情（时间/图片/正文） | `cdn.syndication.twimg.com/tweet-result?id=<id>&token=<任意非空>` | [实测] 200 完整 JSON |
+| 推文列表（100 条，但**非最新**） | `cdn.syndication.twimg.com/srv/timeline-profile/screen-name/<name>` | [实测] 100 条；限流 30 次/15 分钟 |
+| **原创/转发/带图/时间可判的订阅** | 存活 Nitter 实例的 `/<screen>/rss` | [实测] 20 条 = 10 转 + 10 原创，19 带图 |
+| 图片下载 | `pbs.twimg.com`（经代理） | [实测] 代理通、直连超时 |
+
 ### 明确做不到
 
 - **自动读取 Chrome/Edge 已登录 cookie** — Chrome 127+ App-Bound Encryption 封死。可绕过，但手段是进程注入 / process hollowing / COM 伪装，等同恶意软件技术，本项目不采用。
@@ -72,6 +84,8 @@
 | LLM 文本判定 | 免费额度内；L0/L1 规则层拦掉 60-80% |
 | LLM 视觉判定 | 免费额度更紧，仅文本信号矛盾时动用 |
 | 本地常驻 | Node 单进程 + 按需几路 WS；OCR/音频模型按需加载 |
+| 推特第三方 API（增量轮询 50 账号） | ≈$65–80/月（twitterapi.io）；官方 X API 去重后 ≈$37/月，**无去重 ≈$10,800/月** |
+| 推特免登录路线（HTML + syndication / Nitter RSS） | 0 元，代价是实例与页面结构随时可变 |
 
 ## 4. 时效性风险
 
@@ -85,6 +99,8 @@
 | Chrome cookie 加密机制 | ABE 仍在攻防迭代 |
 | NapCat 可用性 | 同类项目 go-cqhttp / Lagrange V1 / Shamrock 已相继失效 |
 | SESSDATA 有效期 | [待验证] 网传半年到一年，无官方声明；用心跳检测代替硬编码天数 |
+| Nitter 实例存活与 X 页面结构 | 公共实例随时被限速/被停止函打死；免登录 HTML 的字段随 X 改版变化（2026-09-16 实测可用） |
+| 本机代理的可用性 | X 全部能力都压在 `127.0.0.1:7890` 上，代理挂 = X 源全停（应做健康检查与告警） |
 
 ## 5. 已知踩坑清单
 
@@ -126,6 +142,25 @@
 
 23. 微博扫码 `passport sso/v2` 的 generate **必须带 `Referer: https://weibo.com/`，否则 403**；返回 image 是 png 直链（面板直接 `<img src>`）。poll 的 retcode 归一化：`20000000`=confirmed、`50114001`=waiting（已实测）；`50114002`=scanned、其他 `50114xxx`=expired（防御式映射，未单独观测）。[实测]
 24. 微博登录态心跳走 `ajax/log/action`，看 **`X-Log-Uid` 响应头**；异常与缺头都归一化为未登录。[实测]
-25. 微博昵称→UID 匿名解析链（`src/sources/weibo/resolve.ts`）：`genvisitor` 拿 tid → `incarnate` 拿 SUB/SUBP → `m.weibo.cn/n/<昵称>` 302 到 `/u/<uid>`；cookie 模块级缓存、失效自动重建并重试一次，绝不进日志。[实测]
+25. 微博昵称→UID 匿名解析链（`src/sources/weibo/resolve.ts`）：`genvisitor` 拿 tid → `incarnate` 拿 SUB/SUBP → `m.weibo.cn/n/<昵称>` 302 到 `/u/<uid>`；cookie 模块级缓存、失效自动重建并重试一次，绝不进日志。[实测]（2026-09-20 补充：反方向 uid→昵称走的 `getIndex` 已被微博收紧——带访客 cookie 也 302 到 `sso/signin` 要求真登录；resolve.ts 已把 `signin` 归入「失效重建」判定，但重建同样救不回，该方向当前实质不可用）
 26. B站 `x/relation/followings` 分页 **50/页**，按返回 total 翻页、短页到底；**无需 WBI 签名**（604 关注 13 页实测）。[实测]
 27. B站批量接口 `get_status_info_by_uids` 传入**非纯数字 uid** 会报 `65530 route_exception`，单 uid 拉取也必败——`listWatchedUids()` 只回 watch=1 且纯数字的 uid（防止 demo 演示数据混入）。[实测]
+
+以下来自 X/推特接入调研（2026-09-16）：
+
+28. **Node 22 原生 fetch 不认代理**：`HTTPS_PROXY` 环境变量无效（`NODE_USE_ENV_PROXY` 是 Node 24+ 才有），项目也未装 `undici`；`curl.exe -x` 在同一环境下同样打不通（`000`）。可行解只有一个——**手写 CONNECT 隧道 + 在隧道上 `tls.connect({servername})`**。请求务必带 `Connection: close`：HTTP/1.1 默认 keep-alive 会让读取端永不 `end`，表现为**假的 20 秒超时**（本次调研踩过，浪费两轮探测）。[实测]
+29. `cdn.syndication.twimg.com/tweet-result` 的 `token` 参数**只需存在且非空，值任意**（`abc` 与推文 id 都返回完整 JSON，与网传"由 id 派生"不符）；**缺 token 时返回 `200` + `{}`**——空对象必须当失败处理，不能当"没内容"。[实测]
+30. **免登录的两条 X 路线都过滤转发**：`x.com/<screen>` HTML 与 `syndication timeline-profile` 实测 `retweeted_status_results` 全为 `null`（同期 Nitter RSS 显示同一账号 20 条里 10 条是转发）。要转发就必须走 Nitter RSS / 持号路线 / API。[实测]
+31. `syndication timeline-profile` **给的不是「最新 100 条」而是抽样**（实测最新条目停在 4 个月前，而该账号当天有推文），且限流 `x-rate-limit-limit: 30`（15 分钟窗口，打满返 429 + 20 字节空体）→ 只能当回填源，不能当实时源。[实测]
+32. Nitter RSS 的 `<link>` 指向**原作者**的 `/status/<id>`（`RT by @xxx` 的 link 是原作者推文），按 link 去重会把"同一条推文被多次转发"折叠成一条；需要"每次转发都推"就必须另取 RT 自身 id。[实测]
+33. Nitter 系公共实例对脚本客户端大多不可用：`xcancel.com` 返回 **451**（法律下架），`nitter.net`/`nitter.poast.org` TLS 重置，`nitter.space`/`lightbrd.com` Cloudflare 403，`tiekoetter`/`privacyredirect` 挂 **Anubis 工作量证明**。实测可用仅 `nitter.jaydenha.uk`、`x.n0g.xyz`（RSS 各 20 条）与限速的 `nitter.kareem.one` → 只能"多实例轮询 + 失败即弃"。[实测]
+34. **Nitter 实例判活必须打 RSS 路径，不能打首页**："首页挂了 Anubis/Cloudflare" ≠ "实例不可用"。2026-09-16 实测 `x.n0g.xyz` 首页是 Anubis 挑战页，但 `/<user>/rss` 正常返回 20 条；按首页判活会把唯一能用的实例误杀成不可用。[实测]
+35. 公共实例会**分钟级抖动**：同一个 `nitter.jaydenha.uk` 前一次探测 TLS 被重置，几十秒后重试又正常返回 20 条。实例探测要带一次瞬时错误重试，并如实标注「已重试 1 次」——既不要把抖动读成死亡，也不要把抖动读成稳定。[实测]
+36. `127.0.0.1:7890` 这类本地代理在 Windows 上可能**只监听 IPv6 通配 `[::]:7890`**：`Get-NetTCPConnection -LocalPort 7890 -State Listen` 查不到（表现为「代理没在跑」），但 `net.connect(7890,'127.0.0.1')` 与 CONNECT 隧道都正常。查代理存活要以实际连接为准，不要只信端口枚举。[实测]
+
+以下来自微博独立图文来源实施（2026-09-17）：
+
+37. **微博没有像 X 那样便宜的匿名「账号存在性」接口**：X 可以拿 `tweet-result` 单推接口低成本判账号（见 29），微博只有昵称解析链（见 25）能反查 uid。所以微博账号的添加流程**在只填 uid 时不校验存在性**（填昵称则解析失败即 400）——硬加等于把添加流程挂在一个未实测的端点上。填错 uid 的表现是「该账号抓取持续失败并告警」，不是「添加时就报错」。[设计取舍]
+38. **微博图床（`sinaimg.cn`）境内直连可达**，不需要 X 那条代理隧道；但**对 Referer 敏感**——头像链路带 `Referer: https://weibo.com/` 实测可达，帖子图复用的 `localizeImage` 也按域带 weibo Referer。2026-09-20 实测：**no-referrer 也 403 了**（wx1/orj960），浏览器热链与 `<img referrerpolicy="no-referrer">` 都显示不出，所以面板帖子图改走 `/api/weibo-image` 服务端反代（带 weibo Referer + 按 URL md5 落盘 cache/weibo-images；host 白名单防 SSRF）。头像 URL 还带签名与过期参数（`?KID=…&ssig=…`，同一头像每轮 URL 也可能不同），所以按 URL 的 md5 落盘、且只在还没有本地头像时下载一次——换头像不更新本地缓存（删号重加才会；旧文件体积小、随目录一起清理）。[实测]
+40. **mymblog 的图片字段是 `pic_infos` 而不是 `pics`**（2026-09-20 实测踩坑）：`pic_infos` 按 pic_id 键控、thumbnail/bmiddle/large 三档，顺序以 `pic_ids` 为准（对象键序不保证）；`picsOf` 两形态都认、`pics` 数组优先。字段没解析对的表现是「帖子归档成功但 pics 恒空」，不报错。[实测]
+39. **微博的「转发」就是它的引用形态**：抓取层把带 `retweeted_status` 的微博折成 `type='retweet'` 并把原文拼进正文（`//转发自 @原作者: …`），没有独立的引用实体可言。因此图文帖规则里 `filters.quote` 只对 X 生效，微博规则带它会**保存时 400**（与「原创/转发都不勾 = 死规则」同一条纪律：不存永不命中的配置）。[设计取舍]

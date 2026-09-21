@@ -18,7 +18,8 @@ import { Db } from '../core/db.js';
 // ---------- defaultNapcatDir / effectiveNapcatDir（macOS 默认容器路径） ----------
 
 test('defaultNapcatDir：darwin 回落 QQ 沙盒容器 workdir，其他平台为空', () => {
-  assert.ok(defaultNapcatDir('darwin').endsWith('Library/Application Support/QQ/NapCat'));
+  // 期望值用 join 拼：这是 macOS 的路径语义，但在 Windows 上跑测试时 join 会给反斜杠
+  assert.ok(defaultNapcatDir('darwin').endsWith(join('Library', 'Application Support', 'QQ', 'NapCat')));
   assert.ok(defaultNapcatDir('darwin').includes('com.tencent.qq'));
   assert.equal(defaultNapcatDir('win32'), '');
   assert.equal(defaultNapcatDir('linux'), '');

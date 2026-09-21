@@ -1,4 +1,4 @@
-// 面板前端 · 主播列表视图（v2 竖版严格三段式卡片 .st-card）+ 详情弹窗（字段编辑 + 生效推送规则纯展示）。
+// 面板前端 · 主播分页（v2 竖版严格三段式卡片 .st-card）+ 详情弹窗（字段编辑 + 生效推送规则纯展示）。
 //   ① 关键帧横幅 = 独立卡片头（16/9，在播粉色描边只描头部块）：粉底 LIVE 角标融开播时长、
 //      右上在线人数次要胶囊；标题/分区叠在只包文字区域的磨砂圆角衬底上；
 //      下播 = 压灰画面 + 底部一行下播时间，无画面 = video-off 占位。
@@ -21,9 +21,12 @@ let modalCats = [];
 let modalRules = [];
 
 // ---- 主播卡片列表 ----
-// 动态类型 → 人话小标签（微博 = 平台标签）
+// 动态类型 → 人话小标签（微博 = 平台标签）。'retweet' 是 source 归一后的三平台转发语义
+// （B站 FORWARD 新行存它；旧行还是 DYNAMIC_TYPE_FORWARD，两个键都留着）。开播动态
+// （LIVE_RCMD）已彻底舍弃：不再入库，旧库行由一次性迁移清理，这里无需再过滤
 const PT_TAG = {
   weibo: ['微博', 'tag-amber'],
+  retweet: ['转发', 'tag-purple'],
   DYNAMIC_TYPE_AV: ['视频', 'tag-blue'],
   DYNAMIC_TYPE_DRAW: ['图文', 'tag-mint'],
   DYNAMIC_TYPE_WORD: ['文字', ''],
@@ -69,8 +72,12 @@ function bannerHtml(s) {
 // 收起态 .pt-img display:none 彻底出流（否则 width:0 仍吃 flex gap 导致左缘不齐）。
 function postRow(p, open) {
   const [label, cls] = postTag(p);
+  // 微博图床防盗链（no-referrer 也 403）：帖子图经 /api/weibo-image 反代（服务端带 Referer + 落盘缓存）
+  const pic = p.pics && p.pics[0]
+    ? (p.platform === 'weibo' ? '/api/weibo-image?url=' + encodeURIComponent(p.pics[0]) : p.pics[0])
+    : '';
   const inner =
-    (p.pics && p.pics[0] ? `<img class="pt-img" src="${esc(p.pics[0])}" referrerpolicy="no-referrer" alt="">` : '') +
+    (pic ? `<img class="pt-img" src="${esc(pic)}" referrerpolicy="no-referrer" alt="">` : '') +
     `<span class="pt-main"><span class="pt-head"><span class="tag ${cls}">${label}</span>` +
     `<small class="pt-tm">${relTime(p.pubTs)}</small></span>` +
     `<span class="pt-x">${esc(p.text || '(无文字)')}</span></span>`;
@@ -86,8 +93,8 @@ function streamerCard(s) {
   const name = s.uname || String(s.uid);
   const live = s.live;
   const isLive = !!(live && live.isLive);
-  // 开播类型的动态（LIVE_RCMD）是自动生成的噪音，不展示；容器定高 166px，最多 3 条
-  const posts = (s.posts || []).filter(function (p) { return p.type !== 'DYNAMIC_TYPE_LIVE_RCMD'; }).slice(0, 3);
+  // 第三栏最多 3 条（容器定高 166px）；开播动态已彻底舍弃（不入库，旧行由迁移清理）
+  const posts = (s.posts || []).slice(0, 3);
   const ruleNames = (s.rules && s.rules.names) || [];
   const meta = `直播间 ${s.roomId ? esc(s.roomId) : '—'}` +
     ` · 微博 ${s.weiboNick ? esc(s.weiboNick) : (s.weiboUid ? esc(s.weiboUid) : '—')}`;
@@ -124,7 +131,7 @@ export function loadStreamers() {
         (((b.live && b.live.lastLiveAt) || 0) - ((a.live && a.live.lastLiveAt) || 0));
     });
     document.getElementById('streamer-list').innerHTML =
-      active.map(streamerCard).join('') || '<p class="hint">名单为空（从设置视图的关注列表加入）。</p>';
+      active.map(streamerCard).join('') || '<p class="hint">名单为空（从下方关注列表加入）。</p>';
     // 侧栏在播计数
     const cnt = document.getElementById('side-live-count');
     if (cnt) cnt.textContent = String(active.filter(function (s) { return s.live && s.live.isLive; }).length);
@@ -232,7 +239,7 @@ function loadModalRules() {
     }).catch(function (e) { toast(e.message, true); });
 }
 
-// 点击规则行（data-action="goto-push-rule"）由 push.js 处理：关弹窗 → 切设置视图 → 直接打开编辑弹窗
+// 点击规则行（data-action="goto-push-rule"）由 push.js 处理：关弹窗 → 切主播视图 → 直接打开编辑弹窗
 
 // ---- 启动与轮询：监听卡 60s（listen.js），主播列表 30s（弹窗 DOM 不被重建） ----
 loadStreamers();

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Db } from './db.js';
 import {
   getRuntimeConfig, saveRuntimeConfig, withRuntimeConfig,
-  isNotifyOnFirstRun, isNotifyOnNewSubscription,
+  isNotifyOnFirstRun, isNotifyOnNewSubscription, getPostBacklogConfig,
   NUM_SPECS, BOOL_SPECS,
 } from './runtime-config.js';
 import { defaultAppConfig } from '../config/schema.js';
@@ -73,4 +73,11 @@ test('冷启动推送开关 helper：默认与显式设置', (t) => {
   saveRuntimeConfig(db, { notifyOnFirstRun: true, notifyOnNewSubscription: false });
   assert.equal(isNotifyOnFirstRun(db), true);
   assert.equal(isNotifyOnNewSubscription(db), false);
+});
+
+test('getPostBacklogConfig：默认关/24h/10 条；settings 覆盖后直读生效（源每轮读，热生效）', (t) => {
+  const db = memDb(t);
+  assert.deepEqual(getPostBacklogConfig(db), { enabled: false, maxAgeSec: 21600, maxPerAccount: 3 });
+  saveRuntimeConfig(db, { backlogPushEnabled: true, backlogMaxAgeHours: 48, backlogMaxPerAccount: 3 });
+  assert.deepEqual(getPostBacklogConfig(db), { enabled: true, maxAgeSec: 172800, maxPerAccount: 3 });
 });

@@ -18,15 +18,17 @@ import type { McpToolDef } from '../mcp/tools.js';
 /**
  * 有意**不**暴露给 agent 的工具：
  * - 排序类（`reorder_*`）：进注册表是为了纳入回滚覆盖；让 LLM 拖排序没有产品价值，反而多一次误写机会
- * - `test_push` / `test_llm_provider`：有对外副作用（真发一条消息）或触发熔断计数，不可撤销
+ * - `test_push` / `test_llm_provider` / `test_x_connection`：有对外副作用（真发一条消息）或触发熔断计数/网络探测，不可撤销
  */
 export const AGENT_EXCLUDED_TOOLS: readonly string[] = [
   'reorder_push_rules',
+  'reorder_post_rules',
   'reorder_categories',
   'reorder_channels',
   'reorder_llm_providers',
   'test_push',
   'test_llm_provider',
+  'test_x_connection',
 ];
 
 /** LLM 是否看得见这个工具 */

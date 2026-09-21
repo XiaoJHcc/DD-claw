@@ -20,9 +20,18 @@ export class AnalysisQueue {
   ) {}
 
   submit(ctx: AnalysisContext): Promise<Classification[]> {
+    return this.run(() => this.classifier.classify(ctx));
+  }
+
+  /**
+   * 通用限流入口：**任何含 LLM 调用的任务都从这里过**（图文帖的判定/翻译是第二种任务，
+   * 它不该被硬塞进 Classifier 抽象里——那会把「分类」这个概念撑成「所有 LLM 任务」）。
+   * 限流语义与 submit 完全一致，两者共用同一条并发闸门。
+   */
+  run<T>(fn: () => Promise<T>): Promise<T> {
     return this.acquire().then(async () => {
       try {
-        return await this.classifier.classify(ctx);
+        return await fn();
       } finally {
         this.release();
       }

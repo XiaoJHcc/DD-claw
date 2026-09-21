@@ -153,6 +153,45 @@ export function checkDotHtml(attrs, checked, disabled) {
     `${checked ? ' checked' : ''}${disabled ? ' disabled' : ''}><span class="cd"></span></label>`;
 }
 export function gripHtml() { return `<span class="grip" title="拖拽排序">${icon('grip')}</span>`; }
+// ---- 胶囊分段导航（segnav）：通用单选切换条。灰轨道 + 白色滑块（thumb），切换时滑块 ----
+// ---- 横滑过去（left/width 过渡）。两档尺寸：lg = 页面级筛选条 / sm = 弹窗内切换。 ----
+// 用法：segnavHtml(items, active, size, action) 出骨架插入 DOM → layoutSegnav(nav, false)
+// 无动画定位滑块；点击由调用方的 data-action 处理（改状态后调 segnavSelect 滑过去）。
+// ResizeObserver 跟随容器尺寸/可见性变化重定位（视图从 hidden 切回时 offsetWidth 才有值）。
+export function segnavHtml(items, active, size, action) {
+  return `<div class="segnav segnav-${size === 'sm' ? 'sm' : 'lg'}"><span class="segnav-thumb"></span>` +
+    items.map(function (it) {
+      return `<button type="button" class="segnav-item${String(it.value) === String(active) ? ' on' : ''}"` +
+        ` data-action="${esc(action)}" data-value="${esc(String(it.value))}">${esc(it.label)}</button>`;
+    }).join('') + '</div>';
+}
+var segnavSeen = new WeakSet();
+var segnavRO = new ResizeObserver(function (es) {
+  for (var i = 0; i < es.length; i++) layoutSegnav(es[i].target, false);
+});
+/** 把滑块定位到当前 .on 项（animate=false 时瞬移，用于首渲与尺寸跟随） */
+export function layoutSegnav(nav, animate) {
+  if (!nav) return;
+  var thumb = nav.querySelector('.segnav-thumb');
+  var on = nav.querySelector('.segnav-item.on');
+  if (!thumb) return;
+  if (!animate) nav.classList.add('noanim');
+  if (on && on.offsetWidth) {
+    thumb.style.left = on.offsetLeft + 'px';
+    thumb.style.width = on.offsetWidth + 'px';
+  }
+  if (!animate) { void nav.offsetHeight; nav.classList.remove('noanim'); }
+  if (!segnavSeen.has(nav)) { segnavSeen.add(nav); segnavRO.observe(nav); }
+}
+/** 切换选中项并滑动滑块（点击处理里调；业务状态变更仍是调用方自己的事） */
+export function segnavSelect(nav, value) {
+  if (!nav) return;
+  var items = nav.querySelectorAll('.segnav-item');
+  for (var i = 0; i < items.length; i++) {
+    items[i].classList.toggle('on', items[i].getAttribute('data-value') === String(value));
+  }
+  layoutSegnav(nav, true);
+}
 export function field(label, inputHtml) {
   return `<div class="field"><label class="field-label">${esc(label)}</label>${inputHtml}</div>`;
 }

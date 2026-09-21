@@ -11,6 +11,9 @@ import { createPanelServer, type PanelDeps, type PanelStatus } from './server.js
 import { createLlmRouter, listLlmProviders, saveLlmProviders, setLlmEnabled, dbKeysOf, type LlmRouter, type FetchLike } from '../analysis/providers.js';
 import type { LlmProviderConfig } from '../config/schema.js';
 import { saveNapcatConfig } from '../notify/napcat.js';
+import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
+import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
+import { defaultPostFilters } from '../core/post-rules.js';
 
 interface Fixture {
   db: Db;
@@ -37,18 +40,32 @@ async function setup(
       };
     };
     llmFetch?: FetchLike;
-    /** 注入 listen dep；缺省不注入（/api/listen* 404） */
-    listen?: { bili?: boolean; weibo?: boolean };
+    /** 注入 listen dep；缺省不注入（/api/listen* 404）。twitter 可传函数 = 动态判据（代理配置会变） */
+    listen?: { bili?: boolean; weibo?: boolean; twitter?: boolean | (() => boolean) };
     /** 注入 napcat dep；缺省不注入（/api/napcat* 404） */
     napcat?: PanelDeps['napcat'];
     /** 注入 advanced dep（onChanged 热生效回调）；缺省则保存只落库 */
     advanced?: PanelDeps['advanced'];
     /** 注入 snapshots dep（/api/snapshot 缓存关键帧）；缺省不注入（404） */
     snapshots?: PanelDeps['snapshots'];
+    /** 注入 xAvatars dep（/api/x-avatar X 头像缓存）；缺省不注入（404） */
+    xAvatars?: PanelDeps['xAvatars'];
     /** 注入头像代理 fetch（/api/avatar 测试用）；缺省用全局 fetch */
     avatar?: PanelDeps['avatar'];
     /** 注入 testPush dep（/api/push/test）；缺省不注入（404） */
     testPush?: PanelDeps['testPush'];
+    /** 注入 x dep（/api/x*）；缺省不注入（404） */
+    x?: PanelDeps['x'];
+    /** 注入 weibo dep（/api/weibo*）；缺省不注入（404） */
+    weibo?: PanelDeps['weibo'];
+    /** 注入 weiboAvatars dep（/api/weibo-avatar）；缺省不注入（404） */
+    weiboAvatars?: PanelDeps['weiboAvatars'];
+    /** 注入 biliAvatars dep（/api/bili-avatar B站动态账号头像缓存）；缺省不注入（404） */
+    biliAvatars?: PanelDeps['biliAvatars'];
+    /** 注入 weiboImages dep（/api/weibo-image 微博帖子图反代）；缺省不注入（不落盘、纯反代） */
+    weiboImages?: PanelDeps['weiboImages'];
+    /** 注入 biliFeed dep（添加 B站动态账号后的即时首拉钩子）；缺省不注入（跳过） */
+    biliFeed?: PanelDeps['biliFeed'];
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -101,12 +118,23 @@ async function setup(
     napcat: opts.napcat,
     advanced: opts.advanced,
     snapshots: opts.snapshots,
+    xAvatars: opts.xAvatars,
     avatar: opts.avatar,
     testPush: opts.testPush,
+    x: opts.x,
+    weibo: opts.weibo,
+    weiboAvatars: opts.weiboAvatars,
+    biliAvatars: opts.biliAvatars,
+    weiboImages: opts.weiboImages,
+    biliFeed: opts.biliFeed,
     ...(opts.listen
       ? {
           listen: {
-            login: () => ({ bili: opts.listen!.bili ?? false, weibo: opts.listen!.weibo ?? false }),
+            login: () => ({
+              bili: opts.listen!.bili ?? false,
+              weibo: opts.listen!.weibo ?? false,
+              twitter: typeof opts.listen!.twitter === 'function' ? opts.listen!.twitter() : (opts.listen!.twitter ?? false),
+            }),
             onChanged: () => { listenChangedCount++; },
           },
         }
@@ -151,13 +179,13 @@ async function api(
 
 // ---- 页面 ----
 
-test('GET / 返回内嵌页面，包含六张卡片（监听/LLM供应商/推送/时间表/主播列表/关注列表）', async (t) => {
+test('GET / 返回内嵌页面，包含四个视图（时间表/主播/图文/设置）', async (t) => {
   const { base } = await setup(t);
   const res = await fetch(base + '/', { headers: { connection: 'close' } });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type') ?? '', /text\/html/);
   const html = await res.text();
-  for (const marker of ['监听', 'LLM 供应商', '推送', 'id="schedule-body"', '主播列表', '关注列表']) {
+  for (const marker of ['id="view-schedule"', 'id="view-streamers"', 'id="view-x"', 'id="view-settings"', '关注列表']) {
     assert.ok(html.includes(marker), `页面应包含「${marker}」`);
   }
   // 关注列表是独立卡片（不再嵌在主播列表里），且带搜索框
@@ -1415,6 +1443,26 @@ test('/api/advanced：GET 默认值；PUT 校验、落库、触发 onChanged', a
   assert.equal(changed, 1, '保存成功触发热生效回调');
 });
 
+test('/api/advanced 图文补推三键：范围校验、落库、GET 回读', async (t) => {
+  const { base, db } = await setup(t);
+
+  const g = await api(base, '/api/advanced');
+  assert.equal(g.json['backlogPushEnabled'], false, '默认不补推');
+  assert.equal(g.json['backlogMaxAgeHours'], 6);
+  assert.equal(g.json['backlogMaxPerAccount'], 3);
+
+  assert.equal((await api(base, '/api/advanced', 'PUT', { backlogMaxAgeHours: 999 })).status, 400, '越界 400');
+  assert.equal((await api(base, '/api/advanced', 'PUT', { backlogPushEnabled: 1 })).status, 400, '布尔类型错 400');
+
+  const ok = await api(base, '/api/advanced', 'PUT', {
+    backlogPushEnabled: true, backlogMaxAgeHours: 48, backlogMaxPerAccount: 3,
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(db.getSetting('backlog_push_enabled'), '1');
+  assert.equal(db.getSetting('backlog_max_age_hours'), '48');
+  assert.equal(db.getSetting('backlog_max_per_account'), '3');
+});
+
 // ---- 时间表 /api/schedule ----
 
 /** 与 server 同口径：日界日串 → 起点 ts（北京时间 06:00） */
@@ -1640,3 +1688,739 @@ test('/api/avatar：坏 uid 400 / 无该主播或无头像 404 / 非白名单 ho
   db.upsertStreamer({ uid: '1003', uname: '坏域名', face: 'https://evil.example.com/x.jpg' });
   assert.equal((await rawGet(base, '/api/avatar?uid=1003')).status, 400, '非白名单 host 400');
 });
+
+// ---- /api/x-avatar X 头像本地缓存 ----
+
+test('/api/x-avatar：按文件名读缓存目录，jpg/png 类型与长缓存头正确', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-xava-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { base } = await setup(t, { xAvatars: { dir } });
+
+  const jpgName = 'a'.repeat(32) + '.jpg';
+  const jpgData = Buffer.from('fake-x-avatar-jpg');
+  writeFileSync(join(dir, jpgName), jpgData);
+  const r1 = await rawGet(base, `/api/x-avatar?file=${jpgName}`);
+  assert.equal(r1.status, 200);
+  assert.deepEqual(r1.body, jpgData);
+  assert.equal(r1.headers.get('content-type'), 'image/jpeg');
+  assert.equal(r1.headers.get('cache-control'), 'max-age=86400', 'md5 文件名随内容变，长缓存');
+
+  const pngName = 'b'.repeat(32) + '.png';
+  writeFileSync(join(dir, pngName), Buffer.from('fake-x-avatar-png'));
+  assert.equal((await rawGet(base, `/api/x-avatar?file=${pngName}`)).headers.get('content-type'), 'image/png');
+});
+
+test('/api/x-avatar：坏文件名 400（白名单即防穿越）、缺文件 404、无 dep 404', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-xava-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { base } = await setup(t, { xAvatars: { dir } });
+
+  assert.equal((await rawGet(base, '/api/x-avatar?file=../../.env')).status, 400, '穿越字符 400');
+  assert.equal((await rawGet(base, '/api/x-avatar?file=not-md5.jpg')).status, 400, '非 md5 名 400');
+  assert.equal((await rawGet(base, '/api/x-avatar')).status, 400, '缺 file 400');
+  assert.equal((await rawGet(base, `/api/x-avatar?file=${'c'.repeat(32)}.jpg`)).status, 404, '文件不存在 404');
+
+  const bare = await setup(t);
+  assert.equal((await rawGet(bare.base, `/api/x-avatar?file=${'c'.repeat(32)}.jpg`)).status, 404, '无 dep 404');
+});
+
+// ---- X / 推特 独立分页（/api/x*）----
+// 这几条守的是「X 与开播那套设置完全分开」：X 未注入时整组端点 404，
+// 注入后读写只碰 x_* 设置；探测走显式 POST，GET 绝不打网络（靠 onChanged/测试计数验证）。
+
+/** 生产装配形状的 x dep：配置落 settings，探测结果只更新内存快照 */
+function makeXDep(db: Db, calls: string[]): NonNullable<PanelDeps['x']> {
+  let status = {
+    proxy: { ok: false, message: '尚未测试', checkedAt: null as number | null },
+    instances: [] as { host: string; ok: boolean; message: string }[],
+    web: { ok: false, message: '尚未测试', checkedAt: null as number | null },
+    // 生产形状里恒有 feed（emptyXStatus 就带它），桩也照抄，免得测出一个生产不会出现的空态
+    feed: emptyXFeedSnapshot(),
+    updatedAt: null as number | null,
+  };
+  return {
+    info: () => ({ config: getXConfig(db), status }),
+    save: (patch) => { saveXConfig(db, patch); return getXConfig(db); },
+    test: async (req) => {
+      calls.push(req.target);
+      const cfg = getXConfig(db);
+      const now = Math.floor(Date.now() / 1000);
+      const out: Record<string, unknown> = {};
+      if (req.target === 'all' || req.target === 'proxy') {
+        out.proxy = { ok: true, kind: 'ok', target: 'https://x.com/robots.txt', status: 200, ms: 12, message: '代理可达' };
+      }
+      if (req.target === 'all' || req.target === 'instances') {
+        out.instances = (req.instances !== undefined ? req.instances.split(',') : cfg.instances)
+          .map((h) => ({ host: h.trim(), ok: h.trim() === 'a.example', kind: 'ok', status: 200, ms: 5, message: '可用' }));
+      }
+      if (req.target === 'all' || req.target === 'web') {
+        out.web = { ok: true, screenName: 'watase_yuzuki', status: 200, ms: 9, tweetIds: 7, latestId: '1', latestAt: now, message: '免登录可用' };
+      }
+      if (out.proxy) status = { ...status, proxy: { ok: true, message: '代理可达', checkedAt: now } };
+      if (out.instances) {
+        status = { ...status, instances: (out.instances as { host: string; ok: boolean }[]).map((i) => ({ host: i.host, ok: i.ok, message: '可用' })) };
+      }
+      if (out.web) status = { ...status, web: { ok: true, message: '免登录可用', checkedAt: now } };
+      status = { ...status, updatedAt: now };
+      return { ...out, status };
+    },
+    // 存在性校验桩：名字里带 ghost 的算「不存在」，其余算存在（链路原因那条路在下面单独测）；
+    // ok 分支带 og:title 抠出的显示名（生产里 verify 顺手种入 nickname）
+    verify: async (screenName) => (screenName.includes('ghost')
+      ? { checked: true, ok: false, kind: 'not-found' as const, message: 'x.com 提示该账号不存在' }
+      : screenName.includes('offline')
+        ? { checked: true, ok: false, kind: 'link' as const, message: '代理不可达（ECONNREFUSED）' }
+        : { checked: true, ok: true, kind: 'ok' as const, name: '渡瀬 結月', message: '账号存在（页面含 7 条推文）' }),
+    onChanged: () => { calls.push('saved'); },
+  };
+}
+
+test('/api/x：未注入 x dep → 整组端点 404（与开播设置彻底分开）', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/x')).status, 404);
+  assert.equal((await api(base, '/api/x', 'PUT', { intervalSec: 300 })).status, 404);
+  assert.equal((await api(base, '/api/x/test', 'POST', { target: 'all' })).status, 404);
+});
+
+test('/api/x：GET 返回默认配置且不打网络；PUT 落 settings 并回调热生效', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, x: makeXDep(db, calls) });
+
+  const got = await api(base, '/api/x');
+  assert.equal(got.status, 200);
+  const config = got.json.config as Record<string, unknown>;
+  assert.equal(config.proxyUrl, 'http://127.0.0.1:7890', '默认代理');
+  assert.equal(config.intervalSec, 300);
+  assert.equal(config.fallbackHtml, true);
+  assert.deepEqual(config.instances, ['nitter.jaydenha.uk', 'x.n0g.xyz']);
+  assert.deepEqual(calls, [], 'GET 不得触发任何探测');
+
+  const put = await api(base, '/api/x', 'PUT', {
+    proxyUrl: '127.0.0.1:1080', instances: 'a.example, b.example', intervalSec: 600, fallbackHtml: false,
+  });
+  assert.equal(put.status, 200);
+  assert.equal((put.json.config as Record<string, unknown>).proxyUrl, '127.0.0.1:1080', '裸 host:port 被接受');
+  assert.equal(db.getSetting('x_proxy_url'), '127.0.0.1:1080', '落 settings 唯一信源');
+  assert.equal(db.getSetting('x_nitter_instances'), 'a.example,b.example');
+  assert.equal(db.getSetting('x_interval_sec'), '600');
+  assert.equal(db.getSetting('x_fallback_html'), '0');
+  assert.deepEqual(calls, ['saved'], '保存触发一次热生效回调');
+});
+
+test('/api/x：PUT 校验代理形状与间隔范围（配置错误当场报，不等轮询才炸）', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+  const bad = await api(base, '/api/x', 'PUT', { proxyUrl: 'socks5://127.0.0.1:1080' });
+  assert.equal(bad.status, 400);
+  assert.match(String(bad.json.error), /代理只支持 http/);
+  assert.equal((await api(base, '/api/x', 'PUT', { intervalSec: 10 })).status, 400, '低于下限');
+  assert.equal((await api(base, '/api/x', 'PUT', { intervalSec: 999999 })).status, 400, '高于上限');
+  assert.equal((await api(base, '/api/x', 'PUT', { instances: 'bad_host' })).status, 400, '实例含下划线（非法 host）');
+  assert.equal((await api(base, '/api/x', 'PUT', {})).status, 400, '空 patch');
+  assert.equal((await api(base, '/api/x', 'PUT', { nope: 1 })).status, 400, '未知字段');
+  assert.equal(db.getSetting('x_proxy_url'), null, '校验失败不落库');
+});
+
+test('/api/x/test：探测按 target 裁剪，且允许用未保存的输入值（先测后存）', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, x: makeXDep(db, calls) });
+
+  const only = await api(base, '/api/x/test', 'POST', { target: 'proxy' });
+  assert.equal(only.status, 200);
+  assert.ok(only.json.proxy, '只测代理时返回 proxy');
+  assert.equal(only.json.instances, undefined, '不越权测实例');
+  assert.deepEqual(calls, ['proxy']);
+
+  const inst = await api(base, '/api/x/test', 'POST', { target: 'instances', instances: 'a.example,b.example' });
+  const list = inst.json.instances as { host: string; ok: boolean }[];
+  assert.deepEqual(list.map((i) => i.host), ['a.example', 'b.example'], '用请求里的覆盖值而非库里的');
+  assert.equal(list[0]!.ok, true, 'a.example 模拟可用');
+
+  const bad = await api(base, '/api/x/test', 'POST', { target: 'nope' });
+  assert.equal(bad.status, 400, 'target 白名单');
+
+  const after = await api(base, '/api/x');
+  const status = after.json.status as { proxy: { ok: boolean }; instances: unknown[] };
+  assert.equal(status.proxy.ok, true, '测试结果写进快照供卡片显示');
+  assert.equal(status.instances.length, 2);
+});
+
+// ---- X 关注账号（独立名单）：CRUD + 存在性校验的两类失败 ----
+
+test('/api/x/accounts：空名单 / 新增成功（含校验回报）/ 重名 409 / 非法格式 400', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, x: makeXDep(db, calls) });
+
+  assert.deepEqual(((await api(base, '/api/x/accounts')).json.accounts as unknown[]).length, 0, '初始为空');
+
+  const created = await api(base, '/api/x/accounts', 'POST', { screenName: '@Watase_Yuzuki' });
+  assert.equal(created.status, 200);
+  const acc = created.json.account as { id: number; screenName: string; nickname: string | null; enabled: boolean };
+  assert.equal(acc.screenName, 'watase_yuzuki', 'screen name 归一化（去 @ 转小写）');
+  assert.equal(acc.enabled, true, '新增默认启用');
+  assert.equal(acc.nickname, '渡瀬 結月', '昵称由 verify 顺手种入（og:title 显示名，平台事实不收手填）');
+  assert.equal((created.json.verify as { ok: boolean }).ok, true, '回报校验结果');
+  assert.deepEqual(calls, ['saved'], '新增触发一次热生效回调');
+
+  assert.equal((await api(base, '/api/x/accounts', 'POST', { screenName: 'watase_yuzuki' })).status, 409, '重名');
+  assert.equal((await api(base, '/api/x/accounts', 'POST', { screenName: 'bad name!' })).status, 400, '格式非法');
+  assert.equal((await api(base, '/api/x/accounts', 'POST', { screenName: 'x', nickname: '手填昵称' })).status, 400, '昵称不接受手填（未知字段）');
+  assert.equal((await api(base, '/api/x/accounts', 'POST', {})).status, 400, '缺 screenName');
+
+  const list = (await api(base, '/api/x/accounts')).json.accounts as { screenName: string }[];
+  assert.equal(list.length, 1);
+});
+
+test('/api/x/accounts：账号不存在 → 400；链路不通 → 照收并回报原因（代理没开也能加）', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+
+  const ghost = await api(base, '/api/x/accounts', 'POST', { screenName: 'ghost_user' });
+  assert.equal(ghost.status, 400, '账号不存在是硬错误');
+  assert.match(String(ghost.json.error), /账号不存在/);
+  assert.equal(db.listXAccounts().length, 0, '拒绝时不落库');
+
+  const offline = await api(base, '/api/x/accounts', 'POST', { screenName: 'offline_guy' });
+  assert.equal(offline.status, 200, '链路原因不拦，照收');
+  assert.equal((offline.json.verify as { ok: boolean }).ok, false);
+  assert.match(String((offline.json.verify as { message: string }).message), /代理不可达/);
+  assert.equal(db.listXAccounts().length, 1, '照收时确实入库');
+});
+
+test('/api/x/accounts：关联主播必须存在；编辑/启停/删除与 404', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+  db.upsertStreamer({ uid: '1001', uname: '阿梓' });
+  const id = db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true });
+
+  assert.equal(
+    (await api(base, '/api/x/accounts', 'POST', { screenName: 'd4dj_pj', biliUid: '9999' })).status, 400,
+    '关联主播不在监听名单 → 400',
+  );
+  const withBili = await api(base, '/api/x/accounts', 'POST', { screenName: 'd4dj_pj', biliUid: '1001' });
+  assert.equal(withBili.status, 200);
+  assert.equal((withBili.json.account as { biliName: string }).biliName, '阿梓', '回显关联主播展示名');
+
+  const put = await api(base, '/api/x/accounts/' + id, 'PUT', { enabled: false });
+  assert.equal(put.status, 200);
+  assert.equal((put.json.account as { enabled: boolean }).enabled, false, '启停生效');
+
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'PUT', { screenName: 'd4dj_pj' })).status, 400, 'screenName 是身份锚点不可改（未知字段 400）');
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'PUT', { nickname: '手填昵称' })).status, 400, '昵称是平台事实不可改（未知字段 400）');
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'PUT', {})).status, 400, '空 patch');
+  assert.equal((await api(base, '/api/x/accounts/99999', 'PUT', { enabled: true })).status, 404);
+
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'DELETE')).status, 200);
+  assert.equal((await api(base, '/api/x/accounts/' + id, 'DELETE')).status, 404, '再删一次 404');
+  assert.equal(db.listXAccounts().length, 1, '只剩 d4dj_pj');
+});
+
+test('/api/listen：推特开关的 auto 判据是「代理已配置」，PUT 可落手动值', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, {
+    db, x: makeXDep(db, calls),
+    listen: { bili: true, weibo: true, twitter: () => getXConfig(db).proxyUrl.trim() !== '' },
+  });
+
+  // 默认配置自带代理地址（http://127.0.0.1:7890）→ 前提满足 → auto 开
+  let info = await api(base, '/api/listen');
+  const rows = info.json.rows as Record<string, { enabled: boolean; setting: string | null }>;
+  assert.equal(rows.twitter!.enabled, true, '默认代理已配置 → auto 开');
+  assert.equal(info.json.xProxyConfigured, true);
+  assert.equal(rows.twitter!.setting, null, 'auto 模式无手动设置');
+
+  // 显式清空代理（墙外部署「不用代理」）→ 前提不满足 → auto 关
+  saveXConfig(db, { proxyUrl: '' });
+  info = await api(base, '/api/listen');
+  assert.equal((info.json.rows as Record<string, { enabled: boolean }>).twitter!.enabled, false, '无代理 → auto 关');
+
+  // 前提不满足也允许手动开：UI 显示开，源实际不跑（由 shouldRunListen 拦）
+  const put = await api(base, '/api/listen/twitter', 'PUT', { enabled: true });
+  assert.equal(put.status, 200);
+  assert.equal((put.json as { enabled: boolean }).enabled, true);
+  assert.equal(db.getSetting('listen_twitter'), '1');
+
+  // 配好代理 → 前提满足；此时手动开 == auto，开关应回 auto（settings key 被删）
+  saveXConfig(db, { proxyUrl: 'http://127.0.0.1:7890' });
+  const put2 = await api(base, '/api/listen/twitter', 'PUT', { enabled: true });
+  assert.equal((put2.json as { setting: string | null }).setting, null, '与 auto 一致 → 回 auto');
+  info = await api(base, '/api/listen');
+  assert.equal((info.json.rows as Record<string, { enabled: boolean }>).twitter!.enabled, true);
+});
+
+// ---- 图文帖规则（X/推特；与推送规则平行的另一张表）----
+
+test('/api/post-rules：CRUD + 引用校验 + 死规则拒绝 + 排序', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+  const channelId = db.upsertPushChannel({
+    name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001', enabled: true,
+  });
+
+  assert.deepEqual(((await api(base, '/api/post-rules')).json.rules as unknown[]).length, 0, '初始无规则');
+
+  const created = await api(base, '/api/post-rules', 'POST', {
+    name: '只推带图原创', channels: [channelId], filters: { media: true },
+  });
+  assert.equal(created.status, 201);
+  const id = (created.json as { id: number }).id;
+  const list = (await api(base, '/api/post-rules')).json.rules as Array<{
+    filters: { original: boolean; retweet: boolean; media: boolean };
+  }>;
+  assert.equal(list[0]!.filters.original, true, '未提供的筛选回落默认（只推原创）');
+  assert.equal(list[0]!.filters.media, true);
+  assert.equal('accountIds' in list[0]!, false, '规则不再携带账号集合（生效范围在账号侧 ruleIds）');
+  assert.equal('platform' in list[0]!, false, '规则已平台无关，响应不再带 platform');
+
+  // platform 已退役：按未知字段 400（与 accountIds 退役同口径）
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { platform: 'weibo' })).status, 400,
+    'platform 已退役，按未知字段拒',
+  );
+
+  // 「原创/转发都不勾」= 永不命中的死规则，当场拒绝
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { filters: { original: false, retweet: false } })).status,
+    400,
+    '死规则拒绝',
+  );
+  assert.equal((await api(base, '/api/post-rules', 'POST', { channels: [999] })).status, 400, '渠道不存在');
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { accountIds: [1] })).status, 400,
+    'accountIds 已退役，按未知字段拒',
+  );
+  assert.equal((await api(base, '/api/post-rules', 'POST', { filters: { nope: true } })).status, 400, '未知筛选字段');
+  assert.equal((await api(base, '/api/post-rules', 'POST', { filters: { media: 'yes' } })).status, 400, '筛选类型错');
+
+  // PUT：只改 filters 时渠道沿用旧值 → 合并后仍要可用
+  assert.equal(
+    (await api(base, `/api/post-rules/${id}`, 'PUT', { filters: { original: false, retweet: false } })).status,
+    400,
+    '合并后成了死规则也要拒',
+  );
+  assert.equal((await api(base, `/api/post-rules/${id}`, 'PUT', { enabled: false })).status, 200);
+  assert.equal(db.listPostRules()[0]!.enabled, false);
+  assert.equal((await api(base, `/api/post-rules/${id}`, 'PUT', {})).status, 400, '空 patch');
+  assert.equal(
+    (await api(base, `/api/post-rules/${id}`, 'PUT', { platform: 'twitter' })).status, 400,
+    'PUT 传 platform 同样按未知字段拒',
+  );
+
+  // 排序：ids 必须是全排列
+  const id2 = db.upsertPostRule({
+    name: 'r2', channels: [], filters: defaultPostFilters(),
+    messageTemplate: null, enabled: true,
+  });
+  assert.equal((await api(base, '/api/post-rules/order', 'PUT', { ids: [id2, id] })).status, 200);
+  assert.deepEqual(db.listPostRules().map((r) => r.id), [id2, id], '顺序按传入重写');
+  assert.equal((await api(base, '/api/post-rules/order', 'PUT', { ids: [id] })).status, 400, '必须全排列');
+
+  assert.equal((await api(base, `/api/post-rules/${id}`, 'DELETE')).status, 200);
+  assert.equal((await api(base, `/api/post-rules/${id}`, 'DELETE')).status, 404, '再删一次 404');
+});
+
+test('/api/post-rules：开了 LLM 判定就必须填判定标准（口径由人填）', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { llmJudge: true })).status, 400,
+    '开了判定却没标准 → 拒绝（不让模型自由发挥）',
+  );
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { llmJudge: true, judgePrompt: '   ' })).status, 400,
+    '全空白不算填了',
+  );
+
+  const created = await api(base, '/api/post-rules', 'POST', {
+    name: 'LLM 判定规则', llmJudge: true, judgePrompt: '只推与直播预告相关的推文', llmTranslate: true,
+  });
+  assert.equal(created.status, 201);
+  const r = db.listPostRules()[0]!;
+  assert.equal(r.llmJudge, true);
+  assert.equal(r.judgePrompt, '只推与直播预告相关的推文');
+  assert.equal(r.llmTranslate, true, '翻译开关落库');
+
+  // PUT 对「合并后」的形状校验：只清标准、判定仍开 → 400
+  assert.equal((await api(base, `/api/post-rules/${r.id}`, 'PUT', { judgePrompt: null })).status, 400);
+  // 同时关掉判定就可以清空标准
+  assert.equal(
+    (await api(base, `/api/post-rules/${r.id}`, 'PUT', { llmJudge: false, judgePrompt: null })).status, 200,
+  );
+  assert.equal(db.listPostRules()[0]!.judgePrompt, null);
+  assert.equal(db.listPostRules()[0]!.llmTranslate, true, '没动的字段保留');
+});
+
+test('/api/x/accounts：名单行携带最近 3 条推文（不含 raw）+ 关联主播展示名', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+  db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true });
+  db.insertPosts([
+    { platform: 'twitter', uid: 'watase_yuzuki', itemId: '1', type: 'tweet', text: 'a', pics: [], pubTs: 2000, url: null, raw: '{"x":1}' },
+    { platform: 'twitter', uid: 'watase_yuzuki', itemId: '2', type: 'retweet', text: 'b', pics: [], pubTs: 3000, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '1', itemId: '3', type: 'DYNAMIC_TYPE_WORD', text: 'c', pics: [], pubTs: 4000, url: null, raw: null },
+    { platform: 'twitter', uid: 'd4dj_pj', itemId: '4', type: 'tweet', text: 'd', pics: [], pubTs: 5000, url: null, raw: null },
+  ]);
+  const r = await api(base, '/api/x/accounts');
+  assert.equal(r.status, 200);
+  const accounts = r.json.accounts as Array<{ screenName: string; posts: Array<{ pubTs: number; raw?: unknown }> }>;
+  assert.equal(accounts.length, 1);
+  assert.equal(accounts[0]!.posts.length, 2, '只带本账号的 X 归档');
+  assert.deepEqual(accounts[0]!.posts.map((p) => p.pubTs), [3000, 2000], '按发布时间倒序');
+  assert.equal(accounts[0]!.posts[0]!.raw, undefined, 'raw 不下发');
+});
+
+// ---- 微博（图文分页第二个来源）：状态快照 + 独立名单 CRUD ----
+
+/** 生产装配形状的 weibo dep：GET 只读快照，名单变化回调热生效（计数验证） */
+function makeWeiboDep(db: Db, calls: string[]): NonNullable<PanelDeps['weibo']> {
+  return {
+    info: () => ({
+      config: { intervalSec: 300 },
+      status: { feed: emptyWeiboFeedSnapshot(), accounts: db.listWeiboAccounts(true).length },
+    }),
+    onChanged: () => { calls.push('changed'); },
+  };
+}
+
+test('/api/weibo：未注入 dep → 整组端点 404', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/weibo')).status, 404);
+  assert.equal((await api(base, '/api/weibo/accounts')).status, 404);
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', { uid: '1' })).status, 404);
+});
+
+test('/api/weibo：GET 只读快照（含账号数与运行状态），绝不打网络', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, weibo: makeWeiboDep(db, calls) });
+  db.upsertWeiboAccount({ uid: '2203177060', nickname: '渡瀬結月', biliUid: null, enabled: true });
+
+  const r = await api(base, '/api/weibo');
+  assert.equal(r.status, 200);
+  const status = r.json.status as { accounts: number; feed: { running: boolean; lastError: string | null } };
+  assert.equal(status.accounts, 1);
+  assert.equal(status.feed.running, false);
+  assert.equal(status.feed.lastError, null);
+  assert.deepEqual(calls, [], 'GET 不触发热生效');
+});
+
+test('/api/weibo/accounts：uid 直填 / 昵称解析 / 重名 409 / 非法 uid 400', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, {
+    db,
+    weibo: makeWeiboDep(db, calls),
+    weiboResolver: {
+      resolveUid: async (nick) => (nick === '渡瀬結月' ? '2203177060' : null),
+    },
+  });
+
+  assert.deepEqual(((await api(base, '/api/weibo/accounts')).json.accounts as unknown[]).length, 0, '初始空名单');
+
+  // 直填 uid（也认 weibo.com/u/<uid> 形态）
+  const created = await api(base, '/api/weibo/accounts', 'POST', { uid: 'https://weibo.com/u/1234567890' });
+  assert.equal(created.status, 200);
+  assert.equal((created.json.account as { uid: string }).uid, '1234567890');
+  assert.deepEqual(calls, ['changed'], '新增后触发热生效（立刻开始抓）');
+
+  // 昵称解析：解析不到 → 400
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', { nickname: '查无此人' })).status, 400);
+  const byNick = await api(base, '/api/weibo/accounts', 'POST', { nickname: '渡瀬結月' });
+  assert.equal(byNick.status, 200);
+  assert.equal((byNick.json.account as { uid: string }).uid, '2203177060');
+
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', { uid: '2203177060' })).status, 409, '重名 409');
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', { uid: 'abc' })).status, 400, '非数字 uid');
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', {})).status, 400, 'uid 与昵称都不给');
+  assert.equal(
+    (await api(base, '/api/weibo/accounts', 'POST', { uid: '111', biliUid: '999' })).status,
+    400,
+    '关联主播必须在监听名单',
+  );
+});
+
+test('/api/weibo/accounts：编辑 / 启停 / 删除 / 关联主播 / 404', async (t) => {
+  const db = new Db(':memory:');
+  const calls: string[] = [];
+  const { base } = await setup(t, { db, weibo: makeWeiboDep(db, calls) });
+  db.upsertStreamer({ uid: '1', uname: '阿梓' });
+  const id = db.upsertWeiboAccount({ uid: '2203177060', nickname: null, biliUid: null, enabled: true });
+
+  const upd = await api(base, `/api/weibo/accounts/${id}`, 'PUT', { enabled: false, biliUid: '1' });
+  assert.equal(upd.status, 200);
+  const acc = db.getWeiboAccount(id)!;
+  assert.equal(acc.enabled, false);
+  assert.equal(acc.biliUid, '1', '关联主播落库');
+  assert.equal((await api(base, `/api/weibo/accounts/${id}`, 'PUT', {})).status, 400, '空 patch');
+  assert.equal((await api(base, '/api/weibo/accounts/9999', 'PUT', { enabled: true })).status, 404);
+  assert.equal((await api(base, '/api/weibo/accounts/9999', 'DELETE')).status, 404);
+
+  assert.equal((await api(base, `/api/weibo/accounts/${id}`, 'DELETE')).status, 200);
+  assert.equal(db.getWeiboAccount(id), undefined);
+});
+
+test('PUT /api/streamers 填微博昵称 → 同步建微博名单行并关联本主播；清空 → 解关联但保留行', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, {
+    db,
+    weiboResolver: { resolveUid: async () => '2203177060' },
+  });
+  db.upsertStreamer({ uid: '1', uname: '阿梓' });
+
+  const r = await api(base, '/api/streamers/1', 'PUT', { weiboNick: '阿梓从小就很可爱' });
+  assert.equal(r.status, 200);
+  const acc = db.getWeiboAccountByUid('2203177060')!;
+  assert.equal(acc.biliUid, '1', '主播详情填昵称 = 在微博名单里建行并关联');
+  assert.equal(acc.nickname, '阿梓从小就很可爱');
+
+  const cleared = await api(base, '/api/streamers/1', 'PUT', { weiboNick: null });
+  assert.equal(cleared.status, 200);
+  assert.equal(db.getWeiboAccountByUid('2203177060')!.biliUid, null, '清空昵称 → 解关联');
+  assert.ok(db.getWeiboAccountByUid('2203177060'), '账号行保留（历史微博与图文页配置都还在）');
+});
+
+test('/api/weibo-avatar：按文件名读缓存目录；坏文件名 400、缺文件 404、无 dep 404', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const name = 'a'.repeat(32) + '.jpg';
+  writeFileSync(join(dir, name), Buffer.from([0xff, 0xd8, 0xff]));
+
+  const { base } = await setup(t, { weiboAvatars: { dir } });
+  const res = await fetch(`${base}/api/weibo-avatar?file=${name}`, { headers: { connection: 'close' } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /image\/jpeg/);
+  assert.equal((await res.arrayBuffer()).byteLength, 3);
+
+  assert.equal((await api(base, '/api/weibo-avatar?file=../../etc/passwd')).status, 400);
+  assert.equal((await api(base, `/api/weibo-avatar?file=${'b'.repeat(32)}.jpg`)).status, 404);
+
+  const bare = await setup(t);
+  assert.equal((await api(bare.base, '/api/weibo-avatar?file=' + name)).status, 404, '未装配 dep');
+});
+
+test('/api/weibo-image：sinaimg 白名单反代（带 Referer + 落盘缓存），白名单外 400', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let calls = 0;
+  let seenReferer = '';
+  const fetchImpl: FetchLike = async (_url, init) => {
+    calls++;
+    seenReferer = String((init?.headers as Record<string, string> | undefined)?.Referer ?? '');
+    return new Response(Buffer.from([0xff, 0xd8, 0xff]), {
+      status: 200,
+      headers: { 'content-type': 'image/jpeg' },
+    });
+  };
+  const { base } = await setup(t, { weiboImages: { dir, fetchImpl } });
+
+  const pic = 'https://wx1.sinaimg.cn/orj960/abc123.jpg';
+  const res = await fetch(`${base}/api/weibo-image?url=${encodeURIComponent(pic)}`, { headers: { connection: 'close' } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /image\/jpeg/);
+  assert.equal(seenReferer, 'https://weibo.com/', '反代必须带 weibo Referer（sinaimg 防盗链）');
+
+  // 第二次命中磁盘缓存，不再打网络
+  const res2 = await fetch(`${base}/api/weibo-image?url=${encodeURIComponent(pic)}`, { headers: { connection: 'close' } });
+  assert.equal(res2.status, 200);
+  assert.equal(calls, 1, '第二次应从磁盘缓存出');
+
+  assert.equal(
+    (await api(base, '/api/weibo-image?url=' + encodeURIComponent('https://evil.example.com/x.jpg'))).status,
+    400, '白名单外 host 拒绝（防开放 SSRF）',
+  );
+  assert.equal((await api(base, '/api/weibo-image?url=not-a-url')).status, 400);
+});
+
+test('/api/bili/accounts：添加后调用 biliFeed.kickAccount 即时首拉', async (t) => {
+  const kicked: string[] = [];
+  const { base } = await setup(t, {
+    biliFeed: { kickAccount: async (uid) => { kicked.push(uid); } },
+  });
+  const r = await api(base, '/api/bili/accounts', 'POST', { uid: 'https://space.bilibili.com/3546661873781168/dynamic' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(kicked, ['3546661873781168'], '添加后应立即首拉新账号（不等下个轮询周期）');
+});
+
+test('添加微博 / X 账号同样即时首拉（deps.weibo / deps.x 的 kickAccount）', async (t) => {
+  const db = new Db(':memory:');
+  const kickedWeibo: string[] = [];
+  const kickedX: string[] = [];
+  const { base } = await setup(t, {
+    db,
+    x: { ...makeXDep(db, []), kickAccount: async (s) => { kickedX.push(s); } },
+    weibo: { ...makeWeiboDep(db, []), kickAccount: async (uid) => { kickedWeibo.push(uid); } },
+    weiboResolver: { resolveUid: async () => null, resolveNick: async () => null },
+  });
+
+  const rw = await api(base, '/api/weibo/accounts', 'POST', { uid: '1158211483' });
+  assert.equal(rw.status, 200);
+  assert.deepEqual(kickedWeibo, ['1158211483'], '微博添加后应立即首拉新账号');
+
+  const rx = await api(base, '/api/x/accounts', 'POST', { screenName: 'hosi_tiri' });
+  assert.equal(rx.status, 200);
+  assert.deepEqual(kickedX, ['hosi_tiri'], 'X 添加后应立即首拉新账号');
+});
+
+test('/api/post-rules：规则平台无关——「引用」与「翻译」不再按平台拒绝保存', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []) });
+
+  // quote 对非 X 帖永不命中是**语义**（matcher 按帖子平台自然生效），不是保存校验错误
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { name: 'quote', filters: { quote: true } })).status, 201,
+    '勾「引用」不再拒绝保存',
+  );
+  // 翻译从保存时校验改为运行时门控（非 X 帖不译）：任何规则都可开
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { name: 'tr', llmTranslate: true })).status, 201,
+    '开「LLM 翻译」不再拒绝保存',
+  );
+  assert.equal(
+    (await api(base, '/api/post-rules', 'POST', { name: 'judge', llmJudge: true, judgePrompt: '只推直播预告' })).status,
+    201,
+    'LLM 判定照常可用',
+  );
+});
+
+// ---- 账号侧 ruleIds：规则存在即可选用（规则平台无关，三份名单同口径）----
+
+test('账号 ruleIds：任何规则都可被任何平台账号选用；不存在的规则 400；GET 视图携带 ruleIds', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []), weibo: makeWeiboDep(db, []) });
+  const newRule = (name: string) => db.upsertPostRule({
+    name, channels: [], filters: defaultPostFilters(),
+    messageTemplate: null, llmJudge: false, judgePrompt: null, llmTranslate: false, enabled: true,
+  });
+  const rule1 = newRule('r1');
+  const rule2 = newRule('r2');
+
+  // X 账号：任意规则都收；不存在的拒
+  const x = await api(base, '/api/x/accounts', 'POST', { screenName: 'watase_yuzuki', ruleIds: [rule1, rule2] });
+  assert.equal(x.status, 200, 'X 账号可选用任何规则（规则平台无关）');
+  assert.deepEqual((x.json.account as { ruleIds: number[] }).ruleIds, [rule1, rule2]);
+  assert.equal(
+    (await api(base, '/api/x/accounts', 'POST', { screenName: 'd4dj_pj', ruleIds: [9999] })).status, 400,
+    '规则不存在 400',
+  );
+  const xId = (x.json.account as { id: number }).id;
+  assert.equal((await api(base, `/api/x/accounts/${xId}`, 'PUT', { ruleIds: [] })).status, 200, '清空选用');
+  assert.equal((await api(base, `/api/x/accounts/${xId}`, 'PUT', { ruleIds: [rule2] })).status, 200, 'PUT 任意规则也收');
+
+  // 微博账号：同一条规则跨平台选用
+  const w = await api(base, '/api/weibo/accounts', 'POST', { uid: '2203177060', ruleIds: [rule1] });
+  assert.equal(w.status, 200);
+  assert.deepEqual((w.json.account as { ruleIds: number[] }).ruleIds, [rule1]);
+
+  // B站动态账号：混选多条规则也收
+  const b = await api(base, '/api/bili/accounts', 'POST', { uid: '7706705', ruleIds: [rule1, rule2] });
+  assert.equal(b.status, 200);
+  assert.deepEqual((b.json.account as { ruleIds: number[] }).ruleIds, [rule1, rule2]);
+  const bId = (b.json.account as { id: number }).id;
+  assert.equal(
+    (await api(base, `/api/bili/accounts/${bId}`, 'PUT', { ruleIds: [rule1, 9999] })).status, 400,
+    '混入一条不存在的规则整体拒',
+  );
+
+  // GET 视图带 ruleIds
+  const list = (await api(base, '/api/bili/accounts')).json.accounts as Array<{ ruleIds: number[] }>;
+  assert.deepEqual(list[0]!.ruleIds, [rule1, rule2]);
+});
+
+test('DELETE /api/post-rules/:id 连带清扫三份账号名单里的 ruleIds（与 webui mock 同构）', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []), weibo: makeWeiboDep(db, []) });
+  const newRule = () => db.upsertPostRule({
+    name: '', channels: [], filters: defaultPostFilters(),
+    messageTemplate: null, llmJudge: false, judgePrompt: null, llmTranslate: false, enabled: true,
+  });
+  const xRule = newRule();
+  const wbRule = newRule();
+  const biRule = newRule();
+  const xId = db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true, ruleIds: [xRule] });
+  const wbId = db.upsertWeiboAccount({ uid: '2203177060', nickname: null, biliUid: null, enabled: true, ruleIds: [wbRule] });
+  const biId = db.upsertBiliAccount({ uid: '7706705', ruleIds: [biRule] });
+
+  assert.equal((await api(base, `/api/post-rules/${xRule}`, 'DELETE')).status, 200);
+  assert.deepEqual(db.getXAccount(xId)!.ruleIds, [], 'X 名单清扫');
+  assert.deepEqual(db.getWeiboAccount(wbId)!.ruleIds, [wbRule], '其它名单不受影响');
+  assert.equal((await api(base, `/api/post-rules/${wbRule}`, 'DELETE')).status, 200);
+  assert.deepEqual(db.getWeiboAccount(wbId)!.ruleIds, [], '微博名单清扫');
+  assert.equal((await api(base, `/api/post-rules/${biRule}`, 'DELETE')).status, 200);
+  assert.deepEqual(db.getBiliAccount(biId)!.ruleIds, [], 'B站名单清扫');
+});
+
+// ---- B站动态账号（图文分页第三个来源）：独立名单 CRUD，恒挂载无 dep 门 ----
+
+test('/api/bili/accounts：CRUD + uid 链接归一化 + 重名 409 + 视图带最近 3 帖（raw 不下发）', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db });
+
+  assert.deepEqual(((await api(base, '/api/bili/accounts')).json.accounts as unknown[]).length, 0, '初始空名单');
+
+  const created = await api(base, '/api/bili/accounts', 'POST', {
+    uid: 'https://space.bilibili.com/7706705/dynamic', displayName: '阿梓',
+  });
+  assert.equal(created.status, 200);
+  const acc = created.json.account as { id: number; uid: string; enabled: boolean; ruleIds: number[] };
+  assert.equal(acc.uid, '7706705', 'space.bilibili.com 链接归一化成纯数字 uid');
+  assert.equal(acc.enabled, true, '新增默认启用');
+  assert.deepEqual(acc.ruleIds, []);
+
+  assert.equal((await api(base, '/api/bili/accounts', 'POST', { uid: '7706705' })).status, 409, '重复 uid 409');
+  assert.equal((await api(base, '/api/bili/accounts', 'POST', { uid: 'abc' })).status, 400, '非数字 uid');
+  assert.equal((await api(base, '/api/bili/accounts', 'POST', {})).status, 400, '缺 uid');
+
+  // 名单行视图带最近 3 帖（按发布时间倒序，raw 不下发）
+  db.insertPosts([
+    { platform: 'bili_dynamic', uid: '7706705', itemId: '1', type: 'DYNAMIC_TYPE_WORD', text: 'a', pics: [], pubTs: 1000, url: null, raw: '{"secret":1}' },
+    { platform: 'bili_dynamic', uid: '7706705', itemId: '2', type: 'DYNAMIC_TYPE_WORD', text: 'b', pics: [], pubTs: 2000, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '7706705', itemId: '3', type: 'DYNAMIC_TYPE_WORD', text: 'c', pics: [], pubTs: 3000, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '7706705', itemId: '4', type: 'DYNAMIC_TYPE_WORD', text: 'd', pics: [], pubTs: 4000, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '999', itemId: '5', type: 'DYNAMIC_TYPE_WORD', text: '别人的', pics: [], pubTs: 5000, url: null, raw: null },
+  ]);
+  const list = (await api(base, '/api/bili/accounts')).json.accounts as Array<{
+    posts: Array<{ pubTs: number; raw?: unknown }>;
+  }>;
+  assert.equal(list[0]!.posts.length, 3, '只带最近 3 条');
+  assert.deepEqual(list[0]!.posts.map((p) => p.pubTs), [4000, 3000, 2000], '倒序且不含别人账号的帖');
+  assert.equal(list[0]!.posts[0]!.raw, undefined, 'raw 不下发');
+
+  // PUT：uid 是身份锚点、uname 是平台事实，都不可改；其它字段部分更新
+  const put = await api(base, `/api/bili/accounts/${acc.id}`, 'PUT', { enabled: false });
+  assert.equal(put.status, 200);
+  assert.equal((put.json.account as { enabled: boolean }).enabled, false);
+  assert.equal((put.json.account as { uname: unknown }).uname, null, 'uname 由抓取回写，输入面动不了');
+  assert.equal((await api(base, `/api/bili/accounts/${acc.id}`, 'PUT', { uid: '1' })).status, 400, 'uid 不可改');
+  assert.equal((await api(base, `/api/bili/accounts/${acc.id}`, 'PUT', { uname: '手填名' })).status, 400, 'uname 不可改');
+  assert.equal((await api(base, `/api/bili/accounts/${acc.id}`, 'PUT', {})).status, 400, '空 patch');
+  assert.equal((await api(base, '/api/bili/accounts/9999', 'PUT', { enabled: true })).status, 404);
+
+  assert.equal((await api(base, `/api/bili/accounts/${acc.id}`, 'DELETE')).status, 200);
+  assert.equal((await api(base, `/api/bili/accounts/${acc.id}`, 'DELETE')).status, 404, '再删一次 404');
+});
+
+test('/api/bili-avatar：按文件名读缓存目录；坏文件名 400、缺文件 404、无 dep 404', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ddclaw-biliava-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const name = 'a'.repeat(32) + '.jpg';
+  writeFileSync(join(dir, name), Buffer.from([0xff, 0xd8, 0xff]));
+
+  const { base } = await setup(t, { biliAvatars: { dir } });
+  const res = await fetch(`${base}/api/bili-avatar?file=${name}`, { headers: { connection: 'close' } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /image\/jpeg/);
+  assert.equal(res.headers.get('cache-control'), 'max-age=86400', 'md5 文件名随内容变，长缓存');
+  assert.equal((await res.arrayBuffer()).byteLength, 3);
+
+  assert.equal((await api(base, '/api/bili-avatar?file=../../etc/passwd')).status, 400, '穿越字符 400');
+  assert.equal((await api(base, `/api/bili-avatar?file=${'b'.repeat(32)}.jpg`)).status, 404, '文件不存在 404');
+
+  const bare = await setup(t);
+  assert.equal((await api(bare.base, '/api/bili-avatar?file=' + name)).status, 404, '未装配 dep');
+});
+

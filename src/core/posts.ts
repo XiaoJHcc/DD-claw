@@ -23,13 +23,14 @@ export interface PostRow {
 
 export interface Post {
   id: number;
-  /** 'bili_dynamic' | 'weibo'（预留） */
+  /** 帖子归属平台：'twitter' | 'weibo' | 'bili_dynamic'（见 core/post-rules.ts POST_PLATFORMS） */
   platform: string;
   /** 作者 uid（字符串，跨平台一致用字符串） */
   uid: string;
   /** 平台全局唯一 id（B站 id_str / 微博 bid），去重靠它 */
   itemId: string;
-  /** 平台原始类型，如 DYNAMIC_TYPE_WORD */
+  /** 帖子类型：X 'tweet'/'retweet'、微博 'mblog'/'retweet'、B站动态 DYNAMIC_TYPE_*
+   *  （FORWARD 已在 source 归一成 'retweet'，LIVE_RCMD 不再入库）——'retweet' 三平台共用 */
   type: string;
   /** 正文（转发拼「//转发自 @xx」摘要） */
   text: string | null;

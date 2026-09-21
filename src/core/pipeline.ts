@@ -1,9 +1,19 @@
 import { makeLogger } from '../logger.js';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
-import { liveEventToMessage } from '../notify/message.js';
-import { matchPushRules, renderTemplate } from '../analysis/matcher.js';
+import { liveEventToMessage, postToMessage } from '../notify/message.js';
+import {
+  defaultPostTitle, matchPostRules, matchPushRules, postAuthorName, renderPostTemplate, renderTemplate,
+  type PostCandidate,
+} from '../analysis/matcher.js';
 import { isPushEnabled } from './push.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
+import { localizeImage, localizeImageViaProxy } from '../notify/image-cache.js';
+import { ruleNeedsLlm, type PostAnalysis, type PostAnalyzer } from '../analysis/post-analyzer.js';
+import type { PostRule } from './post-rules.js';
+import type { XAccount } from './x-accounts.js';
+import type { WeiboAccount } from './weibo-accounts.js';
+import type { BiliAccount } from './bili-accounts.js';
+import { getXConfig } from './x-config.js';
 import { isNotifyOnFirstRun, isNotifyOnNewSubscription } from './runtime-config.js';
 import type { Bus } from './bus.js';
 import type { Db } from './db.js';
@@ -24,6 +34,22 @@ export interface PipelineDeps {
   queue: AnalysisQueue;
   rule: DecisionRule;
   dispatcher: NotifyDispatcher;
+  /** 图片本地化缓存目录（X 图必须经代理下载成本地文件再推）；缺省 = 图文帖不带图 */
+  imageCacheDir?: string;
+  /** 图文帖 LLM 判定/翻译（规则级开关）；缺省 = 规则里的 LLM 开关一律当关 */
+  postAnalyzer?: PostAnalyzer;
+}
+
+/** feed_post 的载荷形状（X / 微博 / B站动态三源同形，platform 决定账号解释域，见 handleFeedPost） */
+interface FeedPostPayload {
+  platform?: string;
+  itemId?: string;
+  type?: string;
+  text?: string | null;
+  pics?: string[];
+  pubTs?: number;
+  url?: string | null;
+  isQuote?: boolean;
 }
 
 interface HealthAlertPayload {
@@ -88,6 +114,8 @@ export class Pipeline {
 
   private async handle(signal: Signal): Promise<void> {
     if (signal.kind === 'health_alert') return this.handleHealthAlert(signal);
+    // 图文帖（X / 微博 / B站动态）：与开播完全平行的一条路径，不进 LLM、不看直播状态
+    if (signal.kind === 'feed_post') return this.handleFeedPost(signal);
     if (!signal.status) {
       log.debug(`忽略无状态的信号 [${signal.kind}]（${signal.source}）`);
       return;
@@ -197,6 +225,152 @@ export class Pipeline {
     const tpl = templateOverride ?? '{liver} 开播了';
     const text = renderTemplate(tpl, event).trim();
     return { ...base, title: text || base.title, channels: channelIds.map(String) };
+  }
+
+  /**
+   * 图文帖（feed_post）路径：机械筛选 → 图文帖规则 → 带图推送。与开播路径完全平行：
+   *  · 不过决策规则（`DecisionRule` 是「每场直播推一次」那类防抖，帖子没有场次概念，
+   *    去重由 posts 的 UNIQUE(platform,item_id) 兜住）；
+   *  · 不过冷启动抑制（帖子不是「启动时已在播」那种状态，首轮由 source 静默归档挡住）；
+   *  · 三个平台走同一条分支：账号在各自名单里查（X→x_accounts / 微博→weibo_accounts /
+   *    B站动态→bili_accounts），规则平台无关——命中只看账号侧 ruleIds 是否选用
+   *    （`matchPostRules`），平台差异只在文案措辞、quote 语义与翻译门控上体现。
+   */
+  private async handleFeedPost(signal: Signal): Promise<void> {
+    const { db, dispatcher } = this.deps;
+    const p = signal.payload as FeedPostPayload | undefined;
+    const platform = p?.platform === 'weibo' ? 'weibo'
+      : p?.platform === 'twitter' ? 'twitter'
+      : p?.platform === 'bili_dynamic' ? 'bili_dynamic'
+      : null;
+    if (!p || !platform) {
+      log.debug(`忽略 feed_post（平台 ${p?.platform ?? '未知'}）：只支持 twitter / weibo / bili_dynamic`);
+      return;
+    }
+    if (!isPushEnabled(db)) {
+      log.debug(`不推送 feed_post ${signal.uid}: 推送总开关已关`);
+      return;
+    }
+    // 账号解析：uid 的解释域按平台不同（X=screen name / 微博与B站动态=数字 uid）
+    const account = platform === 'twitter'
+      ? db.getXAccountByScreenName(signal.uid)
+      : platform === 'weibo'
+        ? db.getWeiboAccountByUid(signal.uid)
+        : db.getBiliAccountByUid(signal.uid);
+    if (!account) {
+      // 三条源的名单与抓取同源，正常不会走到这里（B站动态源只对名单内且开关开着的账号发
+      // 信号）；留着当防御分支，X/微博查不到值得 warn
+      if (platform === 'bili_dynamic') {
+        log.debug(`忽略 feed_post：${signal.uid} 不在 bili_accounts 名单`);
+      } else {
+        log.warn(`feed_post 来自不在${platform === 'weibo' ? '微博' : 'X'}名单里的账号 ${signal.uid}，忽略`);
+      }
+      return;
+    }
+    // 关联主播（{liver}）：动态账号本身就是 B站 uid，直接按 uid 查；
+    // X/微博账号走可选关联 biliUid
+    const biliUid = platform === 'bili_dynamic'
+      ? (account as BiliAccount).uid
+      : (account as XAccount | WeiboAccount).biliUid;
+    const bili = biliUid ? db.getStreamer(biliUid) : undefined;
+    // 三个账号类型只在「标识字段叫什么名字」上不同：X 是 screen name / 微博与B站是数字 uid；
+    // 展示名同一条链：自定义显示名 → 平台昵称/用户名（再缺省由渲染层回退标识本身）
+    const ident: { screenName: string; displayName: string | null } = platform === 'twitter'
+      ? { screenName: (account as XAccount).screenName, displayName: (account as XAccount).displayName ?? (account as XAccount).nickname }
+      : platform === 'weibo'
+        ? { screenName: (account as WeiboAccount).uid, displayName: (account as WeiboAccount).displayName ?? (account as WeiboAccount).nickname }
+        : { screenName: (account as BiliAccount).uid, displayName: (account as BiliAccount).displayName ?? (account as BiliAccount).uname };
+    const post: PostCandidate = {
+      platform,
+      accountId: account.id,
+      ruleIds: account.ruleIds,
+      screenName: ident.screenName,
+      displayName: ident.displayName,
+      // type 已在各 source 归一（B站 FORWARD → 'retweet'，见 sources/bili/dynamic.ts）；
+      // 这里的平台缺省只是防御（信号不该缺 type）
+      type: p.type ?? (platform === 'weibo' ? 'mblog' : platform === 'bili_dynamic' ? 'dynamic' : 'tweet'),
+      text: p.text ?? null,
+      pics: p.pics ?? [],
+      pubTs: p.pubTs ?? 0,
+      url: p.url ?? null,
+      ...(p.isQuote !== undefined ? { isQuote: p.isQuote } : {}),
+      biliName: bili ? (bili.alias || bili.uname) : null,
+    };
+    const label = postAuthorName(post);
+
+    const hits = matchPostRules(db.listEnabledPostRules(), post);
+    if (hits.length === 0) {
+      log.info(`不推送 ${label}: 无命中图文帖规则`);
+      return;
+    }
+
+    // LLM 判定 / 翻译（规则级，默认关）：判定语义 = 「这条规则是否还贡献渠道」——
+    // 开了判定且模型说不推的规则不贡献渠道（与「命中规则独立生效、渠道取并集」一致），
+    // 没开判定的规则照常贡献。LLM 不可用/失败一律按机械筛选放行（post-analyzer 内部处理）。
+    const contributing: PostRule[] = [];
+    let translated: string | null = null;
+    const analyzed = new Map<string, PostAnalysis>();
+    for (const r of hits) {
+      if (!ruleNeedsLlm(r) || !this.deps.postAnalyzer) {
+        contributing.push(r);
+        continue;
+      }
+      // 同（判定标准 + 是否翻译）只调一次 LLM：多数场景就一条这类规则
+      const key = `${r.llmJudge ? 1 : 0}|${r.judgePrompt ?? ''}|${r.llmTranslate ? 1 : 0}`;
+      let a = analyzed.get(key);
+      if (!a) {
+        a = await this.deps.queue.run(() => this.deps.postAnalyzer!.analyze(post, r));
+        analyzed.set(key, a);
+      }
+      if (r.llmJudge && a.source === 'llm' && !a.pass) {
+        log.info(
+          `LLM 判定不推 ${label}（规则 #${r.id}）：${a.reason || '模型未给理由'}`,
+        );
+        continue;
+      }
+      contributing.push(r);
+      if (r.llmTranslate && a.translation && !translated) translated = a.translation;
+    }
+    if (contributing.length === 0) {
+      log.info(`不推送 ${label}: 命中 ${hits.length} 条规则，但都被 LLM 判定拦下`);
+      return;
+    }
+
+    const channelIds: number[] = [];
+    let templateOverride: string | null = null;
+    for (const r of contributing) {
+      for (const id of r.channels) {
+        if (!channelIds.includes(id)) channelIds.push(id);
+      }
+      templateOverride ??= r.messageTemplate;
+    }
+    if (channelIds.length === 0) {
+      log.info(`不推送 ${label}: 命中 ${hits.length} 条规则但都未勾选渠道`);
+      return;
+    }
+
+    // 图片必须先落成本地文件再推（NapCat 与本进程同网络，远程 URL 交给它同样拉不到；
+    // toast 的 Win32 限制也不支持远程图）。两条路线：
+    //  · X 图床（pbs.twimg.com）墙内直连不通 → 走代理隧道下载；
+    //  · 微博图床（sinaimg.cn）与B站图床（hdslb.com）境内直连可达 → 普通 fetch，不给代理链路添无关流量。
+    // 下载失败按无图发，不阻塞通知。
+    let image: string | undefined;
+    if (post.pics.length > 0 && this.deps.imageCacheDir) {
+      image = (platform === 'twitter'
+        ? await localizeImageViaProxy(post.pics[0]!, this.deps.imageCacheDir, getXConfig(db).proxyUrl)
+        : await localizeImage(post.pics[0]!, this.deps.imageCacheDir)) ?? undefined;
+    }
+
+    const tpl = templateOverride ?? defaultPostTitle(post);
+    const msg: PushMessage = {
+      ...postToMessage({ post, title: renderPostTemplate(tpl, post), image, translation: translated }),
+      channels: channelIds.map(String),
+    };
+    log.info(
+      `推送 feed_post ${label} — 命中规则 ${contributing.map((r) => `#${r.id}`).join('/')}` +
+      (translated ? '（含译文）' : ''),
+    );
+    await dispatcher.broadcast(msg);
   }
 
   private async handleHealthAlert(signal: Signal): Promise<void> {

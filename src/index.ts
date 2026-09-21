@@ -32,12 +32,27 @@ import { createPanelServer, type PlatformStatus, type PanelDeps } from './panel/
 import { createWeiboResolver } from './sources/weibo/resolve.js';
 import { loadWeiboCookies, weiboCookieHeader, type WeiboSelfInfo } from './sources/weibo/auth.js';
 import { WeiboFeedSource } from './sources/weibo/feed.js';
+import {
+  emptyWeiboFeedSnapshot, type WeiboFeedSnapshot,
+} from './core/weibo-accounts.js';
 import type { NewPushChannel } from './core/push.js';
-import { shouldRunListen } from './core/listen.js';
+import { isListenEnabled, shouldRunListen } from './core/listen.js';
 import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
 import { seedOnboardingDefaults } from './core/onboarding.js';
 import type { Server } from 'node:http';
 import type { Notifier } from './notify/types.js';
+import {
+  emptyXStatus, getXConfig, invalidateXStatus, isSavedConfigTest, saveXConfig, type XStatus,
+} from './core/x-config.js';
+import { parseInstanceList } from './core/proxy.js';
+import {
+  DEFAULT_PROBE_SCREEN, probeAll, probeInstances, probeProxy, probeVerdict, probeWeb,
+  type InstanceProbe, type ProxyProbe, type WebProbe,
+} from './sources/twitter/probe.js';
+import { TwitterFeedSource } from './sources/twitter/feed.js';
+import { PostAnalyzer } from './analysis/post-analyzer.js';
+import { verifyAccount } from './sources/twitter/web.js';
+import { emptyXFeedSnapshot } from './core/x-config.js';
 
 const log = makeLogger('main');
 
@@ -46,19 +61,29 @@ interface Args {
   testNotify: boolean;
   probe: boolean;
   probeLlm: boolean;
+  probeX: boolean;
+  /** --probe-x 的探测账号（免登录路线用），缺省用调研基准账号 */
+  probeScreen: string;
   napcatSetup: boolean;
   forceUids: string[];
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { dryRun: false, testNotify: false, probe: false, probeLlm: false, napcatSetup: false, forceUids: [] };
+  const args: Args = {
+    dryRun: false, testNotify: false, probe: false, probeLlm: false, probeX: false,
+    probeScreen: DEFAULT_PROBE_SCREEN, napcatSetup: false, forceUids: [],
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') args.dryRun = true;
     else if (a === '--test-notify') args.testNotify = true;
     else if (a === '--probe') args.probe = true;
     else if (a === '--probe-llm') args.probeLlm = true;
-    else if (a === '--napcat-setup') args.napcatSetup = true;
+    else if (a === '--probe-x') args.probeX = true;
+    else if (a === '--x-screen') {
+      const v = argv[++i];
+      if (v) args.probeScreen = v.trim().replace(/^@+/, '');
+    } else if (a === '--napcat-setup') args.napcatSetup = true;
     else if (a === '--force-uid') {
       const v = argv[++i];
       if (v) args.forceUids.push(...v.split(',').map((s) => s.trim()).filter(Boolean));
@@ -66,6 +91,12 @@ function parseArgs(argv: string[]): Args {
   }
   return args;
 }
+
+/**
+ * X 链路上次探测快照：`GET /api/x` 只读它，绝不在读取路径上打网络
+ * （面板会周期轮询这张卡，探测必须由「测试」按钮或 CLI 显式触发）。
+ */
+let xStatus: XStatus = emptyXStatus();
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -133,6 +164,25 @@ async function main(): Promise<void> {
       );
       log.info(`    keyframe: ${s.keyframe || '(无)'}`);
     }
+    return;
+  }
+
+  // --probe-x 验证 X/推特 这条独立链路：代理 → Nitter 实例 → 免登录回退路线。
+  // 只探测、不落库、不发信号。它是 docs/research/twitter.md §7 待验证清单的执行器：
+  // 实例存活与页面结构是本方案最大的时效性风险，「今天还能不能用」必须能一条命令回答。
+  if (args.probeX) {
+    const probeDb = new Db(secrets.dbPath);
+    const cfg = getXConfig(probeDb);
+    probeDb.close();
+    log.info(`X 探测：代理 ${cfg.proxyUrl || '(未配置)'} · 实例 ${cfg.instances.join(', ') || '(空)'} · 账号 @${args.probeScreen}`);
+    const report = await probeAll(cfg, args.probeScreen);
+    log.info(`  [代理]   ${report.proxy.ok ? 'OK  ' : 'FAIL'} ${report.proxy.message}`);
+    for (const i of report.instances) log.info(`  [实例]   ${i.ok ? 'OK  ' : 'FAIL'} ${i.host} — ${i.message}`);
+    if (report.web) log.info(`  [免登录] ${report.web.ok ? 'OK  ' : 'FAIL'} ${report.web.message}`);
+    else log.info('  [免登录] SKIP（x.com 经代理不通；该路线整条压在 x.com 上，与实例路线相互独立）');
+    const verdict = probeVerdict(report);
+    log.info(`结论：${verdict.message}`);
+    if (!verdict.usable) process.exitCode = 1;
     return;
   }
 
@@ -292,6 +342,11 @@ async function main(): Promise<void> {
     ),
     rule: new OncePerSessionRule(db),
     dispatcher,
+    // X 图必须先经代理落到本地（NapCat 在同一墙内网络里拉不到 pbs.twimg.com）——
+    // 与 toast 的自有缓存分开，避免两边的过期策略互相打架
+    imageCacheDir: join(dirname(secrets.dbPath), 'cache', 'images'),
+    // 图文帖的 LLM 判定/翻译：与分类器共用同一个 router getter 与总开关
+    postAnalyzer: new PostAnalyzer(() => llmDep.router ?? null, () => isLlmEnabled(db)),
   });
   pipeline.attach();
 
@@ -373,12 +428,17 @@ async function main(): Promise<void> {
     });
     followsSrc.start({ bus, db, config: eff });
   };
+  const biliAvatarDir = join(dirname(secrets.dbPath), 'cache', 'bili-avatars');
   const startDynamic = (cookieHdr: string): void => {
     dynamicSrc?.stop();
-    // 登录态心跳在 DynamicSource 内部：关注同步未运行时这是 B站登录态来源之一
+    // 登录态心跳在 DynamicSource 内部：关注同步未运行时这是 B站登录态来源之一。
+    // 图文页「监听动态」开关只管 bili_accounts（动态账号）部分：源内每轮读取、热切换免重启；
+    // 监听主播的空间动态归档随登录常开（预告分析等要用），装配处不再看 listen_dynamic
     dynamicSrc = new DynamicSource({
       cookie: cookieHdr,
+      avatarDir: biliAvatarDir,
       onLoginState: (s) => { biliLogin = s; },
+      biliAccountsEnabled: () => isListenEnabled(db, 'dynamic', true),
     });
     dynamicSrc.start({ bus, db, config: eff });
   };
@@ -386,42 +446,114 @@ async function main(): Promise<void> {
   // 有 cookie 未心跳先按已登录（源会自校正），心跳后按真实值
   const biliLoggedIn = (): boolean => cookieImported && (biliLogin === null ? true : biliLogin.isLogin);
 
-  // weibo feed source 同样单独持有：扫码登录后要热重启
+  // weibo feed source 同样单独持有：扫码登录后要热重启；名单/间隔变了也要（新增账号立刻抓）
   let weiboFeedSrc: WeiboFeedSource | null = null;
   let weiboLogin: WeiboSelfInfo | null = null;
   let weiboCookieImported = false;
   let weiboCookieHdr: string | null = null;
+  let weiboStatus: WeiboFeedSnapshot = emptyWeiboFeedSnapshot();
+  let weiboFeedKey = '';
+  const weiboAvatarDir = join(dirname(secrets.dbPath), 'cache', 'weibo-avatars');
+  const weiboImageDir = join(dirname(secrets.dbPath), 'cache', 'weibo-images');
+  const weiboFeedKeyNow = (): string =>
+    [String(eff.weibo.intervalSec), db.listWeiboAccounts(true).map((a) => a.uid).join(',')].join('|');
   const startWeiboFeed = (cookieHdr: string): void => {
     weiboFeedSrc?.stop();
     weiboFeedSrc = new WeiboFeedSource({
       cookie: cookieHdr,
+      avatarCacheDir: weiboAvatarDir,
       onLoginState: (s) => { weiboLogin = s; },
+      onStatus: (s) => { weiboStatus = s; },
     });
     weiboFeedSrc.start({ bus, db, config: eff });
+    weiboFeedKey = weiboFeedKeyNow();
   };
-  const stopWeiboFeed = (): void => { weiboFeedSrc?.stop(); weiboFeedSrc = null; };
+  const stopWeiboFeed = (): void => {
+    weiboFeedSrc?.stop();
+    weiboFeedSrc = null;
+    weiboFeedKey = '';
+    weiboStatus = { ...emptyWeiboFeedSnapshot(), running: false };
+  };
   const weiboLoggedIn = (): boolean =>
     weiboCookieImported && (weiboLogin === null ? true : weiboLogin.loggedIn);
 
-  // 动态 / 微博 两个源的启停唯一入口：面板监听开关 + cookie 存在共同决定
+  // X/推特源（独立分页 + 独立名单）：X 没有登录态，它的运行前提是「代理已配置」。
+  // 参数指纹一变就重启——代理/实例/回退/间隔/名单任何一项改动都要立刻生效。
+  // 头像缓存目录跟随 data 约定（与 toast/关键帧缓存同法拼），面板经 /api/x-avatar 读
+  const xAvatarDir = join(dirname(secrets.dbPath), 'cache', 'x-avatars');
+  let xFeedSrc: TwitterFeedSource | null = null;
+  let xFeedKey = '';
+  const xProxyConfigured = (): boolean => getXConfig(db).proxyUrl.trim() !== '';
+  const xConfigKey = (): string => {
+    const c = getXConfig(db);
+    // 名单（启用账号的 screen name）也在指纹里：加/删/停用账号 → 重启源，PeriodicTask 首轮立即跑
+    const accounts = db.listXAccounts(true).map((a) => a.screenName).join(',');
+    return [c.proxyUrl, c.instances.join(','), String(c.fallbackHtml), String(c.intervalSec), accounts].join('|');
+  };
+  const startXFeed = (): void => {
+    const cfg = getXConfig(db);
+    xFeedSrc?.stop();
+    xFeedSrc = new TwitterFeedSource({
+      proxyUrl: cfg.proxyUrl,
+      instances: cfg.instances,
+      fallbackHtml: cfg.fallbackHtml,
+      intervalSec: cfg.intervalSec,
+      jitterSec: eff.pollJitterSec,
+      healthAlertAfterFailures: eff.healthAlertAfterFailures,
+      avatarCacheDir: xAvatarDir,
+      onStatus: (s) => { xStatus = { ...xStatus, feed: s }; },
+    });
+    xFeedSrc.start({ bus, db, config: eff });
+    xFeedKey = xConfigKey();
+  };
+  const stopXFeed = (): void => {
+    xFeedSrc?.stop();
+    xFeedSrc = null;
+    xFeedKey = '';
+    xStatus = { ...xStatus, feed: { ...emptyXFeedSnapshot(), running: false } };
+  };
+
+  // 动态 / 微博 / X 三个源的启停唯一入口：面板监听开关 + 各自运行前提共同决定
   const reconcileListen = (): void => {
-    if (shouldRunListen(db, 'dynamic', biliCookieHdr !== null)) {
+    // 动态源：B站登录即常开——添加监听直播永远附赠主播动态归档（直播预告分析等要用它，
+    // 2026-09-20 拆分决策）；「监听动态」开关（listen_dynamic）只管 bili_accounts 的轮询，
+    // 由源内 biliAccountsEnabled 回调每轮读取，这里无需启停
+    if (biliCookieHdr !== null) {
       if (!dynamicSrc) {
         log.info(`动态轮询：${db.listWatchedUids().length} 个监听对象，间隔 ${eff.dynamic.intervalSec}s`);
-        startDynamic(biliCookieHdr!);
+        startDynamic(biliCookieHdr);
       }
     } else if (dynamicSrc) {
-      log.info('动态轮询已停止（面板开关关闭 / 无 cookie）');
+      log.info('动态轮询已停止（无 cookie）');
       stopDynamic();
     }
-    if (shouldRunListen(db, 'weibo', weiboCookieHdr !== null)) {
+    // 微博：开关 × 有 cookie × 名单非空；名单/间隔变了就地重启（新增账号要立刻抓）
+    const weiboAccounts = db.listWeiboAccounts(true).length;
+    if (shouldRunListen(db, 'weibo', weiboCookieHdr !== null) && weiboAccounts > 0) {
       if (!weiboFeedSrc) {
-        log.info(`微博时间线：间隔 ${eff.weibo.intervalSec}s`);
+        log.info(`微博时间线：${weiboAccounts} 个账号，间隔 ${eff.weibo.intervalSec}s`);
+        startWeiboFeed(weiboCookieHdr!);
+      } else if (weiboFeedKey !== weiboFeedKeyNow()) {
+        log.info('微博时间线参数已热更新（间隔 / 名单）');
         startWeiboFeed(weiboCookieHdr!);
       }
     } else if (weiboFeedSrc) {
-      log.info('微博时间线已停止（面板开关关闭 / 无 cookie）');
+      log.info('微博时间线已停止（面板开关关闭 / 无 cookie / 名单为空）');
       stopWeiboFeed();
+    }
+    // X：开关 × 代理已配置 × 名单非空；参数变了就地重启
+    const xAccounts = db.listXAccounts(true).length;
+    if (shouldRunListen(db, 'twitter', xProxyConfigured()) && xAccounts > 0) {
+      if (!xFeedSrc) {
+        log.info(`X 时间线：${xAccounts} 个账号，间隔 ${getXConfig(db).intervalSec}s`);
+        startXFeed();
+      } else if (xFeedKey !== xConfigKey()) {
+        log.info('X 时间线参数已热更新（代理 / 实例 / 回退 / 间隔 / 名单）');
+        startXFeed();
+      }
+    } else if (xFeedSrc) {
+      log.info('X 时间线已停止（面板开关关闭 / 未配置代理 / 名单为空）');
+      stopXFeed();
     }
   };
 
@@ -455,6 +587,11 @@ async function main(): Promise<void> {
     if ((prev.weibo.intervalSec !== eff.weibo.intervalSec || thresholdChanged) && weiboFeedSrc) {
       log.info(`微博轮询参数已热更新（间隔 ${eff.weibo.intervalSec}s）`);
       startWeiboFeed(weiboCookieHdr!);
+    }
+    // X 源的告警阈值是构造时快照（startXFeed 传 opts），阈值变了也要重启它才能生效
+    if (thresholdChanged && xFeedSrc) {
+      log.info('X 时间线告警阈值已热更新');
+      startXFeed();
     }
     if (prev.llm.requestTimeoutMs !== eff.llm.requestTimeoutMs
       || prev.llm.circuitThreshold !== eff.llm.circuitThreshold
@@ -548,13 +685,84 @@ async function main(): Promise<void> {
         },
       },
       listen: {
-        login: () => ({ bili: biliLoggedIn(), weibo: weiboLoggedIn() }),
+        login: () => ({ bili: biliLoggedIn(), weibo: weiboLoggedIn(), twitter: xProxyConfigured() }),
         onChanged: () => reconcileListen(),
       },
       advanced: {
         onChanged: () => reconcileRuntime(),
       },
+      // X / 推特 独立分页：连接设置 + 连通性测试（P0 无源，故 onChanged 暂无热生效对象）
+      x: {
+        info: () => ({ config: getXConfig(db), status: xStatus }),
+        save: (patch) => {
+          const prev = getXConfig(db);
+          saveXConfig(db, patch);
+          const next = getXConfig(db);
+          // 配置变了 → 相关旧结论失效（否则改好代理地址后，卡片仍配着上一轮的红点）
+          xStatus = invalidateXStatus(xStatus, prev, next);
+          return next;
+        },
+        test: async (testReq) => {
+          const cfg = getXConfig(db);
+          // 覆盖值优先：面板允许「先测后存」，输入框内容可以先验证再落库
+          const proxyUrl = testReq.proxyUrl !== undefined ? testReq.proxyUrl : cfg.proxyUrl;
+          const instances = testReq.instances !== undefined ? parseInstanceList(testReq.instances) : cfg.instances;
+          const screen = testReq.screenName ? testReq.screenName : DEFAULT_PROBE_SCREEN;
+          const want = testReq.target;
+          const proxyResult: ProxyProbe | null = want === 'all' || want === 'proxy' ? await probeProxy(proxyUrl) : null;
+          const instanceResults: InstanceProbe[] | null =
+            want === 'all' || want === 'instances' ? await probeInstances(instances, proxyUrl, screen) : null;
+          const webResult: WebProbe | null =
+            want === 'all' || want === 'web' ? await probeWeb(screen, proxyUrl) : null;
+
+          const nowSec = Math.floor(Date.now() / 1000);
+          // 只有「测的就是已保存配置」才更新卡片快照；未保存值的测试结果只在弹窗里就地显示
+          if (!isSavedConfigTest(testReq, cfg)) {
+            return { proxy: proxyResult, instances: instanceResults, web: webResult, status: xStatus };
+          }
+          const next: XStatus = { ...xStatus, updatedAt: nowSec };
+          if (proxyResult) next.proxy = { ok: proxyResult.ok, message: proxyResult.message, checkedAt: nowSec };
+          if (instanceResults) {
+            next.instances = instanceResults.map((i) => ({ host: i.host, ok: i.ok, message: i.message }));
+          }
+          if (webResult) next.web = { ok: webResult.ok, message: webResult.message, checkedAt: nowSec };
+          xStatus = next;
+
+          return {
+            proxy: proxyResult,
+            instances: instanceResults,
+            web: webResult,
+            status: next,
+          };
+        },
+        onChanged: () => {
+          // 连接设置或账号名单变了 → 走同一个启停入口（参数指纹变化会就地重启源）
+          reconcileListen();
+        },
+        // 添加账号后的即时首拉（全量轮要排队，单账号先拉一次；去重靠 posts UNIQUE 兜底）
+        kickAccount: async (screenName) => { await xFeedSrc?.kickAccount(screenName); },
+        verify: (screenName) => verifyAccount(screenName, getXConfig(db).proxyUrl),
+      },
       snapshots: { dir: keyframeDir },
+      xAvatars: { dir: xAvatarDir },
+      weiboAvatars: { dir: weiboAvatarDir },
+      biliAvatars: { dir: biliAvatarDir },
+      weiboImages: { dir: weiboImageDir },
+      biliFeed: {
+        // 添加动态账号后即时首拉（动态源间隔默认 300s，等下一轮太久）；
+        // 源没在跑（无 cookie / 开关关）时跳过，等 reconcileListen 启停后的首轮
+        kickAccount: async (uid) => { await dynamicSrc?.kickAccount(uid); },
+      },
+      weibo: {
+        // GET 只读快照（面板每分钟轮询这张卡，绝不打网络）；间隔取自 settings（与 /api/advanced 同一份）
+        info: () => ({
+          config: { intervalSec: getRuntimeConfig(db).weiboIntervalSec },
+          status: { feed: weiboStatus, accounts: db.listWeiboAccounts(true).length },
+        }),
+        onChanged: () => reconcileListen(),
+        // 添加账号后的即时首拉（全量轮要排队，单账号先拉一次；去重靠 posts UNIQUE 兜底）
+        kickAccount: async (uid) => { await weiboFeedSrc?.kickAccount(uid); },
+      },
       testPush: () => sendTestPush(),
       napcat: {
         effective: () => ({ ...getNapcatConfig(db), dir: effectiveNapcatDir(db) }),
@@ -634,6 +842,7 @@ async function main(): Promise<void> {
     followsSrc?.stop();
     dynamicSrc?.stop();
     weiboFeedSrc?.stop();
+    xFeedSrc?.stop();
     panel?.close();
     db.close();
     process.exit(0);

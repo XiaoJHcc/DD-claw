@@ -13,7 +13,7 @@
 ```
 ┌─ 抓取  src/sources/   持续生产：原始数据入库归档 + 变更信号上总线
 │   bili/live-status 批量轮询（50/片）· follows 关注同步 · dynamic 空间动态
-│   weibo/feed 微博时间线 · media/keyframe 在播关键帧缓存
+│   weibo/feed 微博时间线（独立名单）· twitter/feed X 时间线 · media/keyframe 在播关键帧缓存
 │   bili/danmaku 弹幕 WS（待启动）
 │        ↓
 │   core/db 领域归档 · core/bus 变更信号（live_start / title_change / feed_post / …）
@@ -27,6 +27,8 @@
 │        ↓
 ├─ 偏好执行  matcher（纯确定性）  人填推送规则 × 判定 → PushMessage
 │   push_rules v2：分类引用〔空=任意开播〕× 生效主播〔空=全部〕→ 渠道 + 推送词
+│   post_rules（图文帖，平台无关的通用规则）：筛选 → 渠道 + 推送词
+│   （生效范围在账号侧：x/weibo/bili_accounts 行的 rule_ids 选用规则）
 │        ↓ PushMessage
 └─ 通知  src/notify/   dispatcher 按 channels 路由 + 通道执行
      onebot(NapCat) [已实测] / toast [已实现]（ntfy 已放弃）
@@ -76,16 +78,23 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/bus.ts` — 类型化信号总线（handler 异常隔离）
 - `src/core/state.ts` — `diffRoom → Signal`；轮播=未开播；title_change=标题/分区变更
 - `src/core/scheduler.ts` — `PeriodicTask` 通用周期任务器
-- `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送）
-- `src/core/db.ts` — SQLite 十三表 + 仓储；`ensureColumn` 在线补列
+- `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送；`feed_post` 是与之平行的图文帖分支，X / 微博 / B站动态同分支）
+- `src/core/db.ts` — SQLite 十六表 + 仓储；`ensureColumn` 在线补列；`migrateWeiboAccounts` / `migratePostRuleScopes` / `dropLiveRcmdPosts` 一次性数据搬家与清理
 - `src/core/streamers.ts` — streamers / follows 行类型与映射
 - `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
 - `src/core/posts.ts` — posts 行类型与映射（pics JSON）
-- `src/core/listen.ts` — 监听功能开关（settings `listen_<feature>`）
+- `src/core/listen.ts` — 监听功能开关（settings `listen_<feature>`）；`dynamic` 只管动态账号名单（bili_accounts）的轮询，监听主播的动态归档随 B站登录常开；手动关→重开 = 该平台启用账号全部进入恢复轮静默
+- `src/core/backlog.ts` — 图文补推语义（轮次判定 resume/gap/normal + 时间窗/条数上限挑选；三源共用的唯一权威定义）
 - `src/core/runtime-config.ts` — 运行时参数（settings 唯一信源）
 - `src/core/onboarding.ts` — 首启默认值种入（一次性闸门）
 - `src/core/onboarding-defaults.gen.ts` — 构建期生成物（勿手改）
 - `src/core/concurrency.ts` — `mapLimit` 有界并发
+- `src/core/proxy.ts` — **隧道 fetch**（HTTP 代理 CONNECT；Node 22 原生 fetch 不认代理），X 链路唯一出网通道
+- `src/core/x-config.ts` — X/推特连接配置 + 探测状态快照（settings 唯一信源）
+- `src/core/x-accounts.ts` — X 独立关注名单（行类型/映射/归一化；表在 db.ts，独立于 streamers）
+- `src/core/weibo-accounts.ts` — 微博独立关注名单（行/映射/uid 归一化 + 源运行状态快照；表在 db.ts）
+- `src/core/bili-accounts.ts` — B站动态独立账号名单（行/映射/uid 归一化；表在 db.ts，独立于 streamers）
+- `src/core/post-rules.ts` — 图文帖规则（平台无关的通用规则：只定义筛选+渠道+推送词，生效范围在账号侧 rule_ids；quote/翻译按帖子平台运行时生效）
 - `src/config/index.ts` — 读 `.env` + `config.json`（只有 panel 段生效）
 - `src/config/schema.ts` — panel 校验 + provider schema + 默认配置
 - `src/logger.ts` — 极简结构化日志
@@ -101,36 +110,45 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/sources/bili/qrcode.ts` — passport 扫码客户端（要响应头）
 - `src/sources/bili/followings.ts` — `x/relation/followings` 分页（50/页，无 WBI）
 - `src/sources/bili/follows.ts` — `FollowsSource`（正轮成功才落库；不自动入监听）
-- `src/sources/bili/dynamic.ts` — `DynamicSource`：`feed/space`（无 WBI）→ posts
+- `src/sources/bili/dynamic.ts` — `DynamicSource`：`feed/space`（无 WBI）→ posts；轮询对象 = 监听主播 ∪（图文开关开着时的）bili_accounts 启用账号，`feed_post` **只对名单账号发**（监听主播只归档）；FORWARD 归一 `retweet`、LIVE_RCMD 彻底舍弃；名单账号回写 uname/last_ok_at/头像；`kickAccount` 添加后即时首拉
+- `src/sources/bili/avatar.ts` — B站头像本地化（**直连下载**，hdslb 境内可达且不校验 Referer；md5 文件名入库，面板按文件名读）
 - `src/sources/bili/dm.ts` — dm 设备指纹参数（RSSHub 算法）
 - `src/sources/media/keyframe.ts` — `KeyframeCache`（md5 去重、相对路径入库）
-- `src/sources/weibo/feed.ts` — `WeiboFeedSource`：mymblog 轮询
+- `src/sources/weibo/feed.ts` — `WeiboFeedSource`：轮 `weibo_accounts` → mymblog → posts → `feed_post`（`posts.uid` = 微博账号 uid）；登录态心跳折进周期；抓取顺手抠头像落 `cache/weibo-avatars`；每轮上报运行状态快照
+- `src/sources/weibo/avatar.ts` — 微博头像本地化（**直连下载**，sinaimg 境内可达；md5 文件名入库，面板经 `/api/weibo-avatar` 读）
 - `src/sources/weibo/qrcode.ts` — 微博扫码（generate 必须带 Referer）
 - `src/sources/weibo/auth.ts` — weibo-cookies + `X-Log-Uid` 心跳
-- `src/sources/weibo/resolve.ts` — 昵称→UID 匿名解析链
+- `src/sources/weibo/resolve.ts` — 昵称↔UID 匿名解析链（昵称→uid 实测；uid→昵称走 getIndex userInfo）
+- `src/sources/twitter/probe.ts` — **X 连通性探测**（代理 / 实例 RSS / 免登录回退），`npm run probe-x` 与 `/api/x/test` 共用
+- `src/sources/twitter/nitter.ts` — Nitter RSS 解析（主路线：唯一能区分原创/转发）；多实例轮询
+- `src/sources/twitter/web.ts` — 免登录回退：`x.com` HTML 发现 id + 单推接口补详情；账号存在性校验（og:title 顺手抠显示名，verify 回报）
+- `src/sources/twitter/feed.ts` — `TwitterFeedSource`：轮询 `x_accounts` → posts → `feed_post`（模子与 weibo/feed 互为参照）；顺手抠头像 URL 落盘回写、免登录路线回写平台昵称
+- `src/sources/twitter/avatar.ts` — X 头像本地化（代理隧道下载 → cache/x-avatars，md5 文件名入库；面板经 `/api/x-avatar` 读）
 
 ### analysis / rules
 
 - `src/analysis/types.ts` — `Classifier` / `Classification` / `AnalysisContext` / `LlmTask`
 - `src/analysis/classifier.ts` — `RulesClassifier`（LLM 优先 + 确定性回退，入 verdicts）
-- `src/analysis/queue.ts` — 分析队列（限流并发 2）
+- `src/analysis/queue.ts` — 分析队列（限流并发 2；`run()` 是图文帖等非分类任务的通用入口）
 - `src/analysis/providers.ts` — LLM provider（路由/熔断/多 key/双协议）
 - `src/analysis/tasks/classify.ts` — 单次批量 LLM 分类任务
-- `src/analysis/matcher.ts` — 确定性匹配（`matchCategory` / `matchPushRules` / `renderTemplate`）
+- `src/analysis/tasks/post-analysis.ts` — 图文帖任务：判定 + 翻译合并成一次调用（平台措辞；翻译只对 X）
+- `src/analysis/post-analyzer.ts` — 图文帖分析编排（LLM 不可用/失败一律回退机械筛选）
+- `src/analysis/matcher.ts` — 确定性匹配（`matchCategory` / `matchPushRules` / `matchPostRules` / `renderTemplate` / `renderPostTemplate`）
 - `src/rules/types.ts` — `DecisionRule` / `NotifyDecision`
 - `src/rules/once-per-session.ts` — 每场直播推一次
 
 ### notify — 推送
 
 - `src/notify/types.ts` — `Notifier` 接口
-- `src/notify/message.ts` — `liveEventToMessage()`（不用 emoji）
+- `src/notify/message.ts` — `liveEventToMessage()` / `postToMessage()`（图文帖：X 与微博两平台文案，不用 emoji）
 - `src/notify/dispatcher.ts` — fan-out + 渠道路由 + `alertAll`
 - `src/notify/onebot.ts` — NapCat OneBot 11 HTTP（串行 + 1.2s；无 alert）
 - `src/notify/napcat.ts` — NapCat 通道 + 失活自动拉起（双平台、端口条目自管）
 - `src/notify/toast.ts` — 本机通知（健康告警唯一通道）
 - `src/notify/mac-notifier.ts` — macOS 原生 helper（失败回落 osascript）
 - `src/notify/aumid.ts` — Win32 AUMID 注册
-- `src/notify/image-cache.ts` — toast 图片本地化
+- `src/notify/image-cache.ts` — 图片本地化（B站/微博图床直连 / **X 图经代理隧道下载**，都给 NapCat 用 file://）
 
 ### panel / mcp
 
@@ -178,6 +196,7 @@ npm run webui:dev    # 静态服 webui/（改 UI 零重启，浏览器开 ?demo=
 npm test             # node --test（各 *.test.ts）
 npm run probe        # 只查一次开播状态，验证接口通不通
 npm run probe-llm    # 列 LLM provider 状态 + text 路由 ping
+npm run probe-x      # X/推特链路探测：代理 → Nitter 实例（RSS）→ 免登录回退（--x-screen 换账号）
 npm run test-notify  # 假事件走完整推送链路，验证 NapCat/Toast 配置
 npm run napcat-setup # 一次性创建 NapCat 最高权限计划任务（弹一次 UAC）并开启自动拉起
 npm run migrate:snapshots-path # 一次性迁移 snapshots.path（换机后跑一次；幂等）
@@ -190,6 +209,10 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 ## 实现现状
 
 - **已落地主干**：开播通知（NapCat/Toast 已实测）、规模化 + 内容判定（名单迁库 / 扫码登录 / 关注同步 / 动态 / 微博 / LLM 分类管线 / 推送规则 v2）、时间轴统计、控制面板 v1+v2、MCP v1、NapCat 双平台托管
+- **X/推特（独立于 B站的一条路径）**：**P0–P3 全部落地**（隧道 fetch / X 配置 / 连通性探测 / `/api/x*` / 图文分页 `#view-x`（X + 微博，账号卡片墙：身份段 + 选用图文规则 + 帖子段）/ 免登录源 Nitter RSS + 回退 / `x_accounts` 独立名单 / 监听开关 `listen_twitter` / `post_rules` 图文帖规则与 `feed_post` 推送分支（X 图经代理本地化后交 NapCat 用 file://）/ 规则级 LLM 判定与翻译（失败回退机械筛选）/ MCP 工具 / `npm run probe-x`）。计划见 `docs/plan/twitter-source.md`，调研见 `docs/research/twitter.md`
+- **微博图文来源（与 X 同构的第二条图文链路）**：已落地（`weibo_accounts` 独立名单 / `WeiboFeedSource` 轮独立名单 + 运行状态快照 + 头像本地化 / `feed_post` 双平台推送分支（微博图直连下载）/ `post_rules.platform` 平台分流 / 图文页单墙混排 + 平台筛选胶囊 / MCP 三工具 / 老库一次性数据搬家）。计划与实现记录见 `docs/plan/weibo-source.md`
+- **B站动态图文来源 + 图文规则重构**：已落地（`bili_accounts` 独立名单〔动态型 UP 主不开播也能监听〕/ `DynamicSource` 轮询对象 = 监听主播 ∪（图文开关开着时的）动态名单，`feed_post` 只对名单账号发，名单账号头像·uname 回写 / `feed_post` 三平台推送分支 / 图文规则改为**平台无关通用规则 + 账号侧 `rule_ids` 选用**〔post_rules 去 account_ids 与 platform 两个维度〕/ 图文页「图文规则」卡 + B站账号卡与平台筛选胶囊 / MCP 三工具 / 旧规则 scope 一次性迁移到账号）。**2026-09-21 修订**：监听开关拆分（监听主播动态归档随登录常开，`listen_dynamic` 只管动态账号名单）、开播动态（LIVE_RCMD）彻底舍弃（不入库 + 一次性清旧行）、FORWARD 在 source 归一成 `retweet`、三平台账号的 ID 与平台昵称锁定为平台事实（输入面不可改，X 昵称经 verify 种入 / 抓取回写）。计划与实现记录见 `docs/plan/bili-dynamic-posts.md`
+- **图文补推语义（三平台统一，2026-09-21 拍板）**：主动关闭（账号停用→重新启用 / 图文开关手动关→重开）恢复轮**一律静默不补推**（账号表 `silent_next` 恢复位）；服务未运行期间（重启/崩溃/登录态丢失）与添加账号之前默认不推，推送设置开 `backlog_push_enabled`（「补推未运行期间的图文」）后按**时间窗（默认 6h）+ 每账号条数上限（默认 3、取最新）**双重封顶补推；三种轮次归档永不受影响，正常轮新帖全推。语义唯一权威在 `src/core/backlog.ts`
 - **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、**能力面 P0 地基（`runTool` + 写快照/撤销 + 面板 REST 收敛 + `/mcp` 鉴权口径）**、WebUI Agent / MaiBot 插件 / NapCat 直连、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 
@@ -202,4 +225,7 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - `docs/modules/` — 模块实现笔记：core / sources / analysis / notify / panel（逐文件职责与「改前必知」）
 - `docs/mcp.md` — MCP 接口：令牌、角色权限、Host 配置、安全模型与 v2 预留（MaiBot 不直连）
 - `docs/plan/agent-access.md` — 多前端接入统一计划：一个能力面 N 种接线 + 信任模型矩阵 + 分期 **P0-P3** + 能力层调用域（scope，**已定令牌绑定渠道**）+ 拍板记录
-- `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、llm、notify、media-capture、auth-cookie、ts-stack）
+- `docs/plan/twitter-source.md` — X/推特图文来源计划：独立分页 + 独立账号名单 + 图文帖规则，P0–P3 全部落地
+- `docs/plan/weibo-source.md` — 微博图文来源计划：把微博从「主播附属数据源」升级为独立来源（独立名单 / platform 分流 / 单墙混排），已落地
+- `docs/plan/bili-dynamic-posts.md` — B站动态图文来源 + 图文规则「规则卡 + 每账号选用」重构，已落地
+- `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、**twitter**、llm、notify、media-capture、auth-cookie、ts-stack）

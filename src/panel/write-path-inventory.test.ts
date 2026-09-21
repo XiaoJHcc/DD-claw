@@ -92,7 +92,7 @@ interface InventoryEntry {
 const INVENTORY: InventoryEntry[] = [
   // ---- 已收敛：面板已有对应注册表工具，P0 只需面板改走 runTool ----
   {
-    method: 'PUT', path: String.raw`^\/api\/listen\/(dynamic|weibo)$`, label: 'PUT /api/listen/:feature',
+    method: 'PUT', path: String.raw`^\/api\/listen\/(dynamic|weibo|twitter)$`, label: 'PUT /api/listen/:feature',
     coverage: 'registry', tool: 'set_listen', toolStatus: 'exists', exposeToAgent: true,
   },
   {
@@ -170,7 +170,70 @@ const INVENTORY: InventoryEntry[] = [
     coverage: 'registry', tool: 'delete_push_rule', toolStatus: 'exists', exposeToAgent: true,
   },
 
+  {
+    method: 'PUT', path: '/api/x', label: 'PUT /api/x',
+    coverage: 'registry', tool: 'update_x_config', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'POST', path: '/api/x/accounts', label: 'POST /api/x/accounts',
+    coverage: 'registry', tool: 'upsert_x_account', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'PUT', path: String.raw`^\/api\/x\/accounts\/(\d+)$`, label: 'PUT /api/x/accounts/:id',
+    coverage: 'registry', tool: 'upsert_x_account', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'DELETE', path: String.raw`^\/api\/x\/accounts\/(\d+)$`, label: 'DELETE /api/x/accounts/:id',
+    coverage: 'registry', tool: 'delete_x_account', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'POST', path: '/api/weibo/accounts', label: 'POST /api/weibo/accounts',
+    coverage: 'registry', tool: 'upsert_weibo_account', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'PUT', path: String.raw`^\/api\/weibo\/accounts\/(\d+)$`, label: 'PUT /api/weibo/accounts/:id',
+    coverage: 'registry', tool: 'upsert_weibo_account', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'DELETE', path: String.raw`^\/api\/weibo\/accounts\/(\d+)$`, label: 'DELETE /api/weibo/accounts/:id',
+    coverage: 'registry', tool: 'delete_weibo_account', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'POST', path: '/api/bili/accounts', label: 'POST /api/bili/accounts',
+    coverage: 'registry', tool: 'upsert_bili_account', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'PUT', path: String.raw`^\/api\/bili\/accounts\/(\d+)$`, label: 'PUT /api/bili/accounts/:id',
+    coverage: 'registry', tool: 'upsert_bili_account', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'DELETE', path: String.raw`^\/api\/bili\/accounts\/(\d+)$`, label: 'DELETE /api/bili/accounts/:id',
+    coverage: 'registry', tool: 'delete_bili_account', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'POST', path: '/api/post-rules', label: 'POST /api/post-rules',
+    coverage: 'registry', tool: 'upsert_post_rule', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'PUT', path: String.raw`^\/api\/post-rules\/([^/]+)$`, label: 'PUT /api/post-rules/:id',
+    coverage: 'registry', tool: 'upsert_post_rule', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'DELETE', path: String.raw`^\/api\/post-rules\/([^/]+)$`, label: 'DELETE /api/post-rules/:id',
+    coverage: 'registry', tool: 'delete_post_rule', toolStatus: 'exists', exposeToAgent: true,
+  },
+
   // ---- 已收敛但 P0 待补工具（「①成不成立」的答案：成立，写必须过注册表；②暂关） ----
+  {
+    method: 'PUT', path: '/api/post-rules/order', label: 'PUT /api/post-rules/order',
+    coverage: 'registry', tool: 'reorder_post_rules', toolStatus: 'planned', exposeToAgent: false,
+    reason: '排序类：先进注册表以纳入回滚覆盖；是否暴露给 agent 单独决定',
+  },
+  {
+    method: 'POST', path: '/api/x/test', label: 'POST /api/x/test',
+    coverage: 'registry', tool: 'test_x_connection', toolStatus: 'planned', exposeToAgent: false,
+    reason: '网络探测（代理/Nitter/免登录）+ 探测状态快照写 settings → 不暴露给 agent',
+  },
   {
     method: 'PUT', path: '/api/channels/order', label: 'PUT /api/channels/order',
     coverage: 'registry', tool: 'reorder_channels', toolStatus: 'planned', exposeToAgent: false,

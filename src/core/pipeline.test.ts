@@ -7,6 +7,12 @@ import { OncePerSessionRule } from '../rules/once-per-session.js';
 import type { AnalysisContext, Classification, Classifier } from '../analysis/types.js';
 import type { PushMessage, Signal } from './types.js';
 import type { PushChannel, PushRule } from './push.js';
+import { defaultPostFilters, type PostRule } from './post-rules.js';
+import type { XAccount } from './x-accounts.js';
+import type { WeiboAccount } from './weibo-accounts.js';
+import type { BiliAccount } from './bili-accounts.js';
+import type { PostCandidate } from '../analysis/matcher.js';
+import type { PostAnalysis } from '../analysis/post-analyzer.js';
 import type { RoomStatus } from '../sources/bili/types.js';
 import type { AppConfig } from '../config/schema.js';
 
@@ -66,6 +72,24 @@ class FakeDb {
   }
   listPushChannels() { return this.channels; }
   getSetting(key: string) { return this.settings.get(key) ?? null; }
+
+  // ---- X / 图文帖（P2 起 pipeline 的 feed_post 分支要用；微博/B站动态同分支，按平台分名单）----
+  postRules: PostRule[] = [];
+  xAccounts = new Map<string, XAccount>();
+  weiboAccounts = new Map<string, WeiboAccount>();
+  biliAccounts = new Map<string, BiliAccount>();
+  listEnabledPostRules() {
+    return this.postRules.filter((r) => r.enabled).sort((a, b) => a.sort - b.sort || a.id - b.id);
+  }
+  getXAccountByScreenName(screenName: string) {
+    return this.xAccounts.get(screenName);
+  }
+  getWeiboAccountByUid(uid: string) {
+    return this.weiboAccounts.get(uid);
+  }
+  getBiliAccountByUid(uid: string) {
+    return this.biliAccounts.get(uid);
+  }
 }
 
 function rule(over: Partial<PushRule> = {}): PushRule {
@@ -79,6 +103,132 @@ function rule(over: Partial<PushRule> = {}): PushRule {
 function classification(categoryId: number): Classification {
   return { categoryId, name: `分类 ${categoryId}`, source: 'rule', confidence: null, evidence: '' };
 }
+
+// ---- X / 图文帖 fixture ----
+
+function xAccount(over: Partial<XAccount> = {}): XAccount {
+  return {
+    id: 1, screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true,
+    ruleIds: [1, 2],
+    lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null, createdAt: 0, updatedAt: 0,
+    ...over,
+  };
+}
+
+function weiboAccount(over: Partial<WeiboAccount> = {}): WeiboAccount {
+  return {
+    id: 1, uid: '2203177060', nickname: '渡瀬結月', biliUid: null, enabled: true,
+    ruleIds: [1, 2],
+    lastPostId: null, lastPostAt: null, lastOkAt: null, avatar: null, createdAt: 0, updatedAt: 0,
+    ...over,
+  };
+}
+
+function biliAccount(over: Partial<BiliAccount> = {}): BiliAccount {
+  return {
+    id: 1, uid: '80397', uname: '阿梓从小就很可爱', displayName: null, enabled: true,
+    ruleIds: [1, 2], lastOkAt: null, avatar: null, createdAt: 0, updatedAt: 0,
+    ...over,
+  };
+}
+
+function postRule(over: Partial<PostRule> = {}): PostRule {
+  return {
+    id: 1, name: '图文帖规则 1', channels: [1],
+    filters: defaultPostFilters(), messageTemplate: null,
+    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    enabled: true, sort: 0,
+    createdAt: 0, updatedAt: 0,
+    ...over,
+  };
+}
+
+/** feed_post 信号（X 源产出）：无 status，载荷是推文快照 */
+function feedSig(over: {
+  payload?: Record<string, unknown>; uid?: string;
+} = {}): Signal {
+  return {
+    source: 'twitter/feed', kind: 'feed_post', uid: over.uid ?? 'watase_yuzuki', roomId: '', ts: 0,
+    payload: {
+      platform: 'twitter', itemId: '9001', type: 'tweet', text: '今晚有直播',
+      pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
+      ...(over.payload ?? {}),
+    },
+  };
+}
+
+/** 微博源的 feed_post：同一 kind，平台不同（uid = 微博 uid，归属不走 B站 uid） */
+function weiboSig(over: {
+  payload?: Record<string, unknown>; uid?: string;
+} = {}): Signal {
+  return {
+    source: 'weibo/feed', kind: 'feed_post', uid: over.uid ?? '2203177060', roomId: '', ts: 0,
+    payload: {
+      platform: 'weibo', itemId: '5001', type: 'mblog', text: '今晚九点直播！',
+      pics: [], pubTs: 1_789_549_200, url: 'https://weibo.com/2203177060/Pa1bC',
+      ...(over.payload ?? {}),
+    },
+  };
+}
+
+/** B站动态源的 feed_post：同一 kind，uid 就是 B站 uid，type 已在 source 归一
+ *  （DYNAMIC_TYPE_FORWARD → 'retweet'，其余保留 DYNAMIC_TYPE_*，见 sources/bili/dynamic.ts） */
+function biliDynSig(over: {
+  payload?: Record<string, unknown>; uid?: string;
+} = {}): Signal {
+  return {
+    source: 'bili/dynamic', kind: 'feed_post', uid: over.uid ?? '80397', roomId: '', ts: 0,
+    payload: {
+      platform: 'bili_dynamic', itemId: 'd1', type: 'DYNAMIC_TYPE_WORD', text: '今晚八点直播！',
+      pics: [], pubTs: 1_789_549_200, url: 'https://t.bilibili.com/d1',
+      ...(over.payload ?? {}),
+    },
+  };
+}
+
+/** 装好 X 名单与图文帖规则的 harness（feed_post 分支专用） */
+function feedHarness(
+  rules: PostRule[],
+  accounts: XAccount[] = [xAccount()],
+  analyzer?: FakePostAnalyzer,
+  weiboAccounts: WeiboAccount[] = [],
+) {
+  const h = harness({}, 0, [], analyzer);
+  for (const a of accounts) h.db.xAccounts.set(a.screenName, a);
+  for (const a of weiboAccounts) h.db.weiboAccounts.set(a.uid, a);
+  h.db.postRules = rules;
+  return h;
+}
+
+/** 微博侧的 harness（默认名单里放一个微博账号） */
+function weiboHarness(
+  rules: PostRule[],
+  accounts: WeiboAccount[] = [weiboAccount()],
+  analyzer?: FakePostAnalyzer,
+) {
+  return feedHarness(rules, [], analyzer, accounts);
+}
+
+/** B站动态侧的 harness（默认名单里放一个动态账号） */
+function biliDynHarness(rules: PostRule[], accounts: BiliAccount[] = [biliAccount()]) {
+  const h = feedHarness(rules, []);
+  for (const a of accounts) h.db.biliAccounts.set(a.uid, a);
+  return h;
+}
+
+/** 假图文帖分析器：记录调用，按注入的策略给结论 */
+class FakePostAnalyzer {
+  calls: Array<{ ruleId: number; text: string | null }> = [];
+  constructor(private readonly decide: (post: PostCandidate, rule: PostRule) => PostAnalysis) {}
+  async analyze(post: PostCandidate, rule: PostRule): Promise<PostAnalysis> {
+    this.calls.push({ ruleId: rule.id, text: post.text });
+    return this.decide(post, rule);
+  }
+}
+
+const judgeRule = (over: Partial<PostRule> = {}) => postRule({
+  llmJudge: true, judgePrompt: '只推直播预告', ...over,
+});
 
 class FakeDispatcher {
   sent: PushMessage[] = [];
@@ -109,7 +259,12 @@ function config(over: Partial<AppConfig> = {}): AppConfig {
   } as AppConfig;
 }
 
-function harness(over: Partial<AppConfig> = {}, dispatchDelayMs = 0, classifications: Classification[] = []) {
+function harness(
+  over: Partial<AppConfig> = {},
+  dispatchDelayMs = 0,
+  classifications: Classification[] = [],
+  postAnalyzer?: unknown,
+) {
   const bus = new Bus();
   const db = new FakeDb();
   // 冷启动推送开关的事实来源是 settings（面板推送渠道卡「推送设置」）；
@@ -129,6 +284,7 @@ function harness(over: Partial<AppConfig> = {}, dispatchDelayMs = 0, classificat
     queue: new AnalysisQueue(classifier),
     rule: new OncePerSessionRule(db),
     dispatcher: disp as never,
+    ...(postAnalyzer ? { postAnalyzer: postAnalyzer as never } : {}),
   });
   pipeline.attach();
   return { bus, db, disp, pipeline, classifier };
@@ -432,4 +588,352 @@ test('信号处理并发但上限 4', async () => {
   assert.equal(h.disp.sent.length, 12);
   assert.ok(h.disp.concurrentPeak > 1, `应并发处理，实测峰值 ${h.disp.concurrentPeak}`);
   assert.ok(h.disp.concurrentPeak <= 4, `并发峰值应受限，实测峰值 ${h.disp.concurrentPeak}`);
+});
+
+// ---- feed_post 分支（X/推特图文帖）：与开播路径完全平行 ----
+
+test('feed_post 命中图文帖规则 → 推送到规则渠道（默认只推原创）', async () => {
+  const h = feedHarness([postRule({ channels: [1] })]);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+
+  assert.equal(h.disp.sent.length, 1);
+  const m = h.disp.sent[0]!;
+  assert.equal(m.title, '@watase_yuzuki 发了新推文', '默认推送词');
+  assert.equal(m.body, '今晚有直播');
+  assert.equal(m.url, 'https://x.com/watase_yuzuki/status/9001');
+  assert.match(m.attribution ?? '', /@watase_yuzuki/, '副行标注来源账号');
+  assert.deepEqual(m.channels, ['1'], '按规则渠道路由');
+  assert.equal(m.image, undefined, '未配图片缓存目录时不带图');
+  assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
+});
+
+test('机械筛选：默认只命中原创；转发帖要靠规则显式勾「转发」', async () => {
+  // 只推原创（默认 filters）
+  const h1 = feedHarness([postRule()]);
+  h1.bus.emit(feedSig({ payload: { type: 'retweet' } }));
+  await h1.pipeline.whenIdle();
+  assert.equal(h1.disp.sent.length, 0, '转发帖不命中「只推原创」');
+
+  // 只推转发
+  const h2 = feedHarness([postRule({ filters: { ...defaultPostFilters(), original: false, retweet: true } })]);
+  h2.bus.emit(feedSig({ payload: { type: 'retweet' } }));
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 1, '勾了转发才推');
+});
+
+test('机械筛选：必须带图 / 关键词', async () => {
+  const mediaRule = postRule({ filters: { ...defaultPostFilters(), media: true } });
+  const h1 = feedHarness([mediaRule]);
+  h1.bus.emit(feedSig({ payload: { pics: [] } }));
+  await h1.pipeline.whenIdle();
+  assert.equal(h1.disp.sent.length, 0, '无图不命中「必须带图」');
+
+  const h2 = feedHarness([mediaRule]);
+  h2.bus.emit(feedSig({ payload: { pics: ['https://pbs.twimg.com/media/a.jpg'] } }));
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 1, '有图命中');
+
+  const kwRule = postRule({ filters: { ...defaultPostFilters(), keywords: ['直播', '歌回'] } });
+  const h3 = feedHarness([kwRule]);
+  h3.bus.emit(feedSig({ payload: { text: '今天休息' } }));
+  await h3.pipeline.whenIdle();
+  assert.equal(h3.disp.sent.length, 0, '关键词都不中');
+
+  const h4 = feedHarness([kwRule]);
+  h4.bus.emit(feedSig({ payload: { text: '今晚有歌回！' } }));
+  await h4.pipeline.whenIdle();
+  assert.equal(h4.disp.sent.length, 1, '命中任一关键词即推');
+});
+
+test('规则按账号生效：账号侧 ruleIds 没选用的规则不推', async () => {
+  const h = feedHarness(
+    [postRule({ id: 2 })],
+    [
+      xAccount({ id: 1, screenName: 'watase_yuzuki', ruleIds: [] }),
+      xAccount({ id: 2, screenName: 'd4dj_pj', ruleIds: [2] }),
+    ],
+  );
+  h.bus.emit(feedSig({ uid: 'watase_yuzuki' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0, '账号 1 没选用规则 2');
+
+  h.bus.emit(feedSig({ uid: 'd4dj_pj' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '账号 2 选用了规则 2');
+});
+
+test('无命中规则 / 规则未勾渠道 / 账号不在名单 / 平台不匹配 → 都不推且不炸', async () => {
+  // 无规则
+  const h1 = feedHarness([]);
+  h1.bus.emit(feedSig());
+  await h1.pipeline.whenIdle();
+  assert.equal(h1.disp.sent.length, 0);
+
+  // 规则存在但没勾渠道
+  const h2 = feedHarness([postRule({ channels: [] })]);
+  h2.bus.emit(feedSig());
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 0);
+
+  // 账号不在名单（源与名单不同步时不该炸，也不该推）
+  const h3 = feedHarness([postRule()], []);
+  h3.bus.emit(feedSig());
+  await h3.pipeline.whenIdle();
+  assert.equal(h3.disp.sent.length, 0);
+
+  // 微博源的 feed_post：账号不在微博名单里 → 不推（规则平台无关后，挡住它的是名单而不是规则平台）
+  const h4 = feedHarness([postRule()]);
+  h4.bus.emit(weiboSig());
+  await h4.pipeline.whenIdle();
+  assert.equal(h4.disp.sent.length, 0, '账号不在微博名单 = 不推');
+
+  // 未知平台：忽略
+  const h5 = feedHarness([postRule()]);
+  h5.bus.emit(feedSig({ payload: { platform: 'douyin' } }));
+  await h5.pipeline.whenIdle();
+  assert.equal(h5.disp.sent.length, 0);
+});
+
+// ---- feed_post 分支（微博）：与 X 同一条路径，账号/文案按平台分支 ----
+
+test('微博 feed_post 命中微博规则 → 推送；文案用昵称、副行标「微博」', async () => {
+  const h = weiboHarness([postRule({ channels: [1] })]);
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+
+  assert.equal(h.disp.sent.length, 1);
+  const m = h.disp.sent[0]!;
+  assert.equal(m.title, '渡瀬結月 发了新微博', '默认推送词按平台走');
+  assert.equal(m.body, '今晚九点直播！');
+  assert.match(m.attribution ?? '', /微博/, '副行标平台');
+  assert.match(m.attribution ?? '', /渡瀬結月/, '副行用昵称而不是 uid');
+  assert.deepEqual(m.channels, ['1']);
+  assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
+});
+
+test('规则平台无关：同一条规则被 X 与微博账号同时选用，两平台帖都推', async () => {
+  const rules = [postRule({ id: 1, channels: [1] })];
+  const h = feedHarness(rules, [xAccount({ ruleIds: [1] })], undefined, [weiboAccount({ ruleIds: [1] })]);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, 'X 帖命中');
+  assert.equal(h.disp.sent[0]!.title, '@watase_yuzuki 发了新推文');
+
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 2, '微博帖命中同一条规则');
+  assert.equal(h.disp.sent[1]!.title, '渡瀬結月 发了新微博', '文案措辞按帖子平台走');
+});
+
+test('微博规则按账号生效：账号侧 ruleIds 选用规则', async () => {
+  const rules = [postRule({ id: 2, channels: [1] })];
+  const h = weiboHarness(rules, [
+    weiboAccount({ id: 1, uid: '2203177060', ruleIds: [] }),
+    weiboAccount({ id: 2, uid: '111', ruleIds: [2] }),
+  ]);
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0, '账号 1 没选用规则 2');
+
+  h.bus.emit(weiboSig({ uid: '111' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '账号 2 选用了规则 2');
+});
+
+test('微博帖的推送词模板：{author} 渲染成昵称（不是 uid）', async () => {
+  const h = weiboHarness([postRule({ messageTemplate: '{author}｜{text}' })]);
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent[0]!.title, '渡瀬結月｜今晚九点直播！');
+
+  // 昵称还没抓到（新账号）→ 回退 uid，至少不是空标题
+  const h2 = weiboHarness([postRule({ messageTemplate: '{author}' })],
+    [weiboAccount({ nickname: null })]);
+  h2.bus.emit(weiboSig());
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent[0]!.title, '2203177060');
+});
+
+test('微博帖走同一条 LLM 判定：拦下则不推（判定平台无关；翻译运行时只对 X 帖生效）', async () => {
+  const analyzer = new FakePostAnalyzer({ source: 'llm', pass: false, reason: '不是直播相关' });
+  const h = weiboHarness(
+    [postRule({ llmJudge: true, judgePrompt: '只推直播预告' })],
+    [weiboAccount()],
+    analyzer,
+  );
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+  assert.equal(analyzer.calls.length, 1, '确实问过模型');
+  assert.equal(h.disp.sent.length, 0, '判定不推 → 不推');
+});
+
+test('推送总开关关闭 → feed_post 也不推（与开播同一条总闸）', async () => {
+  const h = feedHarness([postRule()]);
+  h.db.settings.set('push_enabled', '0');
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0);
+});
+
+test('推送词模板：{author} {text} {url} 渲染；纯图帖正文给占位', async () => {
+  const h = feedHarness([postRule({ messageTemplate: '{author}｜{text}｜{url}' })]);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(
+    h.disp.sent[0]!.title,
+    '@watase_yuzuki｜今晚有直播｜https://x.com/watase_yuzuki/status/9001',
+  );
+
+  const h2 = feedHarness([postRule()]);
+  h2.bus.emit(feedSig({ payload: { text: null, pics: ['https://pbs.twimg.com/media/a.jpg'] } }));
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent[0]!.body, '（仅图片，无正文）', '空正文别让 QQ 里出现空消息');
+  assert.match(h2.disp.sent[0]!.attribution ?? '', /@watase_yuzuki/);
+});
+
+test('多条命中规则：渠道取并集、推送词取首个非空（与开播规则同一套语义）', async () => {
+  const h = feedHarness([
+    postRule({ id: 1, sort: 0, channels: [1], messageTemplate: null }),
+    postRule({ id: 2, sort: 1, channels: [2], messageTemplate: '{author} 更新了' }),
+  ]);
+  h.db.channels.push({
+    id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001',
+    enabled: true, createdAt: 0, updatedAt: 0,
+  });
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  assert.deepEqual(h.disp.sent[0]!.channels, ['1', '2'], '渠道并集去重保序');
+  assert.equal(h.disp.sent[0]!.title, '@watase_yuzuki 更新了', '首个非空模板生效');
+});
+
+// ---- 图文帖的 LLM 判定 / 翻译（规则级开关，默认关；失败一律回退机械筛选）----
+
+test('LLM 判定拦下 → 不推；判定通过 → 照推', async () => {
+  const deny = new FakePostAnalyzer(() => ({ source: 'llm', pass: false, reason: '只是闲聊', translation: null }));
+  const h1 = feedHarness([judgeRule()], [xAccount()], deny);
+  h1.bus.emit(feedSig());
+  await h1.pipeline.whenIdle();
+  assert.equal(h1.disp.sent.length, 0, '模型说不推就不推');
+  assert.equal(deny.calls.length, 1, '确实问过模型');
+
+  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '是预告', translation: null }));
+  const h2 = feedHarness([judgeRule()], [xAccount()], allow);
+  h2.bus.emit(feedSig());
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 1);
+});
+
+test('LLM 不可用/失败回退 → 判定视为通过，推文照发（不能因为模型抖动让它消失）', async () => {
+  const fallback = new FakePostAnalyzer(() => ({
+    source: 'fallback', pass: true, reason: 'LLM 未启用', translation: null,
+  }));
+  const h = feedHarness([judgeRule()], [xAccount()], fallback);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '回退机械筛选：照推');
+});
+
+test('未装配分析器时规则里的 LLM 开关一律当关（老装配/测试桩不会因此丢推文）', async () => {
+  const h = feedHarness([judgeRule()]);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+});
+
+test('翻译：开了翻译且模型给了译文 → 正文下方带【译】', async () => {
+  const tr = new FakePostAnalyzer(() => ({
+    source: 'llm', pass: true, reason: '', translation: '今晚有直播',
+  }));
+  const h = feedHarness([postRule({ llmTranslate: true })], [xAccount()], tr);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent[0]!.body, '今晚有直播\n\n【译】今晚有直播');
+});
+
+test('多条命中：一条被判定拦下、另一条没开判定 → 仍推，且渠道只来自没被拦的那条', async () => {
+  const deny = new FakePostAnalyzer(() => ({ source: 'llm', pass: false, reason: '不行', translation: null }));
+  const h = feedHarness([
+    judgeRule({ id: 1, sort: 0, channels: [1] }),
+    postRule({ id: 2, sort: 1, channels: [2] }),
+  ], [xAccount()], deny);
+  h.db.channels.push({
+    id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001',
+    enabled: true, createdAt: 0, updatedAt: 0,
+  });
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '无判定的规则照常生效');
+  assert.deepEqual(h.disp.sent[0]!.channels, ['2'], '被判定拦下的规则不贡献渠道');
+  assert.equal(deny.calls.length, 1);
+});
+
+test('同一（判定标准 + 翻译开关）只问模型一次：两条同配置规则共用一次调用', async () => {
+  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '', translation: null }));
+  const h = feedHarness([
+    judgeRule({ id: 1, sort: 0, channels: [1] }),
+    judgeRule({ id: 2, sort: 1, channels: [1] }),
+  ], [xAccount()], allow);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  assert.equal(allow.calls.length, 1, '同配置合并成一次调用（省额度与延迟）');
+});
+
+// ---- feed_post 分支（B站动态）：与 X/微博同一条路径，账号是 bili_accounts ----
+
+test('B站动态 feed_post 命中规则 → 推送；文案「发了新动态」、副行标「B站动态」', async () => {
+  const h = biliDynHarness([postRule({ channels: [1] })]);
+  h.bus.emit(biliDynSig());
+  await h.pipeline.whenIdle();
+
+  assert.equal(h.disp.sent.length, 1);
+  const m = h.disp.sent[0]!;
+  assert.equal(m.title, '阿梓从小就很可爱 发了新动态', '默认推送词按平台走（展示名 = uname）');
+  assert.equal(m.body, '今晚八点直播！');
+  assert.match(m.attribution ?? '', /B站动态/, '副行标平台');
+  assert.deepEqual(m.channels, ['1']);
+  assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
+});
+
+test('B站动态：转发（source 已归一成 retweet）默认「只推原创」不命中', async () => {
+  const h1 = biliDynHarness([postRule()]);
+  h1.bus.emit(biliDynSig({ payload: { type: 'retweet' } }));
+  await h1.pipeline.whenIdle();
+  assert.equal(h1.disp.sent.length, 0, '转发动态不命中「只推原创」');
+
+  const h2 = biliDynHarness([postRule({
+    filters: { ...defaultPostFilters(), original: false, retweet: true },
+  })]);
+  h2.bus.emit(biliDynSig({ payload: { type: 'retweet' } }));
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 1, '勾了转发才推');
+});
+
+test('B站动态：不在 bili_accounts 名单的 uid 静默丢弃（防御分支——源只对名单账号发信号）', async () => {
+  const h = biliDynHarness([postRule()], []);
+  h.bus.emit(biliDynSig({ uid: '99999' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0);
+});
+
+test('B站动态：{liver} 直接按 uid 反查 streamers（动态账号本身就是 B站 uid）', async () => {
+  const h = biliDynHarness(
+    [postRule({ messageTemplate: '{liver} 发动态了' })],
+    [biliAccount({ uid: '1', uname: '主播1' })],
+  );
+  h.bus.emit(biliDynSig({ uid: '1' }));
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent[0]!.title, '阿梓 发动态了', 'streamers 里 uid=1 的简称是阿梓');
+});
+
+test('B站动态：账号侧 ruleIds 没选用规则 = 不推', async () => {
+  const h = biliDynHarness(
+    [postRule({ channels: [1] })],
+    [biliAccount({ ruleIds: [] })],
+  );
+  h.bus.emit(biliDynSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 0, 'ruleIds 空 = 一律不推');
 });

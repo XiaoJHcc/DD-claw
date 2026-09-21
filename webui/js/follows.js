@@ -1,4 +1,4 @@
-// 面板前端 · 卡片6 关注列表：B站关注候选池（头像卡网格 + 已监听标记 + 搜索过滤 + 一键加入监听）。
+// 面板前端 · 主播分页 · 关注列表卡：B站关注候选池（头像卡网格 + 已监听标记 + 搜索过滤 + 一键加入监听）。
 // 视觉 = UI 重设计 v2（白底浅底卡片 hover 上浮 + 30px 三态监听胶囊），行为与改版前 1:1。
 import { api, toast, ACTIONS, INPUTS, esc, avatarHtml } from './core.js';
 import { icon } from './icons.js';

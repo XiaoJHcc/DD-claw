@@ -1,8 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { matchCategory, matchPushRules, renderTemplate } from './matcher.js';
+import {
+  defaultPostTitle, matchCategory, matchPostFilters, matchPostRules, matchPushRules,
+  renderPostTemplate, renderTemplate,
+  type PostCandidate,
+} from './matcher.js';
 import type { LiveEvent } from '../core/types.js';
 import type { Category, PushRule } from '../core/push.js';
+import { defaultPostFilters, type PostRule } from '../core/post-rules.js';
 
 function category(over: Partial<Category> = {}): Category {
   return {
@@ -140,4 +145,165 @@ test('模板变量 {liver} {uname} {title} 渲染（{liver} 用原名）', () =>
 
 test('uname 为空时 {liver} 回退简称', () => {
   assert.equal(renderTemplate('{liver}开播', event({ uname: '' })), '阿梓开播');
+});
+
+// ---- 图文帖（X/推特 + 微博 + B站动态）：与开播规则平行的确定性判定 ----
+
+function post(over: Partial<PostCandidate> = {}): PostCandidate {
+  return {
+    platform: 'twitter',
+    accountId: 1, ruleIds: [1, 2], screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
+    pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
+    ...over,
+  };
+}
+
+/** 微博帖：账号标识是数字 uid、展示名是昵称、类型是 mblog */
+function weiboPost(over: Partial<PostCandidate> = {}): PostCandidate {
+  return {
+    platform: 'weibo',
+    accountId: 1, ruleIds: [1, 2], screenName: '2203177060', displayName: '渡瀬結月', type: 'mblog',
+    text: '今晚九点直播！', pics: [], pubTs: 1_789_549_200,
+    url: 'https://weibo.com/2203177060/Pa1bC',
+    ...over,
+  };
+}
+
+/** B站动态：账号标识是 uid、类型在 pipeline 归一成 dynamic/retweet */
+function biliDynPost(over: Partial<PostCandidate> = {}): PostCandidate {
+  return {
+    platform: 'bili_dynamic',
+    accountId: 1, ruleIds: [1, 2], screenName: '80397', displayName: '阿梓', type: 'dynamic',
+    text: '今晚八点直播！', pics: [], pubTs: 1_789_549_200,
+    url: 'https://t.bilibili.com/9001',
+    ...over,
+  };
+}
+
+function postRule(over: Partial<PostRule> = {}): PostRule {
+  return {
+    id: 1, name: 'r', channels: [1],
+    filters: defaultPostFilters(), messageTemplate: null,
+    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    enabled: true, sort: 0,
+    createdAt: 0, updatedAt: 0,
+    ...over,
+  };
+}
+
+test('matchPostFilters：默认只推原创，转发不命中；勾了转发反过来', () => {
+  const def = defaultPostFilters();
+  assert.equal(matchPostFilters(def, post()), true);
+  assert.equal(matchPostFilters(def, post({ type: 'retweet' })), false);
+
+  const onlyRt = { ...def, original: false, retweet: true };
+  assert.equal(matchPostFilters(onlyRt, post({ type: 'retweet' })), true);
+  assert.equal(matchPostFilters(onlyRt, post()), false, '只推转发时原创不推');
+});
+
+test('matchPostFilters：原创与转发都勾 = 两类都推', () => {
+  const both = { ...defaultPostFilters(), retweet: true };
+  assert.equal(matchPostFilters(both, post()), true);
+  assert.equal(matchPostFilters(both, post({ type: 'retweet' })), true);
+});
+
+test('matchPostFilters：必须带图 / 关键词（任一命中）/ 大小写不敏感', () => {
+  const media = { ...defaultPostFilters(), media: true };
+  assert.equal(matchPostFilters(media, post({ pics: [] })), false);
+  assert.equal(matchPostFilters(media, post({ pics: ['https://pbs.twimg.com/media/a.jpg'] })), true);
+
+  const kw = { ...defaultPostFilters(), keywords: ['歌回', 'LIVE'] };
+  assert.equal(matchPostFilters(kw, post({ text: '今天休息' })), false);
+  assert.equal(matchPostFilters(kw, post({ text: '今晚歌回！' })), true);
+  assert.equal(matchPostFilters(kw, post({ text: 'going live now' })), true, '大小写不敏感');
+  assert.equal(matchPostFilters(kw, post({ text: null })), false, '无正文不命中关键词');
+});
+
+test('matchPostFilters：quote 勾上要求来源确实标了引用（RSS 帖永不命中）', () => {
+  const q = { ...defaultPostFilters(), quote: true };
+  assert.equal(matchPostFilters(q, post()), false, '未知引用 = 不命中');
+  assert.equal(matchPostFilters(q, post({ isQuote: false })), false);
+  assert.equal(matchPostFilters(q, post({ isQuote: true })), true);
+});
+
+test('matchPostRules：账号侧 ruleIds 选用规则 + 筛选，返回全部命中（保持 sort 顺序）', () => {
+  const rules = [
+    postRule({ id: 1, sort: 0 }),
+    postRule({ id: 2, sort: 1, filters: { ...defaultPostFilters(), media: true } }),
+    postRule({ id: 3, sort: 2 }),
+  ];
+  assert.deepEqual(
+    matchPostRules(rules, post({ ruleIds: [1] })).map((r) => r.id),
+    [1],
+    '账号没选用的规则不命中（规则 3 同理）',
+  );
+  assert.deepEqual(
+    matchPostRules(rules, post({ ruleIds: [1, 2], pics: ['https://pbs.twimg.com/media/a.jpg'] })).map((r) => r.id),
+    [1, 2],
+    '有图时选用的两条都命中，顺序按 sort；ruleIds 为空 = 一律不推',
+  );
+  assert.deepEqual(matchPostRules(rules, post({ ruleIds: [] })), [], '账号不选用任何规则 = 不推');
+});
+
+test('renderPostTemplate：{author} {text} {url} {liver}', () => {
+  assert.equal(
+    renderPostTemplate('{author}｜{text}｜{url}', post()),
+    '@watase_yuzuki｜今晚有直播｜https://x.com/watase_yuzuki/status/9001',
+  );
+  assert.equal(renderPostTemplate('{liver} 发帖了', post({ biliName: '阿梓' })), '阿梓 发帖了');
+  assert.equal(
+    renderPostTemplate('{liver} 发帖了', post()),
+    '@watase_yuzuki 发帖了',
+    '没关联主播时回退账号',
+  );
+  assert.equal(renderPostTemplate('{text}', post({ text: null })), '', '无正文渲染成空串');
+});
+
+// ---- 规则平台无关：任何平台的账号都可选用任何规则，命中只看 ruleIds + 机械筛选 ----
+
+test('matchPostRules：规则不分平台，微博/B站帖命中同一条规则（账号侧选用即可）', () => {
+  const rules = [postRule({ id: 1 }), postRule({ id: 2 })];
+  assert.deepEqual(matchPostRules(rules, post({ ruleIds: [1] })).map((r) => r.id), [1], 'X 帖');
+  assert.deepEqual(matchPostRules(rules, weiboPost({ ruleIds: [1] })).map((r) => r.id), [1], '微博帖命中同一条规则');
+  assert.deepEqual(matchPostRules(rules, biliDynPost({ ruleIds: [1, 2] })).map((r) => r.id), [1, 2], 'B站动态帖同理');
+  assert.deepEqual(matchPostRules(rules, weiboPost({ ruleIds: [] })), [], '账号不选用任何规则 = 不推');
+});
+
+test('matchPostRules：quote 规则对非 X 帖永不命中（isQuote undefined，是语义不是错误）', () => {
+  const q = postRule({ id: 1, filters: { ...defaultPostFilters(), quote: true } });
+  assert.deepEqual(matchPostRules([q], weiboPost({ ruleIds: [1] })), [], '微博没有引用形态');
+  assert.deepEqual(matchPostRules([q], biliDynPost({ ruleIds: [1] })), [], 'B站动态没有引用形态');
+  assert.deepEqual(matchPostRules([q], post({ ruleIds: [1], isQuote: true })).map((r) => r.id), [1], 'X 引用帖命中');
+});
+
+test('B站动态帖：作者名用展示名、uid 兜底；转发走同一套原创/转发筛选', () => {
+  assert.equal(defaultPostTitle(biliDynPost()), '阿梓 发了新动态');
+  assert.equal(
+    renderPostTemplate('{author}', biliDynPost({ displayName: null })),
+    '80397',
+    '展示名缺省回退 uid（uid 对人没有意义，但至少不是空标题）',
+  );
+  // 转发（pipeline 已把 DYNAMIC_TYPE_FORWARD 归一成 retweet）走同一套原创/转发筛选
+  assert.equal(matchPostFilters(defaultPostFilters(), biliDynPost({ type: 'retweet' })), false);
+  assert.equal(
+    matchPostFilters({ ...defaultPostFilters(), original: false, retweet: true }, biliDynPost({ type: 'retweet' })),
+    true,
+  );
+});
+
+test('微博帖文案：{author} 用昵称、缺昵称回退 uid；转发语义与 X 相同', () => {
+  assert.equal(renderPostTemplate('{author} 发了新微博', weiboPost()), '渡瀬結月 发了新微博');
+  assert.equal(
+    renderPostTemplate('{author}', weiboPost({ displayName: null })),
+    '2203177060',
+    '昵称还没抓到（新账号）时用 uid，至少不是空标题',
+  );
+  assert.equal(defaultPostTitle(weiboPost()), '渡瀬結月 发了新微博');
+  assert.equal(defaultPostTitle(post()), '@watase_yuzuki 发了新推文');
+  // 微博的转发在抓取层折进 type='retweet'（正文带 //转发自），筛选语义与 X 一致
+  assert.equal(matchPostFilters(defaultPostFilters(), weiboPost({ type: 'retweet' })), false);
+  assert.equal(
+    matchPostFilters({ ...defaultPostFilters(), original: false, retweet: true }, weiboPost({ type: 'retweet' })),
+    true,
+  );
 });

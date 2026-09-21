@@ -1,12 +1,14 @@
-// 面板前端 · 卡片1 监听：B站/微博登录行（点击开统一扫码弹窗）+ 动态/微博两个开关。
-// 直播间开播轮询不依赖登录，常开无开关，不在卡片里展示。
-// 视觉 = v2：行 = 内嵌圆角矩形（白底 hover 浅底，单行 44 / 主副双行 .row-2 恒 66）；
+// 面板前端 · 主播分页 · 监听卡：B站登录行（点击开统一扫码弹窗）。直播间开播轮询不依赖登录，
+// 常开无开关；监听主播的空间动态归档随 B站登录常开（预告分析等要用，2026-09-20 拆分决策）
+// ——「监听动态」开关已搬去「图文」分页的 B站动态卡，且只管动态账号名单（bili_accounts）。
+// 微博行也在「图文」分页（x.js），扫码登录流程经 openPlatformLogin 导出复用（两平台同构，差异参数化）。
+// 视觉 = v2：行 = 内嵌圆角矩形（白底 hover 浅底，主副双行 .row-2 恒 66）；
 // 登录行整行可点（.row-click），行尾二维码图标只是可点性提示（.row-afford），不是按钮。
-import { api, toast, ACTIONS, CHANGES, openSheet, closeSheet, sheetCleanups, switchHtml, checkRowHtml, esc, field } from './core.js';
+import { api, toast, ACTIONS, CHANGES, openSheet, closeSheet, sheetCleanups, checkRowHtml, esc, field } from './core.js';
 import { icon } from './icons.js';
 import qrcode from './qr-lib.js';
 
-const PLAT_STATE = {
+export const PLAT_STATE = {
   ok: ['ok', '已登录'], imported: ['ok', '已登录'],
   expired: ['bad', '已失效'], none: ['none', '未登录'], reserved: ['none', '预留'],
 };
@@ -21,12 +23,7 @@ function platformByKey(key) {
 function loadListen() {
   return api('/api/listen').then(function (s) {
     listenState = s;
-    document.getElementById('listen-rows').innerHTML = [
-      loginRow('B站 登录', platformByKey('bili'), 'bili'),
-      featureRow('监听动态', s.rows.dynamic),
-      loginRow('微博 登录', platformByKey('weibo'), 'weibo'),
-      featureRow('监听微博', s.rows.weibo),
-    ].join('');
+    document.getElementById('listen-rows').innerHTML = loginRow('B站 登录', platformByKey('bili'), 'bili');
   }).catch(function (e) { toast(e.message, true); });
 }
 
@@ -41,21 +38,7 @@ function loginRow(name, plat, key) {
     '</div>';
 }
 
-function featureRow(name, f) {
-  return `<div class="row"><span class="row-main"><span class="row-line">` +
-    `<span class="row-title">${name}</span></span></span>` +
-    `<span class="row-end">` +
-    switchHtml(`data-change="toggle-listen" data-feature="${f.feature}"`, f.enabled) +
-    '</span></div>';
-}
-
-CHANGES['toggle-listen'] = function (el) {
-  const on = el.checked;
-  api('/api/listen/' + el.getAttribute('data-feature'), 'PUT', { enabled: on }).then(function () {
-    toast(on ? '已开启' : '已关闭');
-    loadListen();
-  }).catch(function (e) { toast(e.message, true); loadListen(); });
-};
+// 「监听动态」等各监听开关统一在「图文」分页（x.js 的 toggle-*-listen）；本卡只有登录行
 
 // ---- 统一平台登录流程：两平台同构，差异全部参数化（id 标签 / 提示文案 / 二维码生成与轮询地址） ----
 // B站二维码用内嵌 qr 库渲染 svg；微博是 png 直链，直接 <img> 显示，不用内嵌二维码库。
@@ -98,19 +81,22 @@ function stopLoginPoll() {
   loginPoll = null;
 }
 
-ACTIONS['open-login'] = function (el) {
-  const key = el.getAttribute('data-platform');
+/** 统一扫码登录弹窗：B站行（本卡）与微博行（图文分页）共用；plat = /api/listen platforms 里的对应项 */
+export function openPlatformLogin(key, plat) {
   const conf = LOGIN_PLATFORMS[key];
   if (!conf) return;
-  const p = platformByKey(key);
-  const st = (p && PLAT_STATE[p.state]) || ['none', '未知'];
+  const st = (plat && PLAT_STATE[plat.state]) || ['none', '未知'];
   loginPlatform = key;
   openSheet(conf.title,
     `<div class="login-status"><span class="dot ${st[0]}"></span>${st[1]}` +
-      `<span class="row-sub">${conf.idLabel} ${esc((p && p.mid) || '—')}</span></div>` +
+      `<span class="row-sub">${conf.idLabel} ${esc((plat && plat.mid) || '—')}</span></div>` +
     `<div class="qr-box" id="qr-box">${qrEmptyHtml()}</div>` +
     `<div id="qr-msg" class="qr-status"></div>`);
   sheetCleanups[1] = stopLoginPoll;
+}
+
+ACTIONS['open-login'] = function (el) {
+  openPlatformLogin(el.getAttribute('data-platform'), platformByKey(el.getAttribute('data-platform')));
 };
 
 ACTIONS['start-qr'] = function () {
@@ -135,7 +121,11 @@ function pollLoginQr() {
     if (j.status === 'waiting') return;
     if (j.status === 'scanned') { msg.textContent = '已扫码，请在手机确认'; return; }
     stopLoginPoll();
-    if (j.status === 'confirmed') { closeSheet(1); toast('登录成功'); loadListen(); return; }
+    if (j.status === 'confirmed') {
+      closeSheet(1); toast('登录成功'); loadListen();
+      if (loginConfirmedHook) loginConfirmedHook(); // 微博行在「图文」分页，登录成功同步刷新那边
+      return;
+    }
     if (j.status === 'expired') {
       msg.textContent = '二维码已过期，请重新点击「扫码登录」生成';
       const box = document.getElementById('qr-box');
@@ -144,8 +134,12 @@ function pollLoginQr() {
   }).catch(function () {});
 }
 
-// ---- 抓取设置（监听卡底部按钮）：关注列表 / 直播间轮询 / 关键帧 / 空间动态 / 微博 8 项 ----
+// ---- 抓取设置（监听卡底部按钮）：关注列表 / 直播间轮询 / 关键帧 / 空间动态 7 项 ----
+// （微博抓取间隔随微博两行搬到「图文」分页的微博卡弹窗）
 // v2 表单观感：分组标题 .adv-group + .field 纵向 16 间距 + 并排 .two，范围写进字段标签小字
+/** 微博扫码登录成功后的额外刷新回调（x.js 注册，刷新图文分页的微博行） */
+var loginConfirmedHook = null;
+export function setLoginConfirmedHook(fn) { loginConfirmedHook = fn; }
 function advNum(id) {
   const v = parseInt(document.getElementById(id).value, 10);
   return isNaN(v) ? null : v;
@@ -173,10 +167,7 @@ ACTIONS['open-fetch-settings'] = function () {
       advField('缓存间隔（秒，60~3600）', 'ft-keyframe', j.keyframeIntervalSec) +
       '</div>' +
       advGroup('动态') +
-      '<div class="two">' +
-      advField('B站动态抓取间隔（秒，≥120）', 'ft-dynamic', j.dynamicIntervalSec) +
-      advField('微博抓取间隔（秒，≥120）', 'ft-weibo', j.weiboIntervalSec) +
-      '</div>',
+      advField('B站动态抓取间隔（秒，≥120）', 'ft-dynamic', j.dynamicIntervalSec),
       1,
       `<span id="ft-err" class="form-err"></span>` +
       `<button class="btn" data-action="close-sheet" data-level="1">取消</button>` +
@@ -186,7 +177,7 @@ ACTIONS['open-fetch-settings'] = function () {
 
 ACTIONS['save-fetch-settings'] = function () {
   const errEl = document.getElementById('ft-err');
-  const ids = ['ft-poll', 'ft-jitter', 'ft-threshold', 'ft-follows', 'ft-dynamic', 'ft-weibo', 'ft-keyframe'];
+  const ids = ['ft-poll', 'ft-jitter', 'ft-threshold', 'ft-follows', 'ft-dynamic', 'ft-keyframe'];
   const vals = {};
   for (let i = 0; i < ids.length; i++) {
     const v = advNum(ids[i]);
@@ -199,7 +190,6 @@ ACTIONS['save-fetch-settings'] = function () {
     healthAlertAfterFailures: vals['ft-threshold'],
     followsSyncIntervalSec: vals['ft-follows'],
     dynamicIntervalSec: vals['ft-dynamic'],
-    weiboIntervalSec: vals['ft-weibo'],
     keyframeIntervalSec: vals['ft-keyframe'],
     keyframeEnabled: document.getElementById('ft-b-keyframe').checked,
   }).then(function () {

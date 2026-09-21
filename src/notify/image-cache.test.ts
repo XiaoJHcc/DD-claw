@@ -15,6 +15,18 @@ function fakeFetch(status: number, body: Buffer | null, contentType = 'image/jpe
   })) as unknown as typeof fetch;
 }
 
+/** 捕获请求头的假 fetch（Referer 按图床分支的回归测试用） */
+function headerCaptureFetch(captured: Array<Record<string, string>>): typeof fetch {
+  return (async (_url: unknown, init?: { headers?: Record<string, string> }) => {
+    captured.push(init?.headers ?? {});
+    return {
+      ok: true, status: 200,
+      arrayBuffer: () => Promise.resolve(new ArrayBuffer(1)),
+      headers: new Headers({ 'content-type': 'image/jpeg' }),
+    };
+  }) as unknown as typeof fetch;
+}
+
 let dir = '';
 test.beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'dd-claw-imgcache-')); });
 test.afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
@@ -32,6 +44,18 @@ test('下载成功：写入缓存文件并返回本地路径', async () => {
 test('png content-type 用 .png 扩展名', async () => {
   const file = await localizeImage('https://i0.hdslb.com/x', dir, fakeFetch(200, Buffer.from('x'), 'image/png'));
   assert.ok(file?.endsWith('.png'));
+});
+
+test('Referer 按图床分支：sinaimg 带 weibo.com（防盗链），其余带 B站 Referer', async () => {
+  const captured: Array<Record<string, string>> = [];
+  const f = headerCaptureFetch(captured);
+  await localizeImage('https://wx1.sinaimg.cn/large/abc.jpg', dir, f);
+  await localizeImage('https://i0.hdslb.com/x.jpg', dir, f);
+  await localizeImage('https://fanyi.sinaimg.cn.t.example.com/a.jpg', dir, f);
+  assert.equal(captured[0]!.Referer, 'https://weibo.com/', '微博图床带 weibo Referer');
+  assert.equal(captured[1]!.Referer, 'https://live.bilibili.com/', 'B站图床保持原 Referer');
+  assert.equal(captured[2]!.Referer, 'https://live.bilibili.com/', '后缀撞名的域不算 sinaimg');
+  for (const h of captured) assert.ok(h['User-Agent'], 'UA 恒带');
 });
 
 test('HTTP 失败 / 空body / 超大图 / 网络异常都返回 null，不抛异常', async () => {

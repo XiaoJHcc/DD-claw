@@ -18,6 +18,22 @@ import {
   rowToPost,
   type NewPost, type Post, type PostRow,
 } from './posts.js';
+import {
+  normalizeScreenName, rowToXAccount,
+  type XAccount, type XAccountFetchTouch, type XAccountInput, type XAccountRow,
+} from './x-accounts.js';
+import {
+  rowToWeiboAccount,
+  type WeiboAccount, type WeiboAccountFetchTouch, type WeiboAccountInput, type WeiboAccountRow,
+} from './weibo-accounts.js';
+import {
+  rowToBiliAccount,
+  type BiliAccount, type BiliAccountFetchTouch, type BiliAccountInput, type BiliAccountRow,
+} from './bili-accounts.js';
+import {
+  defaultPostFilters, rowToPostRule,
+  type NewPostRule, type PostFilters, type PostRule, type PostRuleInput, type PostRuleRow,
+} from './post-rules.js';
 
 const log = makeLogger('core/db');
 
@@ -141,6 +157,64 @@ CREATE TABLE IF NOT EXISTS posts (
   UNIQUE(platform, item_id)
 );
 CREATE INDEX IF NOT EXISTS idx_posts_uid_ts ON posts (uid, pub_ts);
+CREATE TABLE IF NOT EXISTS x_accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  screen_name   TEXT    NOT NULL UNIQUE,
+  nickname      TEXT,
+  display_name  TEXT,
+  bili_uid      TEXT,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  rule_ids      TEXT    NOT NULL DEFAULT '[]',
+  last_tweet_id TEXT,
+  last_tweet_at INTEGER,
+  last_ok_at    INTEGER,
+  avatar        TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS post_rules (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  name             TEXT    NOT NULL DEFAULT '',
+  platform         TEXT    NOT NULL DEFAULT 'twitter',
+  account_ids      TEXT    NOT NULL DEFAULT '[]',
+  channels         TEXT    NOT NULL DEFAULT '[]',
+  filters          TEXT    NOT NULL DEFAULT '{}',
+  message_template TEXT,
+  llm_judge        INTEGER NOT NULL DEFAULT 0,
+  judge_prompt     TEXT,
+  llm_translate    INTEGER NOT NULL DEFAULT 0,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  sort             INTEGER NOT NULL DEFAULT 0,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS weibo_accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid           TEXT    NOT NULL UNIQUE,
+  nickname      TEXT,
+  display_name  TEXT,
+  bili_uid      TEXT,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  rule_ids      TEXT    NOT NULL DEFAULT '[]',
+  last_post_id  TEXT,
+  last_post_at  INTEGER,
+  last_ok_at    INTEGER,
+  avatar        TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bili_accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid           TEXT    NOT NULL UNIQUE,
+  uname         TEXT,
+  display_name  TEXT,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  rule_ids      TEXT    NOT NULL DEFAULT '[]',
+  last_ok_at    INTEGER,
+  avatar        TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS live_segments (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id         TEXT    NOT NULL,
@@ -166,6 +240,15 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_room ON snapshots (room_id, live_time, 
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
+
+/** 微博独立名单迁移的一次性闸门（见 Db.migrateWeiboAccounts） */
+const WEIBO_MIGRATION_KEY = 'migrated_weibo_accounts_v1';
+
+/** post_rules 生效范围搬家（account_ids → 账号侧 rule_ids）的一次性闸门（见 Db.migratePostRuleScopes） */
+const POST_RULE_SCOPE_MIGRATION_KEY = 'migrated_post_rule_scopes_v1';
+
+/** 开播动态（LIVE_RCMD）彻底舍弃、清理旧库残留行的一次性闸门（见 Db.dropLiveRcmdPosts） */
+const LIVE_RCMD_DROP_KEY = 'migrated_drop_live_rcmd_posts_v1';
 
 /** listTimeline 在播判定：last_seen 超过该秒数未刷新 = 已下播（崩溃/停机错过 live_end 的兜底） */
 const TIMELINE_LIVE_STALE_S = 600;
@@ -263,6 +346,32 @@ export class Db {
     this.ensureColumn('push_channels', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
     // push_rules 创建来源（MCP 群自助规则标记 'mcp'，权限隔离用；面板/人工规则为 NULL）
     this.ensureColumn('push_rules', 'created_by', 'created_by TEXT');
+    // post_rules 的 LLM 字段（P3）：判定 / 判定标准 / 翻译；旧库在线补列，默认关
+    this.ensureColumn('post_rules', 'llm_judge', 'llm_judge INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('post_rules', 'judge_prompt', 'judge_prompt TEXT');
+    this.ensureColumn('post_rules', 'llm_translate', 'llm_translate INTEGER NOT NULL DEFAULT 0');
+    // x_accounts 头像（抓取时顺手抠 X 头像 → 代理下载到 cache/x-avatars，存文件名；旧库在线补列）
+    this.ensureColumn('x_accounts', 'avatar', 'avatar TEXT');
+    // x_accounts 昵称（X 的 display name，与自定义显示名 display_name 分开；旧库的
+    // display_name 全是人手填的自定义名——抓取从不写它——留在原列语义不变）
+    this.ensureColumn('x_accounts', 'nickname', 'nickname TEXT');
+    // post_rules.platform（微博图文来源接入）：旧库只有 X 规则，默认 'twitter' 即正确
+    this.ensureColumn('post_rules', 'platform', "platform TEXT NOT NULL DEFAULT 'twitter'");
+    // weibo_accounts 自定义显示名（卡片优先展示；留空 = 用昵称，同 x_accounts.display_name 语义）
+    this.ensureColumn('weibo_accounts', 'display_name', 'display_name TEXT');
+    // 账号侧 rule_ids：图文帖规则的生效范围从 post_rules.account_ids 搬到账号选用规则
+    // （规则只定义筛选+渠道+推送词）；旧库在线补列，默认空 = 不选用任何规则
+    this.ensureColumn('x_accounts', 'rule_ids', "rule_ids TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('weibo_accounts', 'rule_ids', "rule_ids TEXT NOT NULL DEFAULT '[]'");
+    // 主动关闭恢复位（图文补推语义见 core/backlog.ts）：重新启用/图文开关重开时置位，
+    // 恢复轮询的首轮静默归档不补推；旧库在线补列，默认 0 = 没有待消费的静默轮
+    this.ensureColumn('x_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('weibo_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('bili_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
+    // weibo_accounts 本身由 SCHEMA 的 CREATE TABLE IF NOT EXISTS 建出；这里只做数据搬家
+    this.migrateWeiboAccounts();
+    this.migratePostRuleScopes();
+    this.dropLiveRcmdPosts();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -271,6 +380,109 @@ export class Db {
     const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
+  }
+
+  /**
+   * 微博从「主播附属数据源」迁到「独立名单」的一次性数据搬家（settings 闸门，只跑一次）：
+   *  ① `streamers.weibo_uid` → `weibo_accounts`（昵称、可选关联主播、启用态照抄 watch）；
+   *  ② 旧微博帖的 `posts.uid` 曾是**B站 uid**（面板第三栏按它分组混排）→ 改写成微博 uid，
+   *     与 X/推特同语义（帖子归属 = 被抓账号自身的 id）。主播卡第三栏改由「关联主播」反查混排
+   *     （见 listRecentPostsMixed），所以这次改写对面板是透明的。
+   *
+   * 幂等靠闸门而不是条件判断：改写后 `posts.uid` 已是微博 uid，
+   * 与 `weibo_accounts.bili_uid` 不再相等，重跑是空操作——但闸门让「只跑一次」这件事显式可读。
+   */
+  private migrateWeiboAccounts(): void {
+    if (this.getSetting(WEIBO_MIGRATION_KEY)) return;
+    const t = now();
+    const seeded = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO weibo_accounts
+           (uid, nickname, bili_uid, enabled, created_at, updated_at)
+         SELECT weibo_uid, weibo_nick, uid, watch, ?, ?
+           FROM streamers
+          WHERE weibo_uid IS NOT NULL AND TRIM(weibo_uid) <> ''`,
+      )
+      .run(t, t);
+    const remapped = this.db
+      .prepare(
+        `UPDATE posts SET uid = (SELECT w.uid FROM weibo_accounts w WHERE w.bili_uid = posts.uid)
+          WHERE platform = 'weibo'
+            AND EXISTS (SELECT 1 FROM weibo_accounts w WHERE w.bili_uid = posts.uid)`,
+      )
+      .run();
+    this.setSetting(WEIBO_MIGRATION_KEY, '1');
+    if (seeded.changes > 0 || remapped.changes > 0) {
+      log.info(
+        `微博独立名单迁移：种入 ${seeded.changes} 个账号，改写 ${remapped.changes} 条历史微博的归属 uid`,
+      );
+    }
+  }
+
+  /**
+   * 图文帖规则生效范围搬家（settings 闸门，只跑一次）：post_rules.account_ids（规则内嵌
+   * 账号集合）→ 账号名单行的 rule_ids（账号选用规则）。
+   *  · account_ids 非空 → 把规则 id 追加到对应平台这些账号的 rule_ids（去重）；
+   *  · account_ids 为空（旧语义 = 该平台全部账号）→ 追加到该平台全部现有账号。
+   * bili_dynamic 无旧数据（该平台与本次改造一起引入），跳过。
+   * account_ids 列保留不删，但写入侧恒 '[]'（见 upsertPostRule）。
+   */
+  private migratePostRuleScopes(): void {
+    if (this.getSetting(POST_RULE_SCOPE_MIGRATION_KEY)) return;
+    const rules = this.db
+      .prepare('SELECT id, platform, account_ids FROM post_rules')
+      .all() as Array<{ id: number; platform: string; account_ids: string }>;
+    let moved = 0;
+    for (const r of rules) {
+      const table = r.platform === 'weibo' ? 'weibo_accounts'
+        : r.platform === 'twitter' ? 'x_accounts'
+        : null;
+      if (!table) continue;
+      let scope: number[];
+      try {
+        scope = JSON.parse(r.account_ids) as number[];
+      } catch {
+        scope = []; // 坏 JSON 按旧语义「全部账号」处理，不丢规则
+      }
+      const accounts = this.db
+        .prepare(`SELECT id, rule_ids FROM ${table}`)
+        .all() as Array<{ id: number; rule_ids: string }>;
+      const update = this.db.prepare(`UPDATE ${table} SET rule_ids = ?, updated_at = ? WHERE id = ?`);
+      for (const a of accounts) {
+        if (scope.length > 0 && !scope.includes(a.id)) continue;
+        let ruleIds: number[];
+        try {
+          ruleIds = JSON.parse(a.rule_ids) as number[];
+        } catch {
+          ruleIds = [];
+        }
+        if (ruleIds.includes(r.id)) continue;
+        ruleIds.push(r.id);
+        update.run(JSON.stringify(ruleIds), now(), a.id);
+        moved++;
+      }
+    }
+    this.setSetting(POST_RULE_SCOPE_MIGRATION_KEY, '1');
+    if (moved > 0) {
+      log.info(`图文帖规则生效范围迁移：${moved} 个账号行的 rule_ids 已写入`);
+    }
+  }
+
+  /**
+   * 开播动态（DYNAMIC_TYPE_LIVE_RCMD）彻底舍弃（2026-09-20 用户决策）：它是 B站自动生成的
+   * 噪音，开播信息由 live-status 源负责，图文规则也不该把它当「原创帖」推。source 已不再
+   * 入库，这里一次性清掉旧库的残留行（settings 闸门；删除不碰 raw 归档哲学——这些行没有
+   * 任何消费者，主播卡展示层此前就是过滤掉它们的）。
+   */
+  private dropLiveRcmdPosts(): void {
+    if (this.getSetting(LIVE_RCMD_DROP_KEY)) return;
+    const r = this.db
+      .prepare(`DELETE FROM posts WHERE platform = 'bili_dynamic' AND type = 'DYNAMIC_TYPE_LIVE_RCMD'`)
+      .run();
+    this.setSetting(LIVE_RCMD_DROP_KEY, '1');
+    if (r.changes > 0) {
+      log.info(`开播动态舍弃迁移：清理 ${r.changes} 条 LIVE_RCMD 历史动态`);
     }
   }
 
@@ -904,6 +1116,93 @@ export class Db {
     tx();
   }
 
+  // ---- post_rules：图文帖规则（X/推特链路，与 push_rules 平行）----
+
+  /** 面板用：全量规则（含 disabled）。matcher 消费请用 listEnabledPostRules。 */
+  listPostRules(): PostRule[] {
+    const rows = this.db.prepare('SELECT * FROM post_rules ORDER BY sort, id').all() as PostRuleRow[];
+    return rows.map(rowToPostRule);
+  }
+
+  /** 全部启用规则，sort 升序（全部命中独立生效，渠道取并集） */
+  listEnabledPostRules(): PostRule[] {
+    const rows = this.db
+      .prepare('SELECT * FROM post_rules WHERE enabled = 1 ORDER BY sort, id')
+      .all() as PostRuleRow[];
+    return rows.map(rowToPostRule);
+  }
+
+  private getPostRule(id: number): PostRule | undefined {
+    const row = this.db.prepare('SELECT * FROM post_rules WHERE id = ?').get(id) as PostRuleRow | undefined;
+    return row ? rowToPostRule(row) : undefined;
+  }
+
+  /** 带 id 且存在 = 改行（未提供字段保留原值）；否则建行（空名补「图文帖规则 N」，排到末尾） */
+  upsertPostRule(input: PostRuleInput): number {
+    const prev = input.id !== undefined ? this.getPostRule(input.id) : undefined;
+    const filters: PostFilters = {
+      ...(prev?.filters ?? defaultPostFilters()),
+      ...(input.filters ?? {}),
+    };
+    const r: NewPostRule = {
+      name: input.name !== undefined ? input.name : prev?.name ?? '',
+      channels: input.channels ?? prev?.channels ?? [],
+      filters,
+      messageTemplate: input.messageTemplate !== undefined
+        ? input.messageTemplate : prev?.messageTemplate ?? null,
+      llmJudge: input.llmJudge ?? prev?.llmJudge ?? false,
+      judgePrompt: input.judgePrompt !== undefined ? input.judgePrompt : prev?.judgePrompt ?? null,
+      llmTranslate: input.llmTranslate ?? prev?.llmTranslate ?? false,
+      enabled: input.enabled ?? prev?.enabled ?? true,
+    };
+    // account_ids 是旧设计的遗留列（生效范围已搬到账号侧 rule_ids）：保留不删，写入侧恒 '[]'。
+    // platform 列同理（规则已平台无关）：UPDATE 不触碰，INSERT 靠列默认值 'twitter' 占位。
+    if (prev) {
+      this.db
+        .prepare(
+          `UPDATE post_rules SET name=?, account_ids='[]', channels=?, filters=?, message_template=?,
+             llm_judge=?, judge_prompt=?, llm_translate=?, enabled=?, updated_at=?
+           WHERE id=?`,
+        )
+        .run(r.name, JSON.stringify(r.channels), JSON.stringify(r.filters),
+          r.messageTemplate, r.llmJudge ? 1 : 0, r.judgePrompt, r.llmTranslate ? 1 : 0,
+          r.enabled ? 1 : 0, now(), prev.id);
+      return prev.id;
+    }
+    const t = now();
+    const { m } = this.db
+      .prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS m FROM post_rules')
+      .get() as { m: number };
+    const info = this.db
+      .prepare(
+        `INSERT INTO post_rules
+           (name, account_ids, channels, filters, message_template,
+            llm_judge, judge_prompt, llm_translate, enabled, sort, created_at, updated_at)
+         VALUES (?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(r.name, JSON.stringify(r.channels), JSON.stringify(r.filters),
+        r.messageTemplate, r.llmJudge ? 1 : 0, r.judgePrompt, r.llmTranslate ? 1 : 0,
+        r.enabled ? 1 : 0, m, t, t);
+    const id = Number(info.lastInsertRowid);
+    if (!r.name) {
+      this.db.prepare('UPDATE post_rules SET name = ?, updated_at = ? WHERE id = ?').run(`图文帖规则 ${id}`, t, id);
+    }
+    return id;
+  }
+
+  deletePostRule(id: number): boolean {
+    return this.db.prepare('DELETE FROM post_rules WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** 拖拽排序：ids 是全部规则的全排列，按数组顺序重写 sort */
+  reorderPostRules(ids: number[]): void {
+    const tx = this.db.transaction(() => {
+      const stmt = this.db.prepare('UPDATE post_rules SET sort = ?, updated_at = ? WHERE id = ?');
+      for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i]);
+    });
+    tx();
+  }
+
   deletePushRule(id: number): boolean {
     return this.db.prepare('DELETE FROM push_rules WHERE id = ?').run(id).changes > 0;
   }
@@ -983,6 +1282,44 @@ export class Db {
   }
 
   /**
+   * 主播卡第三栏（混排）：每个主播各取最近 perUid 条 —— B站动态（`posts.uid` = 主播 uid）
+   * + 该主播**关联微博账号**的微博（`posts.uid` = 微博 uid，`platform='weibo'`）。
+   *
+   * 微博成为独立来源后帖子归属改成了微博账号自身（同 X），"这条微博属于哪个主播"由
+   * `weibo_accounts.bili_uid` 这条可选关联反查——所以主播卡第三栏的行为对用户没有变化，
+   * 而未关联任何主播的微博账号（独立博主）不会串进主播卡。
+   */
+  listRecentPostsMixed(streamerUids: string[], perUid: number): Map<string, Post[]> {
+    const out = new Map<string, Post[]>();
+    if (streamerUids.length === 0 || perUid <= 0) return out;
+    const ph = streamerUids.map(() => '?').join(',');
+    const links = this.db
+      .prepare(`SELECT uid, bili_uid FROM weibo_accounts WHERE bili_uid IN (${ph})`)
+      .all(...streamerUids) as Array<{ uid: string; bili_uid: string }>;
+    const weiboToBili = new Map(links.map((l) => [l.uid, l.bili_uid]));
+    const uids = [...new Set([...streamerUids, ...links.map((l) => l.uid)])];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM posts WHERE uid IN (${uids.map(() => '?').join(',')})
+          ORDER BY pub_ts DESC, id DESC`,
+      )
+      .all(...uids) as PostRow[];
+    for (const uid of streamerUids) out.set(uid, []);
+    for (const r of rows) {
+      const owners: string[] = [];
+      // B站动态：uid 就是主播；微博：反查它关联的主播（防 uid 数字撞车，用 platform 卡死语义）
+      if (r.platform !== 'weibo' && streamerUids.includes(r.uid)) owners.push(r.uid);
+      const bili = weiboToBili.get(r.uid);
+      if (bili && r.platform === 'weibo' && !owners.includes(bili)) owners.push(bili);
+      for (const o of owners) {
+        const list = out.get(o)!;
+        if (list.length < perUid) list.push(rowToPost(r));
+      }
+    }
+    return out;
+  }
+
+  /**
    * 归档检索（MCP search_posts 用）：uid / platform / 正文关键词（LIKE 子串，转义 %_\) 过滤，
    * 按 pub_ts 倒序，limit 钳 1~50。结果含 raw，调用方按需裁剪。
    */
@@ -1001,6 +1338,263 @@ export class Db {
                 ORDER BY pub_ts DESC, id DESC LIMIT ?`)
       .all(...args, limit) as PostRow[];
     return rows.map(rowToPost);
+  }
+
+  // ---- x_accounts：X/推特独立关注名单（独立于 streamers/follows，见 core/x-accounts.ts）----
+
+  /** 名单（enabled 升序无意义，按 screen_name 稳定排序方便面板对照） */
+  listXAccounts(onlyEnabled = false): XAccount[] {
+    const sql = 'SELECT * FROM x_accounts' + (onlyEnabled ? ' WHERE enabled = 1' : '') + ' ORDER BY screen_name';
+    return (this.db.prepare(sql).all() as XAccountRow[]).map(rowToXAccount);
+  }
+
+  getXAccount(id: number): XAccount | undefined {
+    const row = this.db.prepare('SELECT * FROM x_accounts WHERE id = ?').get(id) as XAccountRow | undefined;
+    return row ? rowToXAccount(row) : undefined;
+  }
+
+  getXAccountByScreenName(screenName: string): XAccount | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM x_accounts WHERE screen_name = ?')
+      .get(normalizeScreenName(screenName)) as XAccountRow | undefined;
+    return row ? rowToXAccount(row) : undefined;
+  }
+
+  /**
+   * 带 id 且存在 = 改行（未提供字段保留原值）；否则按 screen_name 建行。
+   * screen_name 撞 UNIQUE（同一账号加两遍）时抛错，由面板转成 409——不做静默合并，
+   * 免得用户以为改动生效了其实改的是另一行。返回名单行 id。
+   */
+  upsertXAccount(input: XAccountInput): number {
+    const prev = input.id !== undefined ? this.getXAccount(input.id) : undefined;
+    const screenName = normalizeScreenName(input.screenName ?? prev?.screenName ?? '');
+    if (prev) {
+      // 重新启用 = 主动暂停结束：置恢复位，恢复轮询的首轮静默（停用期间的帖子不补推）
+      const reEnabled = !prev.enabled && (input.enabled ?? prev.enabled);
+      this.db
+        .prepare(
+          `UPDATE x_accounts SET screen_name=?, nickname=?, display_name=?, bili_uid=?, enabled=?, rule_ids=?, silent_next=?, updated_at=? WHERE id=?`,
+        )
+        .run(
+          screenName,
+          input.nickname !== undefined ? input.nickname : prev.nickname,
+          input.displayName !== undefined ? input.displayName : prev.displayName,
+          input.biliUid !== undefined ? input.biliUid : prev.biliUid,
+          (input.enabled ?? prev.enabled) ? 1 : 0,
+          JSON.stringify(input.ruleIds ?? prev.ruleIds),
+          reEnabled || prev.silentNext ? 1 : 0,
+          now(),
+          prev.id,
+        );
+      return prev.id;
+    }
+    const t = now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO x_accounts
+           (screen_name, nickname, display_name, bili_uid, enabled, rule_ids, last_tweet_id, last_tweet_at, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+      )
+      .run(
+        screenName,
+        input.nickname ?? null,
+        input.displayName ?? null,
+        input.biliUid ?? null,
+        (input.enabled ?? true) ? 1 : 0,
+        JSON.stringify(input.ruleIds ?? []),
+        t,
+        t,
+      );
+    return Number(info.lastInsertRowid);
+  }
+
+  deleteXAccount(id: number): boolean {
+    return this.db.prepare('DELETE FROM x_accounts WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** 抓取回写：只更新传入的字段（游标只往前推由调用方保证；昵称拿到非空才写，不擦好名字） */
+  touchXAccount(id: number, touch: XAccountFetchTouch): void {
+    const sets: string[] = [];
+    const args: Array<string | number | null> = [];
+    if (touch.lastTweetId !== undefined) { sets.push('last_tweet_id = ?'); args.push(touch.lastTweetId); }
+    if (touch.lastTweetAt !== undefined) { sets.push('last_tweet_at = ?'); args.push(touch.lastTweetAt); }
+    if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
+    if (touch.nickname) { sets.push('nickname = ?'); args.push(touch.nickname); }
+    if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
+    if (touch.silentNext !== undefined) { sets.push('silent_next = ?'); args.push(touch.silentNext ? 1 : 0); }
+    if (sets.length === 0) return;
+    sets.push('updated_at = ?');
+    args.push(now(), id);
+    this.db.prepare(`UPDATE x_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  }
+
+  /** 图文开关手动关→手动开（setListen 调用）：全部启用账号进入「恢复轮静默」 */
+  markXAccountsSilentNext(): void {
+    this.db.prepare('UPDATE x_accounts SET silent_next = 1, updated_at = ? WHERE enabled = 1').run(now());
+  }
+
+  // ---- weibo_accounts：微博独立名单（独立于 streamers，见 core/weibo-accounts.ts）----
+
+  /** 名单（按 uid 稳定排序，方便面板对照） */
+  listWeiboAccounts(onlyEnabled = false): WeiboAccount[] {
+    const sql = 'SELECT * FROM weibo_accounts' + (onlyEnabled ? ' WHERE enabled = 1' : '') + ' ORDER BY uid';
+    return (this.db.prepare(sql).all() as WeiboAccountRow[]).map(rowToWeiboAccount);
+  }
+
+  getWeiboAccount(id: number): WeiboAccount | undefined {
+    const row = this.db.prepare('SELECT * FROM weibo_accounts WHERE id = ?').get(id) as WeiboAccountRow | undefined;
+    return row ? rowToWeiboAccount(row) : undefined;
+  }
+
+  getWeiboAccountByUid(uid: string): WeiboAccount | undefined {
+    const row = this.db.prepare('SELECT * FROM weibo_accounts WHERE uid = ?').get(uid) as WeiboAccountRow | undefined;
+    return row ? rowToWeiboAccount(row) : undefined;
+  }
+
+  /**
+   * 带 id 且存在 = 改行（未提供字段保留原值）；否则按 uid 建行。
+   * uid 撞 UNIQUE（同一账号加两遍）时抛错，由面板转成 409——不做静默合并。
+   */
+  upsertWeiboAccount(input: WeiboAccountInput): number {
+    const prev = input.id !== undefined ? this.getWeiboAccount(input.id) : undefined;
+    const uid = (input.uid ?? prev?.uid ?? '').trim();
+    if (prev) {
+      // 重新启用 = 主动暂停结束：置恢复位，恢复轮询的首轮静默（停用期间的帖子不补推）
+      const reEnabled = !prev.enabled && (input.enabled ?? prev.enabled);
+      this.db
+        .prepare('UPDATE weibo_accounts SET uid=?, nickname=?, display_name=?, bili_uid=?, enabled=?, rule_ids=?, silent_next=?, updated_at=? WHERE id=?')
+        .run(
+          uid,
+          input.nickname !== undefined ? input.nickname : prev.nickname,
+          input.displayName !== undefined ? input.displayName : prev.displayName,
+          input.biliUid !== undefined ? input.biliUid : prev.biliUid,
+          (input.enabled ?? prev.enabled) ? 1 : 0,
+          JSON.stringify(input.ruleIds ?? prev.ruleIds),
+          reEnabled || prev.silentNext ? 1 : 0,
+          now(),
+          prev.id,
+        );
+      return prev.id;
+    }
+    const t = now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO weibo_accounts
+           (uid, nickname, display_name, bili_uid, enabled, rule_ids, last_post_id, last_post_at, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+      )
+      .run(uid, input.nickname ?? null, input.displayName ?? null, input.biliUid ?? null,
+        (input.enabled ?? true) ? 1 : 0, JSON.stringify(input.ruleIds ?? []), t, t);
+    return Number(info.lastInsertRowid);
+  }
+
+  deleteWeiboAccount(id: number): boolean {
+    return this.db.prepare('DELETE FROM weibo_accounts WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** 抓取回写：只更新传入的字段（游标只往前推由调用方保证） */
+  touchWeiboAccount(id: number, touch: WeiboAccountFetchTouch): void {
+    const sets: string[] = [];
+    const args: Array<string | number | null> = [];
+    if (touch.lastPostId !== undefined) { sets.push('last_post_id = ?'); args.push(touch.lastPostId); }
+    if (touch.lastPostAt !== undefined) { sets.push('last_post_at = ?'); args.push(touch.lastPostAt); }
+    if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
+    if (touch.nickname) { sets.push('nickname = ?'); args.push(touch.nickname); }
+    if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
+    if (touch.silentNext !== undefined) { sets.push('silent_next = ?'); args.push(touch.silentNext ? 1 : 0); }
+    if (sets.length === 0) return;
+    sets.push('updated_at = ?');
+    args.push(now(), id);
+    this.db.prepare(`UPDATE weibo_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  }
+
+  /** 图文开关手动关→手动开（setListen 调用）：全部启用账号进入「恢复轮静默」 */
+  markWeiboAccountsSilentNext(): void {
+    this.db.prepare('UPDATE weibo_accounts SET silent_next = 1, updated_at = ? WHERE enabled = 1').run(now());
+  }
+
+  /** 解除某主播的微博关联（主播详情清空微博昵称时用）；账号行保留，历史微博不删 */
+  unlinkWeiboAccountsFromBili(biliUid: string): number {
+    return this.db
+      .prepare('UPDATE weibo_accounts SET bili_uid = NULL, updated_at = ? WHERE bili_uid = ?')
+      .run(now(), biliUid).changes;
+  }
+
+  // ---- bili_accounts：B站动态独立账号名单（独立于 streamers，见 core/bili-accounts.ts）----
+
+  /** 名单（按 uid 稳定排序，方便面板对照） */
+  listBiliAccounts(onlyEnabled = false): BiliAccount[] {
+    const sql = 'SELECT * FROM bili_accounts' + (onlyEnabled ? ' WHERE enabled = 1' : '') + ' ORDER BY uid';
+    return (this.db.prepare(sql).all() as BiliAccountRow[]).map(rowToBiliAccount);
+  }
+
+  getBiliAccount(id: number): BiliAccount | undefined {
+    const row = this.db.prepare('SELECT * FROM bili_accounts WHERE id = ?').get(id) as BiliAccountRow | undefined;
+    return row ? rowToBiliAccount(row) : undefined;
+  }
+
+  getBiliAccountByUid(uid: string): BiliAccount | undefined {
+    const row = this.db.prepare('SELECT * FROM bili_accounts WHERE uid = ?').get(uid) as BiliAccountRow | undefined;
+    return row ? rowToBiliAccount(row) : undefined;
+  }
+
+  /**
+   * 带 id 且存在 = 改行（未提供字段保留原值）；否则按 uid 建行。
+   * uid 撞 UNIQUE（同一账号加两遍）时抛错，由面板转成 409——不做静默合并。
+   * uname 是平台事实（抓取经 touchBiliAccount 回写），输入面不收。
+   */
+  upsertBiliAccount(input: BiliAccountInput): number {
+    const prev = input.id !== undefined ? this.getBiliAccount(input.id) : undefined;
+    const uid = (input.uid ?? prev?.uid ?? '').trim();
+    if (prev) {
+      // 重新启用 = 主动暂停结束：置恢复位，恢复轮询的首轮静默（停用期间的帖子不补推）
+      const reEnabled = !prev.enabled && (input.enabled ?? prev.enabled);
+      this.db
+        .prepare('UPDATE bili_accounts SET uid=?, display_name=?, enabled=?, rule_ids=?, silent_next=?, updated_at=? WHERE id=?')
+        .run(
+          uid,
+          input.displayName !== undefined ? input.displayName : prev.displayName,
+          (input.enabled ?? prev.enabled) ? 1 : 0,
+          JSON.stringify(input.ruleIds ?? prev.ruleIds),
+          reEnabled || prev.silentNext ? 1 : 0,
+          now(),
+          prev.id,
+        );
+      return prev.id;
+    }
+    const t = now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO bili_accounts
+           (uid, display_name, enabled, rule_ids, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+      )
+      .run(uid, input.displayName ?? null,
+        (input.enabled ?? true) ? 1 : 0, JSON.stringify(input.ruleIds ?? []), t, t);
+    return Number(info.lastInsertRowid);
+  }
+
+  deleteBiliAccount(id: number): boolean {
+    return this.db.prepare('DELETE FROM bili_accounts WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** 抓取回写：只更新传入的字段（uname 空值不回写——抓到空不该把好名字擦掉） */
+  touchBiliAccount(id: number, touch: BiliAccountFetchTouch): void {
+    const sets: string[] = [];
+    const args: Array<string | number | null> = [];
+    if (touch.uname) { sets.push('uname = ?'); args.push(touch.uname); }
+    if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
+    if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
+    if (touch.silentNext !== undefined) { sets.push('silent_next = ?'); args.push(touch.silentNext ? 1 : 0); }
+    if (sets.length === 0) return;
+    sets.push('updated_at = ?');
+    args.push(now(), id);
+    this.db.prepare(`UPDATE bili_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  }
+
+  /** 图文开关手动关→手动开（setListen 调用）：全部启用账号进入「恢复轮静默」 */
+  markBiliAccountsSilentNext(): void {
+    this.db.prepare('UPDATE bili_accounts SET silent_next = 1, updated_at = ? WHERE enabled = 1').run(now());
   }
 
   // ---- settings：kv（push_enabled / listen_* / llm_* / napcat_* 等）----

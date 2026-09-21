@@ -14,6 +14,8 @@ import { createPanelServer, type PanelDeps, type PanelStatus } from '../panel/se
 import { saveMcpTokens } from '../mcp/auth.js';
 import { resetMcpWriteLimiter } from '../mcp/rate-limit.js';
 import { saveLlmProviders, listLlmProviders } from '../analysis/providers.js';
+import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
+import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 
 const ADMIN_TOKEN = 'ddc_test_admin';
 const GATEWAY_TOKEN = 'ddc_test_gateway';
@@ -51,12 +53,38 @@ async function setup(
   };
   const listenChanged = { count: 0 };
   const advancedChanged = { count: 0 };
+  // X 分页 dep（生产装配形状）：配置落 settings，探测/校验走网络（测试里不触发）
+  const xChanged = { count: 0 };
+  const weiboChanged = { count: 0 };
   const deps: PanelDeps = {
     db,
     status: () => status,
-    listen: { login: () => ({ bili: true, weibo: true }), onChanged: () => listenChanged.count++ },
+    listen: {
+      login: () => ({ bili: true, weibo: true, twitter: getXConfig(db).proxyUrl.trim() !== '' }),
+      onChanged: () => listenChanged.count++,
+    },
     advanced: { onChanged: () => advancedChanged.count++ },
     llm: { store: { list: () => listLlmProviders(db), save: (ps) => saveLlmProviders(db, ps) } },
+    x: {
+      info: () => ({ config: getXConfig(db), status: { proxy: { ok: false, message: '尚未测试', checkedAt: null }, instances: [], web: { ok: false, message: '尚未测试', checkedAt: null }, feed: emptyXFeedSnapshot(), updatedAt: null } }),
+      save: (patch) => { saveXConfig(db, patch); return getXConfig(db); },
+      test: async () => ({ status: 'not-called' }),
+      verify: async (screenName) => (screenName.includes('ghost')
+        ? { checked: true, ok: false, kind: 'not-found' as const, message: '账号不存在' }
+        : { checked: true, ok: true, kind: 'ok' as const, message: '账号存在' }),
+      onChanged: () => xChanged.count++,
+    },
+    // 微博分页 dep（生产装配形状）：只有状态快照 + 名单热生效回调；昵称解析走 weiboResolver
+    weibo: {
+      info: () => ({
+        config: { intervalSec: 300 },
+        status: { feed: emptyWeiboFeedSnapshot(), accounts: db.listWeiboAccounts(true).length },
+      }),
+      onChanged: () => weiboChanged.count++,
+    },
+    weiboResolver: {
+      resolveUid: async (nick) => (nick === '渡瀬結月' ? '2203177060' : null),
+    },
   };
   const server: Server = createPanelServer(deps);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -114,8 +142,10 @@ test('未配置 token → 503；坏 token / 无 token → 401', async (t) => {
   assert.equal(r1.status, 503);
 
   const f = await setup(t);
-  for (const headers of [{}, { authorization: 'Bearer wrong-token' }]) {
-    const r = await fetch(`${f.base}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{}' });
+  const headerCases: Record<string, string>[] = [{}, { authorization: 'Bearer wrong-token' }];
+  for (const extra of headerCases) {
+    const headers: Record<string, string> = { 'content-type': 'application/json', ...extra };
+    const r = await fetch(`${f.base}/mcp`, { method: 'POST', headers, body: '{}' });
     assert.equal(r.status, 401);
   }
 });
@@ -279,4 +309,287 @@ test('search_posts：keyword/uid 过滤 + limit 上限 + raw 不下发', async (
   // LIKE 通配符按字面处理（% 不炸库也不放大匹配）
   const wild = (await call(adm, 'search_posts', { keyword: '%' })) as unknown[];
   assert.equal(wild.length, 0);
+});
+
+// ---- X / 推特（轴 B：新能力先进注册表，MCP 与面板共用同一套校验与 Db 方法）----
+
+test('X 工具：list/upsert/delete 账号与配置读写走注册表，写路径与面板同语义', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  const empty = (await call(adm, 'list_x_accounts')) as { accounts: unknown[] };
+  assert.deepEqual(empty.accounts, [], '初始空名单');
+
+  const created = (await call(adm, 'upsert_x_account', { screenName: '@Watase_Yuzuki' })) as {
+    id: number; account: { screenName: string; enabled: boolean };
+  };
+  assert.equal(created.account.screenName, 'watase_yuzuki', '归一化与面板一致');
+  assert.equal(f.db.listXAccounts().length, 1);
+
+  // 重名 409（错误消息透传到 MCP 客户端）
+  await assert.rejects(() => call(adm, 'upsert_x_account', { screenName: 'watase_yuzuki' }), /已在名单里/);
+
+  // 关联主播必须存在
+  await assert.rejects(() => call(adm, 'upsert_x_account', { screenName: 'd4dj_pj', biliUid: '9999' }), /不在监听名单/);
+  f.db.upsertStreamer({ uid: '1001', uname: '阿梓', watch: true });
+  await call(adm, 'upsert_x_account', { screenName: 'd4dj_pj', biliUid: '1001', enabled: false });
+
+  const listed = (await call(adm, 'list_x_accounts')) as { accounts: Array<{ screenName: string; biliName: string | null; enabled: boolean }> };
+  assert.deepEqual(listed.accounts.map((a) => a.screenName), ['d4dj_pj', 'watase_yuzuki']);
+  assert.equal(listed.accounts[0]!.biliName, '阿梓', '回显关联主播展示名');
+  assert.equal(listed.accounts[0]!.enabled, false, '停用状态可见');
+
+  // 更新（带 id）
+  await call(adm, 'upsert_x_account', { id: created.id, enabled: false });
+  assert.equal(f.db.getXAccount(created.id)!.enabled, false);
+
+  // 配置读写
+  await call(adm, 'update_x_config', { intervalSec: 600, fallbackHtml: false });
+  assert.equal(f.db.getSetting('x_interval_sec'), '600');
+  const got = (await call(adm, 'get_x_config')) as { config: { intervalSec: number; fallbackHtml: boolean } };
+  assert.equal(got.config.intervalSec, 600);
+  assert.equal(got.config.fallbackHtml, false);
+
+  // 删除
+  await call(adm, 'delete_x_account', { id: created.id });
+  assert.equal(f.db.listXAccounts().length, 1);
+  await assert.rejects(() => call(adm, 'delete_x_account', { id: created.id }), /X 账号不存在/);
+});
+
+test('X 工具：gateway 角色看不到（配置含代理地址，属运维面）', async (t) => {
+  const f = await setup(t);
+  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const tools = (await gw.listTools()).tools.map((x) => x.name);
+  assert.equal(tools.includes('get_x_config'), false, 'admin 专属');
+  assert.equal(tools.includes('upsert_x_account'), false, 'admin 专属');
+  assert.equal(tools.includes('list_x_accounts'), true, '只读名单对群友可见');
+});
+
+// ---- 微博（图文分页第二个来源）：与 X 同构的一整套工具 ----
+
+test('微博工具：list/upsert/delete 账号；昵称解析补 uid；写路径与面板同语义', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  assert.deepEqual(((await call(adm, 'list_weibo_accounts')) as { accounts: unknown[] }).accounts, []);
+
+  // 只给昵称 → 走解析链；解析不到 → 拒
+  await assert.rejects(() => call(adm, 'upsert_weibo_account', { nickname: '查无此人' }), /找不到这个昵称/);
+  const byNick = (await call(adm, 'upsert_weibo_account', { nickname: '渡瀬結月' })) as {
+    id: number; account: { uid: string; nickname: string };
+  };
+  assert.equal(byNick.account.uid, '2203177060');
+  assert.equal(byNick.account.nickname, '渡瀬結月');
+  assert.equal(f.db.listWeiboAccounts().length, 1);
+  await assert.rejects(() => call(adm, 'upsert_weibo_account', { uid: '2203177060' }), /已在名单里/);
+
+  // 直填 uid 也能建（另起一个账号）
+  const created = (await call(adm, 'upsert_weibo_account', { uid: '9999' })) as {
+    id: number; account: { uid: string; enabled: boolean };
+  };
+  assert.equal(created.account.uid, '9999');
+  assert.equal(f.db.listWeiboAccounts().length, 2);
+
+  // 关联主播必须存在；更新带 id。uid 与昵称是平台事实：更新时传入直接拒绝
+  await assert.rejects(() => call(adm, 'upsert_weibo_account', { uid: '111', biliUid: '9999' }), /不在监听名单/);
+  f.db.upsertStreamer({ uid: '1001', uname: '阿梓', watch: true });
+  await assert.rejects(
+    () => call(adm, 'upsert_weibo_account', { id: byNick.id, nickname: '阿梓' }),
+    /平台事实不可改/,
+  );
+  await assert.rejects(
+    () => call(adm, 'upsert_weibo_account', { id: byNick.id, uid: '8888' }),
+    /平台事实不可改/,
+  );
+  await call(adm, 'upsert_weibo_account', { id: byNick.id, biliUid: '1001', enabled: false });
+  const listed = (await call(adm, 'list_weibo_accounts')) as {
+    accounts: Array<{ uid: string; nickname: string; biliName: string | null; enabled: boolean }>;
+  };
+  assert.equal(listed.accounts.find((a) => a.uid === '2203177060')!.biliName, '阿梓');
+  assert.equal(listed.accounts.find((a) => a.uid === '2203177060')!.enabled, false);
+  assert.equal(listed.accounts.find((a) => a.uid === '2203177060')!.nickname, '渡瀬結月', '昵称是平台事实，更新改不动');
+
+  await call(adm, 'delete_weibo_account', { id: byNick.id });
+  await assert.rejects(() => call(adm, 'delete_weibo_account', { id: byNick.id }), /微博账号不存在/);
+});
+
+test('微博工具：gateway 只读可见；set_streamer 填微博昵称会建/关联名单行', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const tools = (await gw.listTools()).tools.map((x) => x.name);
+  assert.equal(tools.includes('list_weibo_accounts'), true, '只读名单对群友可见');
+  assert.equal(tools.includes('upsert_weibo_account'), false, '写是 admin 专属');
+  assert.equal(tools.includes('delete_weibo_account'), false);
+
+  f.db.upsertStreamer({ uid: '1001', uname: '阿梓', watch: true });
+  await call(adm, 'set_streamer', { uid: '1001', weiboNick: '渡瀬結月' });
+  const acc = f.db.getWeiboAccountByUid('2203177060')!;
+  assert.equal(acc.biliUid, '1001', '主播详情填昵称 = 在微博名单里建行并关联');
+  await call(adm, 'set_streamer', { uid: '1001', weiboNick: null });
+  assert.equal(f.db.getWeiboAccountByUid('2203177060')!.biliUid, null, '清空 → 解关联但保留行');
+});
+
+test('upsert_post_rule：规则平台无关——「引用」/「翻译」不再拒绝，规则对象不再带 platform', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const { groupChannelId } = seedBase(f.db);
+
+  const wbRule = (await call(adm, 'upsert_post_rule', {
+    name: '通用规则', channels: [groupChannelId],
+  })) as { id: number };
+  const stored = f.db.listPostRules().find((r) => r.id === wbRule.id)!;
+  assert.ok(!('platform' in stored), '规则已平台无关，对象不再带 platform');
+
+  // quote 对非 X 帖永不命中是语义（matcher 按帖子平台自然生效），不是保存校验错误；
+  // 翻译改为运行时门控（非 X 帖不译），任何规则都可开
+  const q = (await call(adm, 'upsert_post_rule', { name: '引用规则', filters: { quote: true } })) as { id: number };
+  assert.equal(f.db.listPostRules().find((r) => r.id === q.id)!.filters.quote, true);
+  const tr = (await call(adm, 'upsert_post_rule', { name: '翻译规则', llmTranslate: true })) as { id: number };
+  assert.equal(f.db.listPostRules().find((r) => r.id === tr.id)!.llmTranslate, true);
+});
+
+test('search_posts：platform=twitter 可检索 X 归档；set_listen 支持 twitter', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  f.db.insertPosts([
+    { platform: 'twitter', uid: 'watase_yuzuki', itemId: '9001', type: 'retweet', text: '转发的推文', pics: ['https://pbs.twimg.com/media/a.jpg'], pubTs: 5000, url: 'https://x.com/a/status/9001', raw: '{"b":2}' },
+  ]);
+  const only = (await call(adm, 'search_posts', { platform: 'twitter' })) as Array<{ itemId: string; pics: string[] }>;
+  assert.equal(only.length, 1);
+  assert.equal(only[0]!.itemId, '9001', 'X 帖也能按平台检索');
+  assert.equal(only[0]!.pics.length, 1);
+
+  const set = (await call(adm, 'set_listen', { feature: 'twitter', enabled: false })) as { feature: string; enabled: boolean };
+  assert.equal(set.feature, 'twitter');
+  assert.equal(set.enabled, false, '推特开关经 MCP 可关');
+  assert.equal(f.db.getSetting('listen_twitter'), '0');
+});
+
+test('图文帖规则工具：list/upsert/delete + 引用校验 + 死规则拒绝 + 合并后校验', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const { groupChannelId } = seedBase(f.db);
+
+  assert.deepEqual(((await call(adm, 'list_post_rules')) as { rules: unknown[] }).rules, []);
+
+  const created = (await call(adm, 'upsert_post_rule', {
+    name: '只推带图原创', channels: [groupChannelId], filters: { media: true },
+  })) as { id: number };
+  const listed = (await call(adm, 'list_post_rules')) as {
+    rules: Array<{ filters: { original: boolean; media: boolean }; channels: number[] }>;
+  };
+  assert.equal(listed.rules[0]!.filters.original, true, '未提供的筛选回落默认');
+  assert.equal(listed.rules[0]!.filters.media, true);
+  assert.deepEqual(listed.rules[0]!.channels, [groupChannelId]);
+  assert.equal('accountIds' in listed.rules[0]!, false, '规则不再携带账号集合（生效范围在账号侧 ruleIds）');
+  assert.equal('platform' in listed.rules[0]!, false, '规则已平台无关，不再带 platform');
+
+  await assert.rejects(
+    () => call(adm, 'upsert_post_rule', { filters: { original: false, retweet: false } }),
+    /至少要勾一个/,
+  );
+  await assert.rejects(() => call(adm, 'upsert_post_rule', { channels: [9999] }), /渠道不存在/);
+
+  // 更新：只改推送词，渠道沿用旧值（合并后仍要校验通过）
+  await call(adm, 'upsert_post_rule', { id: created.id, messageTemplate: '{author} 更新了' });
+  assert.equal(f.db.listPostRules()[0]!.messageTemplate, '{author} 更新了');
+
+  // LLM 判定：开了就必须给标准（与面板同一条校验）
+  await assert.rejects(
+    () => call(adm, 'upsert_post_rule', { id: created.id, llmJudge: true }),
+    /必须填判定提示词/,
+  );
+  await call(adm, 'upsert_post_rule', {
+    id: created.id, llmJudge: true, judgePrompt: '只推直播预告', llmTranslate: true,
+  });
+  const withLlm = f.db.listPostRules()[0]!;
+  assert.equal(withLlm.llmJudge, true);
+  assert.equal(withLlm.judgePrompt, '只推直播预告');
+  assert.equal(withLlm.llmTranslate, true);
+
+  await call(adm, 'delete_post_rule', { id: created.id });
+  assert.equal(f.db.listPostRules().length, 0);
+  await assert.rejects(() => call(adm, 'delete_post_rule', { id: created.id }), /不存在/);
+});
+
+test('账号 ruleIds 选用规则：规则平台无关（存在即可选用）；delete_post_rule 连带清扫三份名单', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const rule1 = (await call(adm, 'upsert_post_rule', { name: 'r1' })) as { id: number };
+  const rule2 = (await call(adm, 'upsert_post_rule', { name: 'r2' })) as { id: number };
+
+  // X 账号：任何规则都可选用；不存在的拒
+  const x = (await call(adm, 'upsert_x_account', { screenName: 'watase_yuzuki', ruleIds: [rule1.id, rule2.id] })) as {
+    id: number; account: { ruleIds: number[] };
+  };
+  assert.deepEqual(x.account.ruleIds, [rule1.id, rule2.id], '规则平台无关，任意选用');
+  await assert.rejects(
+    () => call(adm, 'upsert_x_account', { id: x.id, ruleIds: [9999] }),
+    /图文帖规则不存在/,
+  );
+
+  // 微博 / B站账号同口径（同一条规则跨平台选用）
+  const wb = (await call(adm, 'upsert_weibo_account', { uid: '2203177060', ruleIds: [rule1.id] })) as { id: number };
+  assert.deepEqual(f.db.getWeiboAccount(wb.id)!.ruleIds, [rule1.id]);
+  const bi = (await call(adm, 'upsert_bili_account', { uid: '7706705', ruleIds: [rule2.id] })) as { id: number };
+  assert.deepEqual(f.db.getBiliAccount(bi.id)!.ruleIds, [rule2.id]);
+
+  // 删规则 → 三份名单的 ruleIds 不残留已删 id
+  await call(adm, 'delete_post_rule', { id: rule1.id });
+  assert.deepEqual(f.db.getXAccount(x.id)!.ruleIds, [rule2.id], 'X 名单清扫已删 id');
+  assert.deepEqual(f.db.getWeiboAccount(wb.id)!.ruleIds, [], '微博名单清扫');
+  await call(adm, 'delete_post_rule', { id: rule2.id });
+  assert.deepEqual(f.db.getXAccount(x.id)!.ruleIds, [], 'X 名单清扫');
+  assert.deepEqual(f.db.getBiliAccount(bi.id)!.ruleIds, [], 'B站名单清扫');
+});
+
+test('B站动态账号工具：list/upsert/delete；uid 链接归一化；gateway 只读可见', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const gwTools = (await gw.listTools()).tools.map((x) => x.name);
+  assert.equal(gwTools.includes('list_bili_accounts'), true, '只读名单对群友可见');
+  assert.equal(gwTools.includes('upsert_bili_account'), false, '写是 admin 专属');
+  assert.equal(gwTools.includes('delete_bili_account'), false);
+
+  assert.deepEqual(((await call(adm, 'list_bili_accounts')) as { accounts: unknown[] }).accounts, [], '初始空名单');
+
+  const created = (await call(adm, 'upsert_bili_account', {
+    uid: 'https://space.bilibili.com/7706705/dynamic', displayName: '阿梓',
+  })) as { id: number; account: { uid: string; enabled: boolean } };
+  assert.equal(created.account.uid, '7706705', '链接归一化成纯数字 uid');
+  assert.equal(created.account.enabled, true, '新增默认启用');
+  await assert.rejects(() => call(adm, 'upsert_bili_account', { uid: '7706705' }), /已在名单里/);
+
+  // uname 是平台事实：新建/更新都不收手填，传入直接拒绝
+  await assert.rejects(() => call(adm, 'upsert_bili_account', { uid: '9', uname: '手填名' }), /不接受手填/);
+  await assert.rejects(
+    () => call(adm, 'upsert_bili_account', { id: created.id, uname: '阿梓从小就很可爱' }),
+    /不接受手填/,
+  );
+
+  // 更新（带 id）：启停；uid 是身份锚点不可改
+  await assert.rejects(() => call(adm, 'upsert_bili_account', { id: created.id, uid: '9' }), /身份锚点不可改/);
+  await call(adm, 'upsert_bili_account', { id: created.id, enabled: false });
+  const acc = f.db.getBiliAccount(created.id)!;
+  assert.equal(acc.enabled, false);
+  assert.equal(acc.uname, null, 'uname 由抓取回写（touch），输入面动不了');
+
+  const listed = (await call(adm, 'list_bili_accounts')) as { accounts: Array<{ uid: string; enabled: boolean }> };
+  assert.equal(listed.accounts.length, 1);
+  assert.equal(listed.accounts[0]!.enabled, false, '停用状态可见');
+
+  await call(adm, 'delete_bili_account', { id: created.id });
+  assert.equal(f.db.listBiliAccounts().length, 0);
+  await assert.rejects(() => call(adm, 'delete_bili_account', { id: created.id }), /不存在/);
+});
+
+test('图文帖规则：gateway 能看不能改（list 共享、写是 admin 专属）', async (t) => {
+  const f = await setup(t);
+  const gw = await mcpClient(f, GATEWAY_TOKEN);
+  const tools = (await gw.listTools()).tools.map((x) => x.name);
+  assert.equal(tools.includes('list_post_rules'), true, '只读对群友可见');
+  assert.equal(tools.includes('upsert_post_rule'), false, '写是 admin 专属');
+  assert.equal(tools.includes('delete_post_rule'), false);
 });

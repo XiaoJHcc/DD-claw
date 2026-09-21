@@ -26,6 +26,9 @@ export interface RuntimeConfig {
   notifyOnNewSubscription: boolean;
   keyframeIntervalSec: number;
   keyframeEnabled: boolean;
+  backlogPushEnabled: boolean;
+  backlogMaxAgeHours: number;
+  backlogMaxPerAccount: number;
 }
 
 interface NumSpec {
@@ -49,6 +52,8 @@ export const NUM_SPECS: NumSpec[] = [
   { key: 'llm_circuit_threshold', field: 'llmCircuitThreshold', label: 'LLM 熔断阈值', def: 3, min: 1, max: 20 },
   { key: 'llm_circuit_cooldown_ms', field: 'llmCircuitCooldownMs', label: 'LLM 熔断冷却', def: 600_000, min: 10_000, max: 3_600_000 },
   { key: 'keyframe_interval_sec', field: 'keyframeIntervalSec', label: '关键帧缓存间隔', def: 300, min: 60, max: 3600 },
+  { key: 'backlog_max_age_hours', field: 'backlogMaxAgeHours', label: '补推时间限制（小时）', def: 6, min: 1, max: 168 },
+  { key: 'backlog_max_per_account', field: 'backlogMaxPerAccount', label: '补推账号条数限制（1~50）', def: 3, min: 1, max: 50 },
 ];
 
 interface BoolSpec {
@@ -62,6 +67,7 @@ export const BOOL_SPECS: BoolSpec[] = [
   { key: 'notify_on_first_run', field: 'notifyOnFirstRun', label: '启动时已在播也推送', def: false },
   { key: 'notify_on_new_subscription', field: 'notifyOnNewSubscription', label: '新增订阅在播即推送', def: true },
   { key: 'keyframe_enabled', field: 'keyframeEnabled', label: '关键帧缓存', def: true },
+  { key: 'backlog_push_enabled', field: 'backlogPushEnabled', label: '补推未运行期间的图文', def: false },
 ];
 
 export function getRuntimeConfig(db: Db): RuntimeConfig {
@@ -99,6 +105,24 @@ export function isNotifyOnFirstRun(db: Db): boolean {
 export function isNotifyOnNewSubscription(db: Db): boolean {
   const v = db.getSetting('notify_on_new_subscription');
   return v === '1' ? true : v === '0' ? false : true;
+}
+
+/** 图文帖缺口轮的补推参数（三个图文源每轮直读，热生效免重启） */
+export interface PostBacklogConfig {
+  enabled: boolean;
+  /** 只补最近这么多秒内发布的帖子 */
+  maxAgeSec: number;
+  /** 每账号最多补多少条（取时间窗内最新的） */
+  maxPerAccount: number;
+}
+
+export function getPostBacklogConfig(db: Db): PostBacklogConfig {
+  const rc = getRuntimeConfig(db);
+  return {
+    enabled: rc.backlogPushEnabled,
+    maxAgeSec: rc.backlogMaxAgeHours * 3600,
+    maxPerAccount: rc.backlogMaxPerAccount,
+  };
 }
 
 /**

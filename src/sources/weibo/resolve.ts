@@ -14,6 +14,8 @@ export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 export interface WeiboResolver {
   /** 昵称 → 微博 UID；昵称不存在返回 null；网络/解析失败抛中文 Error */
   resolveUid(nick: string): Promise<string | null>;
+  /** 微博 UID → 昵称；uid 不存在返回 null；网络/解析失败抛中文 Error */
+  resolveNick(uid: string): Promise<string | null>;
 }
 
 interface VisitorCookies {
@@ -36,10 +38,10 @@ function extractJsonpData(body: string, what: string): Record<string, unknown> {
 }
 
 /**
- * 微博昵称 → UID 解析器（匿名访客通道，无需登录；流程已实测 2026-08-03）：
+ * 微博昵称 ↔ UID 解析器（匿名访客通道，无需登录；昵称→UID 流程已实测 2026-08-03）：
  * 1. passport genvisitor 拿 tid
  * 2. passport visitor/incarnate 拿访客 cookie（SUB/SUBP）
- * 3. m.weibo.cn/n/<昵称> 302 跳 /u/<uid>
+ * 3. m.weibo.cn/n/<昵称> 302 跳 /u/<uid>；m.weibo.cn/api/container/getIndex?type=uid 取 userInfo.screen_name
  * 访客 cookie 模块级缓存；跳回 visitor 验证页视为失效，重建后重试一次。
  * cookie 绝不进日志。fetch 可注入便于单测。
  */
@@ -94,6 +96,37 @@ export function createWeiboResolver(fetchImpl?: FetchImpl): WeiboResolver {
     throw new Error(`微博昵称解析请求失败（HTTP ${res.status}）`);
   }
 
+  /** uid → 昵称：getIndex 的 userInfo；跳登录/验证页视为 cookie 失效，缺 userInfo 视为 uid 不存在 */
+  async function lookupNickOnce(uid: string, cookies: VisitorCookies): Promise<string | null | 'expired'> {
+    const res = await doFetch(
+      'https://m.weibo.cn/api/container/getIndex?type=uid&value=' + encodeURIComponent(uid),
+      {
+        headers: {
+          'user-agent': MOBILE_UA,
+          cookie: `SUB=${cookies.sub}; SUBP=${cookies.subp}`,
+          referer: 'https://m.weibo.cn/',
+        },
+        redirect: 'manual',
+      },
+    );
+    if (res.status === 301 || res.status === 302) {
+      const loc = res.headers.get('location') ?? '';
+      // 2026-09 实测：getIndex 现在还会 302 到 sso/signin（微博侧收紧，访客 cookie 不再够用）
+      if (/visitor\.passport\.weibo\.(com|cn)|login|signin/.test(loc)) return 'expired';
+      throw new Error(`微博 uid 解析跳转目标无法识别（Location: 非资料页）`);
+    }
+    if (!res.ok) throw new Error(`微博 uid 解析请求失败（HTTP ${res.status}）`);
+    let json: { ok?: number; data?: { userInfo?: { screen_name?: unknown } } };
+    try {
+      json = (await res.json()) as typeof json;
+    } catch {
+      throw new Error('微博 uid 解析响应不是合法 JSON');
+    }
+    const name = json.data?.userInfo?.screen_name;
+    if (typeof name === 'string' && name.trim()) return name.trim();
+    return null; // uid 不存在（或该账号无资料页）
+  }
+
   return {
     async resolveUid(nick: string): Promise<string | null> {
       try {
@@ -111,6 +144,23 @@ export function createWeiboResolver(fetchImpl?: FetchImpl): WeiboResolver {
         // 底层网络/超时异常统一包成带中文说明的 Error；自己抛的中文错原样上抛
         if (e instanceof Error && e.message.startsWith('微博')) throw e;
         throw new Error(`微博昵称解析请求异常：${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    async resolveNick(uid: string): Promise<string | null> {
+      try {
+        if (!cached) cached = await fetchVisitorCookies();
+        let result = await lookupNickOnce(uid, cached);
+        if (result === 'expired') {
+          log.info('微博访客 cookie 已失效，重建后重试一次');
+          cached = null;
+          cached = await fetchVisitorCookies();
+          result = await lookupNickOnce(uid, cached);
+          if (result === 'expired') throw new Error('微博访客 cookie 重建后仍失效，uid 解析失败');
+        }
+        return result;
+      } catch (e) {
+        if (e instanceof Error && e.message.startsWith('微博')) throw e;
+        throw new Error(`微博 uid 解析请求异常：${e instanceof Error ? e.message : String(e)}`);
       }
     },
   };

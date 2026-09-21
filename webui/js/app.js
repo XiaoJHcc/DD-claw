@@ -6,11 +6,12 @@ import './llm.js';
 import './categories.js';
 import './push.js';
 import './napcat.js';
+import './x.js';
 import './streamers.js';
 import './follows.js';
 import { schedRelayout } from './schedule.js';
 
-// 边栏导航：切换视图（时间表 / 主播列表 / 设置），隐藏态视图的后台轮询照跑（数据保鲜）
+// 边栏导航：切换视图（时间表 / 主播 / 图文 / 设置），隐藏态视图的后台轮询照跑（数据保鲜）
 function switchView(v, activeEl) {
   var items = document.querySelectorAll('.nav-item');
   for (var i = 0; i < items.length; i++) items[i].classList.toggle('active', items[i] === (activeEl || document.querySelector('.nav-item[data-view="' + v + '"]')));
