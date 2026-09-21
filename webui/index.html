@@ -17,6 +17,7 @@
 <button class="nav-item" data-action="nav-view" data-view="streamers"><i data-icon="users"></i><span>主播</span></button>
 <button class="nav-item" data-action="nav-view" data-view="x"><i data-icon="send"></i><span>图文</span></button>
 <button class="nav-item" data-action="nav-view" data-view="settings"><i data-icon="gear"></i><span>设置</span></button>
+<button class="nav-item" data-action="nav-view" data-view="agent"><i data-icon="message-square"></i><span>Agent</span></button>
 </nav>
 <div class="side-foot">
 <span class="live-count"><i class="pulse"></i>在播 <b id="side-live-count">0</b></span>
@@ -171,6 +172,24 @@
 <button class="x-add-btn" data-action="add-feed-account" title="添加账号" aria-label="添加账号"><span data-icon="plus"></span></button>
 </div>
 <div class="st-grid" id="x-account-grid">加载中…</div>
+</div>
+
+<div class="view hidden" id="view-agent">
+<section class="card acc-purple" id="card-agent">
+<div class="card-head"><span class="card-ic" data-icon="message-square"></span><h2>Agent</h2></div>
+<div class="chat-tools">
+<span class="chat-mode-label">写模式</span>
+<div id="chat-mode-nav"></div>
+<span class="hint chat-mode-hint">写前询问 = agent 改设置前先问你确认；自动修改 = 直接改，可撤销兜底</span>
+<button class="btn btn-line" data-action="chat-reset"><span data-icon="clock"></span>重置上下文</button>
+</div>
+<div id="chat-list" class="chat-list">加载中…</div>
+<div class="chat-note hidden" id="chat-note">对话上下文已较长，可点「重置上下文」清空</div>
+<div class="chat-composer">
+<textarea class="inp" id="chat-input" placeholder="让 agent 做什么？（Enter 发送 / Shift+Enter 换行）"></textarea>
+<button class="btn btn-primary" data-action="chat-send"><span data-icon="send"></span>发送</button>
+</div>
+</section>
 </div>
 </main>
 </div>

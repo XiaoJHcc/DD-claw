@@ -288,3 +288,18 @@ export const mockUndoHistory = [
     at: 0, undone: true, tables: ['push_channels'], rows: 4,
   },
 ];
+
+// ---- Agent 聊天（P1 前端聊天视图的 demo 态）：初始会话四条 = 一次完整的「写前询问」往返
+// （用户要改分类关键词 → agent 先要确认 → 确认后回报已执行），一进 demo 就能看到两列气泡
+// 与模式语义。话题与 defaults.json 的种子数据一致（分类「歌回」、渠道「粉丝群」），
+// 免得演示露出后端没有的对象。at 由 mock-api 在冻结时刻后按偏移种入（数组顺序 = 时间顺序）。
+// 交互剧本（mock 的 POST /api/chat 按关键词回话）另见 mock-api.js 的 chatScript。
+export const mockChat = {
+  mode: 'ask',
+  messages: [
+    { role: 'user', content: '给「歌回」这个分类加上关键词「演唱会」', at: 0 },
+    { role: 'assistant', content: '我先确认一下：要给分类「歌回」新增关键词「演唱会」吗？\n确认后我就写入（改动记进设置页的「变更历史」，可撤销）。', at: 0 },
+    { role: 'user', content: '确认', at: 0 },
+    { role: 'assistant', content: '已写入。分类「歌回」现在的关键词是「唱、歌、音乐、演唱会」，匹配方式仍是「或」。', at: 0 },
+  ],
+};

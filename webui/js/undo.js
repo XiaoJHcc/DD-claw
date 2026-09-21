@@ -56,7 +56,7 @@ const TOOL_NAMES = {
 function toolName(t) { return TOOL_NAMES[t] || t || '未知操作'; }
 
 // 来源入口（entry）→ 面板文案；未知值回退原样
-const ENTRY_NAMES = { panel: '面板', mcp: 'MCP' };
+const ENTRY_NAMES = { panel: '面板', mcp: 'MCP', agent: 'Agent' };
 
 function two(n) { return String(n).padStart(2, '0'); }
 

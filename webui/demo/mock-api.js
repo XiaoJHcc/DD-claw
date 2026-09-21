@@ -71,6 +71,8 @@ const store = {
   pushEnabled: true,
   llmEnabled: true,
   undoHistory: clone(M.mockUndoHistory),
+  chat: { mode: M.mockChat.mode, messages: clone(M.mockChat.messages) },
+  chatPending: null,   // 挂起的「等你确认」写操作（写前询问模式：确认后才回报已执行）
   biliLoggedIn: true,
   weiboLoggedIn: true,
   listenSettings: { dynamic: 'auto', weibo: 'auto', twitter: 'auto' },
@@ -117,6 +119,9 @@ for (const p of store.biliPosts) {
 // 变更历史的 at 同样用冻结时刻（列表显示「x 分钟前」；偏移与 mockUndoHistory 顺序一一对应，恒新→旧）
 const undoAges = [40, 8 * 60, 25 * 60, 2 * 3600];
 store.undoHistory.forEach((c, i) => { c.at = nowSec - (undoAges[i] ?? 3600); });
+// Agent 初始会话同样用冻结时刻（气泡显示「x 分钟前」；越靠后越新，偏移递减）
+const chatAges = [600, 540, 300, 240];
+store.chat.messages.forEach((m, i) => { m.at = nowSec - (chatAges[i] ?? 60); });
 
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
@@ -127,6 +132,50 @@ function json(status, obj) {
 const ok = (obj) => json(200, obj);
 const created = (obj) => json(201, obj);
 const err = (status, msg) => json(status, { error: msg });
+
+// ---- Agent 聊天剧本（demo 的 POST /api/chat：真实实现是多轮 LLM + 工具调用，这里按关键词回固定话术）----
+// 三条剧本：
+//   ① 含「撤销」→ 真把变更历史的栈顶标成已撤销，再回拟真文案（设置页的「变更历史」随之同步，跨视图一致）
+//   ② 含「推送」/「规则」→ 写前询问模式下先回确认话术并把这次写挂进 chatPending（用户回「确认/好」
+//      才回「已执行」，否则回「先不动」）；自动修改模式直接回「已执行」
+//   ③ 缺省 → 通用回复（说明能做什么）
+// 用量字段与真实后端同构：messages / chars 由当前会话算，needsResetHint 在 demo 里恒 false（正常值）
+const CHAT_TOOL_NAMES = {
+  upsert_category: '保存分类', delete_category: '删除分类',
+  set_push_enabled: '开关推送', reorder_channels: '调整渠道顺序',
+};
+const chatUsage = () => {
+  let chars = 0;
+  for (const m of store.chat.messages) chars += String(m.content || '').length;
+  return { messages: store.chat.messages.length, chars, needsResetHint: false };
+};
+function chatScript(text) {
+  if (store.chatPending) {
+    const what = store.chatPending;
+    store.chatPending = null;
+    return /^(确认|好的|好|行|可以|ok|yes|是)/i.test(text)
+      ? `已执行：${what}。（改动可在设置页「变更历史」撤销）`
+      : '好，那我先不动。想改的时候再说具体改什么。';
+  }
+  if (text.includes('撤销')) {
+    const top = store.undoHistory.find((c) => !c.undone);
+    if (!top) return '刚查了「变更历史」：没有可撤销的变更（栈是空的）。';
+    top.undone = true;
+    return `已撤销最近一次变更：${CHAT_TOOL_NAMES[top.tool] || top.tool}` +
+      `（${top.tables.length} 张表 · ${top.rows} 行）。\n这条记录已在设置页「变更历史」里标为已撤销。`;
+  }
+  if (text.includes('推送') || text.includes('规则')) {
+    const what = '把推送规则「歌回」的渠道改成只留「粉丝群」';
+    if (store.chat.mode === 'ask') {
+      store.chatPending = what;
+      return `我先确认一下：要${what}吗？回「确认」我就写入。`;
+    }
+    return `已执行：${what}。\n这次是「自动修改」模式直接写入的，改动记进「变更历史」，可撤销。`;
+  }
+  return '我是 DD-claw 的 Agent。能查当前状态（在播、监听开关、最近推送），也能改设置' +
+    '（分类关键词、推送/图文规则、账号名单、各项开关）——所有写入都记进「变更历史」，可以撤销。' +
+    '\n\n直接说要做什么就行。';
+}
 
 // ---- 路由 ----
 function handle(method, path, q, rawBody) {
@@ -893,6 +942,32 @@ for (const p of store.twitterPosts) {
     return ok({ ok: true, change: { id: top.id, tool: top.tool } });
   }
 
+  // ---- Agent 聊天（P1 前端聊天视图）：与真实后端 /api/chat* 逐字同构 ----
+  // 会话在 mock 内存里演进（history 返回它，reset 清空；UI 不缓存），回复逻辑 = 上面的 chatScript。
+  if (path === '/api/chat/history' && method === 'GET') {
+    return ok({ messages: clone(store.chat.messages), mode: store.chat.mode, usage: chatUsage() });
+  }
+  if (path === '/api/chat' && method === 'POST') {
+    const text = String(body().message || '').trim();
+    if (!text) return json(400, { error: '消息不能为空' });
+    const at = Math.floor(Date.now() / 1000);
+    store.chat.messages.push({ role: 'user', content: text, at });
+    const reply = chatScript(text);
+    store.chat.messages.push({ role: 'assistant', content: reply, at });
+    return ok({ ok: true, reply, usage: chatUsage() });
+  }
+  if (path === '/api/chat/reset' && method === 'POST') {
+    store.chat.messages = [];
+    store.chatPending = null;
+    return ok({ ok: true });
+  }
+  if (path === '/api/chat/mode' && method === 'PUT') {
+    const m = body().mode;
+    if (m !== 'ask' && m !== 'auto') return json(400, { error: 'mode 必须是 ask 或 auto' });
+    store.chat.mode = m;
+    return ok({ ok: true, mode: m });
+  }
+
   // ---- 时间表 ----
   if (path === '/api/schedule' && method === 'GET') {
     const from = q.get('from') || M.bjAddDays(M.bjToday(), -7);
@@ -925,7 +1000,13 @@ window.fetch = function (input, init) {
   if (u.origin === location.origin && u.pathname.startsWith('/api/')) {
     const method = (init && init.method) || 'GET';
     const rawBody = (init && init.body) || null;
-    return Promise.resolve(handle(method, u.pathname, u.searchParams, rawBody));
+    const run = () => handle(method, u.pathname, u.searchParams, rawBody);
+    // 发消息是唯一「慢」的路由（真实实现是多轮 LLM + 工具调用）：延迟一下再回，
+    // 让 UI 的在途态（输入框禁用 + 「思考中」气泡）在 demo 里真的看得见；其余路由立即返回。
+    if (u.pathname === '/api/chat' && method === 'POST') {
+      return new Promise((resolve) => setTimeout(() => resolve(run()), 700));
+    }
+    return Promise.resolve(run());
   }
   return realFetch(input, init);
 };

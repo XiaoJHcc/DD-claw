@@ -855,3 +855,54 @@ input:disabled{opacity:.5;background:var(--fill)}
 /* 卡片内容区（无 .set-rows）与行同口径：左右 --inset 外边距、与卡片头同心 */
 .undo-empty{display:flex;align-items:center;justify-content:center;min-height:var(--row-h);
   margin:0 var(--inset) var(--inset);font-size:var(--fs-sm);color:var(--text-2)}
+
+/* ============================================================
+   Agent 视图 · 聊天面板（P1 WebUI Agent 的用户面）：与时间表同口径占满一屏——
+   卡片撑满视图高度，消息列表是卡内滚动区（flex:1 + overflow-y:auto），
+   工具行（写模式开关 + 语义说明 + 重置）与输入区两段固定不动。
+   工具行/列表/输入区的左右缘统一 = --inset + --pad（与卡片头内容同一条左缘）。
+   ============================================================ */
+#view-agent{height:100%;padding-bottom:var(--pad);display:flex;flex-direction:column}
+#view-agent .card{flex:1;min-height:0;display:flex;flex-direction:column}
+/* 工具行：模式开关（定宽 segnav）+ 语义说明（占余量，窄屏省略号） + 重置按钮 */
+.chat-tools{display:flex;align-items:center;gap:var(--sp-3);margin:0 var(--inset) var(--sp-2);padding:0 var(--pad)}
+.chat-mode-label{flex:none;font-size:var(--fs-sm);color:var(--text-2)}
+#chat-mode-nav{flex:none;width:200px}
+.chat-mode-hint{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-tools .btn{flex:none}
+
+/* 消息列表：卡内滚动区（滚动条同 .pick-scroll 口径），底部留一段让最后一条不贴输入区 */
+.chat-list{flex:1;min-height:0;overflow-y:auto;margin:0 var(--inset);
+  padding:var(--sp-1) var(--pad) var(--sp-3);display:flex;flex-direction:column;gap:var(--sp-3);
+  scrollbar-width:thin;scrollbar-color:var(--separator) transparent}
+.chat-list::-webkit-scrollbar{width:8px}
+.chat-list::-webkit-scrollbar-thumb{background:var(--separator);border-radius:4px}
+.chat-list::-webkit-scrollbar-track{background:transparent}
+/* 消息 = 气泡 + 时间小字一列；用户靠右（浅蓝底）、助手靠左（浅灰底，背景标准 --bg-soft）。
+   气泡内是纯文本：pre-wrap 留换行、break-word 防长串溢出，不做 markdown 渲染 */
+.chat-msg{display:flex;flex-direction:column;gap:var(--sp-1);max-width:min(680px,80%)}
+.chat-msg.me{align-self:flex-end;align-items:flex-end}
+.chat-msg.ai{align-self:flex-start;align-items:flex-start}
+.chat-bubble{padding:10px var(--sp-3);border-radius:var(--r-inset);font-size:var(--fs-base);
+  line-height:1.55;white-space:pre-wrap;word-break:break-word}
+.chat-msg.ai .chat-bubble{background:var(--bg-soft);border-bottom-left-radius:6px}
+.chat-msg.me .chat-bubble{background:#EFF4FF;border-bottom-right-radius:6px}
+.chat-meta{font-size:var(--fs-xs);color:var(--text-2)}
+/* 在途态「思考中」+ 三点跳动（一轮真实请求可能是多轮 LLM + 工具调用，此态会停留一会儿） */
+.chat-thinking{display:inline-flex;align-items:center;gap:4px;color:var(--text-2)}
+.chat-thinking i{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.3;
+  animation:chat-dot 1.2s ease-in-out infinite}
+.chat-thinking i:nth-child(2){animation-delay:.15s}
+.chat-thinking i:nth-child(3){animation-delay:.3s}
+@keyframes chat-dot{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:.85;transform:translateY(-2.5px)}}
+/* 空态/加载失败一行居中浅字（在 flex 列里上下居中） */
+.chat-empty{margin:auto;padding:var(--sp-4) 0;text-align:center;font-size:var(--fs-sm);color:var(--text-2)}
+
+/* 上下文偏长的提示行：输入区上方一行浅字（不自动裁剪、不阻断发送） */
+.chat-note{margin:0 calc(var(--inset) + var(--pad)) var(--sp-2);font-size:var(--fs-sm);color:var(--text-2)}
+
+/* 输入区：多行输入框 + 发送按钮（按钮贴底与输入框最后一行对齐）；在途整块禁用 */
+.chat-composer{display:flex;align-items:flex-end;gap:var(--sp-2);
+  padding:0 calc(var(--inset) + var(--pad)) var(--inset)}
+.chat-composer .inp{flex:1;min-width:0;resize:none}
+.chat-composer textarea:disabled{opacity:.5;background:var(--bg-soft)}

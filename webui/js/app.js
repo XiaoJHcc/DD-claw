@@ -10,9 +10,10 @@ import { loadUndoHistory } from './undo.js';
 import './x.js';
 import './streamers.js';
 import './follows.js';
+import { loadChat } from './agent.js';
 import { schedRelayout } from './schedule.js';
 
-// 边栏导航：切换视图（时间表 / 主播 / 图文 / 设置），隐藏态视图的后台轮询照跑（数据保鲜）
+// 边栏导航：切换视图（时间表 / 主播 / 图文 / 设置 / Agent），隐藏态视图的后台轮询照跑（数据保鲜）
 function switchView(v, activeEl) {
   var items = document.querySelectorAll('.nav-item');
   for (var i = 0; i < items.length; i++) items[i].classList.toggle('active', items[i] === (activeEl || document.querySelector('.nav-item[data-view="' + v + '"]')));
@@ -22,10 +23,12 @@ function switchView(v, activeEl) {
   if (v === 'schedule') schedRelayout();
   // 变更历史只在进设置视图时拉取一次（不是常驻轮询的卡片——撤销栈只有写操作会变）
   if (v === 'settings') loadUndoHistory();
+  // 聊天会话持久在服务端（UI 不缓存），每次进 Agent 视图重拉历史与写模式；在途时不重拉（模块内自守）
+  if (v === 'agent') loadChat();
 }
 ACTIONS['nav-view'] = function (el) { switchView(el.getAttribute('data-view'), el); };
 
-// #streamers / #schedule / #settings 直达视图（走查/调试入口）
+// #schedule / #streamers / #x / #settings / #agent 直达视图（走查/调试入口）
 var hashView = location.hash.slice(1);
 if (hashView && document.getElementById('view-' + hashView)) switchView(hashView);
 
