@@ -108,7 +108,7 @@ export function parseUid(v: unknown, field = 'uid'): string {
 
 /**
  * PUT /api/streamers/:uid 的部分更新体（uid 由路由提供）；至少一个可更新字段。
- * weiboNick 空字符串 = 清除；昵称→UID 的解析在路由层做（需要注入 resolver）。
+ * weiboNick 空字符串 = 清除；昵称→UID 的解析在注册表工具层做（set_streamer，需要注入 resolver）。
  */
 export function parseStreamerPatch(body: unknown): Partial<StreamerInput> {
   const o = asObject(body);

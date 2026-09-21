@@ -380,6 +380,11 @@ export class Db {
     return this.db;
   }
 
+  /** 同步 SQL 段的事务包装（级联写原子化用；回调必须是同步代码，不得跨 await） */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
   /** 缺列则 ALTER TABLE 补上（旧库在线迁移；新列一律可空或带默认值，不动旧数据） */
   private ensureColumn(table: string, column: string, ddl: string): void {
     const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;

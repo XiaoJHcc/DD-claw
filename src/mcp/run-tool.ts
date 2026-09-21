@@ -13,17 +13,17 @@
  *   `错误：<msg>`），所以接线 registerTools 时 MCP 侧行为零变化。
  * - 写操作（`def.write`）在执行前经过审计与 `beforeWrite` 快照钩子。
  *
- * 有意未做的部分（避免与在改 `tools.ts` 的分支冲突）：
- * - **尚未接进 `registerTools`**（那需要改 tools.ts 尾部两行）；接线时把 try/catch + auditLog 换成
- *   本函数的返回值映射即可，MCP 输出不变。
+ * 有意未做的部分：
  * - 快照与写入的**同事务**保证不在本函数里：better-sqlite3 事务不能跨 await，而 handler 的
- *   异步校验（如 resolveWeiboNick）发生在写之前。P0 收敛每条写路径时，把「快照 + 同步 SQL 写」
- *   收进同一个 `Db.transaction`；本函数只提供 `beforeWrite` 这个记录点。
+ *   异步校验（如 resolveWeiboNick）发生在写之前。实际记录点是 `UndoStore.track()`
+ *   （经 `runToolTracked` 接线，REST 与 /mcp 同走），取舍见 `undo.ts`；`beforeWrite` 钩子保留给
+ *   后续逐路径把「快照 + 同步 SQL 写」收进同一个 `Db.transaction` 的精修。
  */
 import { z } from 'zod';
 import { makeLogger } from '../logger.js';
 import { HttpError } from '../panel/http-util.js';
 import type { PanelDeps } from '../panel/server.js';
+import { adminScope, channelScope, type ChangeMeta } from '../core/undo.js';
 import type { McpAuth } from './auth.js';
 import type { McpToolDef } from './tools.js';
 
@@ -84,8 +84,8 @@ function validateArgs(
   return { ok: false, error: `参数不合法：${detail}` };
 }
 
-/** 审计日志：写操作 + 角色 + 调用域渠道 + 参数摘要（llm key 值打码） */
-function defaultAudit(call: ToolCall): void {
+/** 审计日志：写操作 + 角色 + 调用域渠道 + 参数摘要（llm key 值打码）。entry 是入口名（MCP / 面板） */
+function auditLine(entry: string, call: ToolCall): void {
   const sanitized = { ...call.args };
   if (call.def.name === 'set_llm_key' && 'value' in sanitized) sanitized.value = '***';
   if ('key' in sanitized) sanitized.key = '***';
@@ -93,7 +93,12 @@ function defaultAudit(call: ToolCall): void {
   const who = scope === undefined
     ? `${call.ctx.role}:${call.ctx.name}`
     : `${call.ctx.role}:${call.ctx.name} #ch${scope}`;
-  log.info(`MCP 写操作 [${who}] ${call.def.name} ${JSON.stringify(sanitized)}`);
+  log.info(`${entry} 写操作 [${who}] ${call.def.name} ${JSON.stringify(sanitized)}`);
+}
+
+/** 审计：写操作 + 角色 + 调用域渠道 + 参数摘要（llm key 打码） */
+function defaultAudit(call: ToolCall): void {
+  auditLine('MCP', call);
 }
 
 function fail(error: string, status?: number): ToolFailure {
@@ -129,4 +134,39 @@ export async function runTool(
     if (e instanceof HttpError) return fail(e.message, e.status);
     return fail(e instanceof Error ? e.message : String(e));
   }
+}
+
+/** 面板 REST 入口的固定身份：回环免 token = admin（鉴权口径见 auth.ts 头注释） */
+export const PANEL_TOOL_CTX: McpAuth = { name: 'panel', role: 'admin', scope: {} };
+
+/** 变更记录归属：gateway 按令牌绑定渠道独立栈；admin / 面板共用全局栈（主人只有一个） */
+export function toolChangeMeta(ctx: McpAuth, entry: 'panel' | 'mcp', tool: string): ChangeMeta {
+  const ch = scopeChannelId(ctx);
+  return {
+    scope: ch === undefined ? adminScope() : channelScope(ch),
+    actor: ctx.name,
+    entry,
+    tool,
+  };
+}
+
+/**
+ * 写工具的快照接线（P0 判据 3 的执行形态）：`def.write` 且装配了 UndoStore 时，
+ * 整个调用经 `UndoStore.track()` 串行落变更记录（前像/后像差分方案与取舍见 undo.ts）；
+ * 否则直退 runTool（校验/审计/错误归一不变）。写路径的两类入口（/mcp 与面板 REST）都走这里。
+ */
+export async function runToolTracked(
+  deps: PanelDeps,
+  def: McpToolDef,
+  args: Record<string, unknown>,
+  ctx: McpAuth,
+  entry: 'panel' | 'mcp',
+): Promise<ToolResult> {
+  const hooks: RunToolHooks = { audit: (call) => auditLine(entry === 'panel' ? '面板' : 'MCP', call) };
+  if (!def.write || !deps.undo) return runTool(deps, def, args, ctx, hooks);
+  const { value } = await deps.undo.track(
+    toolChangeMeta(ctx, entry, def.name),
+    () => runTool(deps, def, args, ctx, hooks),
+  );
+  return value;
 }

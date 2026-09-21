@@ -18,10 +18,10 @@
  * 撤销语义：栈式逆序（只撤最近一次、可连续撤、不跳序）、**每来源渠道一条独立栈**（面板 admin 另有全局栈）、
  * 逐行比对「后像 == 当前值」不等则**中止且一行都不动**（宁中止不丢写）、历史全量保留（只标记 undone，不删记录）。
  *
- * 集成状态：**尚未接线**（新建文件、零冲突）。接线需要 `Db` 暴露原始句柄与事务包装
- * （计划里的「`Db` 需先补一个公开 transaction 包装」，现 `src/core/db.ts:239` 是 `private readonly db`），
- * 然后把各写路径的**同步 SQL 段**套进 `capture()`；热生效回调（reconcileRuntime / reconcileListen / 重建 router）
- * 由撤销执行器在 `undo()` 成功后按「表 → 回调」映射触发（回调挂在 `PanelDeps` 闭包，属接线工作）。
+ * 集成状态：**已接线**（切片 A 装配建表 + 切片 B 写路径落记录）：`Db.raw` 暴露句柄，装配根实例化并挂
+ * `PanelDeps`；写工具经 `runToolTracked` → `track()` 落变更记录（REST 与 /mcp 两个入口同走）。
+ * 热生效回调（reconcileRuntime / reconcileListen / 重建 router）由撤销执行器在 `undo()` 成功后
+ * 按「表 → 回调」映射触发（切片 C）。
  */
 import type Database from 'better-sqlite3';
 
@@ -139,6 +139,8 @@ export class UndoStore {
   private readonly now: () => number;
   private readonly redact: RedactPredicate;
   private readonly meta = new Map<string, TableMeta>();
+  /** track() 的内部串行队列：所有走 track 的写调用排队执行，差分窗口互不交错 */
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly db: Database.Database, opts: UndoStoreOptions = {}) {
     this.tables = opts.tables ?? DEFAULT_CONFIG_TABLES;
@@ -180,6 +182,34 @@ export class UndoStore {
       return { value, changeId: rows.length > 0 ? this.insertRecord(meta, rows) : null };
     });
     return run();
+  }
+
+  /**
+   * 异步段版 capture（写工具的 handler 内含 await 时走这里，见 run-tool.ts runToolTracked）：
+   * 进 fn 前取前像，fn 成功后同步做「后像 → 差分 → 落记录」。
+   *
+   * 与 capture() 的差别与取舍（REST 收敛切片拍板）：
+   * - 前像读取**不在**事务里（better-sqlite3 事务不能跨 await，handler 的异步校验/探测在前）。
+   *   改用内部队列把所有走 track 的写调用**串行化**，保证差分窗口不被另一个写工具交错污染。
+   * - 「写 → 后像差分 → 落记录」三步在 fn resolve 后是连续同步代码，单线程下实际原子。
+   *   残留窗口 = insertRecord 自身失败（磁盘级故障）：此时写已提交而记录没落——方向上是
+   *   「写了却撤不掉」，但仅在存储层故障时发生，且错误会抛给调用方（人知道出事了）。
+   * - 已知限制：不走 track 的写（轮询源回写，如 TwitterFeedSource.touchXAccount 写 x_accounts
+   *   的游标/头像列）可能在窗口内插入而被差分捎带。x_accounts 是配置+归档混合表（同 streamers
+   *   被排除的理由），这类污染的后果是撤销时逐行比对「后像==当前值」更易中止——宁中止不丢写，
+   *   方向可接受；彻底解法是快照按列过滤或把游标列拆表，留待撤销执行器切片裁决。
+   */
+  async track<T>(meta: ChangeMeta, fn: () => Promise<T>): Promise<{ value: T; changeId: number | null }> {
+    const run = async (): Promise<{ value: T; changeId: number | null }> => {
+      const before = this.snapshot();
+      const value = await fn();
+      const after = this.snapshot();
+      const rows = this.diff(before, after);
+      return { value, changeId: rows.length > 0 ? this.insertRecord(meta, rows) : null };
+    };
+    const p = this.queue.then(run, run);
+    this.queue = p.then(() => undefined, () => undefined);
+    return p;
   }
 
   /** 该栈顶（最近一次未撤销的变更） */

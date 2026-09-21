@@ -14,11 +14,14 @@ import { saveNapcatConfig } from '../notify/napcat.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { defaultPostFilters } from '../core/post-rules.js';
+import { UndoStore } from '../core/undo.js';
 
 interface Fixture {
   db: Db;
   base: string;
   llmRouter?: LlmRouter;
+  /** 注入 undo dep 时（opts.undo）可取到，验证写快照落库 */
+  undo?: UndoStore;
 }
 
 /** 记录 listen dep 的 onChanged 被调用次数（面板改开关 → 热启停源） */
@@ -66,6 +69,8 @@ async function setup(
     weiboImages?: PanelDeps['weiboImages'];
     /** 注入 biliFeed dep（添加 B站动态账号后的即时首拉钩子）；缺省不注入（跳过） */
     biliFeed?: PanelDeps['biliFeed'];
+    /** 注入 UndoStore（P0 写快照接线测试）；缺省不注入（写不落变更记录） */
+    undo?: boolean;
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -104,8 +109,11 @@ async function setup(
     dep.onProvidersChanged = () => { dep.router = build(); };
     llm = dep;
   }
+  const undoStore = opts.undo ? new UndoStore(db.raw) : undefined;
+  undoStore?.migrate();
   const server: Server = createPanelServer({
     db,
+    ...(undoStore ? { undo: undoStore } : {}),
     weiboResolver: opts.weiboResolver,
     status: () => ({
       ...status,
@@ -146,7 +154,7 @@ async function setup(
     db.close();
   });
   const { port } = server.address() as AddressInfo;
-  return { db, base: `http://127.0.0.1:${port}`, llmRouter: llm?.router };
+  return { db, base: `http://127.0.0.1:${port}`, llmRouter: llm?.router, ...(undoStore ? { undo: undoStore } : {}) };
 }
 
 interface ApiResult {
@@ -2422,5 +2430,53 @@ test('/api/bili-avatar：按文件名读缓存目录；坏文件名 400、缺文
 
   const bare = await setup(t);
   assert.equal((await api(bare.base, '/api/bili-avatar?file=' + name)).status, 404, '未装配 dep');
+});
+
+// ---- P0 写快照接线：面板写经 runTool 落变更记录（撤销栈的数据源）----
+
+test('写快照：配置写落 undo_changes（settings 前像/后像差分），streamers 不纳入', async (t) => {
+  const { db, base, undo } = await setup(t, { undo: true });
+  db.upsertStreamer({ uid: '1001', uname: '阿梓' }); // 直调 Db（不过注册表），不留记录
+
+  // 配置写：推送总开关 → settings 行的前像/后像
+  const r = await api(base, '/api/push/enabled', 'PUT', { enabled: false });
+  assert.equal(r.status, 200);
+  const hist = undo!.history();
+  assert.equal(hist.length, 1);
+  assert.equal(hist[0]!.tool, 'set_push_enabled');
+  assert.equal(hist[0]!.entry, 'panel');
+  assert.equal(hist[0]!.scope, 'admin', '面板写进全局 admin 栈');
+  const row = hist[0]!.rows[0]!;
+  assert.equal(row.table, 'settings');
+  assert.deepEqual(row.pk, { key: 'push_enabled' });
+  assert.equal(row.before, null, '首次写：前像不存在');
+  assert.equal((row.after as { value: string }).value, '0');
+
+  // streamers 是配置+归档混合表（计划拍板不纳入）：写生效但不落变更记录
+  const r2 = await api(base, '/api/streamers/1001', 'PUT', { alias: '梓宝' });
+  assert.equal(r2.status, 200);
+  assert.equal(db.getStreamer('1001')!.alias, '梓宝');
+  assert.equal(undo!.history().length, 1, 'streamers 写不落变更记录');
+});
+
+test('写快照：删分类级联停用收敛为同一笔记录（事务化差分），撤销整体还原', async (t) => {
+  const { db, base, undo } = await setup(t, { undo: true });
+  const mk = { llmPrompt: null, keywords: ['x'], areas: [], condMode: 'and' as const, enabled: true };
+  const cat = db.upsertCategory({ ...mk, name: '歌回' });
+  db.upsertPushRule({ name: 'r1', categoryId: cat, uids: [], channels: [], messageTemplate: null, enabled: true });
+
+  const r = await api(base, `/api/categories/${cat}`, 'DELETE');
+  assert.equal(r.status, 200);
+  const hist = undo!.history();
+  assert.equal(hist.length, 1, '级联停用 + 删除 = 一笔记录');
+  assert.equal(hist[0]!.tool, 'delete_category');
+  const shapes = hist[0]!.rows.map((x) => `${x.table}:${x.beforeExists}->${x.afterExists}`).sort();
+  assert.deepEqual(shapes, ['categories:true->false', 'push_rules:true->true']);
+
+  // 撤销能整体还原（分类回来 + 规则恢复启用）——面板端点属切片 C，这里先经 store 验证记录可用
+  const ur = undo!.undo('admin');
+  assert.equal(ur.ok, true);
+  assert.ok(db.listCategories().some((c) => c.id === cat), '撤销后分类还原');
+  assert.equal(db.listPushRules().find((x) => x.name === 'r1')!.enabled, true, '撤销后规则恢复启用');
 });
 

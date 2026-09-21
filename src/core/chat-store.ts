@@ -8,8 +8,7 @@
  *   （`usage().needsResetHint`，阈值 40 条消息 / 8k 字符，可配）。
  * - 「重置上下文」= 清空该会话的消息，**保留会话行**（id 不变，便于审计与 UI 复用）。
  *
- * 集成状态：**尚未接线**（新建文件、零冲突）。接线需要 `Db` 暴露原始句柄（同 `undo.ts` 的说明），
- * 并在 `Db` 的迁移段调一次 `migrate()`。
+ * 集成状态：**已装配建表**（index.ts 装配根实例化，`Db.raw` 供句柄）；消费方（agent loop）尚未写。
  */
 import type Database from 'better-sqlite3';
 

@@ -312,3 +312,57 @@ test('未建的表（尚未升级的库）被跳过，不影响其它表', (t) =
   assert.ok(changeId);
   assert.equal(store.peek(adminScope())!.rows.length, 1);
 });
+
+// ---- track()：异步段版记录点（runToolTracked 走这里；handler 内含 await）----
+
+test('track：异步写落记录，前后像与 capture 同形状', async (t) => {
+  const { db, store } = setup(t);
+  const r = await store.track(META, async () => {
+    await Promise.resolve(); // 模拟 handler 里的异步校验
+    seedRule(db, '异步规则', 0);
+    return 'done';
+  });
+  assert.equal(r.value, 'done');
+  assert.ok(r.changeId);
+  const rec = store.peek(adminScope())!;
+  assert.equal(rec.rows.length, 1);
+  assert.equal(rec.rows[0]!.table, 'push_rules');
+  assert.equal(rec.rows[0]!.beforeExists, false);
+  assert.equal(rec.rows[0]!.afterExists, true);
+  // 撤销可用：与 capture 产的记录同一份 undo 逻辑
+  assert.equal(store.undo(adminScope()).ok, true);
+  assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM push_rules`).get() as { n: number }).n, 0);
+});
+
+test('track：fn 失败（runTool 的 ToolFailure 形态是 resolve，但真抛也算）不落记录；无净变化不落记录', async (t) => {
+  const { db, store } = setup(t);
+  await assert.rejects(
+    store.track(META, async () => { throw new Error('校验失败'); }),
+    /校验失败/,
+  );
+  const r = await store.track(META, async () => {
+    db.prepare(`UPDATE push_rules SET name = 'x' WHERE id = 999`).run(); // 命中 0 行
+  });
+  assert.equal(r.changeId, null);
+  assert.deepEqual(store.history(), [], '失败与无变化都不留记录');
+});
+
+test('track：并发写调用串行化，差分互不污染', async (t) => {
+  const { db, store } = setup(t);
+  // A 在写之前让出事件轮回合；若没串行化，B 的写会落进 A 的差分窗口
+  const a = store.track({ ...META, note: 'A' }, async () => {
+    await new Promise((r) => setTimeout(r, 20));
+    seedRule(db, '规则A', 0);
+  });
+  const b = store.track({ ...META, note: 'B' }, async () => {
+    seedRule(db, '规则B', 0);
+  });
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.ok(ra.changeId && rb.changeId);
+  const history = store.history();
+  assert.equal(history.length, 2);
+  const recB = history.find((h) => h.id === rb.changeId)!;
+  assert.deepEqual(recB.rows.map((r) => (r.after as { name: string }).name), ['规则B'], 'B 的记录只含 B 的写');
+  const recA = history.find((h) => h.id === ra.changeId)!;
+  assert.deepEqual(recA.rows.map((r) => (r.after as { name: string }).name), ['规则A'], 'A 的记录只含 A 的写');
+});

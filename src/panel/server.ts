@@ -9,20 +9,11 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
-import type { Streamer, StreamerInput } from '../core/streamers.js';
-import {
-  HttpError, checkAccountRuleIds, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseBiliAccountPatch,
-  parseCategoryPatch, parseChannelPatch,
-  parseNewBiliAccount, parseNewCategory, parseNewChannel, parseNewRule, parseNewWeiboAccount, parseNewXAccount,
-  parsePostRulePatch,
-  parseRulePatch, parseRuntimePatch, parseWeiboAccountPatch,
-  checkPostFiltersUsable, checkPostJudgeUsable, checkPostRuleRefs, parseNewPostRule,
-  deletePostRuleSweepingRefs,
-  parseStreamerPatch, parseUid, parseXAccountPatch, parseXPatch, parseXTestRequest, readJsonBody, sendJson,
-  syncStreamerWeiboLink, watchStreamer, type XTestRequest,
-} from './http-util.js';
+import { HttpError, parseUid, readJsonBody, sendJson, type XTestRequest } from './http-util.js';
 import { scheduleInfo } from './schedule.js';
 import { handleMcp } from '../mcp/handler.js';
+import { toolDefByName } from '../mcp/tools.js';
+import { PANEL_TOOL_CTX, runToolTracked, type ToolFailure, type ToolResult } from '../mcp/run-tool.js';
 import { WEBUI_ASSETS } from './webui-assets.gen.js';
 import { cookieHeader, fetchSelf, loadCookies, saveCookies, type SelfInfo } from '../sources/bili/auth.js';
 import { generateQrcode, pollQrcode } from '../sources/bili/qrcode.js';
@@ -35,13 +26,13 @@ import {
 import {
   fetchWeiboSelf, loadWeiboCookies, saveWeiboCookies, weiboCookieHeader, type WeiboSelfInfo,
 } from '../sources/weibo/auth.js';
-import { llmProviderSchema, type LlmProviderConfig } from '../config/schema.js';
-import { deriveRoutes, isLlmEnabled, setLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
-import { isListenEnabled, listenReadyFor, listenSetting, setListen, type ListenFeature } from '../core/listen.js';
+import type { LlmProviderConfig } from '../config/schema.js';
+import { deriveRoutes, isLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
+import { isListenEnabled, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
 import {
-  getRuntimeConfig, saveRuntimeConfig,
+  getRuntimeConfig,
 } from '../core/runtime-config.js';
-import { isPushEnabled, setPushEnabled } from '../core/push.js';
+import { isPushEnabled } from '../core/push.js';
 import type { XConfig } from '../core/x-config.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
@@ -261,6 +252,74 @@ export function createPanelServer(deps: PanelDeps): http.Server {
   });
 }
 
+// ---- REST 写路由收敛出口（P0 判据 3：面板写一律经 runTool 进注册表，路由层只做状态码/形状映射）----
+// 收敛纪律：① 挂载门（dep 不注入则 404）不变；② 响应形状/状态码/错误文案逐字不变（判据 5），
+// 201 vs 200、`{id}` vs `{ok:true}`、webui 的键名（provider/value）差异都在这一层映射；
+// ③ 业务校验全在注册表 handler（与 MCP 同一份），路由层不再重复。
+
+/** body 必须是 JSON 对象（与 http-util asObject 同一句文案） */
+function asBodyObject(body: unknown): Record<string, unknown> {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    throw new HttpError(400, '请求体必须是 JSON 对象');
+  }
+  return body as Record<string, unknown>;
+}
+
+interface CallToolOpts {
+  /** 路径参数（uid/id/name/feature），并入 args；body 里出现同名单元按未知字段拒（老 parse 口径） */
+  pathArgs?: Record<string, unknown>;
+  /** 成功状态码（缺省 200；POST 建资源的老契约是 201） */
+  status?: number;
+  /**
+   * 老路由的 parse 函数带 rejectUnknownKeys 的传 true：按工具 schema 键拒绝未知字段。
+   * （runTool 的 zod 层对未知键是**剥离**而非拒绝——剥离适合 LLM 入口，面板要尽早暴露拼写错误）
+   */
+  rejectUnknown?: boolean;
+  /** 响应形状映射（缺省透传工具结果；缺结果时回 {ok:true}） */
+  map?: (data: Record<string, unknown>) => unknown;
+}
+
+/** 调注册表工具（经 runToolTracked：zod 校验 + 审计 + 写快照），不做响应映射 */
+async function runPanelTool(
+  deps: PanelDeps,
+  name: string,
+  body: Record<string, unknown>,
+  opts: CallToolOpts = {},
+): Promise<ToolResult> {
+  const def = toolDefByName(name);
+  if (!def) throw new Error(`注册表缺少工具: ${name}`); // 装配错误，走 500
+  if (opts.rejectUnknown) {
+    const allowed = new Set(Object.keys(def.schema));
+    for (const k of Object.keys(body)) {
+      if (!allowed.has(k) || (opts.pathArgs !== undefined && k in opts.pathArgs)) {
+        throw new HttpError(400, `未知字段: ${k}`);
+      }
+    }
+  }
+  return runToolTracked(deps, def, { ...body, ...opts.pathArgs }, PANEL_TOOL_CTX, 'panel');
+}
+
+/** 失败侧转 HTTP：HttpError 状态透传；无状态码的内部错误走老 500 口径（细节进日志不进响应） */
+function throwToolFailure(r: ToolFailure): never {
+  if (r.status !== undefined) throw new HttpError(r.status, r.error);
+  throw new Error(r.error);
+}
+
+/** 收敛后的写路由统一出口：发响应并返回发出的 payload（路由层后续编排如 kickAccount 用） */
+async function callTool(
+  deps: PanelDeps,
+  res: http.ServerResponse,
+  name: string,
+  body: Record<string, unknown>,
+  opts: CallToolOpts = {},
+): Promise<unknown> {
+  const r = await runPanelTool(deps, name, body, opts);
+  if (!r.ok) throwToolFailure(r);
+  const payload = opts.map ? opts.map(r.data as Record<string, unknown>) : (r.data ?? { ok: true });
+  sendJson(res, opts.status ?? 200, payload);
+  return payload;
+}
+
 async function handle(
   deps: PanelDeps,
   weiboSession: { qrid: string | null },
@@ -291,7 +350,9 @@ async function handle(
   }
   const lm = path.match(/^\/api\/listen\/(dynamic|weibo|twitter)$/);
   if (deps.listen && lm && method === 'PUT') {
-    sendJson(res, 200, putListen(deps, lm[1] as ListenFeature, await readJsonBody(req)));
+    await callTool(deps, res, 'set_listen', asBodyObject(await readJsonBody(req)), {
+      pathArgs: { feature: lm[1]! },
+    });
     return;
   }
 
@@ -343,10 +404,7 @@ async function handle(
     return;
   }
   if (method === 'PUT' && path === '/api/advanced') {
-    const patch = parseRuntimePatch(await readJsonBody(req));
-    saveRuntimeConfig(db, patch);
-    deps.advanced?.onChanged();
-    sendJson(res, 200, { ok: true, ...getRuntimeConfig(db) });
+    await callTool(deps, res, 'update_runtime_config', asBodyObject(await readJsonBody(req)));
     return;
   }
 
@@ -357,15 +415,11 @@ async function handle(
     return;
   }
   if (deps.x && method === 'PUT' && path === '/api/x') {
-    const patch = parseXPatch(await readJsonBody(req));
-    deps.x.save(patch);
-    deps.x.onChanged();
-    sendJson(res, 200, deps.x.info());
+    await callTool(deps, res, 'update_x_config', asBodyObject(await readJsonBody(req)), { rejectUnknown: true });
     return;
   }
   if (deps.x && method === 'POST' && path === '/api/x/test') {
-    const testReq = parseXTestRequest(await readJsonBody(req));
-    sendJson(res, 200, await deps.x.test(testReq));
+    await callTool(deps, res, 'test_x_connection', asBodyObject(await readJsonBody(req)), { rejectUnknown: true });
     return;
   }
 
@@ -375,45 +429,26 @@ async function handle(
     return;
   }
   if (deps.x && method === 'POST' && path === '/api/x/accounts') {
-    const input = parseNewXAccount(await readJsonBody(req));
-    if (db.getXAccountByScreenName(input.screenName)) {
-      throw new HttpError(409, `@${input.screenName} 已在名单里`);
-    }
-    checkXBiliUid(db, input.biliUid);
-    checkAccountRuleIds(db, input.ruleIds);
-    // 存在性校验：能校验就校验。「账号不存在」是硬错误（多半敲错了）；
-    // 链路原因（代理不通 / 限流）照收——不能因为代理没开就让人加不了账号，
-    // 把原因回给面板显示即可（这是区分「我填错了」与「链路断了」的唯一手段）。
-    const verify = await deps.x.verify(input.screenName);
-    if (verify.checked && !verify.ok && verify.kind === 'not-found') {
-      throw new HttpError(400, `X 账号不存在：@${input.screenName}`);
-    }
-    // 昵称是平台事实：verify 顺手抠到的 og:title 显示名直接种入（抠不到为 null，抓取再回写）
-    const id = db.upsertXAccount({ ...input, nickname: verify.name ?? null });
+    // 存在性校验与昵称种入已并入 upsert_x_account（与面板同语义）；verify 结果随响应回报
+    const payload = (await callTool(deps, res, 'upsert_x_account', asBodyObject(await readJsonBody(req)), {
+      rejectUnknown: true,
+      map: (d) => ({ account: xAccountInfo(db, Number(d.id)), verify: d.verify }),
+    })) as { account: { screenName: string } };
     // 即时首拉：fire-and-forget，失败只进日志（源内有自己的失败纪律），不挡响应
-    if (deps.x.kickAccount) void deps.x.kickAccount(input.screenName).catch(() => {});
-    deps.x.onChanged();
-    sendJson(res, 200, { account: xAccountInfo(db, id), verify });
+    if (deps.x.kickAccount) void deps.x.kickAccount(payload.account.screenName).catch(() => {});
     return;
   }
   const xa = path.match(/^\/api\/x\/accounts\/(\d+)$/);
   if (deps.x && xa && method === 'PUT') {
-    const id = Number(xa[1]);
-    if (!db.getXAccount(id)) throw new HttpError(404, 'X 账号不存在');
-    // ID 与昵称不可改（parseXAccountPatch 按未知字段 400）——要换账号就删除后重新添加
-    const patch = parseXAccountPatch(await readJsonBody(req));
-    if (patch.biliUid !== undefined) checkXBiliUid(db, patch.biliUid);
-    if (patch.ruleIds !== undefined) checkAccountRuleIds(db, patch.ruleIds);
-    db.upsertXAccount({ ...patch, id });
-    deps.x.onChanged();
-    sendJson(res, 200, { account: xAccountInfo(db, id) });
+    await callTool(deps, res, 'upsert_x_account', asBodyObject(await readJsonBody(req)), {
+      pathArgs: { id: Number(xa[1]) },
+      rejectUnknown: true,
+      map: (d) => ({ account: xAccountInfo(db, Number(d.id)) }),
+    });
     return;
   }
   if (deps.x && xa && method === 'DELETE') {
-    const id = Number(xa[1]);
-    if (!db.deleteXAccount(id)) throw new HttpError(404, 'X 账号不存在');
-    deps.x.onChanged();
-    sendJson(res, 200, { ok: true });
+    await callTool(deps, res, 'delete_x_account', {}, { pathArgs: { id: Number(xa[1]) } });
     return;
   }
 
@@ -453,47 +488,26 @@ async function handle(
     return;
   }
   if (deps.weibo && method === 'POST' && path === '/api/weibo/accounts') {
-    const input = parseNewWeiboAccount(await readJsonBody(req));
-    let uid = input.uid;
-    const nickname = input.nickname;
-    // 只填昵称时走匿名访客解析链补 uid（与主播详情填「微博昵称」同一条链，同一个 resolver）
-    if (!uid) {
-      if (!deps.weiboResolver) throw new HttpError(400, '微博解析不可用，请直接填 uid');
-      try {
-        uid = await deps.weiboResolver.resolveUid(nickname!);
-      } catch (e) {
-        throw new HttpError(400, `微博昵称解析失败：${e instanceof Error ? e.message : String(e)}`);
-      }
-      if (!uid) throw new HttpError(400, `微博上找不到这个昵称：${nickname}`);
-    }
-    if (db.getWeiboAccountByUid(uid)) throw new HttpError(409, `微博 ${uid} 已在名单里`);
-    checkWeiboBiliUid(db, input.biliUid);
-    checkAccountRuleIds(db, input.ruleIds);
-    const id = db.upsertWeiboAccount({ ...input, uid });
+    // 只填昵称时走匿名访客解析链补 uid（与主播详情填「微博昵称」同一条链）——已并入 upsert_weibo_account
+    const payload = (await callTool(deps, res, 'upsert_weibo_account', asBodyObject(await readJsonBody(req)), {
+      rejectUnknown: true,
+      map: (d) => ({ account: weiboAccountInfo(db, Number(d.id)) }),
+    })) as { account: { uid: string } };
     // 即时首拉：fire-and-forget，失败只进日志（源内有自己的失败纪律），不挡响应
-    if (deps.weibo.kickAccount) void deps.weibo.kickAccount(uid).catch(() => {});
-    deps.weibo.onChanged();
-    sendJson(res, 200, { account: weiboAccountInfo(db, id) });
+    if (deps.weibo.kickAccount) void deps.weibo.kickAccount(payload.account.uid).catch(() => {});
     return;
   }
   const wa = path.match(/^\/api\/weibo\/accounts\/(\d+)$/);
   if (deps.weibo && wa && method === 'PUT') {
-    const id = Number(wa[1]);
-    if (!db.getWeiboAccount(id)) throw new HttpError(404, '微博账号不存在');
-    // uid 与昵称不可改（parseWeiboAccountPatch 按未知字段 400）——要换账号就删除后重新添加
-    const patch = parseWeiboAccountPatch(await readJsonBody(req));
-    if (patch.biliUid !== undefined) checkWeiboBiliUid(db, patch.biliUid);
-    if (patch.ruleIds !== undefined) checkAccountRuleIds(db, patch.ruleIds);
-    db.upsertWeiboAccount({ ...patch, id });
-    deps.weibo.onChanged();
-    sendJson(res, 200, { account: weiboAccountInfo(db, id) });
+    await callTool(deps, res, 'upsert_weibo_account', asBodyObject(await readJsonBody(req)), {
+      pathArgs: { id: Number(wa[1]) },
+      rejectUnknown: true,
+      map: (d) => ({ account: weiboAccountInfo(db, Number(d.id)) }),
+    });
     return;
   }
   if (deps.weibo && wa && method === 'DELETE') {
-    const id = Number(wa[1]);
-    if (!db.deleteWeiboAccount(id)) throw new HttpError(404, '微博账号不存在');
-    deps.weibo.onChanged();
-    sendJson(res, 200, { ok: true });
+    await callTool(deps, res, 'delete_weibo_account', {}, { pathArgs: { id: Number(wa[1]) } });
     return;
   }
 
@@ -505,29 +519,25 @@ async function handle(
     return;
   }
   if (method === 'POST' && path === '/api/bili/accounts') {
-    const input = parseNewBiliAccount(await readJsonBody(req));
-    if (db.getBiliAccountByUid(input.uid)) throw new HttpError(409, `uid ${input.uid} 已在名单里`);
-    checkAccountRuleIds(db, input.ruleIds);
-    const id = db.upsertBiliAccount(input);
+    const payload = (await callTool(deps, res, 'upsert_bili_account', asBodyObject(await readJsonBody(req)), {
+      rejectUnknown: true,
+      map: (d) => ({ account: biliAccountInfo(db, Number(d.id)) }),
+    })) as { account: { uid: string } };
     // 即时首拉：fire-and-forget，失败只进日志（源内有自己的失败纪律），不挡响应
-    if (deps.biliFeed) void deps.biliFeed.kickAccount(input.uid).catch(() => {});
-    sendJson(res, 200, { account: biliAccountInfo(db, id) });
+    if (deps.biliFeed) void deps.biliFeed.kickAccount(payload.account.uid).catch(() => {});
     return;
   }
   const ba = path.match(/^\/api\/bili\/accounts\/(\d+)$/);
   if (ba && method === 'PUT') {
-    const id = Number(ba[1]);
-    if (!db.getBiliAccount(id)) throw new HttpError(404, 'B站动态账号不存在');
-    const patch = parseBiliAccountPatch(await readJsonBody(req));
-    if (patch.ruleIds !== undefined) checkAccountRuleIds(db, patch.ruleIds);
-    db.upsertBiliAccount({ ...patch, id });
-    sendJson(res, 200, { account: biliAccountInfo(db, id) });
+    await callTool(deps, res, 'upsert_bili_account', asBodyObject(await readJsonBody(req)), {
+      pathArgs: { id: Number(ba[1]) },
+      rejectUnknown: true,
+      map: (d) => ({ account: biliAccountInfo(db, Number(d.id)) }),
+    });
     return;
   }
   if (ba && method === 'DELETE') {
-    const id = Number(ba[1]);
-    if (!db.deleteBiliAccount(id)) throw new HttpError(404, 'B站动态账号不存在');
-    sendJson(res, 200, { ok: true });
+    await callTool(deps, res, 'delete_bili_account', {}, { pathArgs: { id: Number(ba[1]) } });
     return;
   }
 
@@ -668,13 +678,14 @@ async function handle(
     return;
   }
   if (method === 'POST' && path === '/api/channels') {
-    const id = db.upsertPushChannel(parseNewChannel(await readJsonBody(req)));
-    sendJson(res, 201, { id });
+    await callTool(deps, res, 'upsert_channel', asBodyObject(await readJsonBody(req)), {
+      status: 201, rejectUnknown: true,
+    });
     return;
   }
   // 渠道拖拽排序：ids 是现有渠道的全排列（在 :id 通配之前匹配）
   if (method === 'PUT' && path === '/api/channels/order') {
-    sendJson(res, 200, putChannelOrder(db, await readJsonBody(req)));
+    await callTool(deps, res, 'reorder_channels', asBodyObject(await readJsonBody(req)));
     return;
   }
   // 推送总开关（面板推送卡右上角；settings.push_enabled，缺省开）
@@ -683,16 +694,12 @@ async function handle(
     return;
   }
   if (method === 'PUT' && path === '/api/push/enabled') {
-    const b = (await readJsonBody(req)) as Record<string, unknown>;
-    if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
-    setPushEnabled(db, b.enabled);
-    sendJson(res, 200, { ok: true, enabled: b.enabled });
+    await callTool(deps, res, 'set_push_enabled', asBodyObject(await readJsonBody(req)));
     return;
   }
   // 测试推送：假消息走完整链路（面板「推送设置」弹窗里触发）
   if (deps.testPush && method === 'POST' && path === '/api/push/test') {
-    const r = await deps.testPush();
-    sendJson(res, 200, { ok: true, ...r });
+    await callTool(deps, res, 'test_push', {});
     return;
   }
   // ---- 时间表（过往直播统计；GET-only，无 dep）----
@@ -706,53 +713,62 @@ async function handle(
     return;
   }
   if (deps.llm && method === 'PUT' && path === '/api/llm/keys') {
-    sendJson(res, 200, putLlmKey(deps, await readJsonBody(req)));
+    const body = asBodyObject(await readJsonBody(req));
+    // REST 入参键是 provider/value（webui 契约），工具参数是 name/value；响应补 key 状态回显
+    await callTool(deps, res, 'set_llm_key', { name: body.provider, value: body.value }, {
+      map: (d) => {
+        const provider = (deps.llm?.store?.list() ?? []).find((p) => p.name === d.provider);
+        return {
+          ...d,
+          key: provider ? llmKeySource(db, provider) : { source: 'unset', count: 0, value: null },
+        };
+      },
+    });
     return;
   }
   if (deps.llm && method === 'PUT' && path === '/api/llm/enabled') {
-    const b = (await readJsonBody(req)) as Record<string, unknown>;
-    if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
-    setLlmEnabled(deps.db, b.enabled);
-    sendJson(res, 200, { ok: true, enabled: b.enabled });
+    await callTool(deps, res, 'set_llm_enabled', asBodyObject(await readJsonBody(req)));
     return;
   }
   if (deps.llm?.store && method === 'POST' && path === '/api/llm/providers') {
-    sendJson(res, 201, putLlmProvider(deps, null, await readJsonBody(req)));
+    const body = asBodyObject(await readJsonBody(req));
+    // 裁决（P0 收敛）：REST 保持「重名 400」（webui 契约）；工具 upsert_llm_provider 保持按名 upsert（MCP 契约）
+    if (typeof body.name === 'string' && deps.llm.store.list().some((p) => p.name === body.name)) {
+      throw new HttpError(400, `provider name 重复: ${body.name}`);
+    }
+    await callTool(deps, res, 'upsert_llm_provider', body, { status: 201 });
     return;
   }
   // 排序路由必须在 :name 通配之前匹配，否则 'order' 会被当成 provider 名
   if (deps.llm?.store && method === 'PUT' && path === '/api/llm/providers/order') {
-    sendJson(res, 200, putLlmProviderOrder(deps, await readJsonBody(req)));
+    await callTool(deps, res, 'reorder_llm_providers', asBodyObject(await readJsonBody(req)));
     return;
   }
   const lpt = path.match(/^\/api\/llm\/providers\/([^/]+)\/test$/);
   if (deps.llm?.router && lpt && method === 'POST') {
-    const name = decodeURIComponent(lpt[1]!);
-    const status = deps.llm.router.providerStatus(name);
-    if (status === null) throw new HttpError(404, 'provider 不存在');
-    if (status.startsWith('缺 key')) throw new HttpError(400, '缺 key，请先填写');
-    try {
-      const ms = await deps.llm.router.ping(name);
-      sendJson(res, 200, { ok: true, ms });
-    } catch (e) {
-      // 错误信息只含 HTTP 状态/对端响应摘要，不含 key（key 只在请求头里）
-      sendJson(res, 502, { ok: false, error: (e as Error).message });
+    const r = await runPanelTool(deps, 'test_llm_provider', {}, { pathArgs: { name: decodeURIComponent(lpt[1]!) } });
+    if (r.ok) {
+      sendJson(res, 200, r.data);
+      return;
     }
-    return;
+    // ping 失败的老契约形状：502 { ok:false, error }（不是 4xx 业务错；key 只在请求头，不进错误信息）
+    if (r.status === 502) {
+      sendJson(res, 502, { ok: false, error: r.error });
+      return;
+    }
+    throwToolFailure(r);
   }
   const lpm = path.match(/^\/api\/llm\/providers\/([^/]+)$/);
   if (deps.llm?.store && lpm) {
     const name = decodeURIComponent(lpm[1]!);
     if (method === 'PUT') {
-      sendJson(res, 200, putLlmProvider(deps, name, await readJsonBody(req)));
+      // 404 预检（与 POST 重名同属一个裁决）：REST 按存在性区分 404/400，工具是按名 upsert
+      if (!deps.llm.store.list().some((p) => p.name === name)) throw new HttpError(404, 'provider 不存在');
+      await callTool(deps, res, 'upsert_llm_provider', asBodyObject(await readJsonBody(req)), { pathArgs: { name } });
       return;
     }
     if (method === 'DELETE') {
-      const list = deps.llm.store.list();
-      if (!list.some((p) => p.name === name)) throw new HttpError(404, 'provider 不存在');
-      deps.llm.store.save(list.filter((p) => p.name !== name));
-      deps.llm.onProvidersChanged?.();
-      sendJson(res, 200, { ok: true });
+      await callTool(deps, res, 'delete_llm_provider', {}, { pathArgs: { name } });
       return;
     }
   }
@@ -762,13 +778,14 @@ async function handle(
     return;
   }
   if (method === 'POST' && path === '/api/categories') {
-    const id = db.upsertCategory(parseNewCategory(await readJsonBody(req)));
-    sendJson(res, 201, { id });
+    await callTool(deps, res, 'upsert_category', asBodyObject(await readJsonBody(req)), {
+      status: 201, rejectUnknown: true,
+    });
     return;
   }
   // 分类拖拽排序：ids 是现有分类的全排列（在 :id 通配之前匹配）
   if (method === 'PUT' && path === '/api/categories/order') {
-    sendJson(res, 200, putCategoryOrder(db, await readJsonBody(req)));
+    await callTool(deps, res, 'reorder_categories', asBodyObject(await readJsonBody(req)));
     return;
   }
 
@@ -784,14 +801,14 @@ async function handle(
     return;
   }
   if (method === 'POST' && path === '/api/rules') {
-    const rule = parseNewRule(await readJsonBody(req));
-    checkRuleRefs(db, rule);
-    sendJson(res, 201, { id: db.upsertPushRule(rule) });
+    await callTool(deps, res, 'upsert_push_rule', asBodyObject(await readJsonBody(req)), {
+      status: 201, rejectUnknown: true,
+    });
     return;
   }
   // 规则拖拽排序：ids 是全部规则的全排列（在 :id 通配之前匹配）
   if (method === 'PUT' && path === '/api/rules/order') {
-    sendJson(res, 200, putRuleOrder(db, await readJsonBody(req)));
+    await callTool(deps, res, 'reorder_push_rules', asBodyObject(await readJsonBody(req)));
     return;
   }
 
@@ -801,14 +818,14 @@ async function handle(
     return;
   }
   if (method === 'POST' && path === '/api/post-rules') {
-    const rule = parseNewPostRule(await readJsonBody(req));
-    checkPostRuleRefs(db, rule);
-    sendJson(res, 201, { id: db.upsertPostRule(rule) });
+    await callTool(deps, res, 'upsert_post_rule', asBodyObject(await readJsonBody(req)), {
+      status: 201, rejectUnknown: true,
+    });
     return;
   }
   // 拖拽排序（在 :id 通配之前匹配）
   if (method === 'PUT' && path === '/api/post-rules/order') {
-    sendJson(res, 200, putPostRuleOrder(db, await readJsonBody(req)));
+    await callTool(deps, res, 'reorder_post_rules', asBodyObject(await readJsonBody(req)));
     return;
   }
 
@@ -842,17 +859,14 @@ async function handle(
   if (sm) {
     const uid = parseUid(sm[1]);
     if (sm[2] && method === 'POST') {
-      sendJson(res, 200, watchStreamer(db, uid));
+      await callTool(deps, res, 'watch_streamer', {}, { pathArgs: { uid } });
       return;
     }
     if (!sm[2] && method === 'PUT') {
-      const prev = db.getStreamer(uid);
-      if (!prev) throw new HttpError(404, '该 uid 不在监听名单');
-      const patch = parseStreamerPatch(await readJsonBody(req));
-      await resolveWeiboNick(deps, prev, patch);
-      db.upsertStreamer({ uid, ...patch });
-      syncStreamerWeiboLink(db, uid, patch);
-      sendJson(res, 200, { streamer: db.getStreamer(uid) });
+      await callTool(deps, res, 'set_streamer', asBodyObject(await readJsonBody(req)), {
+        pathArgs: { uid },
+        rejectUnknown: true,
+      });
       return;
     }
   }
@@ -860,23 +874,15 @@ async function handle(
   const chm = path.match(/^\/api\/channels\/([^/]+)$/);
   if (chm) {
     const id = Number(parseUid(chm[1], 'id'));
-    const prev = db.listPushChannels().find((c) => c.id === id);
-    if (!prev) throw new HttpError(404, '渠道不存在');
     if (method === 'PUT') {
-      const patch = parseChannelPatch(await readJsonBody(req));
-      // 联动校验要对合并后的形状做（如 toast 改成 onebot 必须补目标号）
-      checkChannelShape({
-        notifier: patch.notifier ?? prev.notifier,
-        targetType: patch.targetType !== undefined ? patch.targetType : prev.targetType,
-        targetId: patch.targetId !== undefined ? patch.targetId : prev.targetId,
+      // 联动校验（toast 改 onebot 必须补目标号）在工具 handler 里对合并后形状做
+      await callTool(deps, res, 'upsert_channel', asBodyObject(await readJsonBody(req)), {
+        pathArgs: { id }, rejectUnknown: true,
       });
-      db.upsertPushChannel({ id, ...patch });
-      sendJson(res, 200, { ok: true });
       return;
     }
     if (method === 'DELETE') {
-      db.deletePushChannel(id);
-      sendJson(res, 200, { ok: true });
+      await callTool(deps, res, 'delete_channel', {}, { pathArgs: { id } });
       return;
     }
   }
@@ -884,25 +890,16 @@ async function handle(
   const cam = path.match(/^\/api\/categories\/([^/]+)$/);
   if (cam) {
     const id = Number(parseUid(cam[1], 'id'));
-    const prev = db.listCategories().find((c) => c.id === id);
-    if (!prev) throw new HttpError(404, '分类不存在');
     if (method === 'PUT') {
-      const patch = parseCategoryPatch(await readJsonBody(req));
-      // 条件校验要对合并后的形状做（如把唯一的条件清空 → 400）
-      checkCategoryConditions({
-        llmPrompt: patch.llmPrompt !== undefined ? patch.llmPrompt : prev.llmPrompt,
-        keywords: patch.keywords ?? prev.keywords,
-        areas: patch.areas ?? prev.areas,
+      // 条件校验（如把唯一的条件清空 → 400）在工具 handler 里对合并后形状做
+      await callTool(deps, res, 'upsert_category', asBodyObject(await readJsonBody(req)), {
+        pathArgs: { id }, rejectUnknown: true,
       });
-      db.upsertCategory({ id, ...patch });
-      sendJson(res, 200, { ok: true });
       return;
     }
     if (method === 'DELETE') {
-      // 级联：先停用引用它的推送规则（规则保留可恢复），条数返回给面板提示
-      const disabledRules = db.disablePushRulesByCategory(id);
-      db.deleteCategory(id);
-      sendJson(res, 200, { ok: true, disabledRules });
+      // 级联停用引用它的推送规则（规则保留可恢复）+ 删除，已事务化（见 delete_category 工具）
+      await callTool(deps, res, 'delete_category', {}, { pathArgs: { id } });
       return;
     }
   }
@@ -911,22 +908,14 @@ async function handle(
   if (rm) {
     const id = Number(parseUid(rm[1], 'id'));
     if (method === 'PUT') {
-      const patch = parseRulePatch(await readJsonBody(req));
-      const prev = db.listPushRules().find((r) => r.id === id);
-      if (!prev) throw new HttpError(404, '规则不存在');
-      // 存在性校验要对合并后的形状做（如只改 uids 时 categoryId/channels 沿用旧值）
-      checkRuleRefs(db, {
-        categoryId: patch.categoryId !== undefined ? patch.categoryId : prev.categoryId,
-        uids: patch.uids ?? prev.uids,
-        channels: patch.channels ?? prev.channels,
+      // 存在性校验在工具 handler 里对合并后形状做（只改 uids 时 categoryId/channels 沿用旧值）
+      await callTool(deps, res, 'upsert_push_rule', asBodyObject(await readJsonBody(req)), {
+        pathArgs: { id }, rejectUnknown: true,
       });
-      db.upsertPushRule({ id, ...patch });
-      sendJson(res, 200, { ok: true });
       return;
     }
     if (method === 'DELETE') {
-      if (!db.deletePushRule(id)) throw new HttpError(404, '规则不存在');
-      sendJson(res, 200, { ok: true });
+      await callTool(deps, res, 'delete_push_rule', {}, { pathArgs: { id } });
       return;
     }
   }
@@ -935,24 +924,18 @@ async function handle(
   if (prm) {
     const id = Number(parseUid(prm[1], 'id'));
     if (method === 'PUT') {
-      const patch = parsePostRulePatch(await readJsonBody(req));
-      const prev = db.listPostRules().find((r) => r.id === id);
-      if (!prev) throw new HttpError(404, '图文帖规则不存在');
-      // 校验要对「合并后」的形状做（只改 filters 时渠道沿用旧值）
-      checkPostRuleRefs(db, { channels: patch.channels ?? prev.channels });
-      checkPostFiltersUsable({ ...prev.filters, ...(patch.filters ?? {}) });
-      checkPostJudgeUsable(
-        patch.llmJudge ?? prev.llmJudge,
-        patch.judgePrompt !== undefined ? patch.judgePrompt : prev.judgePrompt,
-      );
-      db.upsertPostRule({ id, ...patch });
-      sendJson(res, 200, { ok: true });
+      // 校验（渠道引用 / 死规则 / LLM 判定须带标准）在工具 handler 里对合并后形状做
+      await callTool(deps, res, 'upsert_post_rule', asBodyObject(await readJsonBody(req)), {
+        pathArgs: { id },
+        rejectUnknown: true,
+        // 老契约：PUT 回 { ok: true }（工具返回 { id }，MCP 契约不动）
+        map: () => ({ ok: true }),
+      });
       return;
     }
     if (method === 'DELETE') {
-      // 连带清扫三份账号名单里选用了这条规则的 ruleIds（与 webui mock 同构）
-      if (!deletePostRuleSweepingRefs(db, id)) throw new HttpError(404, '图文帖规则不存在');
-      sendJson(res, 200, { ok: true });
+      // 连带清扫三份账号名单里选用了这条规则的 ruleIds（与 webui mock 同构）——在工具 handler 里
+      await callTool(deps, res, 'delete_post_rule', {}, { pathArgs: { id } });
       return;
     }
   }
@@ -1091,61 +1074,6 @@ async function sendWeiboImage(deps: PanelDeps, url: URL, res: http.ServerRespons
   res.end(buf);
 }
 
-/** 渠道拖拽排序：ids 必须是现有渠道的全排列（长度一致/无重复/无增删）。 */
-function putChannelOrder(db: Db, body: unknown): unknown {
-  const ids = (body as Record<string, unknown> | null)?.ids;
-  if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
-    throw new HttpError(400, 'ids 必须是正整数 id 数组');
-  }
-  const existing = new Set(db.listPushChannels().map((c) => c.id));
-  if (ids.length !== existing.size || new Set(ids).size !== ids.length || ids.some((id) => !existing.has(id))) {
-    throw new HttpError(400, 'ids 必须与现有渠道一一对应');
-  }
-  db.reorderPushChannels(ids);
-  return { ok: true };
-}
-
-/** 分类拖拽排序：ids 必须是现有分类的全排列（长度一致/无重复/无增删）。 */
-function putCategoryOrder(db: Db, body: unknown): unknown {
-  const ids = (body as Record<string, unknown> | null)?.ids;
-  if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
-    throw new HttpError(400, 'ids 必须是正整数 id 数组');
-  }
-  const existing = new Set(db.listCategories().map((c) => c.id));
-  if (ids.length !== existing.size || new Set(ids).size !== ids.length || ids.some((id) => !existing.has(id))) {
-    throw new HttpError(400, 'ids 必须与现有分类一一对应');
-  }
-  db.reorderCategories(ids);
-  return { ok: true };
-}
-
-/** 规则拖拽排序：ids 必须是全部规则的全排列（长度一致/无重复/无增删）。 */
-function putRuleOrder(db: Db, body: unknown): unknown {
-  const ids = (body as Record<string, unknown> | null)?.ids;
-  if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
-    throw new HttpError(400, 'ids 必须是正整数 id 数组');
-  }
-  const existing = new Set(db.listPushRules().map((r) => r.id));
-  if (ids.length !== existing.size || new Set(ids).size !== ids.length || ids.some((id) => !existing.has(id))) {
-    throw new HttpError(400, 'ids 必须与现有规则一一对应');
-  }
-  db.reorderPushRules(ids);
-  return { ok: true };
-}
-
-function putPostRuleOrder(db: Db, body: unknown): unknown {
-  const ids = (body as Record<string, unknown> | null)?.ids;
-  if (!Array.isArray(ids) || ids.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
-    throw new HttpError(400, 'ids 必须是正整数 id 数组');
-  }
-  const existing = new Set(db.listPostRules().map((r) => r.id));
-  if (ids.length !== existing.size || new Set(ids).size !== ids.length || ids.some((id) => !existing.has(id))) {
-    throw new HttpError(400, 'ids 必须与现有图文帖规则一一对应');
-  }
-  db.reorderPostRules(ids);
-  return { ok: true };
-}
-
 /** 名单 + face + 实况（room_state）+ 生效规则名标签 + 最近动态（posts，含关联微博账号的微博）。一次请求内每表只查一次。 */
 function enrichedStreamers(db: Db): unknown[] {
   const streamers = db.listStreamers();
@@ -1180,34 +1108,6 @@ function enrichedStreamers(db: Db): unknown[] {
       })),
     };
   });
-}
-
-/**
- * PUT 里的 weiboNick 处理：与库中现值不同才解析（改名后重新填一次即可）。
- * 解析到 UID → weibo_nick + weibo_uid 一起存；昵称不存在 / 网络错误 → 400；
- * 传空（null）→ 两个字段一起清空。与现值相同 → 不解析（weibo_uid 保持原值）。
- */
-async function resolveWeiboNick(
-  deps: PanelDeps,
-  prev: Streamer,
-  patch: Partial<StreamerInput>,
-): Promise<void> {
-  if (patch.weiboNick === undefined) return;
-  if (patch.weiboNick === null || patch.weiboNick === '') {
-    patch.weiboNick = null;
-    patch.weiboUid = null;
-    return;
-  }
-  if (patch.weiboNick === prev.weiboNick) return;
-  if (!deps.weiboResolver) throw new HttpError(400, '微博解析不可用');
-  let uid: string | null;
-  try {
-    uid = await deps.weiboResolver.resolveUid(patch.weiboNick);
-  } catch (e) {
-    throw new HttpError(400, `微博昵称解析失败：${e instanceof Error ? e.message : String(e)}`);
-  }
-  if (uid === null) throw new HttpError(400, '微博上找不到这个昵称');
-  patch.weiboUid = uid;
 }
 
 /** 轮询扫码状态；confirmed 时落盘 + 热重启回调 + 用新 cookie 查 mid。cookie 值不出现在响应里。 */
@@ -1290,15 +1190,6 @@ function listenInfo(deps: PanelDeps): unknown {
   };
 }
 
-function putListen(deps: PanelDeps, feature: ListenFeature, body: unknown): unknown {
-  const b = (body ?? {}) as Record<string, unknown>;
-  if (typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled 必须是布尔值');
-  const login = deps.listen!.login();
-  const enabled = setListen(deps.db, feature, b.enabled, listenReadyFor(feature, login));
-  deps.listen!.onChanged();
-  return { feature, enabled, setting: listenSetting(deps.db, feature) };
-}
-
 // ---- X 关注账号（独立名单）辅助 ----
 
 /** 名单行的面板视图：附关联主播展示名（简称优先，同 streamers.alias 约定）+ 最近 3 条推文（卡片动态段）。
@@ -1324,11 +1215,6 @@ function xAccountInfo(db: Db, id: number): unknown {
   const a = db.getXAccount(id);
   if (!a) throw new HttpError(404, 'X 账号不存在');
   return xAccountView(db, a);
-}
-
-/** 关联主播必须存在于监听名单（避免留下悬空引用） */
-function checkXBiliUid(db: Db, uid: string | null): void {
-  if (uid && !db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
 }
 
 // ---- 微博关注账号（独立名单）辅助 ----
@@ -1358,11 +1244,6 @@ function weiboAccountInfo(db: Db, id: number): unknown {
   const a = db.getWeiboAccount(id);
   if (!a) throw new HttpError(404, '微博账号不存在');
   return weiboAccountView(db, a);
-}
-
-/** 关联主播必须存在于监听名单（与 checkXBiliUid 同一条纪律） */
-function checkWeiboBiliUid(db: Db, uid: string | null): void {
-  if (uid && !db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
 }
 
 // ---- B站动态账号（独立名单）辅助 ----
@@ -1424,85 +1305,3 @@ function llmInfo(deps: PanelDeps): unknown {
   };
 }
 
-/**
- * 新增（name=null，POST）/ 更新（PUT）provider。body 经 llmProviderSchema 校验；
- * 名单落 settings 表后回调装配处重建 router，热生效。
- */
-function putLlmProvider(deps: PanelDeps, name: string | null, body: unknown): unknown {
-  const store = deps.llm!.store!;
-  const list = store.list();
-  const b = (body ?? {}) as Record<string, unknown>;
-
-  let merged: unknown;
-  if (name === null) {
-    merged = b;
-  } else {
-    const prev = list.find((p) => p.name === name);
-    if (!prev) throw new HttpError(404, 'provider 不存在');
-    // 只允许这几个字段进 patch；name 是路径标识，不可改
-    const patch: Record<string, unknown> = {};
-    for (const k of ['baseURL', 'model', 'vision', 'keyEnvs', 'enabled', 'structuredOutput', 'api'] as const) {
-      if (b[k] !== undefined) patch[k] = b[k];
-    }
-    merged = { ...prev, ...patch };
-  }
-
-  const parsed = llmProviderSchema.safeParse(merged);
-  if (!parsed.success) {
-    const msg = parsed.error.issues
-      .map((i) => `${i.path.length ? i.path.join('.') : '(根)'}: ${i.message}`).join('；');
-    throw new HttpError(400, `provider 校验失败：${msg}`);
-  }
-  const provider = parsed.data;
-
-  if (name === null) {
-    if (list.some((p) => p.name === provider.name)) {
-      throw new HttpError(400, `provider name 重复: ${provider.name}`);
-    }
-    store.save([...list, provider]);
-  } else {
-    store.save(list.map((p) => (p.name === name ? provider : p)));
-  }
-  // 表单可一并提交 key（弹窗编辑体验：一个表单存所有）；空串 = 清除面板填写
-  if (typeof b.key === 'string') {
-    deps.db.setSetting(`llm_key:${provider.name}`, b.key.trim());
-  }
-  deps.llm!.onProvidersChanged?.();
-  return { ok: true, name: provider.name };
-}
-
-/** 排序：names 必须是现有名单的一个排列（长度一致、无重复、无增删），整体重排后落库 */
-function putLlmProviderOrder(deps: PanelDeps, body: unknown): unknown {
-  const store = deps.llm!.store!;
-  const names = (body as Record<string, unknown> | null)?.names;
-  if (!Array.isArray(names) || names.some((n) => typeof n !== 'string')) {
-    throw new HttpError(400, 'names 必须是 provider name 数组');
-  }
-  if (new Set(names).size !== names.length) {
-    throw new HttpError(400, 'names 有重复');
-  }
-  const list = store.list();
-  const byName = new Map(list.map((p) => [p.name, p]));
-  if (names.length !== list.length || names.some((n) => !byName.has(n as string))) {
-    throw new HttpError(400, 'names 必须与现有 provider 名单一一对应');
-  }
-  store.save((names as string[]).map((n) => byName.get(n)!));
-  deps.llm!.onProvidersChanged?.();
-  return { ok: true };
-}
-
-/** 保存/清除 key：按 provider 存 settings 表；空 value = 清除已填 key */
-function putLlmKey(deps: PanelDeps, body: unknown): unknown {
-  const b = (body ?? {}) as Record<string, unknown>;
-  const name = typeof b.provider === 'string' ? b.provider.trim() : '';
-  const value = typeof b.value === 'string' ? b.value.trim() : '';
-  const list = deps.llm!.store?.list() ?? [];
-  const provider = list.find((p) => p.name === name);
-  if (!provider) throw new HttpError(404, `provider 不存在: ${name}`);
-  if (value && !/^[^\s,]+(\s*,\s*[^\s,]+)*$/.test(value)) {
-    throw new HttpError(400, '多个 key 用英文逗号分隔，key 内不能有空格');
-  }
-  deps.db.setSetting(`llm_key:${name}`, value);
-  deps.llm!.router?.refreshKeys();
-  return { ok: true, provider: name, key: llmKeySource(deps.db, provider) };
-}

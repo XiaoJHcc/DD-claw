@@ -79,7 +79,8 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/state.ts` — `diffRoom → Signal`；轮播=未开播；title_change=标题/分区变更
 - `src/core/scheduler.ts` — `PeriodicTask` 通用周期任务器
 - `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送；`feed_post` 是与之平行的图文帖分支，X / 微博 / B站动态同分支）
-- `src/core/db.ts` — SQLite 十六表 + 仓储；`ensureColumn` 在线补列；`migrateWeiboAccounts` / `migratePostRuleScopes` / `dropLiveRcmdPosts` 一次性数据搬家与清理
+- `src/core/db.ts` — SQLite 表群 + 仓储；`ensureColumn` 在线补列；`raw` 只读句柄与 `transaction` 同步事务包装（供 UndoStore / 级联写）；`migrateWeiboAccounts` / `migratePostRuleScopes` / `dropLiveRcmdPosts` 一次性数据搬家与清理
+- `src/core/undo.ts` — 写操作快照与撤销：`capture`（同步事务版）/ `track`（异步段串行版，写工具的实际记录点）；逐行比对撤销、每渠道一栈、LLM key 不落明文
 - `src/core/streamers.ts` — streamers / follows 行类型与映射
 - `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
 - `src/core/posts.ts` — posts 行类型与映射（pics JSON）
@@ -92,6 +93,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/proxy.ts` — **隧道 fetch**（HTTP 代理 CONNECT；Node 22 原生 fetch 不认代理），X 链路唯一出网通道
 - `src/core/x-config.ts` — X/推特连接配置 + 探测状态快照（settings 唯一信源）
 - `src/core/x-accounts.ts` — X 独立关注名单（行类型/映射/归一化；表在 db.ts，独立于 streamers）
+- `src/core/chat-store.ts` — agent 会话存储（chat_sessions / chat_messages；会话键 = 来源渠道，与撤销栈同 scope）
 - `src/core/weibo-accounts.ts` — 微博独立关注名单（行/映射/uid 归一化 + 源运行状态快照；表在 db.ts）
 - `src/core/bili-accounts.ts` — B站动态独立账号名单（行/映射/uid 归一化；表在 db.ts，独立于 streamers）
 - `src/core/post-rules.ts` — 图文帖规则（平台无关的通用规则：只定义筛选+渠道+推送词，生效范围在账号侧 rule_ids；quote/翻译按帖子平台运行时生效）
@@ -152,14 +154,16 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 
 ### panel / mcp
 
-- `src/panel/server.ts` — node:http + 静态内嵌 + `/api/*` + `/mcp`
+- `src/panel/server.ts` — node:http + 静态内嵌 + `/api/*` + `/mcp`；**写路由一律经 `runPanelTool`/`callTool` 走注册表**（校验/审计/快照在能力层，路由只做状态码与形状映射）
 - `src/panel/http-util.ts` — 解析/校验/响应 + 面板与 MCP 共用逻辑
 - `src/panel/schedule.ts` — 时间表查询（北京 06:00 日界）
 - `src/panel/webui-assets.gen.ts` — 构建期生成物（勿手改）
-- `src/mcp/auth.ts` — token 模型 + `resolveMcpAuth`
-- `src/mcp/tools.ts` — 工具注册表（按角色）
+- `src/mcp/auth.ts` — token 模型 + `resolveMcpAuth`（调用域：gateway 令牌绑渠道）
+- `src/mcp/tools.ts` — 工具注册表（按角色；`registerTools` 走 `runToolTracked`）
+- `src/mcp/run-tool.ts` — **能力层唯一执行入口**：`runTool`（zod 再校验 + 审计 + 错误归一）+ `runToolTracked`（写工具经 UndoStore.track 落变更记录）+ `toolChangeMeta` / `PANEL_TOOL_CTX`（REST 入口身份）
 - `src/mcp/handler.ts` — `/mcp` 无状态处理
 - `src/mcp/rate-limit.ts` — gateway 写限流
+- `src/agent/tool-schema.ts` — 注册表 → LLM 工具面（`AGENT_EXCLUDED_TOOLS` 显式排除名单，与 write-path-inventory 测试互锁）
 - 细节见 `docs/modules/panel.md`、`docs/mcp.md`
 
 ### 装配 / 工具 / 前端 / 脚本

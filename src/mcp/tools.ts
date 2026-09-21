@@ -30,7 +30,7 @@ import { isLlmEnabled, setLlmEnabled } from '../analysis/providers.js';
 import { llmProviderSchema } from '../config/schema.js';
 import type { StreamerInput } from '../core/streamers.js';
 import { mcpWriteLimiter } from './rate-limit.js';
-import { runTool } from './run-tool.js';
+import { runToolTracked } from './run-tool.js';
 import type { McpAuth } from './auth.js';
 
 /** gateway 群自助：单渠道 MCP 规则上限 */
@@ -259,11 +259,13 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'set_streamer',
-    description: '更新监听名单条目：alias 别名 / watch 监听 / weiboNick 微博昵称（自动解析 uid，传 null 清除）/ profileNote 备注。至少传一个字段',
+    description: '更新监听名单条目：alias 别名 / watch 监听 / analyze 分析 / notify 通知 / weiboNick 微博昵称（自动解析 uid，传 null 清除）/ profileNote 备注。至少传一个字段',
     schema: {
       uid: uidSchema,
       alias: z.string().nullable().optional(),
       watch: z.boolean().optional(),
+      analyze: z.boolean().optional(),
+      notify: z.boolean().optional(),
       weiboNick: z.string().nullable().optional().describe('微博昵称；传 null 清除（连同 weiboUid）'),
       profileNote: z.string().nullable().optional(),
     },
@@ -274,7 +276,7 @@ const adminTools: McpToolDef[] = [
       const prev = deps.db.getStreamer(uid);
       if (!prev) throw new HttpError(404, '该 uid 不在监听名单');
       const patch = parseStreamerPatch(
-        pickBody(args, ['alias', 'watch', 'weiboNick', 'profileNote']),
+        pickBody(args, ['alias', 'watch', 'analyze', 'notify', 'weiboNick', 'profileNote']),
       );
       // weiboNick → weiboUid 解析（同面板 resolveWeiboNick 语义，内联避免模块循环依赖）
       if (patch.weiboNick !== undefined) {
@@ -401,7 +403,7 @@ const adminTools: McpToolDef[] = [
     },
     role: 'admin',
     write: true,
-    handler: (deps, args) => {
+    handler: async (deps, args) => {
       if (args.id === undefined) {
         const input = parseNewXAccount(pickBody(args, ['screenName', 'displayName', 'biliUid', 'enabled', 'ruleIds']));
         if (args.nickname !== undefined) {
@@ -412,9 +414,16 @@ const adminTools: McpToolDef[] = [
         }
         checkXBiliUidForMcp(deps, input.biliUid);
         checkAccountRuleIds(deps.db, input.ruleIds);
-        const id = deps.db.upsertXAccount(input);
+        // 存在性校验（与面板 POST /api/x/accounts 同一条）：「账号不存在」是硬错误（多半敲错了）；
+        // 链路原因（代理不通 / 限流）照收——不能因为代理没开就让人加不了账号，把原因回报给调用方。
+        // verify 顺手抠到的 og:title 显示名直接种入 nickname（抠不到为 null，抓取再回写）
+        const verify = deps.x?.verify ? await deps.x.verify(input.screenName) : undefined;
+        if (verify?.checked && !verify.ok && verify.kind === 'not-found') {
+          throw new HttpError(400, `X 账号不存在：@${input.screenName}`);
+        }
+        const id = deps.db.upsertXAccount({ ...input, nickname: verify?.name ?? null });
         deps.x?.onChanged();
-        return { id, account: deps.db.getXAccount(id) };
+        return { id, account: deps.db.getXAccount(id), ...(verify ? { verify } : {}) };
       }
       const id = Number(args.id);
       if (!deps.db.getXAccount(id)) throw new HttpError(404, 'X 账号不存在');
@@ -559,7 +568,7 @@ const adminTools: McpToolDef[] = [
       id: idSchema.optional(),
       name: z.string().optional(),
       channels: z.array(idSchema).optional().describe('推送渠道 id（与开播规则共用 push_channels）'),
-      filters: z.object({
+      filters: z.strictObject({
         original: z.boolean().optional().describe('原创'),
         retweet: z.boolean().optional().describe('转发'),
         quote: z.boolean().optional().describe('引用（只有 X 帖能标引用；勾上对非 X 帖永不命中，是语义不是错误）'),
@@ -652,8 +661,12 @@ const adminTools: McpToolDef[] = [
     handler: (deps, args) => {
       const id = args.id as number;
       if (!deps.db.listCategories().some((c) => c.id === id)) throw new HttpError(404, '分类不存在');
-      const disabledRules = deps.db.disablePushRulesByCategory(id);
-      deps.db.deleteCategory(id);
+      // 级联停用 + 删除一个事务（P0：撤销快照的前提——两条语句不再可能只成一半）
+      const disabledRules = deps.db.transaction(() => {
+        const n = deps.db.disablePushRulesByCategory(id);
+        deps.db.deleteCategory(id);
+        return n;
+      });
       return { ok: true, disabledRules };
     },
   },
@@ -773,6 +786,7 @@ const adminTools: McpToolDef[] = [
       enabled: z.boolean().optional(),
       structuredOutput: z.enum(['schema', 'object', 'none']).optional(),
       api: z.enum(['chat-completions', 'responses']).optional(),
+      keyEnvs: z.array(z.string().min(1)).optional().describe('从环境变量读 key 的变量名列表（通常留空，key 直接走 key 字段）'),
       key: z.string().optional().describe('API key（多个用英文逗号分隔）；空串 = 清除'),
     },
     role: 'admin',
@@ -782,7 +796,7 @@ const adminTools: McpToolDef[] = [
       if (!store) throw new HttpError(400, 'LLM provider 管理未装配');
       const list = store.list();
       const prev = list.find((p) => p.name === (args.name as string));
-      const patch = pickBody(args, ['baseURL', 'model', 'vision', 'enabled', 'structuredOutput', 'api']);
+      const patch = pickBody(args, ['baseURL', 'model', 'vision', 'keyEnvs', 'enabled', 'structuredOutput', 'api']);
       const merged = prev ? { ...prev, ...patch } : { name: args.name, ...patch };
       const parsed = llmProviderSchema.safeParse(merged);
       if (!parsed.success) {
@@ -1053,6 +1067,11 @@ export function allToolDefs(): McpToolDef[] {
   return [...sharedTools, ...adminTools, ...gatewayTools];
 }
 
+/** 按名取工具定义（REST 收敛后面板路由经它进注册表；找不到 = 装配错误） */
+export function toolDefByName(name: string): McpToolDef | undefined {
+  return allToolDefs().find((d) => d.name === name);
+}
+
 /** 该角色可见的工具（gateway 看不到 admin 工具，反之亦然——不可见即不存在） */
 export function toolDefsForRole(role: McpAuth['role']): McpToolDef[] {
   return allToolDefs().filter((t) => t.role === 'shared' || t.role === role);
@@ -1066,9 +1085,10 @@ export function registerTools(server: McpServer, deps: PanelDeps, ctx: McpAuth):
     server.registerTool(
       def.name,
       { description: def.description, inputSchema: def.schema },
-      // args 已由 SDK 按 zod shape 校验过；runTool 再校验一次（第二个适配器也绕不过）
+      // args 已由 SDK 按 zod shape 校验过；runToolTracked 内再校验一次（第二个适配器也绕不过），
+      // 写操作顺带过 UndoStore 落变更记录（快照方案见 undo.ts track()）
       (async (args: Record<string, unknown>) => {
-        const r = await runTool(deps, def, args, ctx);
+        const r = await runToolTracked(deps, def, args, ctx, 'mcp');
         return r.ok
           ? { content: [{ type: 'text' as const, text: r.text }] }
           : { content: [{ type: 'text' as const, text: r.text }], isError: true as const };

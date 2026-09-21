@@ -203,15 +203,27 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
 
 **快照实现取向（对「写操作快照与撤销」一节的落实方式，2026-09-17）**：采用**表级前像快照 + 差分**，而不是让每条写路径自己声明「影响了哪些行」。理由是计划里点名的五种形状（级联停用 N 条 / 排序整表重写 / 新建 `sort=MAX+1` / settings 删除式写 / provider 复合写两行）在差分下**自动收敛为同一种记录**，且顺带拿到后像——撤销插入/删除才做得出来；代价是每次配置写整表 SELECT 一遍，但这只发生在配置写路径（面板点一下 / 一次 MCP 调用），配置表几十到几百行，绝不进轮询循环。两个附带决定：① `streamers` **暂不纳入**快照表——它是配置与归档的混合体（面板改 watch/alias，关注源同时覆写 uname/face），纳入后撤销比对会被轮询写频繁打断，撤不掉反而更常见，收敛其写路径时再裁决；② 除 LLM key 外**不做其它隐私例外**，即 `mcp_tokens` 的值会被快照（同库已有明文，未新增暴露面，且换来「撤销令牌轮换」能还原旧令牌）；若要求同口径打码，改一行 `redact` 判定即可。
 
-**接线进展**（切片 A，2026-09-17 后）：`registerTools` 已改走 `runTool`（MCP 侧 content 文本逐字不变，run-tool 契约测试钉住）；
-鉴权口径启动日志已加（`index.ts`，判据 4）；`Db` 已暴露原始句柄（`Db.raw` 只读 getter），
-`UndoStore` / `ChatStore` 已在装配根实例化并建表、挂进 `PanelDeps`（面板路由尚未消费，`beforeWrite` 快照钩子保持空）；
-缺口清单的 8 条 planned 工具（5 个 `reorder_*` + `test_push` / `test_llm_provider` / `test_x_connection`）已补进注册表
-（admin、write、agent 工具面继续排除），逻辑与对应 REST 路由同口径，**REST 路由未动**。
-**仍未接线**：面板 REST 收敛（写路由改走 `runTool`，`server.ts` 行为零变化是下一切片的约束）与撤销快照
-（`beforeWrite` 钩子接线、热生效回调映射）；`completeChat` 与 `agentToolSpecs` 目前**没有任何调用方**
-（agent loop 尚未写），对现有链路零行为变化。
-快照与写入的**同事务**保证不在 `runTool` 内（better-sqlite3 事务不能跨 await），属收敛每条写路径时的工作。
+**快照接线落地（切片 B，2026-09-21）**：记录点 = `UndoStore.track()`（异步段版 capture）：进 handler 前取前像，`runTool` 成功后同步做「后像 → 差分 → 落记录」，所有写调用经内部队列串行化防差分窗口交错。两个已知取舍（详见 `undo.ts` track() 注释）：① 前像读取不在事务里（事务不能跨 await），残留窗口 = 写已提交而记录 INSERT 失败（磁盘级故障），此时错误抛给调用方；② 不走 track 的写（轮询源回写 `x_accounts` 的游标/头像列）可能落进差分窗口被捎带——x_accounts 与 streamers 同为「配置+归档混合表」，后果是撤销比对更易中止（宁中止不丢写），彻底解法（按列过滤或拆表）留待撤销执行器切片裁决。① 的 `streamers` 口径已随接线生效：`watch_streamer` / `set_streamer` / `unwatch_streamer` 照常过 runTool + 审计，但差分恒空、不落变更记录（`set_streamer` 联动的 weibo_accounts 写同理不纳入）。
+
+**接线进展**：
+- **切片 A（2026-09-17 后）**：`registerTools` 已改走 `runTool`（MCP 侧 content 文本逐字不变，run-tool 契约测试钉住）；
+  鉴权口径启动日志已加（`index.ts`，判据 4）；`Db` 已暴露原始句柄（`Db.raw` 只读 getter），
+  `UndoStore` / `ChatStore` 已在装配根实例化并建表、挂进 `PanelDeps`；
+  缺口清单的 8 条 planned 工具（5 个 `reorder_*` + `test_push` / `test_llm_provider` / `test_x_connection`）已补进注册表
+  （admin、write、agent 工具面继续排除），逻辑与对应 REST 路由同口径。
+- **切片 B（REST 收敛 + 快照接线）**：清单里 `coverage: 'registry'` 的全部写路由已改经 `runToolTracked`
+  （`runTool` + UndoStore.track）调注册表 handler，面板里的重复校验分支已删（判据 3 达成；判据 5 由
+  server.test.ts 零改动通过背书）；快照记录点 = `UndoStore.track()`（方案与取舍见下「快照实现取向」）；
+  删分类级联停用已事务化（`Db.transaction` 包装已补）；两处裁决落地见缺口清单末行；
+  REST 收敛需要的工具语义对齐（additive/趋严，MCP 契约不破坏）：`set_streamer` 补 analyze/notify、
+  `upsert_llm_provider` 补 keyEnvs、`upsert_x_account` 新建并入 verify（not-found 拒 / link 照收 /
+  ok 种昵称，响应增 `verify` 键）、`upsert_post_rule` 的 filters 改 strictObject。
+- **仍未接线**：撤销执行器与历史查询端点（`/api/undo*`）、「表 → 热生效回调」映射（撤销后触发
+  reconcileRuntime / reconcileListen / 重建 router）、变更历史 UI（P0b）——均属切片 C；
+  `completeChat` 与 `agentToolSpecs` 目前**没有任何调用方**（agent loop 尚未写），对现有链路零行为变化。
+
+**快照与写入的同事务**：better-sqlite3 事务不能跨 await，故 `runTool` 内不做完整 capture；
+切片 B 的实际记录点与取舍见上「快照实现取向」的落地补充。
 
 **顺带修正的过期内容**（动手前先按最新代码复核）：
 
@@ -232,7 +244,7 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
 | `POST /api/llm/providers/:name/test` | 无工具 | 网络探测 + 失败计熔断，非 DB 写 → 与 `test_push` 同类「①成立②暂关」，**不暴露给 agent** |
 | `PUT /api/napcat`、`POST /api/napcat/launch` | 无工具 | 文件/进程写面（已在遗漏面）→ v1 **仅面板**，不进 agent 工具面 |
 | `POST /api/auth/{bili,weibo}/qrcode` 等登录流 | 无工具 | 人机交互（扫码），不进工具面、不进回滚覆盖（凭据落盘已在遗漏面）；配套 `GET …/qrcode/poll` 是**带写副作用的 GET**（confirmed 时落盘 cookies + 热重启源），同属本排除范围 |
-| `PUT /api/advanced`、`/api/listen/*`、`/api/llm/*`、`PUT /api/push/enabled`（`set_push_enabled`）、分类 / 规则 / 渠道 / 名单 CRUD | 已有对应工具 | 面板改为经 `runTool` 调注册表 handler，删掉面板里的重复校验分支。**收敛前先裁决两处分歧**：① provider 重名——REST 拒绝（server.ts）vs `upsert_llm_provider` 按名更新（tools.ts），统一以谁为准；② `set_streamer` 内联复制的 `resolveWeiboNick`（tools.ts vs server.ts 两份）消重 |
+| `PUT /api/advanced`、`/api/listen/*`、`/api/llm/*`、`PUT /api/push/enabled`（`set_push_enabled`）、分类 / 规则 / 渠道 / 名单 CRUD | 已有对应工具 | ~~面板改为经 `runTool` 调注册表 handler，删掉面板里的重复校验分支~~ **切片 B 已落地**。两处分歧的裁决（2026-09-21 拍板）：① provider 重名——**REST 保持「重名 400」，工具保持按名 upsert**，REST 路由在调 runTool 前做重名预检（PUT 同理做 404 存在性预检），两边契约都不变；② `set_streamer` 的 `resolveWeiboNick`——收敛后 REST 走 runTool，server.ts 那份已删，唯一实现在工具 handler |
 
 **两个概念必须分开**：① **回滚覆盖**——配置写路径全部过注册表，才有「撤销彻底可信」；② **工具暴露**——哪些进 `toolDefsForRole()`、LLM 才看得见。①决定②的实现位置，但不等于②全开放；排序 / 测试推送 / NapCat 正属于「①成立而②暂关」的那类。
 

@@ -18,6 +18,7 @@ import { allToolDefs } from '../mcp/tools.js';
 import { saveLlmProviders, listLlmProviders } from '../analysis/providers.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
+import { UndoStore, adminScope, channelScope } from '../core/undo.js';
 
 const ADMIN_TOKEN = 'ddc_test_admin';
 const GATEWAY_TOKEN = 'ddc_test_gateway';
@@ -27,6 +28,8 @@ interface Fixture {
   base: string;
   listenChanged: { count: number };
   advancedChanged: { count: number };
+  /** 写快照（P0 接线后所有写工具都经它落变更记录） */
+  undo: UndoStore;
   /** 该测试开过的 MCP client（teardown 先关 client 再关 server，否则 keep-alive 连接拖住 server.close） */
   clients: Client[];
 }
@@ -55,11 +58,14 @@ async function setup(
   };
   const listenChanged = { count: 0 };
   const advancedChanged = { count: 0 };
+  const undo = new UndoStore(db.raw);
+  undo.migrate();
   // X 分页 dep（生产装配形状）：配置落 settings，探测/校验走网络（测试里不触发）
   const xChanged = { count: 0 };
   const weiboChanged = { count: 0 };
   const deps: PanelDeps = {
     db,
+    undo,
     status: () => status,
     listen: {
       login: () => ({ bili: true, weibo: true, twitter: getXConfig(db).proxyUrl.trim() !== '' }),
@@ -114,7 +120,7 @@ async function setup(
     db.close();
   });
   const { port } = server.address() as AddressInfo;
-  return { db, base: `http://127.0.0.1:${port}`, listenChanged, advancedChanged, clients };
+  return { db, base: `http://127.0.0.1:${port}`, listenChanged, advancedChanged, undo, clients };
 }
 
 /** SDK client（stateless 模式，Bearer 头走 requestInit）；登记进 fixture 统一 teardown */
@@ -729,4 +735,36 @@ test('排序/测试类工具：admin 可见、gateway 不可见；schema 校验�
   assert.equal(r.ok, false);
   assert.equal(r.status, 400);
   assert.match(r.text, /^错误：参数不合法：/);
+});
+
+// ---- 写快照接线（MCP 入口）：写工具经 runToolTracked 落变更记录，scope 按调用域分栈 ----
+
+test('MCP 写落变更记录：admin 进全局栈；gateway 按令牌绑定渠道进独立栈；失败不写记录', async (t) => {
+  const f = await setup(t);
+  const { groupChannelId } = seedBase(f.db);
+  // 绑渠道的 gateway 令牌（叠加在 fixture 已有令牌上）
+  saveMcpTokens(f.db, [
+    { name: 'adm', role: 'admin', token: ADMIN_TOKEN },
+    { name: 'gw', role: 'gateway', token: GATEWAY_TOKEN },
+    { name: 'gw7', role: 'gateway', token: 'ddc_gw7', channelId: groupChannelId },
+  ]);
+
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  await call(adm, 'set_push_enabled', { enabled: false });
+  const gw7 = await mcpClient(f, 'ddc_gw7');
+  await call(gw7, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705' });
+  // 失败调用不落记录
+  await assert.rejects(call(gw7, 'add_group_push_rule', { channelId: groupChannelId, uid: '7706705' }), /已有相同规则/);
+
+  const adminHist = f.undo.history({ scope: adminScope() });
+  assert.equal(adminHist.length, 1);
+  assert.equal(adminHist[0]!.tool, 'set_push_enabled');
+  assert.equal(adminHist[0]!.entry, 'mcp');
+  assert.equal(adminHist[0]!.actor, 'adm');
+
+  const gwHist = f.undo.history({ scope: channelScope(groupChannelId) });
+  assert.equal(gwHist.length, 1, 'gateway 写进渠道独立栈');
+  assert.equal(gwHist[0]!.tool, 'add_group_push_rule');
+  assert.equal(gwHist[0]!.actor, 'gw7');
+  assert.equal(gwHist[0]!.rows[0]!.table, 'push_rules');
 });
