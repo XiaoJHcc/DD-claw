@@ -45,7 +45,7 @@
 ```
                       ┌─ Web UI REST（/api/*，人点鼠标）        [已落地，待收敛到注册表]
 一个能力面            ├─ MCP over HTTP（/mcp，进程外 Host）     [已落地 v1]
-src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [目标 P1]
+src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [已落地 P1]
 （schema + handler    ├─ MaiBot 插件（HTTP 调 /mcp）           [目标 P2]
  + 角色标注）         └─ NapCat 直连（OneBot 事件 → 进程内）   [目标 P3]
 ```
@@ -66,6 +66,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 | `Notifier.send(msg)` | `src/notify/types.ts` | 载荷是 `PushMessage`；`capabilities` 声明能否带图；`alert()` 供健康告警（当前仅 toast） | ✅ |
 | 能力面 tool def | `src/mcp/tools.ts` | 工具名 + zod schema + handler + role；前端不得绕过注册表私接 Db | ✅ v1 |
 | 撤销入口 | `src/panel/server.ts` `PanelDeps.undoLast` + `src/core/undo.ts` `undoEffects` | 撤该调用域栈顶 + 按受影响表/键触发**装配根**的热生效回调（回调不进 Db / UndoStore 层）；撤销自身 `track: false`，不进变更记录 | ✅ |
+| `runAgentTurn(deps, userMessage)` | `src/agent/loop.ts` | 一轮对话的完整回路（历史 → LLM 轮 → 工具执行 → 结果/错误回填 → 终答），返回 `{reply, steps, toolCalls, truncated}`；scope = `adminScope()`、工具一律经 `runToolTracked`（**entry='agent'**）；`opts.completeChat` 是测试注入点；LLM 未就绪 400 / 调用失败 502 | ✅ P1 |
 
 `PushMessage.priority` 目前是**预留字段、无消费者**，等优先级产品方案定了再补。
 
@@ -81,7 +82,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/scheduler.ts` — `PeriodicTask` 通用周期任务器
 - `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送；`feed_post` 是与之平行的图文帖分支，X / 微博 / B站动态同分支）
 - `src/core/db.ts` — SQLite 表群 + 仓储；`ensureColumn` 在线补列；`raw` 只读句柄与 `transaction` 同步事务包装（供 UndoStore / 级联写）；`migrateWeiboAccounts` / `migratePostRuleScopes` / `dropLiveRcmdPosts` 一次性数据搬家与清理
-- `src/core/undo.ts` — 写操作快照与撤销：`capture`（同步事务版）/ `track`（异步段串行版，写工具的实际记录点）；逐行比对撤销、每渠道一栈、LLM key 不落明文；`DEFAULT_IGNORE_COLUMNS`（混合表轮询列不参与差分/比对/还原）、`undoEffects`（撤销后热生效分类，纯函数不持回调）
+- `src/core/undo.ts` — 写操作快照与撤销：`capture`（同步事务版）/ `track`（异步段串行版，写工具的实际记录点）；逐行比对撤销、每渠道一栈、LLM key 不落明文；`DEFAULT_IGNORE_COLUMNS`（四张「配置+归档」混合表——`streamers` + 三张图文账号名单——的轮询/同步回写列不参与差分、比对与还原；`streamers` 已纳入快照表，2026-09-21）、`undoEffects`（撤销后热生效分类，纯函数不持回调；`streamers` 无标签——名单每轮直读 DB）
 - `src/core/streamers.ts` — streamers / follows 行类型与映射
 - `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
 - `src/core/posts.ts` — posts 行类型与映射（pics JSON）
@@ -108,11 +109,11 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/sources/bili/client.ts` — HTTP 层（UA、超时重试、错误分层）
 - `src/sources/bili/types.ts` — B站接口返回类型
 - `src/sources/bili/live-status.ts` — 批量 `get_status_info_by_uids`（50/片）
-- `src/sources/bili/live-status-source.ts` — 轮询 + diff + coldStart + 健康计数
+- `src/sources/bili/live-status-source.ts` — 轮询 + diff + coldStart + 健康计数；顺手给 streamers 的空值回填 `uname`/`face`/`room_id`（已有值绝不覆盖——这三列 + `updated_at` 是 `undo.ts` 对 streamers 的忽略列）
 - `src/sources/bili/auth.ts` — cookies.json + nav 心跳（不进日志）
 - `src/sources/bili/qrcode.ts` — passport 扫码客户端（要响应头）
 - `src/sources/bili/followings.ts` — `x/relation/followings` 分页（50/页，无 WBI）
-- `src/sources/bili/follows.ts` — `FollowsSource`（正轮成功才落库；不自动入监听）
+- `src/sources/bili/follows.ts` — `FollowsSource`（正轮成功才落库；不自动入监听）；只给已在名单且 face 为空的 streamers 回填头像（不写别的列——该列是 `undo.ts` 对 streamers 的忽略列之一）
 - `src/sources/bili/dynamic.ts` — `DynamicSource`：`feed/space`（无 WBI）→ posts；轮询对象 = 监听主播 ∪（图文开关开着时的）bili_accounts 启用账号，`feed_post` **只对名单账号发**（监听主播只归档）；FORWARD 归一 `retweet`、LIVE_RCMD 彻底舍弃；名单账号回写 uname/last_ok_at/头像；`kickAccount` 添加后即时首拉
 - `src/sources/bili/avatar.ts` — B站头像本地化（**直连下载**，hdslb 境内可达且不校验 Referer；md5 文件名入库，面板按文件名读）
 - `src/sources/bili/dm.ts` — dm 设备指纹参数（RSSHub 算法）
@@ -165,7 +166,10 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/mcp/handler.ts` — `/mcp` 无状态处理
 - `src/mcp/rate-limit.ts` — gateway 写限流
 - `src/agent/tool-schema.ts` — 注册表 → LLM 工具面（`AGENT_EXCLUDED_TOOLS` 显式排除名单，与 write-path-inventory 测试互锁）
-- 细节见 `docs/modules/panel.md`、`docs/mcp.md`
+- `src/agent/loop.ts` — **WebUI Agent 的 agent loop**（`runAgentTurn` / `chatBlockedReason` / `AGENT_MAX_STEPS=8`）：面板单会话（scope=adminScope）读历史 → `[system, ...history, user]` → 循环 `deps.llm.router.completeChat`（可注入假 LLM）→ tool_calls 逐个经 `runToolTracked`（entry='agent'）执行、结果或错误文本回填 → 无 tool_calls 即终答；往来全部落 ChatStore。**不按 mode 硬拦写工具**（写纪律在系统提示层）
+- `src/agent/system-prompt.ts` — 系统提示 + 写操作模式（`settings.chat_write_mode`，缺省 `ask`=写前询问 / `auto`）：`buildSystemPrompt` / `getChatWriteMode` / `setChatWriteMode`（`set_chat_mode` 工具用它，且**不在 agent 工具面**）
+- `src/panel/server.ts` 的 `/api/chat/{history,reset,mode}` 与 `POST /api/chat` 是 WebUI Agent 的接线（chat dep 不注入则 404）
+- 细节见 `docs/modules/panel.md`、`docs/mcp.md`、`docs/plan/agent-access.md`（P1）
 
 ### 装配 / 工具 / 前端 / 脚本
 
@@ -218,8 +222,8 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - **微博图文来源（与 X 同构的第二条图文链路）**：已落地（`weibo_accounts` 独立名单 / `WeiboFeedSource` 轮独立名单 + 运行状态快照 + 头像本地化 / `feed_post` 双平台推送分支（微博图直连下载）/ `post_rules.platform` 平台分流 / 图文页单墙混排 + 平台筛选胶囊 / MCP 三工具 / 老库一次性数据搬家）。计划与实现记录见 `docs/plan/weibo-source.md`
 - **B站动态图文来源 + 图文规则重构**：已落地（`bili_accounts` 独立名单〔动态型 UP 主不开播也能监听〕/ `DynamicSource` 轮询对象 = 监听主播 ∪（图文开关开着时的）动态名单，`feed_post` 只对名单账号发，名单账号头像·uname 回写 / `feed_post` 三平台推送分支 / 图文规则改为**平台无关通用规则 + 账号侧 `rule_ids` 选用**〔post_rules 去 account_ids 与 platform 两个维度〕/ 图文页「图文规则」卡 + B站账号卡与平台筛选胶囊 / MCP 三工具 / 旧规则 scope 一次性迁移到账号）。**2026-09-21 修订**：监听开关拆分（监听主播动态归档随登录常开，`listen_dynamic` 只管动态账号名单）、开播动态（LIVE_RCMD）彻底舍弃（不入库 + 一次性清旧行）、FORWARD 在 source 归一成 `retweet`、三平台账号的 ID 与平台昵称锁定为平台事实（输入面不可改，X 昵称经 verify 种入 / 抓取回写）。计划与实现记录见 `docs/plan/bili-dynamic-posts.md`
 - **图文补推语义（三平台统一，2026-09-21 拍板）**：主动关闭（账号停用→重新启用 / 图文开关手动关→重开）恢复轮**一律静默不补推**（账号表 `silent_next` 恢复位）；服务未运行期间（重启/崩溃/登录态丢失）与添加账号之前默认不推，推送设置开 `backlog_push_enabled`（「补推未运行期间的图文」）后按**时间窗（默认 6h）+ 每账号条数上限（默认 3、取最新）**双重封顶补推；三种轮次归档永不受影响，正常轮新帖全推。语义唯一权威在 `src/core/backlog.ts`
-- **能力面 P0 地基（全部落地）**：后端（切片 A–C）=`runTool` 共享执行器 + 写快照与撤销（`UndoStore` 差分前像 / 逐行比对中止 / 每渠道一栈 / 混合表按列过滤）+ 撤销执行器（`PanelDeps.undoLast` + `undoEffects` 热生效映射 + `POST /api/undo` / `GET /api/undo/history` + 内部工具 `undo_last_change`）+ 面板配置写 REST 全部收敛到注册表 + 鉴权口径启动日志；面板侧（P0b）= 设置页底部「变更历史」卡（`webui/js/undo.js`，栈顶撤销 + 冲突标注）。切片记录见 `docs/plan/agent-access.md`
-- **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、WebUI Agent（P1：agent loop + 聊天视图）/ MaiBot 插件 / NapCat 直连、弹幕抓取
+- **能力面 P0 地基（全部落地）**：后端（切片 A–C）=`runTool` 共享执行器 + 写快照与撤销（`UndoStore` 差分前像 / 逐行比对中止 / 每渠道一栈 / 四张混合表按列过滤——`streamers` + 三张图文账号名单）+ 撤销执行器（`PanelDeps.undoLast` + `undoEffects` 热生效映射 + `POST /api/undo` / `GET /api/undo/history` + 内部工具 `undo_last_change`）+ 面板配置写 REST 全部收敛到注册表 + 鉴权口径启动日志；面板侧（P0b）= 设置页底部「变更历史」卡（`webui/js/undo.js`，栈顶撤销 + 冲突标注）。切片记录见 `docs/plan/agent-access.md`
+- **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、WebUI Agent 真机验收（P1 验收口径的实操项）、MaiBot 插件 / NapCat 直连、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 
 

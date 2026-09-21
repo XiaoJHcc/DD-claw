@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import Database from 'better-sqlite3';
 import {
-  adminScope, channelScope, DEFAULT_CONFIG_TABLES, undoEffects, UndoStore,
+  adminScope, channelScope, DEFAULT_CONFIG_TABLES, DEFAULT_IGNORE_COLUMNS, undoEffects, UndoStore,
 } from './undo.js';
 
 const DDL = `
@@ -25,6 +25,13 @@ const DDL = `
     enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   CREATE TABLE archive_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT);
+  -- streamers：配置 + 归档混合表（列名与 core/db.ts 逐字一致，face 由 ensureColumn 补）
+  CREATE TABLE streamers (
+    uid TEXT PRIMARY KEY, uname TEXT NOT NULL DEFAULT '', alias TEXT, room_id TEXT,
+    weibo_uid TEXT, weibo_nick TEXT, watch INTEGER NOT NULL DEFAULT 1,
+    analyze INTEGER NOT NULL DEFAULT 0, notify INTEGER NOT NULL DEFAULT 1, profile_note TEXT,
+    face TEXT, source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('follows','manual')),
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   -- 三张「配置 + 归档」混合表（列名照抄 core/db.ts，silent_next 由 ensureColumn 补）
   CREATE TABLE x_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, screen_name TEXT NOT NULL UNIQUE, nickname TEXT,
@@ -385,7 +392,7 @@ test('track：并发写调用串行化，差分互不污染', async (t) => {
   const recA = history.find((h) => h.id === ra.changeId)!;
   assert.deepEqual(recA.rows.map((r) => (r.after as { name: string }).name), ['规则A'], 'A 的记录只含 A 的写');
 });
-// ---- 混和表按列过滤（切片 C 裁决：x_accounts / weibo_accounts / bili_accounts）----
+// ---- 混和表按列过滤（切片 C 裁决：x_accounts / weibo_accounts / bili_accounts；streamers 同口径见下）----
 
 /** 三张混合表的形状：配置列（面板 / agent 能改）与轮询列（touch* 回写的游标 / 心跳） */
 const ACCOUNT_SHAPES = [
@@ -419,7 +426,7 @@ test('混合表列过滤：轮询回写不落记录、不污染撤销，撤销�
     && DEFAULT_CONFIG_TABLES.includes('bili_accounts'),
     '三张图文名单都是「配置 + 归档」混合表：纳入快照 + 按列过滤',
   );
-  assert.ok(!DEFAULT_CONFIG_TABLES.includes('streamers'), 'streamers 维持整表不纳入（无可分的游标列）');
+  assert.ok(DEFAULT_CONFIG_TABLES.includes('streamers'), 'streamers 按列过滤后也已纳入快照（2026-09-21）');
 
   for (const s of ACCOUNT_SHAPES) {
     const id = seedAccount(db, s);
@@ -472,6 +479,148 @@ test('列过滤不削弱冲突检测：配置列被第三方改过仍然中止�
   assert.equal(row.rule_ids, '[9]', '冲突中止时第三方写的值必须原样留着');
 });
 
+// ---- streamers 纳入快照（2026-09-21：从「整表不纳入」改为按列过滤；P1 真机冒烟的缺口）----
+
+/** 建一张 streamers 行（照抄 Db.upsertStreamer 的建行形状：配置列取建行默认、平台事实列空） */
+function seedStreamer(db: Database.Database, uid: string, at = 500, patch: Record<string, unknown> = {}): void {
+  const cols: Record<string, unknown> = {
+    uname: '', alias: null, room_id: null, weibo_uid: null, weibo_nick: null,
+    watch: 1, analyze: 0, notify: 1, profile_note: null, face: null,
+    source: 'manual', created_at: at, updated_at: at, ...patch,
+  };
+  const names = Object.keys(cols);
+  db.prepare(
+    `INSERT INTO streamers (uid, ${names.join(', ')}) VALUES (?, ${names.map(() => '?').join(', ')})`,
+  ).run(uid, ...names.map((c) => cols[c]));
+}
+
+/**
+ * 轮询回填（模拟 `LiveStatusSource.pollOnce` 的「为空才补」：`uname` / `face` / `room_id`
+ * 一起写回，`updated_at` 每次 upsert 都重写）。`FollowsSource.syncOnce` 的头像回填是它的子集
+ * （只写 face + updated_at），故同一个夹具够用。
+ */
+function pollFillStreamer(
+  db: Database.Database, uid: string, at: number,
+  v: { uname?: string; face?: string; roomId?: string } = {},
+): void {
+  db.prepare(
+    `UPDATE streamers SET uname = COALESCE(?, uname), face = COALESCE(face, ?),
+       room_id = COALESCE(room_id, ?), updated_at = ? WHERE uid = ?`,
+  ).run(v.uname ?? '平台名', v.face ?? 'f.jpg', v.roomId ?? '80397', at, uid);
+}
+
+test('streamers 按列过滤：轮询回填不落记录、不阻断撤销，撤销也不回滚轮询列', (t) => {
+  const { db, store } = setup(t);
+  assert.ok(DEFAULT_CONFIG_TABLES.includes('streamers'), 'streamers 在快照表里');
+  assert.deepEqual(
+    DEFAULT_IGNORE_COLUMNS.streamers, ['uname', 'face', 'room_id', 'updated_at'],
+    '忽略列 = 轮询与关注同步回写的列（配置列 watch/alias/analyze/notify/weibo_nick/weibo_uid/profile_note 都参与差分与还原）',
+  );
+  seedStreamer(db, '1001');
+
+  // ① 只有轮询列变化 → 不算一次配置写（原「差分恒空」是缺口，现在是「轮询列不算」）
+  const only = store.capture(META, () => pollFillStreamer(db, '1001', 600));
+  assert.equal(only.changeId, null, '轮询回填不落变更记录');
+
+  // ② 配置写（别名 + 关通知）与同一窗口里的关注同步头像回填 → 记录只记这一行
+  const { changeId } = store.capture({ ...META, tool: 'set_streamer' }, () => {
+    db.prepare(`UPDATE streamers SET alias = '梓宝', notify = 0, updated_at = 700 WHERE uid = '1001'`).run();
+    // FollowsSource.syncOnce 的头像回填（face 为空的条目）：只在同一行上写 face + updated_at
+    db.prepare(`UPDATE streamers SET face = 'f2.jpg', updated_at = 700 WHERE uid = '1001'`).run();
+  });
+  assert.ok(changeId, 'agent/面板改别名要落记录（P1 冒烟缺口：以前撤不掉）');
+  const rec = store.peek(adminScope())!;
+  assert.equal(rec.rows.length, 1, '轮询列不额外产生行');
+  assert.deepEqual(rec.rows[0]!.pk, { uid: '1001' });
+  assert.equal(rec.rows[0]!.table, 'streamers');
+
+  // ③ 撤销前轮询又前进（当前值已与后像不同）→ 比对只看配置列，仍然撤得掉
+  pollFillStreamer(db, '1001', 900, { uname: '改过的平台名' });
+  const u = store.undo(adminScope());
+  assert.equal(u.ok, true, '轮询列前进不该让撤销中止');
+  assert.deepEqual(u.tables, ['streamers']);
+  const row = db.prepare(`SELECT * FROM streamers WHERE uid = '1001'`).get() as Record<string, unknown>;
+  assert.equal(row.alias, null, '配置列还原');
+  assert.equal(row.notify, 1, '配置列还原');
+  assert.equal(row.uname, '改过的平台名', '平台事实列保持撤销前的值（不把轮询数据回滚）');
+  assert.equal(row.face, 'f2.jpg', '头像同属轮询列');
+  assert.equal(row.room_id, '80397', '房间号同属轮询列');
+  assert.equal(row.updated_at, 900, 'updated_at 同属轮询列');
+});
+
+test('列过滤不削弱 streamers 的冲突检测：配置列被第三方改过仍然中止', (t) => {
+  const { db, store } = setup(t);
+  seedStreamer(db, '1002');
+
+  store.capture(META, () => {
+    db.prepare(`UPDATE streamers SET alias = '第一次改' WHERE uid = '1002'`).run();
+    pollFillStreamer(db, '1002', 700);
+  });
+  // 第三方（另一个入口）把配置列改成别的值：后像 ≠ 当前值 → 中止
+  db.prepare(`UPDATE streamers SET alias = '别人改的' WHERE uid = '1002'`).run();
+
+  const r = store.undo(adminScope());
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'conflict');
+  assert.match(r.detail!, /streamers \(uid=1002\)/);
+  assert.equal(
+    (db.prepare(`SELECT alias FROM streamers WHERE uid = '1002'`).get() as { alias: string }).alias,
+    '别人改的', '冲突中止时第三方写的值必须原样留着',
+  );
+});
+
+test('watch_streamer 两种形状的撤销：不在名单→插行（撤销删行）、已在名单→更新（撤销按列还原）', (t) => {
+  const { db, store } = setup(t);
+
+  // 形状 A：uid 不在 streamers（只可能在关注候选池里）→ 建行；撤销 = 整行删除
+  const a = store.capture({ ...META, tool: 'watch_streamer' }, () => seedStreamer(db, '2001', 800, { source: 'follows' }));
+  assert.ok(a.changeId);
+  assert.equal(store.peek(adminScope())!.rows[0]!.beforeExists, false, '前像不存在 = 插行');
+  assert.equal(store.undo(adminScope()).ok, true);
+  assert.equal(
+    (db.prepare(`SELECT COUNT(*) AS n FROM streamers WHERE uid = '2001'`).get() as { n: number }).n, 0,
+    '撤销新建 = 行没了',
+  );
+
+  // 形状 B：已在名单但 watch=0（unwatch 过）→ upsertStreamer 的 ON CONFLICT 走更新同一行；撤销 = 只还原配置列
+  seedStreamer(db, '2002', 800, { watch: 0, alias: '别删我', profile_note: '备注', weibo_nick: '她的微博', weibo_uid: '2203177060' });
+  pollFillStreamer(db, '2002', 850); // 轮询先回填过一轮：撤销不该把它回滚
+  const b = store.capture({ ...META, tool: 'watch_streamer' }, () =>
+    db.prepare(`UPDATE streamers SET watch = 1, updated_at = 900 WHERE uid = '2002'`).run());
+  assert.ok(b.changeId);
+  assert.equal(store.peek(adminScope())!.rows[0]!.beforeExists, true, '前像存在 = 更新已存在行');
+
+  const u = store.undo(adminScope());
+  assert.equal(u.ok, true);
+  const row = db.prepare(`SELECT * FROM streamers WHERE uid = '2002'`).get() as Record<string, unknown>;
+  assert.equal(row.watch, 0, 'watch 还原');
+  assert.equal(row.alias, '别删我', '别名原样保留（同一行的其它配置列不动）');
+  assert.equal(row.profile_note, '备注');
+  assert.equal(row.weibo_nick, '她的微博');
+  assert.equal(row.weibo_uid, '2203177060');
+  assert.equal(row.uname, '平台名', '轮询列不还原');
+  assert.equal(row.updated_at, 900, 'updated_at 不还原');
+});
+
+test('撤销删除：streamers 按前像整行重插（忽略列随前像回来，同三张账号名单口径）', (t) => {
+  const { db, store } = setup(t);
+  // 生产路径里暂无「删 streamers 行」的写（下监听 = watch=0 保留条目）——这里钉住 store 层的形状，
+  // 与 accounts 表口径一致：insertRow 按前像整行重插，不做忽略列过滤
+  seedStreamer(db, '3001', 700, { source: 'follows' });
+  pollFillStreamer(db, '3001', 750);
+
+  store.capture(META, () => db.prepare(`DELETE FROM streamers WHERE uid = '3001'`).run());
+  const u = store.undo(adminScope());
+  assert.equal(u.ok, true);
+  const row = db.prepare(`SELECT * FROM streamers WHERE uid = '3001'`).get() as Record<string, unknown>;
+  assert.equal(row.uname, '平台名', '前像整行重插：平台事实列也随前像回来');
+  assert.equal(row.face, 'f.jpg');
+  assert.equal(row.room_id, '80397');
+  assert.equal(row.updated_at, 750);
+  assert.equal(row.created_at, 700, '建行时间与来源照抄前像');
+  assert.equal(row.source, 'follows');
+});
+
 test('撤销结果带 tables / settingKeys / tool（入口层据此触发热生效）', (t) => {
   const { db, store } = setup(t);
   db.prepare(`INSERT INTO settings (key, value) VALUES ('listen_weibo', '1')`).run();
@@ -511,6 +660,10 @@ test('undoEffects：受影响表 / settings 键 → 热生效标签（P0 判据 
   assert.deepEqual(undoEffects({ tables: ['x_accounts'] }), ['listen']);
   assert.deepEqual(undoEffects({ tables: ['weibo_accounts', 'bili_accounts'] }), ['listen']);
   assert.deepEqual(undoEffects({ tables: ['push_channels'] }), ['notifiers']);
+  assert.deepEqual(
+    undoEffects({ tables: ['streamers'] }), [],
+    '监听名单（含 watch）由 live-status / 动态源每轮直读 DB，撤销无需重启任何源',
+  );
   assert.deepEqual(undoEffects({ tables: ['settings', 'push_rules', 'categories', 'post_rules'] }), []);
   // 一条记录跨面时全部给出，顺序稳定（settings 键在前）
   assert.deepEqual(

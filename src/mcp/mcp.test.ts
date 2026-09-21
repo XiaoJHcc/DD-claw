@@ -854,3 +854,35 @@ test('undo_last_change：撤 LLM key = 清空 + refill 提示，且触发 router
   assert.equal(f.undoFired.llm, 1, '撤 key 要重建 router（与面板手写等价）');
   assert.deepEqual(Object.entries(f.undoFired).filter(([, n]) => n > 0), [['llm', 1]]);
 });
+
+test('undo_last_change：撤 streamers 写（set_streamer 改别名）还原配置列、不回滚轮询列', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  f.db.upsertStreamer({ uid: '1001', uname: '阿梓', alias: '旧别名' });
+  f.db.raw.prepare(`UPDATE streamers SET face = 'old.jpg', updated_at = 1111 WHERE uid = ?`).run('1001');
+
+  // P1 真机冒烟场景：agent / MCP 用 set_streamer 改别名，主人要能从变更历史撤回来
+  await call(adm, 'set_streamer', { uid: '1001', alias: '梓宝', notify: false });
+  assert.equal(f.db.getStreamer('1001')!.alias, '梓宝');
+  const rec = f.undo.history({ scope: adminScope() })[0]!;
+  assert.equal(rec.tool, 'set_streamer');
+  assert.equal(rec.entry, 'mcp');
+  assert.equal(rec.rows.length, 1, '只有 streamers 这一行（轮询列不额外产生行）');
+  assert.equal(rec.rows[0]!.table, 'streamers');
+
+  // 撤销前轮询源回填同一行 → 比对只看配置列，仍撤得掉；轮询列不回滚
+  f.db.raw
+    .prepare(`UPDATE streamers SET uname = '阿梓从小就很可爱', face = 'new.jpg', room_id = '80397', updated_at = 2222 WHERE uid = ?`)
+    .run('1001');
+  const r = (await call(adm, 'undo_last_change')) as { change: { tool: string }; applied: number };
+  assert.equal(r.change.tool, 'set_streamer');
+  assert.equal(r.applied, 1);
+  const s = f.db.getStreamer('1001')!;
+  assert.equal(s.alias, '旧别名', '配置列还原');
+  assert.equal(s.notify, true, '配置列还原');
+  assert.equal(s.uname, '阿梓从小就很可爱', '平台事实列保持撤销前的值');
+  assert.equal(s.face, 'new.jpg', '头像同属轮询列');
+  assert.equal(s.roomId, '80397', '房间号同属轮询列');
+  // streamers 无热生效对象（监听名单每轮直读 DB）——撤销不触发任何装配级回调
+  assert.deepEqual(f.undoFired, { runtime: 0, listen: 0, llm: 0, notifiers: 0 });
+});

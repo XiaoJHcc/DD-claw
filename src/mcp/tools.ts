@@ -24,6 +24,7 @@ import {
 import { scheduleInfo } from '../panel/schedule.js';
 import { setPushEnabled } from '../core/push.js';
 import { setListen, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
+import { setChatWriteMode, type ChatWriteMode } from '../agent/system-prompt.js';
 import { X_INTERVAL_MAX, X_INTERVAL_MIN } from '../core/x-config.js';
 import { getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS } from '../core/runtime-config.js';
 import { isLlmEnabled, setLlmEnabled } from '../analysis/providers.js';
@@ -374,6 +375,18 @@ const adminTools: McpToolDef[] = [
       deps.listen.onChanged();
       return { feature, enabled, setting: listenSetting(deps.db, feature) };
     },
+  },
+  {
+    name: 'set_chat_mode',
+    description: 'agent 对话的写操作模式：ask = 每个写工具调用前先复述要改什么、等主人确认；'
+      + 'auto = 可直接修改并简述结果。面板的「写前询问 / 自动修改」开关用它',
+    schema: { mode: z.enum(['ask', 'auto']) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => ({
+      ok: true,
+      mode: setChatWriteMode(deps.db, args.mode as ChatWriteMode),
+    }),
   },
   {
     name: 'update_runtime_config',

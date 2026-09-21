@@ -37,8 +37,10 @@ import type { XConfig } from '../core/x-config.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 import type { UndoResult, UndoStore } from '../core/undo.js';
-import { changeTables, type ChangeRecord } from '../core/undo.js';
+import { adminScope, changeTables, type ChangeRecord } from '../core/undo.js';
 import type { ChatStore } from '../core/chat-store.js';
+import { getChatWriteMode } from '../agent/system-prompt.js';
+import { chatBlockedReason, runAgentTurn } from '../agent/loop.js';
 
 const log = makeLogger('panel');
 
@@ -202,7 +204,7 @@ export interface PanelDeps {
    * 撤渠道 → 重建通知通道。不注入则 POST /api/undo 一律 404。
    */
   undoLast?: (scope?: string) => UndoResult;
-  /** agent 会话存储（P0 地基，core/chat-store.ts）；本切片仅装配建表，面板路由尚未消费 */
+  /** agent 会话存储（core/chat-store.ts）：面板单会话（scope = adminScope），/api/chat* 消费 */
   chat?: ChatStore;
   /**
    * 头像代理 fetch 注入点（测试用）；缺省用全局 fetch。/api/avatar 恒挂载，
@@ -338,6 +340,8 @@ async function handle(
   const method = req.method ?? 'GET';
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   const path = url.pathname;
+  // 对话端点共用（也让下面对 deps.chat 的窄化不受中间的函数调用影响）
+  const chat = deps.chat;
 
   // ---- 静态资产（构建期内嵌快照，运行时绝不读磁盘）：纯 map 查键，无路径拼接 ----
   // 命中则直接返回对应 content-type + no-store；未命中（含 /api/* 与穿越尝试）自然落到下面的 API/404。
@@ -948,6 +952,43 @@ async function handle(
     }
   }
 
+  // ---- WebUI Agent 对话（P1：agent loop + 写模式开关；chat dep 存在才挂，缺 dep = 404）----
+  // 面板是**单会话**：scope = adminScope()，与撤销栈同一套 scope 字符串。四个端点的响应形状
+  // 是 webui 契约（逐字冻结，demo mock 同构）：history 回 {messages,mode,usage}，发消息回 {ok,reply,usage}。
+  // 「写前询问 / 自动修改」只写在系统提示里（agent/loop.ts **不硬拦**写工具），故路由层不干预
+  // loop 的工具调用；PUT /api/chat/mode 也只是一次普通配置写（进注册表 → 可撤销）。
+  if (chat && method === 'GET' && path === '/api/chat/history') {
+    sendJson(res, 200, {
+      messages: chatHistoryMessages(chat),
+      mode: getChatWriteMode(db),
+      usage: chat.usage(adminScope()),
+    });
+    return;
+  }
+  if (chat && method === 'POST' && path === '/api/chat') {
+    const body = asBodyObject(await readJsonBody(req));
+    if (typeof body.message !== 'string' || body.message.trim() === '') {
+      throw new HttpError(400, 'message 必须是非空字符串');
+    }
+    // LLM 未启用 / 无可用 provider = 400（指引去设置页修）；调用彻底失败由 loop 抛 502
+    const blocked = chatBlockedReason(deps);
+    if (blocked !== null) throw new HttpError(400, blocked);
+    const turn = await runAgentTurn(deps, body.message);
+    sendJson(res, 200, { ok: true, reply: turn.reply, usage: chat.usage(adminScope()) });
+    return;
+  }
+  if (chat && method === 'POST' && path === '/api/chat/reset') {
+    // 重置上下文：清空消息、保留会话行（core/chat-store.ts）。非配置写，不入撤销栈
+    chat.reset(adminScope());
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (chat && method === 'PUT' && path === '/api/chat/mode') {
+    // 经注册表：写模式是配置写，要与面板其余开关一样进快照/变更历史（工具在 agent 工具面之外）
+    await callTool(deps, res, 'set_chat_mode', asBodyObject(await readJsonBody(req)));
+    return;
+  }
+
   // ---- 变更历史与撤销（P0 判据 1/2/6；undo dep 存在才挂）----
   // 这两个路由是**唯一不经注册表**的写面：它本身就是撤销执行器——撤销的写是把已记录的前像写回去，
   // 再进快照会把自己变成下一条可撤销记录（工具 undo_last_change 也不带快照，见 mcp/run-tool.ts）。
@@ -973,6 +1014,16 @@ async function handle(
   }
 
   throw new HttpError(404, '未知路由');
+}
+
+/**
+ * 对话记录 → history 端点形状（webui 契约，逐字冻结）：只给 user / assistant 的**有正文**消息
+ * ——`tool` 结果与「只调工具、没说话」的轮次对用户没有意义；`at` 秒级（库里毫秒）。
+ */
+function chatHistoryMessages(chat: ChatStore): Array<{ role: string; content: string; at: number }> {
+  return chat.messages(adminScope())
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim() !== '')
+    .map((m) => ({ role: m.role, content: m.content, at: Math.floor(m.createdAt / 1000) }));
 }
 
 /**

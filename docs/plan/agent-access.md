@@ -201,9 +201,9 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
 
 **`completeChat` 的 `responses` 分支尚未真机验证**：形状按上面写的实现并有离线测试钉住，但「真实端点是否逐字如此」（尤其 `function_call_output` + `call_id` 往返、`instructions` 与 `tools` 能否共存）只有接上真端点才能确认。第一次接真端点时先跑一次单轮工具往返再放量。
 
-**快照实现取向（对「写操作快照与撤销」一节的落实方式，2026-09-17）**：采用**表级前像快照 + 差分**，而不是让每条写路径自己声明「影响了哪些行」。理由是计划里点名的五种形状（级联停用 N 条 / 排序整表重写 / 新建 `sort=MAX+1` / settings 删除式写 / provider 复合写两行）在差分下**自动收敛为同一种记录**，且顺带拿到后像——撤销插入/删除才做得出来；代价是每次配置写整表 SELECT 一遍，但这只发生在配置写路径（面板点一下 / 一次 MCP 调用），配置表几十到几百行，绝不进轮询循环。两个附带决定：① `streamers` **暂不纳入**快照表——它是配置与归档的混合体（面板改 watch/alias，关注源同时覆写 uname/face），纳入后撤销比对会被轮询写频繁打断，撤不掉反而更常见，收敛其写路径时再裁决；② 除 LLM key 外**不做其它隐私例外**，即 `mcp_tokens` 的值会被快照（同库已有明文，未新增暴露面，且换来「撤销令牌轮换」能还原旧令牌）；若要求同口径打码，改一行 `redact` 判定即可。
+**快照实现取向（对「写操作快照与撤销」一节的落实方式，2026-09-17）**：采用**表级前像快照 + 差分**，而不是让每条写路径自己声明「影响了哪些行」。理由是计划里点名的五种形状（级联停用 N 条 / 排序整表重写 / 新建 `sort=MAX+1` / settings 删除式写 / provider 复合写两行）在差分下**自动收敛为同一种记录**，且顺带拿到后像——撤销插入/删除才做得出来；代价是每次配置写整表 SELECT 一遍，但这只发生在配置写路径（面板点一下 / 一次 MCP 调用），配置表几十到几百行，绝不进轮询循环。两个附带决定：① `streamers` 是否纳入快照表——**2026-09-21 最终纳入 + 按列过滤**（原裁决定为「暂不纳入」，理由见下条修订）；② 除 LLM key 外**不做其它隐私例外**，即 `mcp_tokens` 的值会被快照（同库已有明文，未新增暴露面，且换来「撤销令牌轮换」能还原旧令牌）；若要求同口径打码，改一行 `redact` 判定即可。
 
-**快照接线落地（切片 B，2026-09-21）**：记录点 = `UndoStore.track()`（异步段版 capture）：进 handler 前取前像，`runTool` 成功后同步做「后像 → 差分 → 落记录」，所有写调用经内部队列串行化防差分窗口交错。两个已知取舍（详见 `undo.ts` track() 注释）：① 前像读取不在事务里（事务不能跨 await），残留窗口 = 写已提交而记录 INSERT 失败（磁盘级故障），此时错误抛给调用方；② 不走 track 的写（轮询源回写 `x_accounts` 的游标/头像列）可能落进差分窗口被捎带——x_accounts 与 streamers 同为「配置+归档混合表」，后果是撤销比对更易中止（宁中止不丢写）。**② 已由切片 C 的按列过滤解除**（`DEFAULT_IGNORE_COLUMNS`：三张图文账号名单的轮询列不参与差分/比对/还原，见下「切片 C 落地」）。① 的 `streamers` 口径已随接线生效：`watch_streamer` / `set_streamer` / `unwatch_streamer` 照常过 runTool + 审计，但差分恒空、不落变更记录（`set_streamer` 联动的 weibo_accounts 写同理不纳入）。
+**快照接线落地（切片 B，2026-09-21）**：记录点 = `UndoStore.track()`（异步段版 capture）：进 handler 前取前像，`runTool` 成功后同步做「后像 → 差分 → 落记录」，所有写调用经内部队列串行化防差分窗口交错。两个已知取舍（详见 `undo.ts` track() 注释）：① 前像读取不在事务里（事务不能跨 await），残留窗口 = 写已提交而记录 INSERT 失败（磁盘级故障），此时错误抛给调用方；② 不走 track 的写（轮询源回写 `x_accounts` 的游标/头像列）可能落进差分窗口被捎带——x_accounts 与 streamers 同为「配置+归档混合表」，后果是撤销比对更易中止（宁中止不丢写）。**② 已由切片 C 的按列过滤解除**（`DEFAULT_IGNORE_COLUMNS`：混合表的轮询列不参与差分/比对/还原，见下「切片 C 落地」）。**切片 B 当时** `streamers` 尚未进快照表：`watch_streamer` / `set_streamer` / `unwatch_streamer` 照常过 runTool + 审计，但差分恒空、不落变更记录——**该口径已作废**（2026-09-21 按列过滤后一并纳入，见下「切片 C 落地」末两行）。
 
 **接线进展**：
 - **切片 A（2026-09-17 后）**：`registerTools` 已改走 `runTool`（MCP 侧 content 文本逐字不变，run-tool 契约测试钉住）；
@@ -232,7 +232,9 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
 | ✅ REST 端点 | `src/panel/server.ts` | `GET /api/undo/history` → `{changes:[{id,tool,entry,actor,scope,at(秒),undone,tables,rows}]}`（新→旧）；`POST /api/undo`（忽略 body）→ 200 `{ok,change:{id,tool}}` / 空栈 404 / 比对中止 409。**唯一不经注册表的写路由**，直接调 `deps.undoLast` |
 | ✅ 撤销内部工具 | `src/mcp/tools.ts` `undo_last_change`（shared = 两角色可见） | admin → 全局栈；gateway → 令牌绑定渠道栈，**未绑渠道拒绝不回落**；默认暴露给 agent（不进 `AGENT_EXCLUDED_TOOLS`）；`track: false` ——撤销自身不入栈 |
 | ✅ `POST /api/undo` 的清单分类 | `write-path-inventory.test.ts` 新增第三种 `coverage: 'executor'` | 机器校验：该路由对应的工具必须 `exists` + `write` + `track === false`（与「撤销不入栈」互锁），暴露策略仍与 `AGENT_EXCLUDED_TOOLS` 对齐 |
-| ✅ `x_accounts` 混合表裁决（切片 B 遗留） | `undo.ts` `DEFAULT_IGNORE_COLUMNS` | 三张图文账号名单的轮询列（游标 / `last_ok_at` / `avatar` / `silent_next` / 平台昵称 `nickname` / `uname` / `updated_at`）不参与差分、比对与还原：轮询写不再被捎带，游标前进不再让撤销中止，撤销也不回滚轮询数据。`streamers` 仍整表不纳入（无可分列） |
+| ✅ `x_accounts` 混合表裁决（切片 B 遗留） | `undo.ts` `DEFAULT_IGNORE_COLUMNS` | 三张图文账号名单的轮询列（游标 / `last_ok_at` / `avatar` / `silent_next` / 平台昵称 `nickname` / `uname` / `updated_at`）不参与差分、比对与还原：轮询写不再被捎带，游标前进不再让撤销中止，撤销也不回滚轮询数据 |
+| ✅ `streamers` 混合表裁决（原「整表不纳入」作废，2026-09-21） | `undo.ts` `DEFAULT_CONFIG_TABLES` + `DEFAULT_IGNORE_COLUMNS.streamers` | 触发原因 = P1 真机冒烟：agent 用 `set_streamer` 改别名后**撤不掉**（差分恒空 → 不落记录）。逐列核对写者后确认轮询列与配置列可分——忽略 `uname`（`LiveStatusSource` 的回填；平台事实，输入面不收）、`face`（同一条回填 + `FollowsSource` 头像回填）、`room_id`（同一条回填，匿名可得通道）、`updated_at`（每次 `upsertStreamer` 都重写）；配置列 `watch` / `alias` / `analyze` / `notify` / `weibo_nick` / `weibo_uid` / `profile_note` 全部参与差分与还原（`source` / `created_at` 只在建行时定，照常参与）。两种撤销形状都已覆盖：不在名单 → 插行（撤销 = 整行删除）；已在名单（下过监听）→ `upsertStreamer` 的 ON CONFLICT 更新同一行（撤销 = 按列还原，轮询列保留） |
+| ✅ `streamers` 撤销的热生效口径 | `undo.ts` `undoEffects` | **不给 `listen`**：监听名单（含 `watch` 开关）由 live-status / 动态源每轮直读 `listWatchedUids()`，撤一次别名或 watch 下一轮即生效，不需要重启任何源（与三张图文账号名单不同——那两个源在构造时快照名单，故要 `reconcileListen`） |
 
 **快照与写入的同事务**：better-sqlite3 事务不能跨 await，故 `runTool` 内不做完整 capture；
 切片 B 的实际记录点与取舍见上「快照实现取向」的落地补充。
@@ -276,6 +278,24 @@ P2 与 P3 顺序可互换、也可只做其一——取决于「MaiBot 是否继
 | **误写率** | **0 容忍**——「写前询问」模式下未经用户确认的写操作数为 0（「自动修改」模式下不确认即写是**合法行为**，不计误写）；出现一次即修系统提示与工具 description |
 | 能力边界 | 100% 不臆造：不存在的 uid / id 必须报错或澄清，不得凭空构造 id（本机 admin 下「改任意渠道」是合法业务，不算越界） |
 | 失败处置 | 任一项不达标 → 先调 description / 提示词；两轮仍不达标 → P1 暂停，回到 P0 评估是否值得继续 |
+
+#### 已落地（2026-09-21，`mcp-interface` 分支，后端侧；webui 侧由前端并行落地）
+
+| 项 | 落点 | 说明 |
+|---|---|---|
+| ✅ agent loop | 新 `src/agent/loop.ts` + `loop.test.ts`（13 例） | `runAgentTurn(deps, userMessage)`：面板**单会话**（scope = `adminScope()`）读历史 → 拼 `[system, ...history, user]` → 循环（`AGENT_MAX_STEPS = 8`）`completeChat` → 有 `tool_calls` 就逐个 `runToolTracked`（ctx = `{name:'webui-agent', role:'admin', scope:{}}`，**entry='agent'**）→ 结果**或中文错误文本**回填 → 无 `tool_calls` 即终答；超上限给兜底回复（`truncated: true`），不空转。user / assistant（含 tool_calls）/ tool 往来**全部落 ChatStore**；system 提示每轮重拼不落库。历史回放做**双向半截轮次清理**（assistant 的 tool_calls 与 tool 结果没配对成功的都摘掉——否则进程在两者之间挂掉会让之后每一轮请求都被端点拒绝）。LLM 接缝可注入（`opts.completeChat`，测试用假 LLM 驱动多轮剧本）；生产缺省走 `deps.llm.router.completeChat`（熔断/降级与分类任务同源） |
+| ✅ 系统提示 | 新 `src/agent/system-prompt.ts` | 中文，四条硬纪律 + 写模式两套措辞：**能力只来自工具**（没有的工具就说没有、不绕路）、**uid/id 先 search 再引用绝不编造**、ask 模式**任何写工具调用前先在回复里复述要改什么、等用户下一轮确认**（auto 模式可直接写但要简述做了什么）、撤销走 `undo_last_change`（本调用域栈顶）、回答简洁。**每轮按当前模式重拼** |
+| ✅ 写模式开关 | `system-prompt.ts` 的 `get/setChatWriteMode`（settings `chat_write_mode`，缺省 `ask`）+ 注册表工具 `set_chat_mode`（admin、write）+ `PUT /api/chat/mode` | 工具进注册表以纳入回滚覆盖，但**进 `AGENT_EXCLUDED_TOOLS`**——LLM 若能自己切 auto，「未经确认不写」的门槛就交回给模型（验收表里的「误写率 0 容忍」） |
+| ✅ 四端点接线 | `src/panel/server.ts`（chat dep 不注入则 404） | `GET /api/chat/history` → `{messages:[{role,content,at(秒)}],mode,usage}`（只给 user/assistant 的**有正文**消息；`tool` 结果与空轮次不上屏）；`POST /api/chat` → `{ok,reply,usage}`（message 空/非字符串 400；LLM 未启用/无可用 provider 400 中文指引去设置页；调用彻底失败 502）；`POST /api/chat/reset` → `{ok:true}`（清消息保会话行）；`PUT /api/chat/mode` → `{ok:true,mode}`（经 `runPanelTool` → `set_chat_mode`，非法值 400） |
+| ✅ 清单分类 | `write-path-inventory.test.ts` | `/api/chat/mode` → `registry` + `set_chat_mode` + `exposeToAgent:false`；`POST /api/chat`、`POST /api/chat/reset` → `excluded`（对话入口自身只写 chat_messages；reset 是清消息，非配置写） |
+| ✅ `entry='agent'` | `src/mcp/run-tool.ts` | `ToolEntry = 'panel' \| 'mcp' \| 'agent'`（`toolChangeMeta` / `runToolTracked` 签名 + 审计标签 `Agent`）；`ChangeMeta.entry` 本就是 string，注释里已列 agent。面板变更历史因此能区分「agent 写的」与「人手点的」——**webui 侧文案映射（`undo.js` 的 ENTRY_NAMES）待补** |
+| ✅ provider 就绪判据 | `src/analysis/providers.ts` | `ProviderStatus` 增 `ready`（= `isReady()`）：让 `/api/chat` 的「未就绪 400」与「调用失败 502」分开，不必 parse `status` 文案。纯新增字段，`/api/llm` 契约不变 |
+
+**装配**：`PanelDeps` 无新字段——loop 消费的 `chat`（ChatStore）、`llm.router`（可热重建）、`undo`（写快照）在切片 A 已挂进 `index.ts`，故装配根零改动。**LLM 关/无 provider 时 `/api/chat` 按契约 400**（`chatBlockedReason` 统一出中文原因，REST 只做状态码映射）。
+
+**与计划的两处不符（已按实际处理）**：① 计划 P1 写的「面板新增**第四个**视图」在 `main` 上早已是四个视图（时间表/主播/图文/设置），agent 对话是**第五个**视图；② 「写前询问 / 自动修改」开关**没有**做成独立的布尔设置项，就一个 `chat_write_mode`（'ask'/'auto'，缺省 ask）——一个键两个值即是开关，避免两处状态可能打架。
+
+**仍未验证**：`completeChat` 的 `responses` 分支（`function_call_output` + `call_id` 往返）仍只有离线测试钉住，第一次接真端点时先跑一次单轮工具往返（见上文 P0 记录）。`runAgentTurn` 的真机验收（≥20 条用例、工具选择/参数正确率、误写率 0）**需要人在面板上跑**，属 P1 验收口径的实操项，不在本轮后端交付内。
 
 ### P2：MaiBot 插件
 

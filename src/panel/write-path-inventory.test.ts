@@ -282,6 +282,27 @@ const INVENTORY: InventoryEntry[] = [
       + '但 REST 路由直接调 deps.undoLast（不经 runPanelTool）',
   },
 
+  // ---- WebUI Agent 对话（P1）----
+  {
+    method: 'PUT', path: '/api/chat/mode', label: 'PUT /api/chat/mode',
+    coverage: 'registry', tool: 'set_chat_mode', toolStatus: 'exists', exposeToAgent: false,
+    reason: '写模式开关（ask=写前询问 / auto=自动修改）：是配置写，进注册表以纳入回滚覆盖；'
+      + '但**不得暴露给 agent**——LLM 若能自己切到 auto，「未经确认不写」的门槛就交回给了模型，'
+      + 'P1 验收的「误写率 0 容忍」名存实亡',
+  },
+  {
+    method: 'POST', path: '/api/chat', label: 'POST /api/chat',
+    coverage: 'excluded', exposeToAgent: false,
+    reason: 'agent 对话入口：路由自身只写 chat_messages（会话记录，非配置、不入撤销栈）；'
+      + '对话里产生的配置写各自经工具面落快照（entry=agent），故这里不重复覆盖',
+  },
+  {
+    method: 'POST', path: '/api/chat/reset', label: 'POST /api/chat/reset',
+    coverage: 'excluded', exposeToAgent: false,
+    reason: '清空会话消息（chat_messages）、保留会话行：非配置写；重置上下文是用户显式动作，'
+      + '撤销它没有意义（旧消息不会因为撤销而「回来」）',
+  },
+
   // ---- 明知而未纳入（docs/plan/agent-access.md「变更记录遗漏面」） ----
   {
     method: 'PUT', path: '/api/napcat', label: 'PUT /api/napcat',

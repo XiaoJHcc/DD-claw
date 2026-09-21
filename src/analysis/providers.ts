@@ -513,6 +513,11 @@ export interface ProviderStatus {
   vision: boolean;
   routes: string[];
   status: string;
+  /**
+   * 此刻能不能真的用（启用 + 有 key + 未熔断，= `isReady()`）：面板只展示，agent loop 用它
+   * 区分「LLM 未就绪（400，去设置页修）」与「调用失败（502）」，不用去 parse status 文案。
+   */
+  ready: boolean;
 }
 
 export class LlmRouter {
@@ -568,6 +573,7 @@ export class LlmRouter {
       vision: p.spec.vision,
       routes: (['text', 'vision'] as const).filter((r) => this.routes[r].includes(p.name)),
       status: p.status(),
+      ready: p.isReady(),
     }));
   }
 

@@ -93,16 +93,17 @@ export interface UndoResult {
 export type RedactPredicate = (table: string, column: string, row: Row) => boolean;
 
 /**
- * 参与快照的配置表。`streamers` **不纳入**（整表排除）：它是配置与归档的混合体
- * （面板改 watch/alias，同时关注源会覆写 uname/face），而轮询写的是**同一行**——
- * 逐行比对照旧会被打断，且它没有「游标列」可过滤（watch/alias/uname/face 全在一行里）。
- * 三张图文账号名单（x_accounts / weibo_accounts / bili_accounts）是同类混合体，但它们的
- * 配置列与轮询列**可分**，故纳入快照 + 按列过滤（见 DEFAULT_IGNORE_COLUMNS）。
+ * 参与快照的配置表。四张「配置 + 归档」混合表（`streamers` + 三张图文账号名单）都在内：
+ * 面板 / agent 改配置列（watch/alias/profile_note…），轮询或关注同步同时回写**同一行**的
+ * 平台事实列——按列过滤（见 DEFAULT_IGNORE_COLUMNS）把后者排除掉后，混合表与纯配置表同待遇。
+ * `streamers` 的口径变更（2026-09-21）：原计划「整表排除」，P1 真机冒烟暴露缺口——agent 用
+ * `set_streamer` 改别名后撤不掉（差分恒空 = 不落记录）。逐列核对写者后确认它的轮询列与配置列
+ * 同样可分（轮询只写 uname/face/room_id/updated_at），故改为纳入 + 按列过滤。
  * 归档表（room_state/posts/verdicts/live_segments）一律不进来——计划明确「不把轮询数据回滚」。
  */
 export const DEFAULT_CONFIG_TABLES: readonly string[] = [
   'settings', 'push_rules', 'categories', 'push_channels', 'post_rules',
-  'x_accounts', 'weibo_accounts', 'bili_accounts',
+  'streamers', 'x_accounts', 'weibo_accounts', 'bili_accounts',
 ];
 
 /**
@@ -116,6 +117,19 @@ export const DEFAULT_CONFIG_TABLES: readonly string[] = [
  * ② 撤销比对照旧只看配置列——游标前进不会把一次配置写变成「已被其他入口修改」；
  * ③ 撤销还原不写这些列（计划要求「不把轮询数据回滚」）。
  * 差分 / 比对 / 还原三处都按本表过滤，故「忽略」在各处口径一致。
+ *
+ * 逐列依据 = 「谁写这一列」（以代码实际为准，改源前重新核对）：
+ * - `x_accounts` ← `touchXAccount`（TwitterFeedSource）：游标 / 心跳 / 头像 / 昵称 / 恢复位。
+ * - `weibo_accounts` ← `touchWeiboAccount`（WeiboFeedSource）：同上（昵称只在新建时种入）。
+ * - `bili_accounts` ← `touchBiliAccount`（DynamicSource）：uname 同 weibo 的 nickname，平台事实。
+ * - `streamers` ← 两条**轮询/同步**回写路径，与面板 / agent 的配置写（alias / watch / analyze /
+ *   notify / weiboNick→weiboUID / profileNote）在同一行上：
+ *   `uname` / `room_id` ← `LiveStatusSource.pollOnce` 的「为空才补」回填（uname 是平台事实，
+ *   room_id 是匿名可得通道拿到的房间号，输入面都不收）；`face` ← 同一条回填 **以及**
+ *   `FollowsSource.syncOnce` 的关注列表头像回填（face 为空的条目）；`updated_at` ← 两者每次
+ *   `upsertStreamer` 都会重写（`Db.upsertStreamer` 的 ON CONFLICT 子句无条件写它）。
+ *   其余列不忽略：`weibo_nick` / `weibo_uid` 只由配置写（`set_streamer` / 面板 PUT）落库，
+ *   `source` / `created_at` 只在新建行时定（之后任何 upsert 都原样带回），都属人的配置意图。
  */
 export const DEFAULT_IGNORE_COLUMNS: Record<string, readonly string[]> = {
   // touchXAccount 所写列
@@ -124,6 +138,8 @@ export const DEFAULT_IGNORE_COLUMNS: Record<string, readonly string[]> = {
   weibo_accounts: ['last_post_id', 'last_post_at', 'last_ok_at', 'nickname', 'avatar', 'silent_next', 'updated_at'],
   // touchBiliAccount 所写列（uname 同 weibo nickname：平台事实）
   bili_accounts: ['uname', 'last_ok_at', 'avatar', 'silent_next', 'updated_at'],
+  // live-status 回填 + 关注同步头像回填所写列（见上方逐列依据）
+  streamers: ['uname', 'face', 'room_id', 'updated_at'],
 };
 
 /** 隐私例外（计划里的唯一一条）：LLM key 不落明文 */
@@ -520,6 +536,10 @@ export function changeSettingKeys(rec: ChangeRecord): string[] {
  *                  变化在装配处也是走同一个启停入口）
  * - `llm`       → 重建 llm router（`settings.llm_providers` / `llm_key:*`；撤 key = 清空 + 重填提示）
  * - `notifiers` → `rebuildNotifiers`（`push_channels` 行；`napcat_*` 配置同面板保存后的重装配口径）
+ *
+ * 混合表里唯一**不需要**回调的是 `streamers`：监听名单（含 watch 开关）由 live-status 与动态源
+ * **每轮直读 `listWatchedUids()`**，撤销一次别名 / watch 改动下一轮即生效，不需要重启任何源。
+ * 图文账号名单不同——微博 / X 的源在构造时快照名单，故要经 `reconcileListen` 就地重启。
  */
 export type UndoEffect = 'runtime' | 'listen' | 'llm' | 'notifiers';
 
