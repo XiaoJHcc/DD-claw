@@ -5,7 +5,7 @@
 // 编辑走 sheet（留空 = 清空该字段，settings 表是唯一信源，无 config 回落）。
 // 「失活自动拉起」= 独立开关：开启时建拉起任务（Windows 弹一次 UAC，macOS 无任务
 // 直接 open QQ），关闭时彻底移除任务。状态每 30s 重取（GET 是一次真实探测）。
-import { api, toast, ACTIONS, CHANGES, esc, field, openSheet, closeSheet, switchHtml } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, field, openSheet, closeSheet, switchHtml, onTableRefresh } from './core.js';
 import { icon } from './icons.js';
 
 let ncCache = null;
@@ -114,3 +114,5 @@ ACTIONS['napcat-launch'] = function () {
 
 setInterval(loadNapcat, 30000);
 loadNapcat();
+// NapCat 配置在 settings 表（napcat_*）——撤销后重拉本卡
+onTableRefresh(['settings'], loadNapcat);

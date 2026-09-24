@@ -1,6 +1,6 @@
 // 面板前端 · 主播分页 · 关注列表卡：B站关注候选池（头像卡网格 + 已监听标记 + 搜索过滤 + 一键加入监听）。
 // 视觉 = UI 重设计 v2（白底浅底卡片 hover 上浮 + 30px 三态监听胶囊），行为与改版前 1:1。
-import { api, toast, ACTIONS, INPUTS, esc, avatarHtml } from './core.js';
+import { api, toast, ACTIONS, INPUTS, esc, avatarHtml, onTableRefresh } from './core.js';
 import { icon } from './icons.js';
 import { loadStreamers } from './streamers.js';
 
@@ -68,3 +68,5 @@ ACTIONS['unwatch'] = function (el) {
 
 loadFollows();
 setInterval(loadFollows, 30000);
+// 加入/取消监听写的是 streamers 表：撤销后「已监听」标记要跟着回去（卡片本身 30s 一轮自愈，这里即时）
+onTableRefresh(['streamers'], loadFollows);

@@ -8,7 +8,7 @@
 //      其余收起单行，hover 收起行互斥换展；展开行 flex:1 此消彼长、容器总高恒定。
 // 卡序：在播优先、再按 lastLiveAt 倒序。规则的新增/编辑/排序收编在「推送规则」卡片；
 // 详情弹窗规则区为纯展示，点击行关弹窗并直接打开该规则的编辑弹窗（push.js 的 goto-push-rule）。
-import { api, toast, ACTIONS, esc, openSheet, sheetCleanups, field, ruleDeadReason, avatarHtml, relTime, fmtLiveDur } from './core.js';
+import { api, toast, ACTIONS, esc, openSheet, sheetCleanups, field, ruleDeadReason, avatarHtml, relTime, fmtLiveDur, onTableRefresh } from './core.js';
 import { icon } from './icons.js';
 
 // follows.js / push.js / categories.js 在 import：loadStreamers 与 avatarHtml（core 的转发）
@@ -244,3 +244,5 @@ function loadModalRules() {
 // ---- 启动与轮询：监听卡 60s（listen.js），主播列表 30s（弹窗 DOM 不被重建） ----
 loadStreamers();
 setInterval(loadStreamers, 30000);
+// 主播名单（含别名/watch）在 streamers 表——撤销后重拉本卡
+onTableRefresh(['streamers'], loadStreamers);

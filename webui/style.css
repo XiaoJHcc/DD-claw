@@ -847,47 +847,82 @@ input:disabled{opacity:.5;background:var(--fill)}
 
 /* ============================================================
    设置页 · 变更历史卡（P0b 撤销的用户面）：通宽卡片压在三张设置卡下方（不占视图）
-   行 = 通用 .row-2（主行：操作名 + 来源/受影响摘要/状态 tag；副行：时间 · 操作者 · 表名），
-   栈顶那条行尾挂一枚 ghost 按钮「撤销」（标准 .btn，不另造尺寸）。已撤销的行整行置灰
-   （同 .x-card.x-off 口径），空态/加载失败一行居中浅字
+   行 = 通用 .row-2（主行：操作名 + 来源/受影响摘要/状态 tag；明细：行级中文明细；
+   副行：时间 · 操作者 · 表名），栈顶那条行尾挂一枚 ghost 按钮「撤销」（标准 .btn，不另造尺寸）。
+   已撤销的行整行置灰（同 .x-card.x-off 口径），空态/加载失败一行居中浅字
    ============================================================ */
 .undo-row.undo-off{opacity:.55}
 /* 卡片内容区（无 .set-rows）与行同口径：左右 --inset 外边距、与卡片头同心 */
 .undo-empty{display:flex;align-items:center;justify-content:center;min-height:var(--row-h);
   margin:0 var(--inset) var(--inset);font-size:var(--fs-sm);color:var(--text-2)}
+/* 行级明细（服务端 detail，2026-09-22 契约）：一条一行「动作 tag + 中文 label + 改了：字段…」。
+   tag 用小号（明细是副信息，不该抢主行的视觉权重）；超出 6 条由 JS 折叠成「另有 N 条」 */
+.undo-detail{display:flex;flex-direction:column;gap:1px;margin:1px 0}
+.undo-detail-row{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-sm)}
+.undo-detail-row .tag{line-height:16px;padding:0 5px}
+.undo-detail-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.undo-fields{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
 
 /* ============================================================
-   Agent 视图 · 聊天面板（P1 WebUI Agent 的用户面）：与时间表同口径占满一屏——
-   卡片撑满视图高度，消息列表是卡内滚动区（flex:1 + overflow-y:auto），
-   工具行（写模式开关 + 语义说明 + 重置）与输入区两段固定不动。
-   工具行/列表/输入区的左右缘统一 = --inset + --pad（与卡片头内容同一条左缘）。
+   Agent 视图 · 聊天面板（P1 WebUI Agent 的用户面）：
+   信息层级参考 ChatGPT / Claude 一类对话页——消息是主角，工具件退到次要层级：
+   写模式 / 模型选择 / 重置收进卡片头一行；消息区与输入区共用一条**居中限宽栏**
+   （--thread:760，窄屏自适应），两边的缘完全对齐；滚动的只有消息列表，
+   输入区固定在卡片底部（不随消息滚走）。
    ============================================================ */
 #view-agent{height:100%;padding-bottom:var(--pad);display:flex;flex-direction:column}
-#view-agent .card{flex:1;min-height:0;display:flex;flex-direction:column}
-/* 工具行：模式开关（定宽 segnav）+ 语义说明（占余量，窄屏省略号） + 重置按钮 */
-.chat-tools{display:flex;align-items:center;gap:var(--sp-3);margin:0 var(--inset) var(--sp-2);padding:0 var(--pad)}
+#view-agent .card{flex:1;min-height:0;display:flex;flex-direction:column;--thread:760px}
+/* 卡片头右侧三件：写模式（小 segnav）/ 模型选择（自绘下拉）/ 重置——都是 36 高的标准控件 */
+.chat-mode{display:flex;align-items:center;gap:var(--sp-2);flex:none}
 .chat-mode-label{flex:none;font-size:var(--fs-sm);color:var(--text-2)}
-#chat-mode-nav{flex:none;width:200px}
-.chat-mode-hint{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chat-tools .btn{flex:none}
+#chat-mode-nav{flex:none;width:180px}
+.chat-provider-pick{flex:none;width:224px}
+/* 窄屏：先把「写模式」文字标签让掉，再收窄两个控件，最后保证三者同行不换行 */
+@media (max-width:1100px){
+  .chat-mode-label{display:none}
+  #chat-mode-nav{width:150px}
+  .chat-provider-pick{width:184px}
+}
+@media (max-width:880px){
+  #chat-mode-nav{width:120px}
+  .chat-provider-pick{width:150px}
+}
 
-/* 消息列表：卡内滚动区（滚动条同 .pick-scroll 口径），底部留一段让最后一条不贴输入区 */
-.chat-list{flex:1;min-height:0;overflow-y:auto;margin:0 var(--inset);
-  padding:var(--sp-1) var(--pad) var(--sp-3);display:flex;flex-direction:column;gap:var(--sp-3);
+/* 消息 + 输入区共用的竖列容器（撑满卡片内宽，限宽交给里面的两段） */
+.chat-thread{flex:1;min-height:0;display:flex;flex-direction:column}
+/* 消息列表 = 唯一滚动口。滚动条落在卡片右缘（与 ChatGPT 同口径：不去挤居中的内容栏），
+   scrollbar-gutter 预留条位（出现/消失不跳版），overscroll-behavior 断掉向外的滚动链 */
+.chat-list{flex:1;min-height:0;overflow-y:auto;scrollbar-gutter:stable;overscroll-behavior:contain;
   scrollbar-width:thin;scrollbar-color:var(--separator) transparent}
 .chat-list::-webkit-scrollbar{width:8px}
 .chat-list::-webkit-scrollbar-thumb{background:var(--separator);border-radius:4px}
 .chat-list::-webkit-scrollbar-track{background:transparent}
-/* 消息 = 气泡 + 时间小字一列；用户靠右（浅蓝底）、助手靠左（浅灰底，背景标准 --bg-soft）。
-   气泡内是纯文本：pre-wrap 留换行、break-word 防长串溢出，不做 markdown 渲染 */
-.chat-msg{display:flex;flex-direction:column;gap:var(--sp-1);max-width:min(680px,80%)}
-.chat-msg.me{align-self:flex-end;align-items:flex-end}
-.chat-msg.ai{align-self:flex-start;align-items:flex-start}
+/* 消息栏：居中限宽（--thread），左右内边距 --pad 与输入区同一条内容缘 */
+.chat-msgs{display:flex;flex-direction:column;gap:var(--sp-3);min-height:100%;
+  width:100%;max-width:var(--thread);margin:0 auto;padding:var(--sp-2) var(--pad) var(--sp-3)}
+/* 「上面还有内容」的滚动提示：贴顶吸附的白→透明渐变条，只在可向上滚时显形。
+   container scroll-state 查询（Chrome/Edge 133+）不支持时它保持 opacity:0 = 静默降级
+   （纯提示，不影响任何功能）；负 margin 让 22px 的高度不占流的空间 */
+.chat-fade{position:sticky;top:0;height:22px;margin-bottom:-22px;z-index:1;opacity:0;
+  pointer-events:none;transition:opacity .18s ease;
+  background:linear-gradient(to bottom,var(--card-bg) 30%,rgba(255,255,255,0))}
+@supports (container-type: scroll-state){
+  .chat-list{container-type:scroll-state}
+  @container scroll-state(scrollable: top){.chat-fade{opacity:1}}
+}
+/* 消息 = 气泡 + 归属小字一列。助手是主角：气泡可撑满整栏（短回复仍按内容收缩）；
+   用户靠右、更窄，是「提问」的从属形态。气泡内是纯文本：pre-wrap 留换行、break-word 防长串溢出 */
+.chat-msg{display:flex;flex-direction:column;gap:var(--sp-1);max-width:100%}
+.chat-msg.me{align-self:flex-end;align-items:flex-end;max-width:min(560px,85%)}
+.chat-msg.ai{align-self:stretch;align-items:flex-start}
 .chat-bubble{padding:10px var(--sp-3);border-radius:var(--r-inset);font-size:var(--fs-base);
   line-height:1.55;white-space:pre-wrap;word-break:break-word}
 .chat-msg.ai .chat-bubble{background:var(--bg-soft);border-bottom-left-radius:6px}
 .chat-msg.me .chat-bubble{background:#EFF4FF;border-bottom-right-radius:6px}
-.chat-meta{font-size:var(--fs-xs);color:var(--text-2)}
+/* 归属小字：模型名（有才显示）+ 时间，`·` 分隔；完整时刻进 title */
+.chat-meta{display:flex;align-items:center;gap:6px;font-size:var(--fs-xs);color:var(--text-2)}
+.chat-prov{font-weight:600}
+.chat-meta-dot{color:var(--separator)}
 /* 在途态「思考中」+ 三点跳动（一轮真实请求可能是多轮 LLM + 工具调用，此态会停留一会儿） */
 .chat-thinking{display:inline-flex;align-items:center;gap:4px;color:var(--text-2)}
 .chat-thinking i{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.3;
@@ -898,11 +933,13 @@ input:disabled{opacity:.5;background:var(--fill)}
 /* 空态/加载失败一行居中浅字（在 flex 列里上下居中） */
 .chat-empty{margin:auto;padding:var(--sp-4) 0;text-align:center;font-size:var(--fs-sm);color:var(--text-2)}
 
-/* 上下文偏长的提示行：输入区上方一行浅字（不自动裁剪、不阻断发送） */
-.chat-note{margin:0 calc(var(--inset) + var(--pad)) var(--sp-2);font-size:var(--fs-sm);color:var(--text-2)}
-
+/* 底部区（固定不动）：一条通宽分隔线 + 上下文偏长提示行 + 输入区。
+   提示行与输入区同栏同宽，输入区底部留卡片内边距（--inset），与卡片头对称 */
+.chat-foot{flex:none;border-top:1px solid var(--divider);padding:var(--sp-3) 0 var(--inset)}
+.chat-note{width:100%;max-width:var(--thread);margin:0 auto var(--sp-2);padding:0 var(--pad);
+  font-size:var(--fs-sm);color:var(--text-2)}
 /* 输入区：多行输入框 + 发送按钮（按钮贴底与输入框最后一行对齐）；在途整块禁用 */
-.chat-composer{display:flex;align-items:flex-end;gap:var(--sp-2);
-  padding:0 calc(var(--inset) + var(--pad)) var(--inset)}
+.chat-composer{display:flex;align-items:flex-end;gap:var(--sp-2);width:100%;max-width:var(--thread);
+  margin:0 auto;padding:0 var(--pad)}
 .chat-composer .inp{flex:1;min-width:0;resize:none}
 .chat-composer textarea:disabled{opacity:.5;background:var(--bg-soft)}

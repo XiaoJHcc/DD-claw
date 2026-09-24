@@ -4,7 +4,7 @@
 // 微博行也在「图文」分页（x.js），扫码登录流程经 openPlatformLogin 导出复用（两平台同构，差异参数化）。
 // 视觉 = v2：行 = 内嵌圆角矩形（白底 hover 浅底，主副双行 .row-2 恒 66）；
 // 登录行整行可点（.row-click），行尾二维码图标只是可点性提示（.row-afford），不是按钮。
-import { api, toast, ACTIONS, CHANGES, openSheet, closeSheet, sheetCleanups, checkRowHtml, esc, field } from './core.js';
+import { api, toast, ACTIONS, CHANGES, openSheet, closeSheet, sheetCleanups, checkRowHtml, esc, field, onTableRefresh } from './core.js';
 import { icon } from './icons.js';
 import qrcode from './qr-lib.js';
 
@@ -200,3 +200,5 @@ ACTIONS['save-fetch-settings'] = function () {
 
 loadListen();
 setInterval(loadListen, 60000);
+// 监听开关与运行参数都在 settings 表——撤销（含撤销一号登录态相关开关）后重拉本卡
+onTableRefresh(['settings'], loadListen);

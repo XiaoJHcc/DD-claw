@@ -71,7 +71,7 @@ const store = {
   pushEnabled: true,
   llmEnabled: true,
   undoHistory: clone(M.mockUndoHistory),
-  chat: { mode: M.mockChat.mode, messages: clone(M.mockChat.messages) },
+  chat: { mode: M.mockChat.mode, provider: M.mockChat.provider, messages: clone(M.mockChat.messages) },
   chatPending: null,   // 挂起的「等你确认」写操作（写前询问模式：确认后才回报已执行）
   biliLoggedIn: true,
   weiboLoggedIn: true,
@@ -79,6 +79,20 @@ const store = {
   biliQrStep: 0,
   weiboQrStep: 0,
 };
+
+// demo 专用的额外供应商：Agent 卡的模型选择器要能演「自动路由 + 多选 + 停用项不出现在选项里」，
+// 而 defaults.json 同时是**真实后端的首启种入信源**（构建期生成 onboarding-defaults.gen.ts），
+// 故 demo 专用补充只加在这里，绝不改 defaults.json。第二条停用 = 演示「只列 enabled」。
+store.llmProviders.push(
+  {
+    name: '本地 Ollama', baseURL: 'http://127.0.0.1:11434/v1', model: 'qwen3:8b',
+    vision: false, enabled: true, structuredOutput: 'none', api: 'chat-completions',
+  },
+  {
+    name: '智谱 GLM', baseURL: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash',
+    vision: false, enabled: false, structuredOutput: 'schema', api: 'chat-completions',
+  },
+);
 
 // X 快照的时间戳也用冻结时刻（连接卡副行要显示「上次测试 x/x xx:xx」）
 store.x.status.proxy.checkedAt = nowSec;
@@ -117,7 +131,7 @@ for (const p of store.biliPosts) {
   p.createdAt = nowSec;
 }
 // 变更历史的 at 同样用冻结时刻（列表显示「x 分钟前」；偏移与 mockUndoHistory 顺序一一对应，恒新→旧）
-const undoAges = [40, 8 * 60, 25 * 60, 2 * 3600];
+const undoAges = [40, 6 * 60, 22 * 60, 50 * 60, 3 * 3600, 6 * 3600];
 store.undoHistory.forEach((c, i) => { c.at = nowSec - (undoAges[i] ?? 3600); });
 // Agent 初始会话同样用冻结时刻（气泡显示「x 分钟前」；越靠后越新，偏移递减）
 const chatAges = [600, 540, 300, 240];
@@ -139,16 +153,19 @@ const err = (status, msg) => json(status, { error: msg });
 //   ② 含「推送」/「规则」→ 写前询问模式下先回确认话术并把这次写挂进 chatPending（用户回「确认/好」
 //      才回「已执行」，否则回「先不动」）；自动修改模式直接回「已执行」
 //   ③ 缺省 → 通用回复（说明能做什么）
+// 变更记录的中文名一律读记录自带的 title（后端唯一信源，前端与 mock 都不再维护工具名映射）。
 // 用量字段与真实后端同构：messages / chars 由当前会话算，needsResetHint 在 demo 里恒 false（正常值）
-const CHAT_TOOL_NAMES = {
-  upsert_category: '保存分类', delete_category: '删除分类',
-  set_push_enabled: '开关推送', reorder_channels: '调整渠道顺序',
-};
 const chatUsage = () => {
   let chars = 0;
   for (const m of store.chat.messages) chars += String(m.content || '').length;
   return { messages: store.chat.messages.length, chars, needsResetHint: false };
 };
+// 这条回复由谁提供：选定模型优先，'' = 自动路由 → 取第一个启用的供应商（无则 null，仿「LLM 全停用」）
+function activeProviderName() {
+  if (store.chat.provider) return store.chat.provider;
+  const first = store.llmProviders.find((p) => p.enabled);
+  return first ? first.name : null;
+}
 function chatScript(text) {
   if (store.chatPending) {
     const what = store.chatPending;
@@ -160,8 +177,8 @@ function chatScript(text) {
   if (text.includes('撤销')) {
     const top = store.undoHistory.find((c) => !c.undone);
     if (!top) return '刚查了「变更历史」：没有可撤销的变更（栈是空的）。';
-    top.undone = true;
-    return `已撤销最近一次变更：${CHAT_TOOL_NAMES[top.tool] || top.tool}` +
+    undoRecord(top);   // 与 POST /api/undo 同一条路径：标已撤销 + 还原写前快照
+    return `已撤销最近一次变更：${top.title || top.tool}` +
       `（${top.tables.length} 张表 · ${top.rows} 行）。\n这条记录已在设置页「变更历史」里标为已撤销。`;
   }
   if (text.includes('推送') || text.includes('规则')) {
@@ -175,6 +192,172 @@ function chatScript(text) {
   return '我是 DD-claw 的 Agent。能查当前状态（在播、监听开关、最近推送），也能改设置' +
     '（分类关键词、推送/图文规则、账号名单、各项开关）——所有写入都记进「变更历史」，可以撤销。' +
     '\n\n直接说要做什么就行。';
+}
+
+// ---- 配置写记账（demo 专用）：真实后端由写工具落变更记录（title / detail 都是服务端文案），
+// demo 里没有工具层，故在 fetch 拦截器上补一层：写前快照 → 写成功则往历史头部插一条同构记录
+// （带 title / detail / tables）并记下快照。有了它才演得出「改设置后历史立即多一条」与
+// 「撤销后页面状态还原」（撤销 = 还原快照，且返回 title / refill）。
+const undoReverts = new Map();   // 记录 id → 写前快照（只在撤销时用，不上交换面）
+let undoSeq = 100;              // 新记录 id 从 100 起（种子是 1~6，保持「新→旧 = id 降序」成立）
+const undoAt = () => Math.floor(Date.now() / 1000);
+
+// 参与快照的状态切片（与真实后端 DEFAULT_CONFIG_TABLES 对应的那几张表 + 开关）
+const SNAPSHOT_KEYS = [
+  'channels', 'categories', 'rules', 'postRules', 'streamers', 'xAccounts',
+  'weiboAccounts', 'biliAccounts', 'llmProviders', 'pushEnabled', 'llmEnabled',
+  'listenSettings', 'napcat', 'x',
+];
+function snapshotStore() {
+  const snap = {};
+  for (const k of SNAPSHOT_KEYS) snap[k] = clone(store[k]);
+  // agent 会话设置（写模式 / 选定模型）单独一份：它们也是配置写（后端 set_chat_mode /
+  // set_chat_provider 进变更历史），但**消息不参与回滚**——撤销一次模型切换不该吞掉之后的对话
+  snap.chatSettings = { mode: store.chat.mode, provider: store.chat.provider };
+  return snap;
+}
+function restoreStore(snap) {
+  for (const k of SNAPSHOT_KEYS) if (snap[k] !== undefined) store[k] = clone(snap[k]);
+  if (snap.chatSettings) {
+    store.chat.mode = snap.chatSettings.mode;
+    store.chat.provider = snap.chatSettings.provider;
+  }
+}
+/** 撤销一条记录：标已撤销 +（新记录才有）还原写前快照 */
+function undoRecord(rec) {
+  rec.undone = true;
+  const snap = undoReverts.get(rec.id);
+  if (snap) { restoreStore(snap); undoReverts.delete(rec.id); }
+}
+const refillNames = () => store.llmProviders.filter((p) => p.enabled).map((p) => p.name);
+
+/** 写路径 → 记录文案（demo 口径：够读即可，真实文案由后端工具给） */
+function writeMeta(method, path, b) {
+  const del = method === 'DELETE';
+  const upd = { action: 'updated' };
+  if (path === '/api/llm/enabled') {
+    return { tool: 'set_llm_enabled', title: b.enabled ? '启用 LLM 分析' : '停用 LLM 分析', tables: ['settings'],
+      detail: [{ label: '设置项「LLM 总开关」', ...upd, fields: ['启用状态'] }] };
+  }
+  if (path === '/api/llm/providers/order') {
+    return { tool: 'reorder_llm_providers', title: '调整供应商顺序', tables: ['settings'],
+      detail: [{ label: 'LLM 供应商顺序', ...upd, fields: ['排序'] }] };
+  }
+  if (path === '/api/llm/providers' || /^\/api\/llm\/providers\/[^/]+$/.test(path)) {
+    const name = path === '/api/llm/providers' ? b.name : decodeURIComponent(path.split('/').pop());
+    const withKey = !del && !!(b.key && String(b.key).trim());
+    return {
+      tool: del ? 'delete_llm_provider' : 'upsert_llm_provider',
+      title: del ? '删除 LLM 供应商' : (path === '/api/llm/providers' ? '新增 LLM 供应商' : '保存 LLM 供应商'),
+      tables: ['settings'],
+      detail: [{ label: `供应商「${name}」`, action: del ? 'deleted' : (path === '/api/llm/providers' ? 'created' : 'updated'),
+        fields: withKey ? ['API key'] : undefined }],
+      // 填了 key 的写：撤销 = 清空密钥需重填（与后端 undoNote 同语义）
+      undoNote: withKey ? 'refill' : undefined,
+      refill: withKey ? [name] : undefined,
+    };
+  }
+  if (path === '/api/advanced') {
+    return { tool: 'update_runtime_config', title: '修改运行时参数', tables: ['settings'],
+      detail: [{ label: '设置项「运行时参数」', ...upd, fields: ['参数值'] }] };
+  }
+  if (path === '/api/chat/mode') {
+    return { tool: 'set_chat_mode', title: '设置写模式', tables: ['settings'],
+      detail: [{ label: '设置项「Agent 写模式」', ...upd, fields: ['写模式'] }] };
+  }
+  if (path === '/api/chat/provider') {
+    return { tool: 'set_chat_provider', title: '选择 Agent 模型', tables: ['settings'],
+      detail: [{ label: '设置项「Agent 模型」', ...upd, fields: ['模型'] }] };
+  }
+  if (path === '/api/push/enabled') {
+    return { tool: 'set_push_enabled', title: b.enabled ? '启用推送' : '停用推送', tables: ['settings'],
+      detail: [{ label: '设置项「推送总开关」', ...upd, fields: ['启用状态'] }] };
+  }
+  if (path === '/api/napcat') {
+    return { tool: 'update_napcat', title: '修改 NapCat 配置', tables: ['settings'],
+      detail: [{ label: '设置项「NapCat 连接」', ...upd, fields: ['连接配置'] }] };
+  }
+  if (path === '/api/x') {
+    return { tool: 'update_x_config', title: '修改 X 连接设置', tables: ['settings'],
+      detail: [{ label: '设置项「X 连接」', ...upd, fields: ['代理 / 实例 / 间隔'] }] };
+  }
+  const lm = path.match(/^\/api\/listen\/(dynamic|weibo|twitter)$/);
+  if (lm) {
+    const plat = { dynamic: 'B站动态', weibo: '微博', twitter: 'X' }[lm[1]];
+    return { tool: 'set_listen', title: '修改监听开关', tables: ['settings'],
+      detail: [{ label: `设置项「监听开关：${plat}」`, ...upd, fields: ['启用状态'] }] };
+  }
+  // 四类 CRUD 家族：渠道 / 分类 / 推送规则 / 图文规则 / 三张账号名单，形状一致
+  const fam = [
+    { re: /^\/api\/channels(?:\/(\d+))?$|^\/api\/channels\/order$/, table: 'push_channels', noun: '推送渠道', names: ['新增推送渠道', '保存推送渠道', '删除推送渠道'] },
+    { re: /^\/api\/categories(?:\/(\d+))?$|^\/api\/categories\/order$/, table: 'categories', noun: '分类', names: ['保存分类', '保存分类', '删除分类'] },
+    { re: /^\/api\/rules(?:\/(\d+))?$|^\/api\/rules\/order$/, table: 'push_rules', noun: '推送规则', names: ['保存推送规则', '保存推送规则', '删除推送规则'] },
+    { re: /^\/api\/post-rules(?:\/(\d+))?$|^\/api\/post-rules\/order$/, table: 'post_rules', noun: '图文规则', names: ['保存图文规则', '保存图文规则', '删除图文规则'] },
+    { re: /^\/api\/x\/accounts(?:\/(\d+))?$/, table: 'x_accounts', noun: 'X 账号', names: ['保存 X 账号', '保存 X 账号', '删除 X 账号'] },
+    { re: /^\/api\/weibo\/accounts(?:\/(\d+))?$/, table: 'weibo_accounts', noun: '微博账号', names: ['保存微博账号', '保存微博账号', '删除微博账号'] },
+    { re: /^\/api\/bili\/accounts(?:\/(\d+))?$/, table: 'bili_accounts', noun: 'B站动态账号', names: ['保存B站动态账号', '保存B站动态账号', '删除B站动态账号'] },
+  ];
+  for (const f of fam) {
+    if (!f.re.test(path)) continue;
+    if (path.endsWith('/order')) {
+      return { tool: 'reorder', title: `调整${f.noun}顺序`, tables: [f.table],
+        detail: [{ label: `${f.noun}顺序`, ...upd, fields: ['排序'] }] };
+    }
+    const id = path.match(/\/(\d+)$/)?.[1];
+    const tool = del ? 'delete' : (method === 'POST' ? 'upsert_new' : 'upsert');
+    return {
+      tool: `${tool}_${f.table}`,
+      title: f.names[del ? 2 : (method === 'POST' ? 0 : 1)],
+      tables: [f.table],
+      detail: [{ label: `${f.noun}「${b.nickname || b.screenName || b.alias || b.name || (id ? '#' + id : '')}」`,
+        action: del ? 'deleted' : (method === 'POST' ? 'created' : 'updated'),
+        fields: del || method === 'POST' ? undefined : ['配置字段'] }],
+    };
+  }
+  const watch = path.match(/^\/api\/streamers\/([^/]+)(\/watch)?$/);
+  if (watch) {
+    const uid = decodeURIComponent(watch[1]);
+    const add = method === 'POST' && !!watch[2];
+    return {
+      tool: add ? 'watch_streamer' : 'set_streamer',
+      title: add ? '加入监听' : (b.watch === false ? '取消监听' : '修改主播设置'),
+      tables: ['streamers'],
+      detail: [{ label: `主播 ${uid}`, action: 'updated', fields: add || b.watch === false ? ['关注状态'] : ['别名 / 备注'] }],
+    };
+  }
+  // 未覆盖的写：不猜语义，只记一条能读的记录（真实后端不会走到这里）
+  return { tool: 'unknown_write', title: '修改设置', tables: ['settings'],
+    detail: [{ label: method + ' ' + path, ...upd }] };
+}
+
+/** 写成功后往历史头部插一条同构记录（顺序 = 新→旧） */
+function recordWrite(method, path, rawBody, snap) {
+  let b = {};
+  try { b = JSON.parse(rawBody || '{}'); } catch { /* 非 JSON body */ }
+  const meta = writeMeta(method, path, b);
+  const rec = {
+    id: ++undoSeq, tool: meta.tool, entry: 'panel', actor: 'panel', scope: 'admin',
+    at: undoAt(), undone: false,
+    tables: meta.tables, rows: meta.detail.length,
+    title: meta.title, detail: meta.detail,
+    ...(meta.undoNote ? { undoNote: meta.undoNote } : {}),
+  };
+  store.undoHistory.unshift(rec);
+  undoReverts.set(rec.id, snap);
+}
+
+// demo 里触发联动刷新的写白名单（与 webui/js/core.js 的 CONFIG_WRITE_PREFIXES 同口径——
+// 前端只在配置写成功后刷变更历史，mock 也只在配置写成功后记一条，两边才不会打架）。
+// 注意 /api/chat 只列 mode / provider 两条真配置写（都进变更历史），聊天回合与 reset 不算。
+const MOCK_WRITE_PREFIXES = [
+  '/api/llm', '/api/advanced', '/api/categories', '/api/rules', '/api/channels',
+  '/api/post-rules', '/api/streamers', '/api/follows', '/api/listen', '/api/push',
+  '/api/x', '/api/weibo', '/api/bili', '/api/napcat', '/api/chat/mode', '/api/chat/provider',
+];
+function isMockConfigWrite(method, path) {
+  if (!method || method.toUpperCase() === 'GET') return false;
+  if (path.includes('/test') || path === '/api/napcat/launch') return false;
+  return MOCK_WRITE_PREFIXES.some((p) => path === p || path.startsWith(p + '/'));
 }
 
 // ---- 路由 ----
@@ -931,30 +1114,40 @@ for (const p of store.twitterPosts) {
 
   // ---- 变更历史与撤销（P0b 撤销的用户面）：与 /api/undo* 逐字同构 ----
   // 历史新→旧全量（只标 undone 不删行）；POST /api/undo 撤「最新一条未撤销的」（mock 只演成功路径：
-  // 点撤销把栈顶标 undone 并回对应形状；把四条都撤完后再点已无按钮，符合空栈 404 语义）。
+  // 点撤销把栈顶标 undone + 还原写前快照，并回 title / refill 两个新字段；把记录都撤完后再点已无按钮，
+  // 符合空栈 404 语义）。refill 只在记录带 undoNote='refill' 时回，值为需重填的 provider 名。
   if (path === '/api/undo/history' && method === 'GET') {
     return ok({ changes: store.undoHistory });
   }
   if (path === '/api/undo' && method === 'POST') {
     const top = store.undoHistory.find((c) => !c.undone);
     if (!top) return err(404, '没有可撤销的变更');
-    top.undone = true;
-    return ok({ ok: true, change: { id: top.id, tool: top.tool } });
+    undoRecord(top);
+    const refill = top.undoNote === 'refill' ? refillNames() : undefined;
+    return ok({
+      ok: true, change: { id: top.id, tool: top.tool }, title: top.title || top.tool,
+      ...(refill ? { refill } : {}),
+    });
   }
 
   // ---- Agent 聊天（P1 前端聊天视图）：与真实后端 /api/chat* 逐字同构 ----
   // 会话在 mock 内存里演进（history 返回它，reset 清空；UI 不缓存），回复逻辑 = 上面的 chatScript。
+  // provider：history 回**当前选定**（'' = 自动路由），assistant 消息各带**自己那条**的归属，POST 回本次实际回答者。
   if (path === '/api/chat/history' && method === 'GET') {
-    return ok({ messages: clone(store.chat.messages), mode: store.chat.mode, usage: chatUsage() });
+    return ok({
+      messages: clone(store.chat.messages), mode: store.chat.mode,
+      provider: store.chat.provider, usage: chatUsage(),
+    });
   }
   if (path === '/api/chat' && method === 'POST') {
     const text = String(body().message || '').trim();
     if (!text) return json(400, { error: '消息不能为空' });
     const at = Math.floor(Date.now() / 1000);
-    store.chat.messages.push({ role: 'user', content: text, at });
+    store.chat.messages.push({ role: 'user', content: text, at, provider: null });
     const reply = chatScript(text);
-    store.chat.messages.push({ role: 'assistant', content: reply, at });
-    return ok({ ok: true, reply, usage: chatUsage() });
+    const provider = activeProviderName();
+    store.chat.messages.push({ role: 'assistant', content: reply, at, provider });
+    return ok({ ok: true, reply, provider, usage: chatUsage() });
   }
   if (path === '/api/chat/reset' && method === 'POST') {
     store.chat.messages = [];
@@ -966,6 +1159,15 @@ for (const p of store.twitterPosts) {
     if (m !== 'ask' && m !== 'auto') return json(400, { error: 'mode 必须是 ask 或 auto' });
     store.chat.mode = m;
     return ok({ ok: true, mode: m });
+  }
+  if (path === '/api/chat/provider' && method === 'PUT') {
+    const p = body().provider;
+    if (typeof p !== 'string') return json(400, { error: 'provider 必须是字符串' });
+    if (p !== '' && !store.llmProviders.some((x) => x.name === p)) {
+      return json(400, { error: `provider 不存在: ${p}` });
+    }
+    store.chat.provider = p;
+    return ok({ ok: true, provider: p });
   }
 
   // ---- 时间表 ----
@@ -1000,7 +1202,13 @@ window.fetch = function (input, init) {
   if (u.origin === location.origin && u.pathname.startsWith('/api/')) {
     const method = (init && init.method) || 'GET';
     const rawBody = (init && init.body) || null;
-    const run = () => handle(method, u.pathname, u.searchParams, rawBody);
+    const run = () => {
+      // 配置写：写前留一张快照，写成功则记一条变更历史（撤销时还原它）——见上面「配置写记账」
+      const snap = isMockConfigWrite(method, u.pathname) ? snapshotStore() : null;
+      const res = handle(method, u.pathname, u.searchParams, rawBody);
+      if (snap && res && res.status < 300) recordWrite(method, u.pathname, rawBody, snap);
+      return res;
+    };
     // 发消息是唯一「慢」的路由（真实实现是多轮 LLM + 工具调用）：延迟一下再回，
     // 让 UI 的在途态（输入框禁用 + 「思考中」气泡）在 demo 里真的看得见；其余路由立即返回。
     if (u.pathname === '/api/chat' && method === 'POST') {

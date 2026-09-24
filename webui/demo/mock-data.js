@@ -265,27 +265,58 @@ export const mockTwitterPosts = [
   },
 ];
 
-// ---- 变更历史（P0b 撤销的用户面的 demo 态）：四条 = 保存分类 / 删分类（级联 2 表）/
-// 群渠道关推送（MCP 来源 + 渠道栈）/ 调整渠道顺序（已撤销——演示置灰行与「撤销」按钮只挂栈顶）。
+// ---- 变更历史（P0b 撤销的用户面的 demo 态）：六条 = 设置 LLM 密钥（含 refill 副作用：撤销 = 清空密钥
+// 需重填）/ 保存分类 / 删分类（级联 4 行 = 「多行明细」样例）/ 群渠道关推送（MCP 来源 + 渠道栈）/
+// 修改运行时参数 / 调整渠道顺序（已撤销——演示置灰行与「撤销」按钮只挂栈顶）。
 // 字段与 GET /api/undo/history 的每一条逐字同构（id / tool / entry / actor / scope / at / undone /
-// tables / rows），顺序恒为**新→旧**（id 降序）；at 由 mock-api 在冻结时刻后按偏移种入。
+// tables / rows / title / detail / undoNote），顺序恒为**新→旧**（id 降序）；at 由 mock-api 在冻结
+// 时刻后按偏移种入。title / detail 是后端给的中文文案（前端不维护工具名映射），detail 每条 =
+// { label 中文对象名, action: created|updated|deleted, fields? 变化的中文字段名 }。
 // scope 取值同服务端：面板/本机 admin = 'admin'，渠道栈 = 'ch:<channelId>'。
 export const mockUndoHistory = [
   {
-    id: 4, tool: 'upsert_category', entry: 'panel', actor: 'panel', scope: 'admin',
-    at: 0, undone: false, tables: ['categories'], rows: 1,
-  },
-  {
-    id: 3, tool: 'delete_category', entry: 'panel', actor: 'panel', scope: 'admin',
-    at: 0, undone: false, tables: ['categories', 'push_rules'], rows: 4,
-  },
-  {
-    id: 2, tool: 'set_push_enabled', entry: 'mcp', actor: 'maibot', scope: 'ch:2',
+    id: 6, tool: 'set_llm_key', entry: 'panel', actor: 'panel', scope: 'admin',
     at: 0, undone: false, tables: ['settings'], rows: 1,
+    title: '设置 LLM 密钥', undoNote: 'refill',
+    detail: [{ label: '设置项「LLM 密钥 DeepSeek」', action: 'updated', fields: ['密钥'] }],
+  },
+  {
+    id: 5, tool: 'upsert_category', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: false, tables: ['categories'], rows: 1,
+    title: '保存分类',
+    detail: [{ label: '分类「歌回」', action: 'updated', fields: ['关键词', '判定方式'] }],
+  },
+  {
+    id: 4, tool: 'delete_category', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: false, tables: ['categories', 'push_rules'], rows: 4,
+    title: '删除分类',
+    detail: [
+      { label: '分类「杂谈」', action: 'deleted' },
+      { label: '推送规则「杂谈-开播」', action: 'updated', fields: ['启用状态'] },
+      { label: '推送规则「杂谈-闲聊」', action: 'updated', fields: ['启用状态'] },
+      { label: '推送规则「全部」', action: 'updated', fields: ['启用状态'] },
+    ],
+  },
+  {
+    id: 3, tool: 'set_push_enabled', entry: 'mcp', actor: 'maibot', scope: 'ch:2',
+    at: 0, undone: false, tables: ['settings'], rows: 1,
+    title: '开关推送',
+    detail: [{ label: '设置项「推送总开关」', action: 'updated', fields: ['启用状态'] }],
+  },
+  {
+    id: 2, tool: 'update_runtime_config', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: false, tables: ['settings'], rows: 2,
+    title: '修改运行时参数',
+    detail: [
+      { label: '设置项「请求超时」', action: 'updated', fields: ['请求超时'] },
+      { label: '设置项「熔断阈值」', action: 'updated', fields: ['熔断阈值'] },
+    ],
   },
   {
     id: 1, tool: 'reorder_channels', entry: 'panel', actor: 'panel', scope: 'admin',
     at: 0, undone: true, tables: ['push_channels'], rows: 4,
+    title: '调整渠道顺序',
+    detail: [{ label: '推送渠道顺序', action: 'updated', fields: ['排序'] }],
   },
 ];
 
@@ -293,13 +324,16 @@ export const mockUndoHistory = [
 // （用户要改分类关键词 → agent 先要确认 → 确认后回报已执行），一进 demo 就能看到两列气泡
 // 与模式语义。话题与 defaults.json 的种子数据一致（分类「歌回」、渠道「粉丝群」），
 // 免得演示露出后端没有的对象。at 由 mock-api 在冻结时刻后按偏移种入（数组顺序 = 时间顺序）。
+// provider = 选定的模型（'' = 自动路由，用户可在 Agent 卡头的选择器里换）；assistant 消息上的
+// provider 是**该条回复实际由谁提供**（持久化，换模型后旧气泡仍标当时的模型）。
 // 交互剧本（mock 的 POST /api/chat 按关键词回话）另见 mock-api.js 的 chatScript。
 export const mockChat = {
   mode: 'ask',
+  provider: '',
   messages: [
-    { role: 'user', content: '给「歌回」这个分类加上关键词「演唱会」', at: 0 },
-    { role: 'assistant', content: '我先确认一下：要给分类「歌回」新增关键词「演唱会」吗？\n确认后我就写入（改动记进设置页的「变更历史」，可撤销）。', at: 0 },
-    { role: 'user', content: '确认', at: 0 },
-    { role: 'assistant', content: '已写入。分类「歌回」现在的关键词是「唱、歌、音乐、演唱会」，匹配方式仍是「或」。', at: 0 },
+    { role: 'user', content: '给「歌回」这个分类加上关键词「演唱会」', at: 0, provider: null },
+    { role: 'assistant', content: '我先确认一下：要给分类「歌回」新增关键词「演唱会」吗？\n确认后我就写入（改动记进设置页的「变更历史」，可撤销）。', at: 0, provider: 'DeepSeek' },
+    { role: 'user', content: '确认', at: 0, provider: null },
+    { role: 'assistant', content: '已写入。分类「歌回」现在的关键词是「唱、歌、音乐、演唱会」，匹配方式仍是「或」。', at: 0, provider: 'DeepSeek' },
   ],
 };

@@ -2,7 +2,7 @@
 // .row-2：拖拽把手/启停勾/主行名称+多模态 tag/副行模型 ID·端点/测试/编辑/删除）+ 底部新增按钮。
 // 顺序 = 调用优先级，拖拽排序落库热生效；新增与编辑统一走 sheet 表单（v2 .field 观感，
 // 协议/结构化输出走自绘下拉 dropdownHtml）。视觉 = UI 重设计 v2 平移，行为与旧版 1:1。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, makeSortable, openSheet, closeSheet, dropdownHtml } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, makeSortable, openSheet, closeSheet, dropdownHtml, onTableRefresh } from './core.js';
 
 let llmCache = [];
 
@@ -175,3 +175,5 @@ makeSortable(document.getElementById('llm-list'), {
 });
 
 loadLlm();
+// 供应商清单与总开关都在 settings 表（llm_providers / llm_enabled）——撤销后重拉本卡
+onTableRefresh(['settings'], loadLlm);

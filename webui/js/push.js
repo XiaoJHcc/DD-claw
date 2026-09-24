@@ -8,7 +8,7 @@
 // （点击开二级挑选弹窗）。挑选弹窗 = 关注列表同款 pick-card 头像卡网格（整卡可点、搜索只按昵称过滤、
 // 挑选即生效到内存草稿并实时同步圆柱卡），全部不选 = 全部主播（含未来新增）；保存时才 PUT/POST 落库。
 // 引用对象不可用的可视化（ruleDeadReason，core.js）：规则行整行置灰 + 标题划线 + 原因标签。
-import { api, toast, ACTIONS, CHANGES, INPUTS, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, makeSortable, openSheet, closeSheet, dropdownHtml, ruleDeadReason, avatarHtml } from './core.js';
+import { api, toast, ACTIONS, CHANGES, INPUTS, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, makeSortable, openSheet, closeSheet, dropdownHtml, ruleDeadReason, avatarHtml, onTableRefresh } from './core.js';
 import { icon } from './icons.js';
 import { loadStreamers } from './streamers.js';
 
@@ -491,3 +491,6 @@ ACTIONS['save-push-settings'] = function () {
 };
 
 loadPush();
+// 一次拉全（推送开关 / 渠道 / 规则 / 分类 / 主播）——这五张表任一被撤销都靠它拉回真实态；
+// 登记为同一个函数，refreshTables 的去重保证只跑一次。
+onTableRefresh(['settings', 'push_channels', 'push_rules', 'categories', 'streamers'], loadPush);
