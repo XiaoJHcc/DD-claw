@@ -10,7 +10,7 @@ import type { PanelDeps } from '../panel/server.js';
 import { runTool } from '../mcp/run-tool.js';
 import type { McpToolDef } from '../mcp/tools.js';
 import {
-  AllProvidersExhaustedError, LlmRouter, OpenAiProvider, SIMULATED_TOOL_CALL_ID,
+  AllProvidersExhaustedError, LlmRouter, OpenAiProvider, SelectedProviderError, SIMULATED_TOOL_CALL_ID,
   type FetchLike, type LlmRequest, type ToolSpec,
 } from './providers.js';
 
@@ -302,6 +302,129 @@ test('第一个 provider 降级后模拟也失败 → 换下一个 provider；�
       return true;
     },
   );
+});
+
+// ---- 点名 provider（LlmRequest.provider）：硬路由，绝不降级 ----
+
+test('点名 provider：只有它被调用，返回里带 provider = 实际回答者；自动路由缺省不变', async (t) => {
+  const a = provider({ name: 'a' }, [chatResponse({ content: 'a 答的' })]);
+  const b = provider({ name: 'b' }, [chatResponse({ content: 'b 答的' })]);
+  t.after(() => {});
+  const router = routerOf([a.p, b.p]);
+
+  // 缺省（自动路由）：路由顺序第一个回答
+  const auto = await router.completeChat({ messages: [{ role: 'user', content: 'x' }], tools: TOOLS });
+  assert.equal(auto.content, 'a 答的');
+  assert.equal(auto.provider, 'a', 'ChatCompletion.provider = 实际落点');
+  assert.equal(b.calls.length, 0);
+
+  // 点名 b：只打 b（a 一次都不碰），结果里的 provider 是 b
+  const picked = await router.completeChat({ messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: 'b' });
+  assert.equal(picked.content, 'b 答的');
+  assert.equal(picked.provider, 'b');
+  assert.equal(a.calls.length, 1, '点名时不去试别的 provider');
+  assert.equal(b.calls.length, 1);
+
+  // 空串 = 自动路由（面板「自动」就是写空串，不会长成「点名空名字」）
+  const blank = await router.completeChat({ messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: '' });
+  assert.equal(blank.provider, 'a');
+  assert.equal(b.calls.length, 1);
+});
+
+test('点名 provider：不存在 / 未启用 / 缺 key / 熔断 都抛 SelectedProviderError，不回落别人', async (t) => {
+  const good = provider({ name: 'good' }, [chatResponse({ content: '好' })]);
+  const off = provider({ name: 'off', enabled: false }, [chatResponse({ content: '不该被调到' })]);
+  t.after(() => {});
+  const router = routerOf([off.p, good.p]);
+
+  // ① 不存在
+  await assert.rejects(
+    () => router.completeChat({ messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: 'nope' }),
+    (e: unknown) => {
+      assert.ok(e instanceof SelectedProviderError);
+      assert.equal(e.provider, 'nope');
+      assert.match(e.message, /没有这个 LLM provider：nope/);
+      return true;
+    },
+  );
+
+  // ② 已配置但关掉了（checkbox）——明确中文错误，且不落到 good 身上
+  await assert.rejects(
+    () => router.completeChat({ messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: 'off' }),
+    (e: unknown) => {
+      assert.match((e as Error).message, /指定的 LLM provider「off」当前不可用（disabled）/);
+      return true;
+    },
+  );
+  assert.equal(good.calls.length, 0, '点名失败绝不回落别人');
+
+  // ③ 缺 key（isReady=false 的另一支）
+  const missing = new OpenAiProvider(
+    spec({ name: 'nokey' }), [], { ...OPTS, fetchFn: fakeFetch([]).fn },
+  );
+  await assert.rejects(
+    () => routerOf([missing]).completeChat({ messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: 'nokey' }),
+    /缺 key/,
+  );
+});
+
+test('点名 provider：调用失败照常计熔断，但不换人（抛 SelectedProviderError 带原始原因）', async (t) => {
+  const bad = provider({ name: 'bad' }, [new Response('boom', { status: 500 })]);
+  const good = provider({ name: 'good' }, [chatResponse({ content: '兜底回答' })]);
+  t.after(() => {});
+  const router = routerOf([bad.p, good.p]);
+
+  await assert.rejects(
+    () => router.completeChat({ messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: 'bad' }),
+    (e: unknown) => {
+      assert.ok(e instanceof SelectedProviderError);
+      assert.match(e.message, /LLM provider「bad」调用失败：HTTP 500/);
+      return true;
+    },
+  );
+  assert.equal(good.calls.length, 0, '点名的 provider 失败也不换人');
+  assert.equal(bad.p.status(), 'ready', '一次失败不到熔断阈值');
+
+  // 连失败到阈值 → 它自己熔断；下次点名直接「当前不可用（熔断中）」
+  for (let i = 0; i < 2; i++) {
+    await router.completeChat({ messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: 'bad' })
+      .catch(() => undefined);
+  }
+  assert.equal(bad.p.status(), '熔断中');
+  await assert.rejects(
+    () => router.completeChat({ messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: 'bad' }),
+    /当前不可用（熔断中）/,
+  );
+});
+
+test('点名 provider + JSON 模拟降级：模拟落点也算它，模拟失败不换人', async (t) => {
+  // 端点不支持原生 tools → 就地降级模拟（模拟请求不带 tools）
+  const { p } = providerWith({ name: 'sim' }, (body) =>
+    body.tools !== undefined
+      ? new Response('{"error":"unknown parameter: tools"}', { status: 400 })
+      : jsonResponse({ choices: [{ message: { content: '{"reply":"模拟答的"}' } }] }));
+  t.after(() => {});
+  const out = await routerOf([p]).completeChat({
+    messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: 'sim',
+  });
+  assert.equal(out.content, '模拟答的');
+  assert.equal(out.provider, 'sim', '模拟降级产出的结果同样带 provider');
+
+  // 原生不支持 + 模拟也失败 → 抛 SelectedProviderError（不是 AllProvidersExhausted），也不换人
+  const bad = provider({ name: 'sb' }, [new Response('boom', { status: 500 })]);
+  const fallback = provider({ name: 'other' }, [chatResponse({ content: '不该被调到' })]);
+  t.after(() => {});
+  await assert.rejects(
+    () => routerOf([bad.p, fallback.p]).completeChat({
+      messages: [{ role: 'user', content: 'x' }], tools: TOOLS, provider: 'sb', simulateTools: true,
+    }),
+    (e: unknown) => {
+      assert.ok(e instanceof SelectedProviderError, `应是点名错误，实际 ${String(e)}`);
+      assert.match(e.message, /调用失败：HTTP 500/);
+      return true;
+    },
+  );
+  assert.equal(fallback.calls.length, 0, '点名失败不换人');
 });
 
 // ---- 计划里的硬要求：模拟产出的 args 必须过 runTool 校验 ----

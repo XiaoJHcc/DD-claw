@@ -78,7 +78,9 @@ function fixture(opts: {
     seen.push({ ...req, messages: req.messages.map((m) => ({ ...m })) as ChatMessage[] });
     const step = script[seen.length - 1];
     if (!step) throw new Error(`剧本只准备了 ${script.length} 步，却被问了第 ${seen.length} 次`);
-    return step(req, seen.length - 1);
+    // provider 由木偶补：剧本只关心正文/工具调用，真回答者由 provider 层给（loop 会把它落库）
+    const out = step(req, seen.length - 1);
+    return out.provider === undefined ? { ...out, provider: 'p1' } : out;
   };
   const bot = createQqbot({
     db,

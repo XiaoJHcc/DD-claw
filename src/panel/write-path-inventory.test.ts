@@ -291,6 +291,13 @@ const INVENTORY: InventoryEntry[] = [
       + 'P1 验收的「误写率 0 容忍」名存实亡',
   },
   {
+    method: 'PUT', path: '/api/chat/provider', label: 'PUT /api/chat/provider',
+    coverage: 'registry', tool: 'set_chat_provider', toolStatus: 'exists', exposeToAgent: false,
+    reason: 'Agent 模型选择（settings chat_provider，空串=自动路由）：是配置写，进注册表以纳入回滚覆盖；'
+      + '但**不得暴露给 agent**——换模型是主人对成本与质量的取舍，模型不该自己「点将」，'
+      + '也不该在自己答不好时改配置',
+  },
+  {
     method: 'POST', path: '/api/chat', label: 'POST /api/chat',
     coverage: 'excluded', exposeToAgent: false,
     reason: 'agent 对话入口：路由自身只写 chat_messages（会话记录，非配置、不入撤销栈）；'

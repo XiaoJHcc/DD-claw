@@ -142,10 +142,17 @@ export const DEFAULT_IGNORE_COLUMNS: Record<string, readonly string[]> = {
   streamers: ['uname', 'face', 'room_id', 'updated_at'],
 };
 
+/**
+ * 该 settings 键是否属于隐私例外（LLM key）。**键即判据**：`redactLlmKey` 与入口层的
+ * 「撤销后需重填」提示都从这一个函数出发，两处口径不会漂移（`llm_key:<provider>` 一行一个键）。
+ */
+export function isLlmKeySetting(key: unknown): boolean {
+  return typeof key === 'string' && key.startsWith('llm_key:');
+}
+
 /** 隐私例外（计划里的唯一一条）：LLM key 不落明文 */
 export const redactLlmKey: RedactPredicate = (table, column, row) =>
-  table === 'settings' && column === 'value' &&
-  typeof row.key === 'string' && row.key.startsWith('llm_key:');
+  table === 'settings' && column === 'value' && isLlmKeySetting(row.key);
 
 export function adminScope(): string {
   return 'admin';

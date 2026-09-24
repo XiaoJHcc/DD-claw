@@ -11,6 +11,7 @@ import {
 } from '../analysis/providers.js';
 import { ChatStore } from '../core/chat-store.js';
 import { Db } from '../core/db.js';
+import { getChatProvider, setChatProvider } from '../analysis/providers.js';
 import { UndoStore, adminScope, channelScope } from '../core/undo.js';
 import { HttpError } from '../panel/http-util.js';
 import type { PanelDeps, PanelStatus } from '../panel/server.js';
@@ -58,14 +59,16 @@ function toolCall(id: string, name: string, args: unknown = {}): ToolCall {
   return { id, name, arguments: JSON.stringify(args) };
 }
 
-/** 假 LLM：第 i 次请求取剧本第 i 步；请求深拷留档（loop 会继续往自己的数组里 push） */
+/** 假 LLM：第 i 次请求取剧本第 i 步；请求深拷留档（loop 会继续往自己的数组里 push）。
+ *  provider 由木偶补：剧本只关心正文/工具调用，真回答者由 provider 层给（loop 读它落库/回显）。 */
 function fakeChat(script: Array<(req: LlmRequest, i: number) => ChatCompletion>) {
   const seen: LlmRequest[] = [];
   const fn = async (req: LlmRequest): Promise<ChatCompletion> => {
     seen.push({ ...req, messages: req.messages.map((m) => ({ ...m })) as ChatMessage[] });
     const step = script[seen.length - 1];
     if (!step) throw new Error(`剧本只准备了 ${script.length} 步，却被问了第 ${seen.length} 次`);
-    return step(req, seen.length - 1);
+    const out = step(req, seen.length - 1);
+    return out.provider === undefined ? { ...out, provider: 'p1' } : out;
   };
   return { fn, seen };
 }
@@ -96,7 +99,7 @@ test('单轮直答：没有 tool_calls 就是终答；工具面按角色+排除�
   for (const want of ['search_streamers', 'list_streamers', 'set_push_enabled', 'undo_last_change']) {
     assert.ok(names.includes(want), `${want} 应在工具面`);
   }
-  for (const not of ['set_chat_mode', 'test_push', 'reorder_push_rules', 'list_group_channels']) {
+  for (const not of ['set_chat_mode', 'set_chat_provider', 'test_push', 'reorder_push_rules', 'list_group_channels']) {
     assert.ok(!names.includes(not), `${not} 不该在工具面`);
   }
 });
@@ -289,6 +292,65 @@ test('写模式：缺省 ask；settings 的值决定系统提示里的写纪律'
   // 脏值按安全默认（ask），不让一个坏值把「写前询问」关掉
   db.setSetting('chat_write_mode', 'nope');
   assert.equal(getChatWriteMode(db), 'ask');
+});
+
+// ---- 模型选择（settings chat_provider）----
+
+test('模型选择：chat_provider 非空 → 每轮请求带 provider；结果与实际回答者落进 assistant 消息', async () => {
+  const { db, chat, deps } = fixture();
+
+  // 缺省 = 自动路由（请求里不带 provider，router 按路由顺序降级）
+  const auto = fakeChat([() => reply('自动答的')]);
+  const r0 = await runAgentTurn(deps, '谁在播', { completeChat: auto.fn });
+  assert.equal(auto.seen[0]!.provider, undefined, '自动路由不带 provider');
+  assert.equal(r0.provider, 'p1', '返回值给出实际回答者');
+  assert.equal(chat.messages(adminScope())[1]!.provider, 'p1', 'assistant 消息落库带 provider');
+
+  // 点名 p9：请求带 provider（假 LLM 照原样回一个别的名字，验证「结果里的才是事实」）
+  setChatProvider(db, 'p9');
+  assert.equal(getChatProvider(db), 'p9');
+  const picked = fakeChat([(req) => ({ content: '点名答的', toolCalls: [], provider: req.provider ?? '?' })]);
+  const r1 = await runAgentTurn(deps, '再来一次', { completeChat: picked.fn });
+  assert.equal(picked.seen[0]!.provider, 'p9', 'settings 的值进了 LlmRequest.provider');
+  assert.equal(r1.provider, 'p9');
+  assert.equal(chat.messages(adminScope()).at(-1)!.provider, 'p9');
+
+  // 工具轮次也带 provider，且整轮（含中间轮）的 provider 都落库
+  const multi = fakeChat([
+    (req) => ({ content: '先看一眼。', toolCalls: [toolCall('c1', 'list_streamers')], provider: req.provider ?? '?' }),
+    (req) => ({ content: '看完了。', toolCalls: [], provider: req.provider ?? '?' }),
+  ]);
+  const r2 = await runAgentTurn(deps, '看看名单', { completeChat: multi.fn });
+  assert.deepEqual(multi.seen.map((s) => s.provider), ['p9', 'p9']);
+  assert.equal(r2.provider, 'p9');
+  const stored = chat.messages(adminScope()).filter((m) => m.role === 'assistant');
+  assert.deepEqual(stored.map((m) => m.provider), ['p1', 'p9', 'p9', 'p9']);
+
+  // 回到自动：写空串 = 删键，请求里又不见 provider
+  setChatProvider(db, '');
+  assert.equal(db.getSetting('chat_provider'), null);
+  const back = fakeChat([() => reply('又自动了')]);
+  await runAgentTurn(deps, '回到自动', { completeChat: back.fn });
+  assert.equal(back.seen[0]!.provider, undefined);
+});
+
+test('模型选择：选定的 provider 没了/不可用 → chatBlockedReason 给中文指引（400，不是 502）', async () => {
+  const { db, deps } = fixture();
+  attachRouter(deps, ['k1']); // p1 就绪
+  setLlmEnabled(db, true);
+
+  assert.equal(chatBlockedReason(deps), null, '自动路由下有就绪 provider 就是可用');
+
+  setChatProvider(db, 'ghost');
+  assert.match(chatBlockedReason(deps)!, /选定的 LLM provider「ghost」不在配置里/);
+
+  // 选定的 provider 缺 key（attachRouter 的 key 池为空）→ 明确说它不可用，而不是笼统「没有可用 provider」
+  deps.llm!.router = createLlmRouter(
+    { requestTimeoutMs: 1_000, circuitThreshold: 3, circuitCooldownMs: 60_000, providers: [PROVIDER] },
+    () => [],
+  );
+  setChatProvider(db, 'p1');
+  assert.match(chatBlockedReason(deps)!, /选定的 LLM provider「p1」当前不可用（缺 key（未填写））/);
 });
 
 // ---- 撤销 ----

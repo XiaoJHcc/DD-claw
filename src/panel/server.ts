@@ -27,7 +27,7 @@ import {
   fetchWeiboSelf, loadWeiboCookies, saveWeiboCookies, weiboCookieHeader, type WeiboSelfInfo,
 } from '../sources/weibo/auth.js';
 import type { LlmProviderConfig } from '../config/schema.js';
-import { deriveRoutes, isLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
+import { deriveRoutes, getChatProvider, isLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
 import { isListenEnabled, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
 import {
   getRuntimeConfig,
@@ -37,7 +37,8 @@ import type { XConfig } from '../core/x-config.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 import type { UndoResult, UndoStore } from '../core/undo.js';
-import { adminScope, changeTables, type ChangeRecord } from '../core/undo.js';
+import { adminScope } from '../core/undo.js';
+import { undoChangeInfo, undoToolTitle } from './undo-view.js';
 import type { ChatStore } from '../core/chat-store.js';
 import { getChatWriteMode } from '../agent/system-prompt.js';
 import { chatBlockedReason, runAgentTurn } from '../agent/loop.js';
@@ -960,16 +961,19 @@ async function handle(
     }
   }
 
-  // ---- WebUI Agent 对话（P1：agent loop + 写模式开关；chat dep 存在才挂，缺 dep = 404）----
-  // 面板是**单会话**：scope = adminScope()，与撤销栈同一套 scope 字符串。四个端点的响应形状
-  // 是 webui 契约（逐字冻结，demo mock 同构）：history 回 {messages,mode,usage}，发消息回 {ok,reply,usage}。
-  // 「写前询问 / 自动修改」只写在系统提示里（agent/loop.ts **不硬拦**写工具），故路由层不干预
-  // loop 的工具调用；PUT /api/chat/mode 也只是一次普通配置写（进注册表 → 可撤销）。
+  // ---- WebUI Agent 对话（P1：agent loop + 写模式 / 模型选择；chat dep 存在才挂，缺 dep = 404）----
+  // 面板是**单会话**：scope = adminScope()，与撤销栈同一套 scope 字符串。五个端点的响应形状
+  // 是 webui 契约（逐字冻结，demo mock 同构）：history 回 {messages,mode,usage,provider}，
+  // 发消息回 {ok,reply,usage,provider}。「写前询问 / 自动修改」只写在系统提示里
+  // （agent/loop.ts **不硬拦**写工具），故路由层不干预 loop 的工具调用；
+  // PUT /api/chat/{mode,provider} 都是普通配置写（进注册表 → 可撤销，工具不在 agent 工具面）。
   if (chat && method === 'GET' && path === '/api/chat/history') {
     sendJson(res, 200, {
       messages: chatHistoryMessages(chat),
       mode: getChatWriteMode(db),
       usage: chat.usage(adminScope()),
+      // 当前选定模型（'' = 自动路由）；每条 assistant 消息另有自己的 provider（谁答的）
+      provider: getChatProvider(db),
     });
     return;
   }
@@ -982,7 +986,12 @@ async function handle(
     const blocked = chatBlockedReason(deps);
     if (blocked !== null) throw new HttpError(400, blocked);
     const turn = await runAgentTurn(deps, body.message);
-    sendJson(res, 200, { ok: true, reply: turn.reply, usage: chat.usage(adminScope()) });
+    sendJson(res, 200, {
+      ok: true,
+      reply: turn.reply,
+      usage: chat.usage(adminScope()),
+      provider: turn.provider,
+    });
     return;
   }
   if (chat && method === 'POST' && path === '/api/chat/reset') {
@@ -994,6 +1003,11 @@ async function handle(
   if (chat && method === 'PUT' && path === '/api/chat/mode') {
     // 经注册表：写模式是配置写，要与面板其余开关一样进快照/变更历史（工具在 agent 工具面之外）
     await callTool(deps, res, 'set_chat_mode', asBodyObject(await readJsonBody(req)));
+    return;
+  }
+  if (chat && method === 'PUT' && path === '/api/chat/provider') {
+    // 同上：模型选择也是配置写（进快照/变更历史，可撤销）；工具同样不在 agent 工具面
+    await callTool(deps, res, 'set_chat_provider', asBodyObject(await readJsonBody(req)));
     return;
   }
 
@@ -1011,7 +1025,22 @@ async function handle(
       if (r.reason === 'empty') throw new HttpError(404, '没有可撤销的变更');
       throw new HttpError(409, '该设置已被其他入口修改，无法撤销本次');
     }
-    sendJson(res, 200, { ok: true, change: { id: r.id, tool: r.tool ?? null } });
+    // 中文操作名与「需重填」提示都由后端给（与 /api/undo/history 逐条字段同源，见 panel/undo-view.ts）。
+    // **主形状是 change 里的那份**（与历史端点的 title/undoNote 对称）；顶层再放一份同样的值，
+    // 是为了让「读 res.title / res.refill」与「读 res.change.title / res.change.refill」两种写法都成立
+    // （UI 与本接口并行开发，不做猜谜）。refill 只在隐私例外（LLM key）撤销时出现。
+    const payload = {
+      ok: true,
+      change: {
+        id: r.id,
+        tool: r.tool ?? null,
+        title: undoToolTitle(r.tool),
+        ...(r.refill === undefined ? {} : { refill: r.refill }),
+      },
+      title: undoToolTitle(r.tool),
+      ...(r.refill === undefined ? {} : { refill: r.refill }),
+    };
+    sendJson(res, 200, payload);
     return;
   }
 
@@ -1036,31 +1065,21 @@ async function handle(
 }
 
 /**
- * 对话记录 → history 端点形状（webui 契约，逐字冻结）：只给 user / assistant 的**有正文**消息
+ * 对话记录 → history 端点形状（webui 契约）：只给 user / assistant 的**有正文**消息
  * ——`tool` 结果与「只调工具、没说话」的轮次对用户没有意义；`at` 秒级（库里毫秒）。
+ * `provider`（谁答的）每条都给：assistant 是落库的实际回答者，user 行恒为 null（前端不必分支取值）。
  */
-function chatHistoryMessages(chat: ChatStore): Array<{ role: string; content: string; at: number }> {
+function chatHistoryMessages(chat: ChatStore): Array<{
+  role: string; content: string; at: number; provider: string | null;
+}> {
   return chat.messages(adminScope())
     .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim() !== '')
-    .map((m) => ({ role: m.role, content: m.content, at: Math.floor(m.createdAt / 1000) }));
-}
-
-/**
- * 变更记录 → 历史端点形状（webui 契约，逐字冻结）：`at` 秒级（库里是毫秒）、
- * `tables` 去重、`rows` = 受影响行数、`undone` 布尔。
- */
-function undoChangeInfo(c: ChangeRecord): Record<string, unknown> {
-  return {
-    id: c.id,
-    tool: c.tool ?? null,
-    entry: c.entry,
-    actor: c.actor,
-    scope: c.scope,
-    at: Math.floor(c.at / 1000),
-    undone: c.undoneAt !== null,
-    tables: changeTables(c),
-    rows: c.rows.length,
-  };
+    .map((m) => ({
+      role: m.role,
+      content: m.content,
+      at: Math.floor(m.createdAt / 1000),
+      provider: m.role === 'assistant' ? m.provider : null,
+    }));
 }
 
 // ---- 头像代理（/api/avatar）----
@@ -1401,9 +1420,12 @@ function llmKeySource(
 function llmInfo(deps: PanelDeps): unknown {
   const list = deps.llm!.store?.list() ?? [];
   const routes = deriveRoutes(list);
-  const statusByName = new Map((deps.llm!.router?.describe() ?? []).map((s) => [s.name, s.status]));
+  const described = new Map((deps.llm!.router?.describe() ?? []).map((s) => [s.name, s]));
   return {
     enabled: isLlmEnabled(deps.db),
+    // agent 会话选定的 provider（'' = 自动路由）：选择器只需读这一处就能预选，
+    // 与 /api/chat/history 的 provider 同一个 settings 键
+    chatProvider: getChatProvider(deps.db),
     providers: list.map((p) => ({
       name: p.name,
       baseURL: p.baseURL,
@@ -1413,7 +1435,10 @@ function llmInfo(deps: PanelDeps): unknown {
       structuredOutput: p.structuredOutput,
       api: p.api,
       routes: (['text', 'vision'] as const).filter((r) => routes[r].includes(p.name)),
-      status: statusByName.get(p.name) ?? null,
+      status: described.get(p.name)?.status ?? null,
+      // 此刻能不能真的用（启用 + 有 key + 未熔断）：Agent 模型选择器只让挑能用的，
+      // 与 loop 的 chatBlockedReason 同一判据（ProviderStatus.ready）
+      ready: described.get(p.name)?.ready ?? false,
       key: llmKeySource(deps.db, p),
     })),
   };

@@ -51,12 +51,25 @@ export interface ToolSpec {
 export interface ChatCompletion {
   content: string;
   toolCalls: ToolCall[];
+  /**
+   * **实际回答的 provider 名**（router 路由后的落点）。agent 会话要把它落进库/回给面板——
+   * 自动路由下一轮可能换人，只有 provider 层知道自己是谁。
+   */
+  provider: string;
 }
 
 export interface LlmRequest {
   messages: ChatMessage[];
   /** 强制指定路由；缺省按 messages 里有没有 image_url 自动判断 */
   vision?: boolean;
+  /**
+   * **强制指定哪个 provider 回答**（agent 会话模型选择，settings `chat_provider`）。
+   * 与 `vision` 不同：这是硬约束，指定的 provider 不存在 / 未启用 / 熔断 / 调用失败都
+   * **抛错且绝不回落别人**（`SelectedProviderError`）——主人选了模型，就不该被静默换掉。
+   * 缺省（undefined 或空串）= 按路由优先级自动选，失败逐级降级。
+   * **只被 `completeChat` 使用**（与 `tools` 同款口径）：分类任务走 `completeJson`，不看这个字段。
+   */
+  provider?: string;
   /** 请求级 JSON schema；provider 的 structuredOutput 模式决定怎么下发 */
   jsonSchema?: { name: string; schema: Record<string, unknown>; strict?: boolean };
   maxTokens?: number;
@@ -103,6 +116,21 @@ export class AllProvidersExhaustedError extends Error {
     readonly attempts: string[],
   ) {
     super(`LLM ${route} 路由全部不可用: ${attempts.join(' → ') || '(路由为空或无可用 provider)'}`);
+  }
+}
+
+/**
+ * `LlmRequest.provider` 指定的 provider 这条硬路由走不通（不存在 / 未启用 / 缺 key / 熔断 / 调用失败）。
+ * 与 `AllProvidersExhaustedError` 的区别：**不降级**——主人点名要的模型不该被静默换掉，
+ * 出错比换人回答诚实。文案是中文（直接进 agent 回话与面板错误提示）。
+ */
+export class SelectedProviderError extends Error {
+  override name = 'SelectedProviderError';
+  constructor(
+    readonly provider: string,
+    message: string,
+  ) {
+    super(message);
   }
 }
 
@@ -276,6 +304,7 @@ export class OpenAiProvider {
     return {
       content: typeof msg.content === 'string' ? msg.content : '',
       toolCalls: parseChatToolCalls(msg.tool_calls),
+      provider: this.name,
     };
   }
 
@@ -438,7 +467,7 @@ export class OpenAiProvider {
     if (!content && toolCalls.length === 0) {
       throw new ProviderCallError('响应既没有 output_text 也没有 function_call');
     }
-    return { content, toolCalls };
+    return { content, toolCalls, provider: this.name };
   }
 }
 
@@ -611,12 +640,17 @@ export class LlmRouter {
    * 带工具的一轮对话。熔断 / 路由 / 降级语义与 `completeJson` 同源：
    * 逐个 provider 试，失败的记熔断、换下一个。
    *
+   * **点名 provider（`req.provider`）时不降级**：主人选了模型就不该被静默换掉——
+   * 不存在 / 未启用 / 缺 key / 熔断 / 调用失败一律抛 `SelectedProviderError`（中文文案），
+   * 绝不落到别人身上（见 `LlmRequest.provider`）。
+   *
    * **JSON 模拟降级**：端点不支持原生 tools 时（`ToolUnsupportedError`，或调用方直接指定
    * `simulateTools`），就用提示词让模型输出 `{"tool":…,"arguments":…}` 再由我们拼成一次工具调用——
    * 这**不算 provider 故障**，不记熔断。模拟产出的 arguments 与原生 tool_calls 一样是原始 JSON 字符串，
    * 因此**同样必须过 `runTool()` 的 zod 校验**，写工具不得因此绕过 schema。
    */
   async completeChat(req: LlmRequest): Promise<ChatCompletion> {
+    if (req.provider !== undefined && req.provider !== '') return this.completeChatWith(req.provider, req);
     const routeKind: 'text' | 'vision' = req.vision ?? hasImage(req.messages) ? 'vision' : 'text';
     const route = this.routes[routeKind];
     const attempts: string[] = [];
@@ -628,39 +662,75 @@ export class LlmRouter {
         attempts.push(`${name}[跳过:${p.status()}]`);
         continue;
       }
-      if (req.simulateTools) {
+      const out = await this.tryChat(p, req, attempts, name);
+      if (out !== null) return out;
+    }
+    throw new AllProvidersExhaustedError(routeKind, attempts);
+  }
+
+  /**
+   * 点名路由：只有这一个 provider 会被调用，任何一步不顺都抛错（不换人）。
+   * 「未就绪」在调用前就判定（省一次注定失败的请求），调用失败照常计熔断。
+   */
+  private async completeChatWith(name: string, req: LlmRequest): Promise<ChatCompletion> {
+    const p = this.byName.get(name);
+    if (!p) throw new SelectedProviderError(name, `没有这个 LLM provider：${name}（请在设置页重新选择）`);
+    if (!p.isReady()) {
+      throw new SelectedProviderError(name, `指定的 LLM provider「${name}」当前不可用（${p.status()}）`);
+    }
+    const attempts: string[] = [];
+    const out = await this.tryChat(p, req, attempts, name, true);
+    // strict 下失败一律抛错，这行只是类型兜底（防御）
+    if (out === null) throw new SelectedProviderError(name, `指定的 LLM provider「${name}」调用失败`);
+    return out;
+  }
+
+  /**
+   * 单 provider 的一次工具轮次（原生 → 端点不支持就地降级为 JSON 模拟）。
+   * 成功返回结果；降级链走不通返回 null（由调用方决定「换下一个」还是抛错）。
+   * `strict` = 点名路由：失败直接把原始错误包成 `SelectedProviderError` 抛出，不回落别人。
+   */
+  private async tryChat(
+    p: OpenAiProvider,
+    req: LlmRequest,
+    attempts: string[],
+    name: string,
+    strict = false,
+  ): Promise<ChatCompletion | null> {
+    const fail = (e: unknown, tag: string): null => {
+      p.recordFailure(e);
+      attempts.push(`${name}[${tag}]`);
+      if (strict) {
+        throw new SelectedProviderError(name, `LLM provider「${name}」调用失败：${(e as Error).message}`);
+      }
+      return null;
+    };
+    if (req.simulateTools) {
+      try {
+        const out = await simulateToolCall(p, req);
+        p.recordSuccess();
+        return out;
+      } catch (e) {
+        return fail(e, '模拟失败');
+      }
+    }
+    try {
+      const out = await p.completeChat(req);
+      p.recordSuccess();
+      return out;
+    } catch (e) {
+      if (e instanceof ToolUnsupportedError) {
+        attempts.push(`${name}[无原生 tools→JSON 模拟]`);
         try {
           const out = await simulateToolCall(p, req);
           p.recordSuccess();
           return out;
-        } catch (e) {
-          p.recordFailure(e);
-          attempts.push(`${name}[模拟失败]`);
-          continue;
+        } catch (e2) {
+          return fail(e2, '模拟失败');
         }
       }
-      try {
-        const out = await p.completeChat(req);
-        p.recordSuccess();
-        return out;
-      } catch (e) {
-        if (e instanceof ToolUnsupportedError) {
-          attempts.push(`${name}[无原生 tools→JSON 模拟]`);
-          try {
-            const out = await simulateToolCall(p, req);
-            p.recordSuccess();
-            return out;
-          } catch (e2) {
-            p.recordFailure(e2);
-            attempts.push(`${name}[模拟失败]`);
-            continue;
-          }
-        }
-        p.recordFailure(e);
-        attempts.push(`${name}[失败]`);
-      }
+      return fail(e, '失败');
     }
-    throw new AllProvidersExhaustedError(routeKind, attempts);
   }
 }
 
@@ -719,12 +789,13 @@ async function simulateToolCall(p: OpenAiProvider, req: LlmRequest): Promise<Cha
         name: obj.tool,
         arguments: JSON.stringify(obj.arguments ?? {}),
       }],
+      provider: p.name,
     };
   }
   const reply = typeof obj.reply === 'string'
     ? obj.reply
     : (typeof raw === 'string' ? raw : JSON.stringify(raw));
-  return { content: reply, toolCalls: [] };
+  return { content: reply, toolCalls: [], provider: p.name };
 }
 
 function hasImage(messages: ChatMessage[]): boolean {
@@ -778,6 +849,32 @@ export function isLlmEnabled(db: Db): boolean {
 
 export function setLlmEnabled(db: Db, on: boolean): void {
   db.setSetting(LLM_ENABLED_SETTING, on ? '1' : '0');
+}
+
+// ---- agent 会话的模型选择：settings 表（'' = 自动路由，缺省）----
+
+const CHAT_PROVIDER_SETTING = 'chat_provider';
+
+/**
+ * agent 对话选定的 provider 名；`''` = 自动路由（按 provider 列表顺序 + 降级）。
+ * 只认**已配置过**的名字（选定后 provider 被删/改名 → 退回自动？不——见 `chatProviderMissing`）：
+ * 读取一律原样返回，配置是否还有效由调用方按 provider 名单判定（`chatBlockedReason`）。
+ */
+export function getChatProvider(db: Db): string {
+  return (db.getSetting(CHAT_PROVIDER_SETTING) ?? '').trim();
+}
+
+/** 写入选定（`''` = 回到自动路由，key 直接删掉，与 listen 开关「回 auto」同语义） */
+export function setChatProvider(db: Db, provider: string): string {
+  const name = provider.trim();
+  if (name === '') db.deleteSetting(CHAT_PROVIDER_SETTING);
+  else db.setSetting(CHAT_PROVIDER_SETTING, name);
+  return getChatProvider(db);
+}
+
+/** 该名字在 provider 名单里有没有（面板下拉与 `PUT /api/chat/provider` 的 400 判据） */
+export function hasLlmProvider(list: readonly LlmProviderConfig[], name: string): boolean {
+  return list.some((p) => p.name === name);
 }
 
 /**

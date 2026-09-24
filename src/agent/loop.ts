@@ -25,9 +25,14 @@
  *
  * 依赖注入：`opts.completeChat` 是唯一的 LLM 接缝（测试用假 LLM 驱动多轮 tool_calls 剧本）；
  * 生产缺省走 `deps.llm.router.completeChat`——熔断 / 路由 / 降级语义与分类任务同源。
+ *
+ * **模型选择**（settings `chat_provider`）：每轮直读并塞进 `LlmRequest.provider`——非空即「点名」，
+ * router 侧不降级（`SelectedProviderError` 中文报错，`analysis/providers.ts`）；空串 = 自动路由。
+ * 每轮的 `ChatCompletion.provider`（实际回答者）随 assistant 消息落库、并在返回值里给出，
+ * 面板据此显示「这句是谁答的」（自动路由下轮与轮之间可能不同）。
  */
 import type { ChatCompletion, ChatMessage, LlmRequest, ToolCall } from '../analysis/providers.js';
-import { isLlmEnabled } from '../analysis/providers.js';
+import { getChatProvider, isLlmEnabled } from '../analysis/providers.js';
 import type { ChatMessage as StoredMessage } from '../core/chat-store.js';
 import { adminScope } from '../core/undo.js';
 import type { McpAuth, McpRole } from '../mcp/auth.js';
@@ -82,11 +87,18 @@ export interface AgentTurnResult {
   toolCalls: number;
   /** 达到轮次上限：reply 是兜底文案，不是模型结论 */
   truncated: boolean;
+  /** 本轮**实际回答**的 provider 名（面板显示「谁答的」；自动路由下每轮可能不同） */
+  provider: string;
 }
 
 /**
  * agent 是否可用（`/api/chat` 的前置检查，映射 400）：可用返回 null，否则给中文原因，
  * 并指明去设置页做什么（契约：LLM 未启用 / 无可用 provider 都是 400 而不是 502）。
+ *
+ * 选了具体 provider（settings `chat_provider`）时按**它**判：选的人不存在 / 不可用都算 400，
+ * 而不是先放过去再让 router 抛错——「去设置页换一个」是用户动作，不该长成 502 的失败回执。
+ * router 侧的点名不降级（`SelectedProviderError`）仍是兜底：从这次检查到真正调用之间
+ * provider 熔断/被删，错误一样是明确中文（只是状态码落 502）。
  */
 export function chatBlockedReason(deps: PanelDeps): string | null {
   if (!deps.chat) return '对话存储未装配';
@@ -95,6 +107,15 @@ export function chatBlockedReason(deps: PanelDeps): string | null {
   if (!isLlmEnabled(deps.db)) return 'LLM 未启用：请在设置页打开 LLM 总开关';
   const providers = router.describe();
   if (providers.length === 0) return '还没有配置 LLM provider：请在设置页添加';
+  const selected = getChatProvider(deps.db);
+  if (selected !== '') {
+    const p = providers.find((x) => x.name === selected);
+    if (!p) return `选定的 LLM provider「${selected}」不在配置里：请在设置页重新选择或改回自动`;
+    if (!p.ready) {
+      return `选定的 LLM provider「${selected}」当前不可用（${p.status}）：请在设置页检查它，或改回自动`;
+    }
+    return null;
+  }
   if (!providers.some((p) => p.ready)) {
     const why = providers.map((p) => `${p.name}（${p.status}）`).join('、');
     return `没有可用的 LLM provider：${why}——请在设置页检查 provider 开关与 API key`;
@@ -124,6 +145,8 @@ export async function runAgentTurn(
   const entry = opts.entry ?? 'agent';
   const maxSteps = opts.maxSteps ?? AGENT_MAX_STEPS;
   const completeChat = opts.completeChat ?? defaultCompleteChat(deps);
+  // 模型选择（settings `chat_provider`，'' = 自动路由）：每轮直读，改了下一句即生效（不必重启/重建 router）
+  const selectedProvider = getChatProvider(deps.db);
   // 身份与调用域只由接入层构造（能力层只读）：channelId 缺席 = admin 全量，在场 = 限定该渠道
   const toolCtx: McpAuth = {
     name: actor,
@@ -146,24 +169,31 @@ export async function runAgentTurn(
   store.append(scope, { role: 'user', content: message });
 
   let executed = 0;
+  /** 本轮实际回答的 provider（最后一轮的落点：终答是它给的） */
+  let answeredBy = '';
   for (let step = 1; step <= maxSteps; step++) {
     let out: ChatCompletion;
     try {
-      out = await completeChat({ messages: [...messages], tools: specs });
+      out = await completeChat({
+        messages: [...messages],
+        tools: specs,
+        ...(selectedProvider === '' ? {} : { provider: selectedProvider }),
+      });
     } catch (e) {
       // 前置问题（未装配 / 未启用）原样上抛；其余一律「LLM 调用彻底失败」= 502
       if (e instanceof HttpError) throw e;
       throw new HttpError(502, `LLM 调用失败：${e instanceof Error ? e.message : String(e)}`);
     }
+    answeredBy = out.provider ?? '';
 
     if (out.toolCalls.length === 0) {
       const reply = out.content.trim() === '' ? (opts.fallbacks?.empty ?? EMPTY_REPLY) : out.content;
-      store.append(scope, { role: 'assistant', content: reply });
-      return { reply, steps: step, toolCalls: executed, truncated: false };
+      store.append(scope, { role: 'assistant', content: reply, provider: out.provider });
+      return { reply, steps: step, toolCalls: executed, truncated: false, provider: out.provider };
     }
 
     // 工具调用轮次整段落库：下一轮历史回放要靠 toolCalls 里的 call id 与 tool 结果配对
-    store.append(scope, { role: 'assistant', content: out.content, toolCalls: out.toolCalls });
+    store.append(scope, { role: 'assistant', content: out.content, toolCalls: out.toolCalls, provider: out.provider });
     messages.push({ role: 'assistant', content: out.content, toolCalls: out.toolCalls });
     for (const call of out.toolCalls) {
       const text = await runOneTool(deps, defByName, call, toolCtx, entry);
@@ -175,8 +205,8 @@ export async function runAgentTurn(
 
   const reply = opts.fallbacks?.truncated
     ?? `（连续 ${maxSteps} 轮工具调用仍没有得出结论，先停下了。可以把问题拆小一点再问，或直接在面板上操作。）`;
-  store.append(scope, { role: 'assistant', content: reply });
-  return { reply, steps: maxSteps, toolCalls: executed, truncated: true };
+  store.append(scope, { role: 'assistant', content: reply, provider: answeredBy });
+  return { reply, steps: maxSteps, toolCalls: executed, truncated: true, provider: answeredBy };
 }
 
 /** 缺省 LLM 接缝：走装配根的 router（与分类任务同一个熔断/降级语义） */

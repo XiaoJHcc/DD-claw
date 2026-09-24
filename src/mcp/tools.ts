@@ -30,7 +30,7 @@ import { setListen, listenReadyFor, listenSetting, type ListenFeature } from '..
 import { setChatWriteMode, type ChatWriteMode } from '../agent/system-prompt.js';
 import { X_INTERVAL_MAX, X_INTERVAL_MIN } from '../core/x-config.js';
 import { getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS } from '../core/runtime-config.js';
-import { isLlmEnabled, setLlmEnabled } from '../analysis/providers.js';
+import { hasLlmProvider, isLlmEnabled, setChatProvider, setLlmEnabled } from '../analysis/providers.js';
 import { llmProviderSchema } from '../config/schema.js';
 import type { StreamerInput } from '../core/streamers.js';
 import { mcpWriteLimiter, writeLimitBucket } from './rate-limit.js';
@@ -444,6 +444,25 @@ const adminTools: McpToolDef[] = [
       ok: true,
       mode: setChatWriteMode(deps.db, args.mode as ChatWriteMode),
     }),
+  },
+  {
+    name: 'set_chat_provider',
+    description: 'agent 对话用哪个 LLM provider 回答（空串 = 自动路由，按 provider 顺序 + 失败降级）。'
+      + '点名后不降级：它不可用时直接报错，不会偷偷换别人回答。面板的 Agent 模型选择用它',
+    schema: {
+      provider: z.string().describe('provider 名；空串 = 自动路由'),
+    },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const provider = (args.provider as string).trim();
+      if (provider !== '') {
+        const list = deps.llm?.store?.list();
+        if (list === undefined) throw new HttpError(400, 'LLM provider 管理未装配');
+        if (!hasLlmProvider(list, provider)) throw new HttpError(400, `没有这个 LLM provider：${provider}`);
+      }
+      return { ok: true, provider: setChatProvider(deps.db, provider) };
+    },
   },
   {
     name: 'update_runtime_config',

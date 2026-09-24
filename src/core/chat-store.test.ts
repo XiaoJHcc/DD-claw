@@ -46,6 +46,37 @@ test('append / messages 往返（含 assistant 的 tool_calls 与 tool 回填）
   assert.ok(msgs[0]!.createdAt < msgs[3]!.createdAt, '按时间升序');
 });
 
+test('provider 列：assistant 记「谁答的」；未给/非 assistant/老消息一律 null', (t) => {
+  const { store } = setup(t);
+  const scope = channelScope(7);
+  store.append(scope, { role: 'user', content: '谁在播' });
+  store.append(scope, { role: 'assistant', content: '自动答的', provider: 'p1' });
+  store.append(scope, { role: 'assistant', content: '没记 provider 的老消息形态', provider: null });
+  store.append(scope, { role: 'assistant', content: '空串按没记处理', provider: '' });
+  store.append(scope, { role: 'tool', content: '[]', toolCallId: 'c1', provider: 'p1' });
+
+  assert.deepEqual(store.messages(scope).map((m) => m.provider), [null, 'p1', null, null, 'p1'],
+    'provider 原样读回；空串 = 没记（不是「provider 名叫空串」）');
+
+  // 老库在线补列：加列之前建的表只有老列（provider 不存在）——migrate 后能读写，且老行为 null
+  const old = new Database(':memory:');
+  t.after(() => old.close());
+  old.exec(`CREATE TABLE chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL,
+    role TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', tool_calls TEXT,
+    tool_call_id TEXT, created_at INTEGER NOT NULL);
+    CREATE TABLE chat_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);`);
+  old.prepare(`INSERT INTO chat_sessions (scope, created_at, updated_at) VALUES ('admin', 1, 1)`).run();
+  old.prepare(`INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (1, 'assistant', '老行', 1)`).run();
+  const upgraded = new ChatStore(old);
+  upgraded.migrate();
+  assert.deepEqual(upgraded.messages('admin').map((m) => [m.content, m.provider]), [['老行', null]]);
+  upgraded.append('admin', { role: 'assistant', content: '新行', provider: 'p2' });
+  assert.equal(upgraded.messages('admin').at(-1)!.provider, 'p2');
+});
+
 test('渠道隔离：不同群 / 私聊 / 面板的上下文互不可见', (t) => {
   const { store } = setup(t);
   store.append(channelScope(7), { role: 'user', content: '群 7 的话' });

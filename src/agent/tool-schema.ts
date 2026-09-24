@@ -21,6 +21,8 @@ import type { McpToolDef } from '../mcp/tools.js';
  * - `test_push` / `test_llm_provider` / `test_x_connection`：有对外副作用（真发一条消息）或触发熔断计数/网络探测，不可撤销
  * - `set_chat_mode`：写前询问的开关**不能让 agent 自己关**——能切到 auto 就等于把
  *   「未经确认不写」的门槛交回给模型，P1 验收的「误写率 0 容忍」会名存实亡
+ * - `set_chat_provider`：换模型**同样是主人的决定**（选便宜/贵的、选更听话的），理由与上一条同：
+ *   模型若能自己指定「谁来答」，就等于绕开主人对成本与质量的取舍；它也不该在自己出问题时改配置
  */
 export const AGENT_EXCLUDED_TOOLS: readonly string[] = [
   'reorder_push_rules',
@@ -32,6 +34,7 @@ export const AGENT_EXCLUDED_TOOLS: readonly string[] = [
   'test_llm_provider',
   'test_x_connection',
   'set_chat_mode',
+  'set_chat_provider',
 ];
 
 /** LLM 是否看得见这个工具 */
