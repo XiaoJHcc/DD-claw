@@ -112,7 +112,7 @@ admin 令牌没有 scope：管理侧指定渠道一直走 `upsert_push_rule` 的
   gateway = 令牌绑定渠道的栈；未绑渠道直接拒绝，不回落），逐行比对后像与当前值，不一致则中止且一行不动；
   撤完触发热生效（等同面板上改回来）。它自身**不进变更记录**（撤销不该可再撤，见 `UndoStore`）。
 - **admin 写**：`watch_streamer` / `unwatch_streamer` / `set_streamer` / `set_push_enabled` /
-  `set_llm_enabled` / `set_listen` / `set_chat_mode` / `update_runtime_config` / `upsert_category` / `delete_category` /
+  `set_llm_enabled` / `set_listen` / `set_chat_mode` / `set_chat_provider` / `update_runtime_config` / `upsert_category` / `delete_category` /
   `upsert_push_rule` / `delete_push_rule` / `upsert_channel` / `delete_channel` /
   `list_llm_providers` / `upsert_llm_provider` / `delete_llm_provider` / `set_llm_key` /
   `get_x_config` / `update_x_config` / `upsert_x_account` / `delete_x_account` /

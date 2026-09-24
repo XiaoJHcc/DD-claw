@@ -159,6 +159,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/panel/server.ts` — node:http + 静态内嵌 + `/api/*` + `/mcp`；**写路由一律经 `runPanelTool`/`callTool` 走注册表**（校验/审计/快照在能力层，路由只做状态码与形状映射）；**唯一例外 `POST /api/undo`**（撤销执行器本身，直接调 `deps.undoLast` 且不入快照）
 - `src/panel/http-util.ts` — 解析/校验/响应 + 面板与 MCP 共用逻辑
 - `src/panel/schedule.ts` — 时间表查询（北京 06:00 日界）
+- `src/panel/undo-view.ts` — 变更历史的展示层翻译（`title` 中文操作名 / `detail` 行级中文明细 / `undoNote` refill 判定）——settings 键与表→中文名唯一信源，webui 不再自维护工具名映射
 - `src/panel/webui-assets.gen.ts` — 构建期生成物（勿手改）
 - `src/mcp/auth.ts` — token 模型 + `resolveMcpAuth`（调用域：gateway 令牌绑渠道）
 - `src/mcp/tools.ts` — 工具注册表（按角色；`registerTools` 走 `runToolTracked`）；`undo_last_change` 是唯一 `track: false` 的写工具（撤销不进快照栈）
