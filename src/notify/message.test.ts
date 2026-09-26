@@ -46,29 +46,47 @@ function post(over: Partial<PostCandidate> = {}): PostCandidate {
   };
 }
 
-test('postToMessage：默认标题带 @账号，正文与链接各就各位，来源进 attribution', () => {
-  const m = postToMessage({ post: post(), image: 'D:\\cache\\a.jpg' });
-  assert.equal(m.title, '@watase_yuzuki 发了新推文');
+test('postToMessage：默认标题带 @账号，正文与链接各就各位，attribution 只留时间', () => {
+  const m = postToMessage({ post: post(), images: ['D:\\cache\\a.jpg'] });
+  assert.equal(m.title, '@watase_yuzuki 发布新推文');
   assert.equal(m.body, '今晚有直播');
   assert.equal(m.url, 'https://x.com/watase_yuzuki/status/9001');
-  assert.equal(m.image, 'D:\\cache\\a.jpg', '图片是已本地化的路径（OneBot 会转 file://）');
+  assert.equal(m.image, 'D:\\cache\\a.jpg', '首图同时进 image（toast 等单图通道用）');
+  assert.deepEqual(m.images, ['D:\\cache\\a.jpg'], '图片是已本地化的路径（OneBot 会转 file://）');
   assert.equal(m.icon, undefined, 'X 帖没有头像字段');
   assert.equal(m.priority, 'normal');
-  assert.match(m.attribution!, /^X {2}· {2}@watase_yuzuki/);
+  assert.equal(
+    m.attribution,
+    new Date(1_789_549_200 * 1000).toLocaleString('zh-CN', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    }),
+    '作者已进标题，attribution 只留时间一行',
+  );
 });
 
-test('postToMessage：模板标题优先；纯图帖正文给占位；多图在 attribution 里报数', () => {
-  const m = postToMessage({ post: post({ text: '   ', pics: ['a', 'b', 'c'] }), title: ' 阿梓 更新了 ' });
+test('postToMessage：X 有显示名时标题是「显示名 @账号 发布新推文」', () => {
+  const m = postToMessage({ post: post({ displayName: '渡濑结月' }) });
+  assert.equal(m.title, '渡濑结月 @watase_yuzuki 发布新推文');
+});
+
+test('postToMessage：模板标题优先；纯图帖正文给占位；多图全进 images', () => {
+  const m = postToMessage({
+    post: post({ text: '   ', pics: ['a', 'b', 'c'] }),
+    title: ' 阿梓 更新了 ',
+    images: ['x', 'y', 'z'],
+  });
   assert.equal(m.title, '阿梓 更新了', '标题两侧空白被裁掉');
   assert.equal(m.body, '（仅图片，无正文）');
-  assert.match(m.attribution!, /共 3 张图/);
+  assert.deepEqual(m.images, ['x', 'y', 'z'], '有图的帖全图都推');
+  assert.equal(m.image, 'x', 'image 仍是首图');
 });
 
 test('postToMessage：无图 / 无 url / pubTs=0 时不写这些字段', () => {
   const m = postToMessage({ post: post({ pics: [], url: null, pubTs: 0 }) });
   assert.equal(m.image, undefined);
+  assert.equal(m.images, undefined);
   assert.equal(m.url, undefined);
-  assert.equal(m.attribution, 'X  ·  @watase_yuzuki', '没有时间就不拼时间');
+  assert.equal(m.attribution, undefined, '没有时间就没有 attribution');
 });
 
 test('postToMessage：有译文时正文下方拼【译】块；空译文不拼', () => {
@@ -82,18 +100,17 @@ test('postToMessage：有译文时正文下方拼【译】块；空译文不拼'
   assert.equal(none.body, '（仅图片，无正文）');
 });
 
-test('postToMessage：B站动态副行标「B站动态」、标题后缀「动态」、作者用展示名（uid 兜底）', () => {
+test('postToMessage：B站动态标题后缀「动态」、作者用展示名（uid 兜底）', () => {
   const m = postToMessage({
     post: post({
       platform: 'bili_dynamic', screenName: '80397', displayName: '阿梓',
       type: 'dynamic', url: 'https://t.bilibili.com/9001',
     }),
   });
-  assert.equal(m.title, '阿梓 发了新动态');
-  assert.match(m.attribution!, /^B站动态 {2}· {2}阿梓/);
+  assert.equal(m.title, '阿梓 发布新动态');
 
   const noName = postToMessage({
     post: post({ platform: 'bili_dynamic', screenName: '80397', displayName: null, type: 'dynamic' }),
   });
-  assert.equal(noName.title, '80397 发了新动态', '展示名缺省回退 uid，至少不是空标题');
+  assert.equal(noName.title, '80397 发布新动态', '展示名缺省回退 uid，至少不是空标题');
 });

@@ -599,10 +599,10 @@ test('feed_post 命中图文帖规则 → 推送到规则渠道（默认只推�
 
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '@watase_yuzuki 发了新推文', '默认推送词');
+  assert.equal(m.title, '@watase_yuzuki 发布新推文', '默认推送词');
   assert.equal(m.body, '今晚有直播');
   assert.equal(m.url, 'https://x.com/watase_yuzuki/status/9001');
-  assert.match(m.attribution ?? '', /@watase_yuzuki/, '副行标注来源账号');
+  assert.match(m.attribution ?? '', /^\d{2}\/\d{2} \d{2}:\d{2}$/, '副行只留发布时间');
   assert.deepEqual(m.channels, ['1'], '按规则渠道路由');
   assert.equal(m.image, undefined, '未配图片缓存目录时不带图');
   assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
@@ -697,17 +697,16 @@ test('无命中规则 / 规则未勾渠道 / 账号不在名单 / 平台不匹�
 
 // ---- feed_post 分支（微博）：与 X 同一条路径，账号/文案按平台分支 ----
 
-test('微博 feed_post 命中微博规则 → 推送；文案用昵称、副行标「微博」', async () => {
+test('微博 feed_post 命中微博规则 → 推送；标题用昵称、副行只留时间', async () => {
   const h = weiboHarness([postRule({ channels: [1] })]);
   h.bus.emit(weiboSig());
   await h.pipeline.whenIdle();
 
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '渡瀬結月 发了新微博', '默认推送词按平台走');
+  assert.equal(m.title, '渡瀬結月 发布新微博', '默认推送词按平台走');
   assert.equal(m.body, '今晚九点直播！');
-  assert.match(m.attribution ?? '', /微博/, '副行标平台');
-  assert.match(m.attribution ?? '', /渡瀬結月/, '副行用昵称而不是 uid');
+  assert.match(m.attribution ?? '', /^\d{2}\/\d{2} \d{2}:\d{2}$/, '作者已进标题，副行只留时间');
   assert.deepEqual(m.channels, ['1']);
   assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
 });
@@ -718,12 +717,12 @@ test('规则平台无关：同一条规则被 X 与微博账号同时选用，�
   h.bus.emit(feedSig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1, 'X 帖命中');
-  assert.equal(h.disp.sent[0]!.title, '@watase_yuzuki 发了新推文');
+  assert.equal(h.disp.sent[0]!.title, '@watase_yuzuki 发布新推文');
 
   h.bus.emit(weiboSig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 2, '微博帖命中同一条规则');
-  assert.equal(h.disp.sent[1]!.title, '渡瀬結月 发了新微博', '文案措辞按帖子平台走');
+  assert.equal(h.disp.sent[1]!.title, '渡瀬結月 发布新微博', '文案措辞按帖子平台走');
 });
 
 test('微博规则按账号生效：账号侧 ruleIds 选用规则', async () => {
@@ -789,7 +788,8 @@ test('推送词模板：{author} {text} {url} 渲染；纯图帖正文给占位'
   h2.bus.emit(feedSig({ payload: { text: null, pics: ['https://pbs.twimg.com/media/a.jpg'] } }));
   await h2.pipeline.whenIdle();
   assert.equal(h2.disp.sent[0]!.body, '（仅图片，无正文）', '空正文别让 QQ 里出现空消息');
-  assert.match(h2.disp.sent[0]!.attribution ?? '', /@watase_yuzuki/);
+  assert.match(h2.disp.sent[0]!.title, /@watase_yuzuki/, '作者标注已收进标题行');
+  assert.equal(h2.disp.sent[0]!.images, undefined, '未配图片缓存目录时图不下、按无图发');
 });
 
 test('多条命中规则：渠道取并集、推送词取首个非空（与开播规则同一套语义）', async () => {
@@ -883,16 +883,16 @@ test('同一（判定标准 + 翻译开关）只问模型一次：两条同配�
 
 // ---- feed_post 分支（B站动态）：与 X/微博同一条路径，账号是 bili_accounts ----
 
-test('B站动态 feed_post 命中规则 → 推送；文案「发了新动态」、副行标「B站动态」', async () => {
+test('B站动态 feed_post 命中规则 → 推送；文案「发布新动态」、副行只留时间', async () => {
   const h = biliDynHarness([postRule({ channels: [1] })]);
   h.bus.emit(biliDynSig());
   await h.pipeline.whenIdle();
 
   assert.equal(h.disp.sent.length, 1);
   const m = h.disp.sent[0]!;
-  assert.equal(m.title, '阿梓从小就很可爱 发了新动态', '默认推送词按平台走（展示名 = uname）');
+  assert.equal(m.title, '阿梓从小就很可爱 发布新动态', '默认推送词按平台走（展示名 = uname）');
   assert.equal(m.body, '今晚八点直播！');
-  assert.match(m.attribution ?? '', /B站动态/, '副行标平台');
+  assert.match(m.attribution ?? '', /^\d{2}\/\d{2} \d{2}:\d{2}$/, '副行只留发布时间');
   assert.deepEqual(m.channels, ['1']);
   assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
 });

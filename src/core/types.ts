@@ -110,6 +110,8 @@ export interface PushMessage {
   title: string;
   body: string;
   image?: string;
+  /** 多图（图文帖全图推送）。存在时优先于 image；toast 等单图通道取第一张 */
+  images?: string[];
   /** 小图标（主播头像）。toast 显示在左侧（appLogoOverride），刚开播无关键帧时仍有图 */
   icon?: string;
   /** 辅助说明小字（toast attribution 那行灰字；其他通道自行拼进正文） */

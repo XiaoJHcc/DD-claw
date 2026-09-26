@@ -62,7 +62,7 @@ export class OneBotNotifier implements Notifier {
       // 图片失败降级为纯文本重发一次 —— 预览图是锦上添花，通知本身不能丢。
       // 但只在请求真的到达了 NapCat 时才降级：连接层失败（reached=false）
       // 说明 NapCat 压根不通，去掉图片重试必然同样失败，白费一次请求。
-      if (msg.image && first.reached) {
+      if ((msg.images?.length || msg.image) && first.reached) {
         log.warn(`${label} 带图失败，降级纯文本重试`, first.error);
         const retry = await this.post(t, this.buildSegments(msg, false));
         return { ...retry, target: label };
@@ -98,15 +98,17 @@ export class OneBotNotifier implements Notifier {
   }
 
   private buildSegments(msg: PushMessage, withImage: boolean): Segment[] {
-    // attribution（分区 · 开播时间）拼成正文一行，QQ 没有小灰字概念
-    const text = `${msg.title}\n${msg.body}` + (msg.attribution ? `\n${msg.attribution}` : '');
-    const segs: Segment[] = [{ type: 'text', data: { text } }];
-    if (withImage && msg.image) {
+    // 段序：标题+正文 → 图片 → attribution（分区 · 开播时间 / 帖子的发布时间）+ 链接。
+    // QQ 没有小灰字概念，attribution 拼成正文尾行；图片要在它之前，时间行才是消息的收尾。
+    const segs: Segment[] = [{ type: 'text', data: { text: `${msg.title}\n${msg.body}` } }];
+    const images = withImage ? (msg.images?.length ? msg.images : msg.image ? [msg.image] : []) : [];
+    for (const img of images) {
       // B站 CDN 是公网可达的，直接给 URL 让 NapCat 自己拉，不落盘不 base64；
       // 本地路径（X 图经代理下载后的形态）转成 file:// —— NapCat 与本进程同机，只能取本地。
-      segs.push({ type: 'image', data: { file: isLocalImage(msg.image) ? pathToFileURL(msg.image).href : msg.image } });
+      segs.push({ type: 'image', data: { file: isLocalImage(img) ? pathToFileURL(img).href : img } });
     }
-    if (msg.url) segs.push({ type: 'text', data: { text: `\n${msg.url}` } });
+    const tail = (msg.attribution ? `\n${msg.attribution}` : '') + (msg.url ? `\n${msg.url}` : '');
+    if (tail) segs.push({ type: 'text', data: { text: tail } });
     return segs;
   }
 

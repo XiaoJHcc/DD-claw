@@ -57,7 +57,7 @@ test('msg.targets 缺省/空数组 = 不发（config 目标仅作渠道种子与
   }
 });
 
-test('attribution 拼进正文第三行，缺省不拼', async () => {
+test('attribution 拼成正文尾段，缺省不拼', async () => {
   const posted: Posted[] = [];
   const restore = stubFetch(posted);
   try {
@@ -67,9 +67,34 @@ test('attribution 拼进正文第三行，缺省不拼', async () => {
       attribution: '网游 / CS2  ·  21:31 开播',
     }));
     await n.send(msg({ targets: [{ type: 'private', id: '22222' }] }));
-    const texts = posted.map((p) => (p.body['message'] as Array<{ data: { text: string } }>)[0]!.data.text);
-    assert.equal(texts[0], 't\nb\n网游 / CS2  ·  21:31 开播');
-    assert.equal(texts[1], 't\nb');
+    const segsOf = (i: number) => posted[i]!.body['message'] as Array<{ type: string; data: { text?: string } }>;
+    assert.equal(segsOf(0)[0]!.data.text, 't\nb');
+    assert.equal(segsOf(0).at(-1)!.data.text, '\n网游 / CS2  ·  21:31 开播');
+    assert.equal(segsOf(1).length, 1, '无 attribution 时只有一个文本段');
+    assert.equal(segsOf(1)[0]!.data.text, 't\nb');
+  } finally {
+    restore();
+  }
+});
+
+test('段序：标题+正文 → 全部图片 → 时间+链接；images 优先于 image', async () => {
+  const posted: Posted[] = [];
+  const restore = stubFetch(posted);
+  try {
+    const n = new OneBotNotifier('http://napcat:3000', '');
+    await n.send(msg({
+      targets: [{ type: 'private', id: '22222' }],
+      image: 'https://i2.hdslb.com/bfs/face/should-not-use.jpg',
+      images: ['D:\\cache\\a.jpg', 'D:\\cache\\b.jpg'],
+      attribution: '09/26 21:23',
+      url: 'https://x.com/watase_yuzuki/status/9001',
+    }));
+    const segs = posted[0]!.body['message'] as Array<{ type: string; data: Record<string, string> }>;
+    assert.deepEqual(segs.map((s) => s.type), ['text', 'image', 'image', 'text']);
+    assert.equal(segs[0]!.data['text'], 't\nb');
+    assert.ok(segs[1]!.data['file']!.startsWith('file://'), '本地图转 file://');
+    assert.ok(segs[2]!.data['file']!.startsWith('file://'), '多图逐张各发一个 image 段');
+    assert.equal(segs[3]!.data['text'], '\n09/26 21:23\nhttps://x.com/watase_yuzuki/status/9001');
   } finally {
     restore();
   }

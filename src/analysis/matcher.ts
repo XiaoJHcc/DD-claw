@@ -132,10 +132,13 @@ export function postAuthorName(post: PostCandidate): string {
   return post.displayName || post.screenName;
 }
 
-/** 内置默认推送词（规则没填 messageTemplate 时用） */
+/** 内置默认推送词（规则没填 messageTemplate 时用）：X 带「显示名 @账号」，其余平台用展示名 */
 export function defaultPostTitle(post: PostCandidate): string {
   const noun = post.platform === 'weibo' ? '微博' : post.platform === 'bili_dynamic' ? '动态' : '推文';
-  return `${postAuthorName(post)} 发了新${noun}`;
+  const author = post.platform === 'twitter' && post.displayName
+    ? `${post.displayName} @${post.screenName}`
+    : postAuthorName(post);
+  return `${author} 发布新${noun}`;
 }
 
 /** 渲染图文帖推送词变量：{author} = 作者（X=@账号 / 其余=展示名），{text} = 正文，{url} = 链接，{liver} = 关联主播 */

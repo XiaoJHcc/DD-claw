@@ -292,7 +292,7 @@ type PostRule = {
   channels: number[];                     // 引用 push_channels.id（与开播规则共用）
   filters: { original: boolean; retweet: boolean; quote: boolean; media: boolean; keywords: string[] };
                                             // quote 只有 X 帖可识别（其余平台永不命中，是语义不是校验错误）
-  messageTemplate: string | null;         // null = 内置默认（按帖子平台：'{author} 发了新推文 / 新微博 / 新动态'）
+  messageTemplate: string | null;         // null = 内置默认（按帖子平台：'显示名 @账号 发布新推文 / 新微博 / 新动态'）
   llmJudge: boolean; judgePrompt: string | null; llmTranslate: boolean;   // 翻译运行时仅对 X 帖生效
   enabled: boolean;
 };

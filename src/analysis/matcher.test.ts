@@ -277,7 +277,7 @@ test('matchPostRules：quote 规则对非 X 帖永不命中（isQuote undefined�
 });
 
 test('B站动态帖：作者名用展示名、uid 兜底；转发走同一套原创/转发筛选', () => {
-  assert.equal(defaultPostTitle(biliDynPost()), '阿梓 发了新动态');
+  assert.equal(defaultPostTitle(biliDynPost()), '阿梓 发布新动态');
   assert.equal(
     renderPostTemplate('{author}', biliDynPost({ displayName: null })),
     '80397',
@@ -298,8 +298,13 @@ test('微博帖文案：{author} 用昵称、缺昵称回退 uid；转发语义�
     '2203177060',
     '昵称还没抓到（新账号）时用 uid，至少不是空标题',
   );
-  assert.equal(defaultPostTitle(weiboPost()), '渡瀬結月 发了新微博');
-  assert.equal(defaultPostTitle(post()), '@watase_yuzuki 发了新推文');
+  assert.equal(defaultPostTitle(weiboPost()), '渡瀬結月 发布新微博');
+  assert.equal(defaultPostTitle(post()), '@watase_yuzuki 发布新推文');
+  assert.equal(
+    defaultPostTitle(post({ displayName: '渡濑结月' })),
+    '渡濑结月 @watase_yuzuki 发布新推文',
+    'X 有显示名时标题带「显示名 @账号」',
+  );
   // 微博的转发在抓取层折进 type='retweet'（正文带 //转发自），筛选语义与 X 一致
   assert.equal(matchPostFilters(defaultPostFilters(), weiboPost({ type: 'retweet' })), false);
   assert.equal(

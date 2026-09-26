@@ -30,13 +30,14 @@ export function liveEventToMessage(e: LiveEvent): PushMessage {
 
 export interface PostMessageInput {
   post: PostCandidate;
-  /** 已渲染的标题（图文帖规则的推送词产物）；缺省「@账号 发了新推文」 */
+  /** 已渲染的标题（图文帖规则的推送词产物）；缺省「显示名 @账号 发布新推文」 */
   title?: string;
   /**
    * 已本地化的图片路径（X 图必须经代理下载成**本地文件**再传：NapCat 在同一个墙内
-   * 网络里拉不到 pbs.twimg.com，`file://` 才是它真能取到的形态）。缺省 = 无图。
+   * 网络里拉不到 pbs.twimg.com，`file://` 才是它真能取到的形态）。有图的帖全图都传；
+   * 缺省/空数组 = 无图（下载全失败的兜底）。
    */
-  image?: string;
+  images?: string[];
   /** LLM 译文（规则开了翻译且调用成功时才有）；拼在正文下方，带「【译】」标记 */
   translation?: string | null;
 }
@@ -46,20 +47,15 @@ export interface PostMessageInput {
  * QQ iOS 气泡渲染器会把增补平面 emoji 拆成方框）。正文为空（纯图帖）时给一句占位，
  * 别让 QQ 里出现空消息。
  *
- * 平台差异只在文案：X 的作者是 `@screen_name`，微博 / B站动态用展示名（uid 对人没有意义，
- * 只作兜底）；来源标注与「发了新X」后缀按平台映射。
+ * 结构（QQ 渠道拼出来）：「显示名 @账号 发布新X」标题行 / 正文 / 全部图片 / 时间 / 链接。
+ * 作者已进标题、多图全推，attribution 只留时间一行（toast 的小灰字行）。
+ * 平台差异只在文案：X 的作者是「显示名 @screen_name」（无显示名回退 @screen_name），
+ * 微博 / B站动态用展示名（uid 对人没有意义，只作兜底）；「发布新X」后缀按平台映射。
  * 这里刻意不 import analysis/matcher 的 `postAuthorName`——`sources / analysis / notify`
  * 互不 import 是依赖方向纪律，为一行字符串不值得破坏它（`PostCandidate` 只作类型引用，运行时被擦除）。
  */
 
-/** attribution 里的来源标注 */
-const PLATFORM_ATTRIBUTION: Record<PostCandidate['platform'], string> = {
-  twitter: 'X',
-  weibo: '微博',
-  bili_dynamic: 'B站动态',
-};
-
-/** 「发了新X」的名词后缀 */
+/** 「发布新X」的名词后缀 */
 const POST_NOUN: Record<PostCandidate['platform'], string> = {
   twitter: '推文',
   weibo: '微博',
@@ -73,15 +69,18 @@ export function postToMessage(input: PostMessageInput): PushMessage {
         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
       })
     : '';
-  const extra = post.pics.length > 1 ? `  ·  共 ${post.pics.length} 张图` : '';
   const text = (post.text ?? '').trim() || '（仅图片，无正文）';
   const translation = input.translation?.trim();
-  const author = post.platform === 'twitter' ? `@${post.screenName}` : (post.displayName || post.screenName);
+  const author = post.platform === 'twitter'
+    ? (post.displayName ? `${post.displayName} @${post.screenName}` : `@${post.screenName}`)
+    : (post.displayName || post.screenName);
+  const images = input.images?.length ? input.images : undefined;
   return {
-    title: input.title?.trim() || `${author} 发了新${POST_NOUN[post.platform]}`,
+    title: input.title?.trim() || `${author} 发布新${POST_NOUN[post.platform]}`,
     body: translation ? `${text}\n\n【译】${translation}` : text,
-    image: input.image,
-    attribution: `${PLATFORM_ATTRIBUTION[post.platform]}  ·  ${author}` + (when ? `  ·  ${when}` : '') + extra,
+    image: images?.[0],
+    images,
+    attribution: when || undefined,
     url: post.url ?? undefined,
     priority: 'normal',
   };

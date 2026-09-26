@@ -56,7 +56,9 @@ export class ToastNotifier implements Notifier {
   }
 
   async send(msg: PushMessage): Promise<NotifyResult[]> {
-    return [await this.show(msg.title, msg.body, msg.image ?? '', msg.url ?? '', msg.icon ?? '', msg.attribution ?? '')];
+    // toast 只支持单图（Windows heroImg / macOS contentImage），多图取第一张
+    const image = msg.images?.[0] ?? msg.image ?? '';
+    return [await this.show(msg.title, msg.body, image, msg.url ?? '', msg.icon ?? '', msg.attribution ?? '')];
   }
 
   async alert(title: string, body: string): Promise<void> {

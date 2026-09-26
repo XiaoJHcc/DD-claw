@@ -8,6 +8,7 @@ import {
 import { isPushEnabled } from './push.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 import { localizeImage, localizeImageViaProxy } from '../notify/image-cache.js';
+import { mapLimit } from './concurrency.js';
 import { ruleNeedsLlm, type PostAnalysis, type PostAnalyzer } from '../analysis/post-analyzer.js';
 import type { PostRule } from './post-rules.js';
 import type { XAccount } from './x-accounts.js';
@@ -350,20 +351,24 @@ export class Pipeline {
     }
 
     // 图片必须先落成本地文件再推（NapCat 与本进程同网络，远程 URL 交给它同样拉不到；
-    // toast 的 Win32 限制也不支持远程图）。两条路线：
+    // toast 的 Win32 限制也不支持远程图）。有图的帖全图都下，每张独立容错、失败的单张跳过；
+    // 全部失败按无图发，不阻塞通知。两条路线：
     //  · X 图床（pbs.twimg.com）墙内直连不通 → 走代理隧道下载；
     //  · 微博图床（sinaimg.cn）与B站图床（hdslb.com）境内直连可达 → 普通 fetch，不给代理链路添无关流量。
-    // 下载失败按无图发，不阻塞通知。
-    let image: string | undefined;
+    let images: string[] | undefined;
     if (post.pics.length > 0 && this.deps.imageCacheDir) {
-      image = (platform === 'twitter'
-        ? await localizeImageViaProxy(post.pics[0]!, this.deps.imageCacheDir, getXConfig(db).proxyUrl)
-        : await localizeImage(post.pics[0]!, this.deps.imageCacheDir)) ?? undefined;
+      const proxyUrl = getXConfig(db).proxyUrl;
+      const downloaded = await mapLimit(post.pics, 3, (pic) =>
+        platform === 'twitter'
+          ? localizeImageViaProxy(pic, this.deps.imageCacheDir!, proxyUrl)
+          : localizeImage(pic, this.deps.imageCacheDir!));
+      const ok = downloaded.filter((p): p is string => p != null);
+      if (ok.length > 0) images = ok;
     }
 
     const tpl = templateOverride ?? defaultPostTitle(post);
     const msg: PushMessage = {
-      ...postToMessage({ post, title: renderPostTemplate(tpl, post), image, translation: translated }),
+      ...postToMessage({ post, title: renderPostTemplate(tpl, post), images, translation: translated }),
       channels: channelIds.map(String),
     };
     log.info(
