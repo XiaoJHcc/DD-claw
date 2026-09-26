@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  decodeEntities, instancePicToCdn, parseNitterAvatar, parseNitterItem, parseNitterRss,
+  decodeEntities, instancePicToCdn, parseNitterAuthorName, parseNitterAvatar, parseNitterItem, parseNitterRss,
 } from './nitter.js';
 
 function item(opts: {
@@ -137,4 +137,24 @@ test('parseNitterAvatar：频道头 image/url → CDN 头像；没有 image 或�
   assert.equal(parseNitterAvatar(odd), null, '非 /pic/ 前缀（认不出来的形态）丢弃');
 
   assert.equal(parseNitterAvatar(''), null);
+});
+
+test('parseNitterAuthorName：频道头 title「显示名 / @handle」→ 显示名；形态对不上 → null', () => {
+  // 真实频道头格式（2026-09 真机 nitter.jaydenha.uk 核对）：渡瀬 結月 / @Watase_Yuzuki
+  const real = '<rss><channel><title>渡瀬 結月 / @Watase_Yuzuki</title>' +
+    '<link>http://n/a</link>' +
+    item({ title: 'x', creator: '@a', link: 'http://n/a/status/1000000000000000001#m', guid: '1000000000000000001', date: 'Wed, 16 Sep 2026 01:00:00 GMT' }) +
+    '</channel></rss>';
+  assert.equal(parseNitterAuthorName(real), '渡瀬 結月');
+
+  const ent = '<rss><channel><title>Tom &amp; Jerry / @tomjerry</title></channel></rss>';
+  assert.equal(parseNitterAuthorName(ent), 'Tom & Jerry', '实体解码');
+
+  const withSlash = '<rss><channel><title>A/B 组合 / @ab_official</title></channel></rss>';
+  assert.equal(parseNitterAuthorName(withSlash), 'A/B 组合', '显示名自带 / 时剥最后一个 /@');
+
+  const noName = '<rss><channel><title>@a</title></channel></rss>';
+  assert.equal(parseNitterAuthorName(noName), null, '只有 @handle 没有显示名');
+
+  assert.equal(parseNitterAuthorName(''), null);
 });

@@ -854,7 +854,8 @@ function saveXAccount(el) {
   const req = idAttr ? api('/api/x/accounts/' + idAttr, 'PUT', body) : api('/api/x/accounts', 'POST', body);
   req.then(function (r) {
     if (idAttr) {
-      toast('已保存'); // 编辑：浮窗留着（规则区还要用），同主播详情保存口径
+      closeSheet(1); // 编辑：保存即关浮窗（选用规则勾选本就即改即存，不靠浮窗留着）
+      toast('已保存');
     } else {
       closeSheet(1);
       reloadAfterAdd();
@@ -909,7 +910,8 @@ function saveWeiboAccount(el) {
   const req = idAttr ? api('/api/weibo/accounts/' + idAttr, 'PUT', body) : api('/api/weibo/accounts', 'POST', body);
   req.then(function () {
     if (idAttr) {
-      toast('已保存'); // 编辑：浮窗留着（规则区还要用）
+      closeSheet(1); // 编辑：保存即关浮窗（选用规则勾选本就即改即存）
+      toast('已保存');
     } else {
       closeSheet(1);
       reloadAfterAdd();
@@ -934,7 +936,8 @@ function saveBiliAccount(el) {
   const req = idAttr ? api('/api/bili/accounts/' + idAttr, 'PUT', body) : api('/api/bili/accounts', 'POST', body);
   req.then(function () {
     if (idAttr) {
-      toast('已保存'); // 编辑：浮窗留着（规则区还要用）
+      closeSheet(1); // 编辑：保存即关浮窗（选用规则勾选本就即改即存）
+      toast('已保存');
     } else {
       closeSheet(1);
       reloadAfterAdd();

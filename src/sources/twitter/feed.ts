@@ -39,7 +39,7 @@ export interface TimelineFetch {
   host: string | null;
   /** 顺手抠到的账号头像 URL（pbs.twimg.com 形态）；两条路线都可能给不了 → null */
   avatarUrl: string | null;
-  /** 顺手抠到的账号显示名（免登录路线 og:title）；Nitter RSS 给不了 → null */
+  /** 顺手抠到的账号显示名（RSS 频道头 title / 免登录路线 og:title）；都抠不到 → null */
   authorName: string | null;
 }
 
@@ -198,8 +198,8 @@ export class TwitterFeedSource implements Source {
     ctx.db.touchXAccount(acc.id, {
       lastOkAt: nowSec,
       ...(newest ? { lastTweetId: newest.id, lastTweetAt: newest.pubTs } : {}),
-      // 昵称（平台显示名）是平台事实：拿到非空才回写（免登录路线 og:title 能给，
-      // Nitter RSS 给不了——RSS 主路线下昵称靠添加时 verify 种入后保持）
+      // 昵称（平台显示名）是平台事实：拿到非空才回写（RSS 频道头 title / 免登录路线
+      // og:title 都能给；都没有就靠添加时 verify 种入的值保持）
       ...(fetched.authorName ? { nickname: fetched.authorName } : {}),
       // 恢复位消费：本轮按 resume 轮静默处理过了，顺手清位
       ...(acc.silentNext ? { silentNext: false } : {}),
@@ -264,7 +264,7 @@ export class TwitterFeedSource implements Source {
         const rss = this.opts.rssFetcher
           ? await this.opts.rssFetcher(instances, screenName)
           : await fetchFromAnyInstance(instances, screenName, proxyUrl);
-        return { tweets: rss.tweets, via: 'nitter', host: rss.host, avatarUrl: rss.avatarCdn ?? null, authorName: null };
+        return { tweets: rss.tweets, via: 'nitter', host: rss.host, avatarUrl: rss.avatarCdn ?? null, authorName: rss.authorName ?? null };
       } catch (e) {
         rssError = e instanceof Error ? e.message : String(e);
       }

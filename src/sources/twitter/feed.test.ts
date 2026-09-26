@@ -135,6 +135,23 @@ test('游标只往前推：lastTweetId / lastTweetAt / lastOkAt 回写', async (
   assert.ok(h.account().lastOkAt !== null, '成功抓取记 lastOkAt（面板据此区分“抓过”与“从没成功”）');
 });
 
+test('昵称：RSS 频道头抠到显示名 → 回写 nickname；抠不到保持原值', async (t) => {
+  let authorName: string | null = '渡瀬 結月';
+  const h = harness({
+    rssFetcher: async (): Promise<NitterFetchResult> => ({
+      host: 'nitter.a.example', tweets: [tweet({ id: '700' })], avatarCdn: null, authorName, bytes: 1, ms: 1,
+    }),
+  });
+  t.after(h.cleanup);
+  assert.equal(h.account().nickname, null, '初始无昵称（verify 没抠到）');
+  await h.src.pollOnce();
+  assert.equal(h.account().nickname, '渡瀬 結月', 'RSS 主路线也回写昵称');
+
+  authorName = null;
+  await h.src.pollOnce();
+  assert.equal(h.account().nickname, '渡瀬 結月', '抠不到不清空已有昵称');
+});
+
 test('头像：抠到 URL 且账号无头像 → avatarSaver 落盘后回写文件名；已回写过不重复下载', async (t) => {
   const saves: string[] = [];
   const avatarCdn: string | null = 'https://pbs.twimg.com/profile_images/1/a.jpg';

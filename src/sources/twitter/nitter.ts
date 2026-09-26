@@ -151,11 +151,28 @@ export function parseNitterAvatar(xml: string): string | null {
   return instancePicToCdn(decodeEntities(m[1]!.trim()));
 }
 
+/**
+ * 频道头 `<title>` → 账号显示名。实测形态（2026-09 真机核对）：`渡瀬 結月 / @Watase_Yuzuki`。
+ * 贪婪剥掉尾部的 ` / @handle`（显示名本身可能含 `/`，取最后一个 `/@`）。
+ * 形态对不上（实例只给 `@handle`、结构变了）返回 null——昵称缺失不影响抓取主流程。
+ */
+export function parseNitterAuthorName(xml: string): string | null {
+  const channel = xml.split('<item>')[0] ?? '';
+  const m = channel.match(/<title>([\s\S]*?)<\/title>/);
+  if (!m) return null;
+  const raw = decodeEntities(m[1]!).trim();
+  const mm = raw.match(/^(.*)\s*\/\s*@[A-Za-z0-9_]+\s*$/);
+  const name = (mm ? mm[1]! : '').trim();
+  return name || null;
+}
+
 export interface NitterFetchResult {
   host: string;
   tweets: ParsedTweet[];
   /** 频道头抠出的账号头像（pbs.twimg.com 形态）；实例没给为 null */
   avatarCdn: string | null;
+  /** 频道头 `<title>` 抠出的账号显示名；实例没给或形态对不上为 null */
+  authorName?: string | null;
   bytes: number;
   ms: number;
 }
@@ -188,6 +205,7 @@ export async function fetchNitterTimeline(
     host,
     tweets: parseNitterRss(res.text),
     avatarCdn: parseNitterAvatar(res.text),
+    authorName: parseNitterAuthorName(res.text),
     bytes: res.body.length,
     ms: Date.now() - started,
   };
