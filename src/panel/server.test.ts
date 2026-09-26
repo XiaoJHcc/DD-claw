@@ -2770,10 +2770,11 @@ test('/api/chat：单轮直答 {ok,reply,usage}；空消息 400；LLM 未就绪 
   await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-chat' });
   const r = await api(base, '/api/chat', 'POST', { message: '现在谁在播' });
   assert.equal(r.status, 200);
-  assert.deepEqual(Object.keys(r.json).sort(), ['ok', 'provider', 'reply', 'usage'], '响应形状逐字冻结');
+  assert.deepEqual(Object.keys(r.json).sort(), ['calls', 'ok', 'provider', 'reply', 'usage'], '响应形状逐字冻结');
   assert.equal(r.json.ok, true);
   assert.equal(r.json.reply, '现在没有在播的监听主播。');
   assert.equal(r.json.provider, 'ds', 'provider = 实际回答的模型（自动路由下就是路由落点）');
+  assert.deepEqual(r.json.calls, [], '单轮直答没有工具调用');
   assert.deepEqual(r.json.usage, { messages: 2, chars: 17, needsResetHint: false });
 
   // 请求带上了系统提示（写模式纪律）与工具面：真的走了 agent loop
@@ -2808,6 +2809,25 @@ test('/api/chat：模型请求写工具 → 能力层写库；变更记录 entry
   assert.equal(db.getSetting('push_enabled'), '0', '工具真的执行了');
   assert.equal(llm.bodies.length, 2, '工具结果回填后又问了一轮');
 
+  // 工具调用明细（ToolCallView）：POST 回包与 history 回放同一形状信源
+  const calls = r.json.calls as Array<Record<string, unknown>>;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(Object.keys(calls[0]!).sort(),
+    ['args', 'id', 'name', 'ok', 'output', 'target', 'title'], 'calls 行形状逐字冻结');
+  assert.equal(calls[0]!.id, 'c1');
+  assert.equal(calls[0]!.name, 'set_push_enabled');
+  assert.equal(calls[0]!.title, '开关推送', '中文操作名 = undo-view 唯一信源');
+  assert.equal(calls[0]!.ok, true);
+
+  // history：带调用的中间轮与终答分两条，calls 配在中间轮上；无调用的行不带 calls 键
+  const h = await api(base, '/api/chat/history');
+  const msgs = h.json.messages as Array<Record<string, unknown>>;
+  assert.deepEqual(msgs.map((m) => [m.role, m.content]),
+    [['user', '把推送关了'], ['assistant', '好，我把推送总开关关掉。'], ['assistant', '已关闭推送总开关。']]);
+  assert.equal((msgs[1]!.calls as Array<Record<string, unknown>>).length, 1);
+  assert.equal((msgs[1]!.calls as Array<Record<string, unknown>>)[0]!.id, 'c1');
+  assert.equal(msgs[2]!.calls, undefined);
+
   // 变更历史：entry 区分入口（面板人手 vs 进程内 agent），都在 admin 全局栈
   const changes = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   assert.deepEqual(changes.map((c) => `${c.entry}:${c.actor}:${c.tool}`),
@@ -2838,7 +2858,8 @@ test('/api/chat/history 与 reset：消息累积、mode 回显、reset 清消息
   const h = await api(base, '/api/chat/history');
   const messages = h.json.messages as Array<Record<string, unknown>>;
   assert.deepEqual(messages.map((m) => [m.role, m.content]), [['user', '问题一'], ['assistant', '答复一']]);
-  assert.deepEqual(Object.keys(messages[0]!).sort(), ['at', 'content', 'provider', 'role']);
+  assert.deepEqual(Object.keys(messages[0]!).sort(), ['at', 'content', 'id', 'provider', 'role']);
+  assert.ok(Number.isInteger(messages[0]!.id) && (messages[0]!.id as number) > 0, 'id = chat_messages.id（轮询去重键）');
   assert.ok((messages[0]!.at as number) >= before && (messages[0]!.at as number) < 1e10, 'at 是秒级时间戳');
   assert.deepEqual(h.json.usage, { messages: 2, chars: 6, needsResetHint: false });
 

@@ -134,8 +134,11 @@ for (const p of store.biliPosts) {
 const undoAges = [40, 6 * 60, 22 * 60, 50 * 60, 3 * 3600, 6 * 3600];
 store.undoHistory.forEach((c, i) => { c.at = nowSec - (undoAges[i] ?? 3600); });
 // Agent 初始会话同样用冻结时刻（气泡显示「x 分钟前」；越靠后越新，偏移递减）
-const chatAges = [600, 540, 300, 240];
+const chatAges = [600, 540, 300, 240, 235];
 store.chat.messages.forEach((m, i) => { m.at = nowSec - (chatAges[i] ?? 60); });
+// 消息 id 自增器：与真实后端 chat_messages.id 同语义（前端进行中轮询的增量去重键）
+let chatSeq = store.chat.messages.reduce((max, m) => Math.max(max, m.id || 0), 0) + 1;
+let callSeq = 100;   // 工具调用 id（种子消息用了 demo_call_1/2；前端只按字符串去重）
 
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
@@ -148,13 +151,17 @@ const created = (obj) => json(201, obj);
 const err = (status, msg) => json(status, { error: msg });
 
 // ---- Agent 聊天剧本（demo 的 POST /api/chat：真实实现是多轮 LLM + 工具调用，这里按关键词回固定话术）----
+// 返回 { reply, calls }：calls 与真实后端 ToolCallView 同构（demo 里手工拼，title 用真实工具中文名）。
 // 三条剧本：
-//   ① 含「撤销」→ 真把变更历史的栈顶标成已撤销，再回拟真文案（设置页的「变更历史」随之同步，跨视图一致）
+//   ① 含「撤销」→ 真把变更历史的栈顶标成已撤销 + undo_last_change 工具行
 //   ② 含「推送」/「规则」→ 写前询问模式下先回确认话术并把这次写挂进 chatPending（用户回「确认/好」
-//      才回「已执行」，否则回「先不动」）；自动修改模式直接回「已执行」
-//   ③ 缺省 → 通用回复（说明能做什么）
+//      才回「已执行」+ upsert 工具行，否则回「先不动」）；自动修改模式直接回「已执行」
+//   ③ 缺省 → 查态剧本：两枚只读工具行（含一枚失败态）+ 全元素 markdown，专门用来验收渲染
 // 变更记录的中文名一律读记录自带的 title（后端唯一信源，前端与 mock 都不再维护工具名映射）。
 // 用量字段与真实后端同构：messages / chars 由当前会话算，needsResetHint 在 demo 里恒 false（正常值）
+function demoCall(name, title, target, ok2, args, output) {
+  return { id: 'demo_call_' + (++callSeq), name, title, target, ok: ok2, args, output };
+}
 const chatUsage = () => {
   let chars = 0;
   for (const m of store.chat.messages) chars += String(m.content || '').length;
@@ -170,28 +177,54 @@ function chatScript(text) {
   if (store.chatPending) {
     const what = store.chatPending;
     store.chatPending = null;
-    return /^(确认|好的|好|行|可以|ok|yes|是)/i.test(text)
-      ? `已执行：${what}。（改动可在设置页「变更历史」撤销）`
-      : '好，那我先不动。想改的时候再说具体改什么。';
+    if (!/^(确认|好的|好|行|可以|ok|yes|是)/i.test(text)) {
+      return { reply: '好，那我先不动。想改的时候再说具体改什么。', calls: [] };
+    }
+    return {
+      reply: `已执行：${what}。（改动可在设置页「变更历史」撤销）`,
+      calls: [demoCall('upsert_push_rule', '保存推送规则', '歌回', true,
+        '{\n  "name": "歌回",\n  "channels": ["粉丝群"]\n}', '{\n  "ok": true\n}')],
+    };
   }
   if (text.includes('撤销')) {
     const top = store.undoHistory.find((c) => !c.undone);
-    if (!top) return '刚查了「变更历史」：没有可撤销的变更（栈是空的）。';
+    if (!top) return { reply: '刚查了「变更历史」：没有可撤销的变更（栈是空的）。', calls: [] };
     undoRecord(top);   // 与 POST /api/undo 同一条路径：标已撤销 + 还原写前快照
-    return `已撤销最近一次变更：${top.title || top.tool}` +
-      `（${top.tables.length} 张表 · ${top.rows} 行）。\n这条记录已在设置页「变更历史」里标为已撤销。`;
+    return {
+      reply: `已撤销最近一次变更：${top.title || top.tool}` +
+        `（${top.tables.length} 张表 · ${top.rows} 行）。\n这条记录已在设置页「变更历史」里标为已撤销。`,
+      calls: [demoCall('undo_last_change', '撤销变更', '', true, '{}',
+        `{\n  "undone": "${top.title || top.tool}"\n}`)],
+    };
   }
   if (text.includes('推送') || text.includes('规则')) {
     const what = '把推送规则「歌回」的渠道改成只留「粉丝群」';
     if (store.chat.mode === 'ask') {
       store.chatPending = what;
-      return `我先确认一下：要${what}吗？回「确认」我就写入。`;
+      return {
+        reply: `我先确认一下：要${what}吗？回「确认」我就写入。`,
+        calls: [demoCall('list_push_rules', '列出推送规则', '', true, '{}',
+          '{\n  "rules": [\n    { "name": "歌回", "channels": ["粉丝群", "私信"] }\n  ]\n}')],
+      };
     }
-    return `已执行：${what}。\n这次是「自动修改」模式直接写入的，改动记进「变更历史」，可撤销。`;
+    return {
+      reply: `已执行：${what}。\n这次是「自动修改」模式直接写入的，改动记进「变更历史」，可撤销。`,
+      calls: [demoCall('upsert_push_rule', '保存推送规则', '歌回', true,
+        '{\n  "name": "歌回",\n  "channels": ["粉丝群"]\n}', '{\n  "ok": true\n}')],
+    };
   }
-  return '我是 DD-claw 的 Agent。能查当前状态（在播、监听开关、最近推送），也能改设置' +
-    '（分类关键词、推送/图文规则、账号名单、各项开关）——所有写入都记进「变更历史」，可以撤销。' +
-    '\n\n直接说要做什么就行。';
+  return {
+    reply: '现在 **6 位**在播，按直播时长排：\n\n| 主播 | 分区 | 已播 |\n| --- | --- | --- |\n' +
+      '| 阿梓从小就很可爱 | 虚拟主播 | 2:14 |\n| 七海 Nana7mi | 虚拟主播 | 1:03 |\n\n' +
+      '- 微博图文 3 条归档未推（都在补推窗口外）\n- X 链路 `fallback-html` 正常\n\n' +
+      '想改什么直接说，比如「把推送规则的渠道改一改」。',
+    calls: [
+      demoCall('get_live_now', '查看在播列表', '', true, '{}',
+        '{\n  "live": [\n    { "uname": "阿梓从小就很可爱", "area": "虚拟主播", "minutes": 134 },\n    { "uname": "七海 Nana7mi", "area": "虚拟主播", "minutes": 63 }\n  ]\n}'),
+      demoCall('search_posts', '搜索图文帖', '演唱会', false,
+        '{\n  "query": "演唱会",\n  "limit": 5\n}', '错误：微博登录态失效，请到设置页重新扫码'),
+    ],
+  };
 }
 
 // ---- 配置写记账（demo 专用）：真实后端由写工具落变更记录（title / detail 都是服务端文案），
@@ -1143,11 +1176,15 @@ for (const p of store.twitterPosts) {
     const text = String(body().message || '').trim();
     if (!text) return json(400, { error: '消息不能为空' });
     const at = Math.floor(Date.now() / 1000);
-    store.chat.messages.push({ role: 'user', content: text, at, provider: null });
-    const reply = chatScript(text);
+    store.chat.messages.push({ id: chatSeq++, role: 'user', content: text, at, provider: null });
+    const out = chatScript(text);
     const provider = activeProviderName();
-    store.chat.messages.push({ role: 'assistant', content: reply, at, provider });
-    return ok({ ok: true, reply, provider, usage: chatUsage() });
+    // 工具调用与终答分两条落库（中间轮 content 为空、只带 calls），与真实后端的回放形状一致
+    if (out.calls.length) {
+      store.chat.messages.push({ id: chatSeq++, role: 'assistant', content: '', at, provider, calls: out.calls });
+    }
+    store.chat.messages.push({ id: chatSeq++, role: 'assistant', content: out.reply, at, provider });
+    return ok({ ok: true, reply: out.reply, provider, usage: chatUsage(), calls: out.calls });
   }
   if (path === '/api/chat/reset' && method === 'POST') {
     store.chat.messages = [];

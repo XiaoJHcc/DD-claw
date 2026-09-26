@@ -42,6 +42,8 @@ import { undoChangeInfo, undoToolTitle } from './undo-view.js';
 import type { ChatStore } from '../core/chat-store.js';
 import { getChatWriteMode } from '../agent/system-prompt.js';
 import { chatBlockedReason, runAgentTurn } from '../agent/loop.js';
+import { toolCallView, type ToolCallView } from '../agent/tool-view.js';
+import type { ToolCall } from '../analysis/providers.js';
 
 const log = makeLogger('panel');
 
@@ -991,6 +993,8 @@ async function handle(
       reply: turn.reply,
       usage: chat.usage(adminScope()),
       provider: turn.provider,
+      // 本轮工具调用明细（面板渲染工具行；历史回放由 /api/chat/history 的 calls 重建，同一形状）
+      calls: turn.calls,
     });
     return;
   }
@@ -1069,17 +1073,44 @@ async function handle(
  * ——`tool` 结果与「只调工具、没说话」的轮次对用户没有意义；`at` 秒级（库里毫秒）。
  * `provider`（谁答的）每条都给：assistant 是落库的实际回答者，user 行恒为 null（前端不必分支取值）。
  */
+/**
+ * 会话历史 → 面板聊天视图的读法。与 loop 的历史回放同口径：assistant 的 toolCalls 与
+ * tool 结果按 call id 配对，配不上的（进程半截挂掉）双方都丢；空壳轮次（无文本无配对
+ * 调用）不显示。工具调用经 `toolCallView` 出展示形状（与 `POST /api/chat` 的 calls 同一信源）。
+ * `id` = chat_messages.id：前端进行中轮询靠它做增量去重。
+ */
 function chatHistoryMessages(chat: ChatStore): Array<{
-  role: string; content: string; at: number; provider: string | null;
+  id: number; role: string; content: string; at: number; provider: string | null; calls?: ToolCallView[];
 }> {
-  return chat.messages(adminScope())
-    .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim() !== '')
-    .map((m) => ({
-      role: m.role,
+  const msgs = chat.messages(adminScope());
+  const toolById = new Map<string, string>();
+  for (const m of msgs) {
+    if (m.role === 'tool' && m.toolCallId !== null) toolById.set(m.toolCallId, m.content);
+  }
+  const out: Array<{
+    id: number; role: string; content: string; at: number; provider: string | null; calls?: ToolCallView[];
+  }> = [];
+  for (const m of msgs) {
+    if (m.role === 'user') {
+      if (m.content.trim() === '') continue;
+      out.push({ id: m.id, role: 'user', content: m.content, at: Math.floor(m.createdAt / 1000), provider: null });
+      continue;
+    }
+    if (m.role !== 'assistant') continue;   // tool 行已配进 calls；孤儿 tool 结果丢弃
+    const calls = ((m.toolCalls ?? []) as ToolCall[])
+      .filter((c) => toolById.has(c.id))
+      .map((c) => toolCallView(c, toolById.get(c.id)!));
+    if (m.content.trim() === '' && calls.length === 0) continue;   // 空壳轮次
+    out.push({
+      id: m.id,
+      role: 'assistant',
       content: m.content,
       at: Math.floor(m.createdAt / 1000),
-      provider: m.role === 'assistant' ? m.provider : null,
-    }));
+      provider: m.provider,
+      ...(calls.length > 0 ? { calls } : {}),
+    });
+  }
+  return out;
 }
 
 // ---- 头像代理（/api/avatar）----

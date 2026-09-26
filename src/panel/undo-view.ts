@@ -33,6 +33,23 @@ export const UNKNOWN_TOOL_TITLE = '未知操作';
  * 新增写工具时补一行；漏了不会坏（回退工具原名），但面板上会出现英文名。
  */
 const TOOL_TITLES: Record<string, string> = {
+  // 只读查询（Agent 视图的工具行也用这张表——工具名 → 中文名就这一个信源）
+  get_status: '查询当前状态',
+  get_live_now: '查看在播列表',
+  get_schedule: '查询时间表',
+  list_streamers: '列出主播',
+  search_streamers: '搜索主播',
+  list_push_rules: '列出推送规则',
+  list_categories: '列出分类',
+  list_channels: '列出推送渠道',
+  search_posts: '搜索图文帖',
+  list_x_accounts: '列出 X 账号',
+  list_weibo_accounts: '列出微博账号',
+  list_bili_accounts: '列出 B站动态账号',
+  list_post_rules: '列出图文规则',
+  list_llm_providers: '列出 LLM 供应商',
+  get_x_config: '查看 X 连接设置',
+  list_group_channels: '列出群渠道',
   // 开关与运行时参数
   set_push_enabled: '开关推送',
   set_llm_enabled: '开关 LLM',

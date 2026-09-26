@@ -864,65 +864,100 @@ input:disabled{opacity:.5;background:var(--fill)}
 .undo-fields{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
 
 /* ============================================================
-   Agent 视图 · 聊天面板（P1 WebUI Agent 的用户面）：
-   信息层级参考 ChatGPT / Claude 一类对话页——消息是主角，工具件退到次要层级：
-   写模式 / 模型选择 / 重置收进卡片头一行；消息区与输入区共用一条**居中限宽栏**
-   （--thread:760，窄屏自适应），两边的缘完全对齐；滚动的只有消息列表，
-   输入区固定在卡片底部（不随消息滚走）。
+   Agent 视图 · 聊天面板（codex / kimi code 式对话页，2026 重做）：
+   卡片头与全局一致（图标 + 标题），工具件全部收进底部输入盒的工具条——
+   消息是页面上唯一的主角。消息区与输入盒共用一条**居中限宽内容栏**
+   （--thread:720，窄屏自适应）；滚动的只有消息列表，输入盒固定在卡片底部。
    ============================================================ */
 #view-agent{height:100%;padding-bottom:var(--pad);display:flex;flex-direction:column}
-#view-agent .card{flex:1;min-height:0;display:flex;flex-direction:column;--thread:760px}
-/* 卡片头右侧三件：写模式（小 segnav）/ 模型选择（自绘下拉）/ 重置——都是 36 高的标准控件 */
-.chat-mode{display:flex;align-items:center;gap:var(--sp-2);flex:none}
-.chat-mode-label{flex:none;font-size:var(--fs-sm);color:var(--text-2)}
-#chat-mode-nav{flex:none;width:180px}
-.chat-provider-pick{flex:none;width:224px}
-/* 窄屏：先把「写模式」文字标签让掉，再收窄两个控件，最后保证三者同行不换行 */
-@media (max-width:1100px){
-  .chat-mode-label{display:none}
-  #chat-mode-nav{width:150px}
-  .chat-provider-pick{width:184px}
-}
-@media (max-width:880px){
-  #chat-mode-nav{width:120px}
-  .chat-provider-pick{width:150px}
-}
+#view-agent .card{flex:1;min-height:0;display:flex;flex-direction:column;--thread:720px}
 
-/* 消息 + 输入区共用的竖列容器（撑满卡片内宽，限宽交给里面的两段） */
+/* 消息 + 输入盒共用的竖列容器（撑满卡片内宽，限宽交给里面的两段） */
 .chat-thread{flex:1;min-height:0;display:flex;flex-direction:column}
-/* 消息列表 = 唯一滚动口。滚动条落在卡片右缘（与 ChatGPT 同口径：不去挤居中的内容栏），
+/* 消息列表 = 唯一滚动口。滚动口上缘用负边距上提 --inset（= 卡片头的 bottom margin），
+   裁切线与卡片头下缘**重合**——内容从头带下缘滑进「头底下」，裁切点藏在头阴影线上，
+   不再出现悬在白缝里的切口。滚动条落在卡片右缘（与 ChatGPT 同口径：不去挤居中的内容栏），
    scrollbar-gutter 预留条位（出现/消失不跳版），overscroll-behavior 断掉向外的滚动链 */
 .chat-list{flex:1;min-height:0;overflow-y:auto;scrollbar-gutter:stable;overscroll-behavior:contain;
+  margin-top:-30px;
   scrollbar-width:thin;scrollbar-color:var(--separator) transparent}
 .chat-list::-webkit-scrollbar{width:8px}
 .chat-list::-webkit-scrollbar-thumb{background:var(--separator);border-radius:4px}
 .chat-list::-webkit-scrollbar-track{background:transparent}
-/* 消息栏：居中限宽（--thread），左右内边距 --pad 与输入区同一条内容缘 */
-.chat-msgs{display:flex;flex-direction:column;gap:var(--sp-3);min-height:100%;
-  width:100%;max-width:var(--thread);margin:0 auto;padding:var(--sp-2) var(--pad) var(--sp-3)}
-/* 「上面还有内容」的滚动提示：贴顶吸附的白→透明渐变条，只在可向上滚时显形。
-   container scroll-state 查询（Chrome/Edge 133+）不支持时它保持 opacity:0 = 静默降级
-   （纯提示，不影响任何功能）；负 margin 让 22px 的高度不占流的空间 */
-.chat-fade{position:sticky;top:0;height:22px;margin-bottom:-22px;z-index:1;opacity:0;
-  pointer-events:none;transition:opacity .18s ease;
-  background:linear-gradient(to bottom,var(--card-bg) 30%,rgba(255,255,255,0))}
-@supports (container-type: scroll-state){
-  .chat-list{container-type:scroll-state}
-  @container scroll-state(scrollable: top){.chat-fade{opacity:1}}
-}
-/* 消息 = 气泡 + 归属小字一列。助手是主角：气泡可撑满整栏（短回复仍按内容收缩）；
-   用户靠右、更窄，是「提问」的从属形态。气泡内是纯文本：pre-wrap 留换行、break-word 防长串溢出 */
+/* 卡片头抬层 + margin-bottom 特殊化为 0（其余卡片是 --inset）：
+   滚动口的裁剪线在其上缘下方约 20px 处会**切掉头部投影**（实测，红阴影验证），
+   故滚动口上缘用负边距上提 30px 藏进不透明头带后方——头部投影完整投在滚到下方的
+   内容上，内容从头带下缘「滑进头底下」，裁切点与阴影线都不可见。
+   「上面还有内容」的提示由这道阴影承担，不再用白色渐隐遮罩 */
+#card-agent .card-head{position:relative;z-index:2;margin-bottom:0}
+/* 消息栏：居中限宽。max-width 含左右内边距 --pad（文字内容宽 = --thread，与输入盒同一条缘）。
+   顶部留白 = --sp-3 + 30px：滚动口上提了 30px（见 .chat-list），补偿回首条到头带的净距 = --sp-3 */
+.chat-msgs{display:flex;flex-direction:column;gap:20px;min-height:100%;
+  width:100%;max-width:calc(var(--thread) + var(--pad)*2);margin:0 auto;
+  padding:calc(var(--sp-3) + 30px) var(--pad) var(--sp-3)}
+/* 消息：助手是无气泡底的整栏内容（正文 markdown 渲染），用户靠右一枚浅灰圆角泡、更窄，
+   是「提问」的从属形态。用户气泡内是纯文本：pre-wrap 留换行、break-word 防长串溢出 */
 .chat-msg{display:flex;flex-direction:column;gap:var(--sp-1);max-width:100%}
-.chat-msg.me{align-self:flex-end;align-items:flex-end;max-width:min(560px,85%)}
+.chat-msg.me{align-self:flex-end;align-items:flex-end;max-width:min(560px,80%)}
 .chat-msg.ai{align-self:stretch;align-items:flex-start}
-.chat-bubble{padding:10px var(--sp-3);border-radius:var(--r-inset);font-size:var(--fs-base);
-  line-height:1.55;white-space:pre-wrap;word-break:break-word}
-.chat-msg.ai .chat-bubble{background:var(--bg-soft);border-bottom-left-radius:6px}
-.chat-msg.me .chat-bubble{background:#EFF4FF;border-bottom-right-radius:6px}
+.chat-bubble{font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.chat-msg.ai .chat-bubble{padding:2px 0}
+.chat-msg.ai .chat-bubble.chat-md{white-space:normal}   /* markdown 块自己管换行 */
+.chat-msg.me .chat-bubble{background:var(--fill);border-radius:18px;padding:9px 14px;line-height:1.6}
 /* 归属小字：模型名（有才显示）+ 时间，`·` 分隔；完整时刻进 title */
 .chat-meta{display:flex;align-items:center;gap:6px;font-size:var(--fs-xs);color:var(--text-2)}
+.chat-msg.ai .chat-meta{padding-left:2px}
 .chat-prov{font-weight:600}
 .chat-meta-dot{color:var(--separator)}
+/* ---- 工具调用行（kimi 式）：13px 次要色横排，hover 浅底；chevron 随展开旋转 ---- */
+.chat-calls{display:flex;flex-direction:column;gap:2px;width:100%;padding:2px 0}
+.chat-call{width:100%;border-radius:10px}
+.chat-call-head{display:flex;align-items:center;gap:7px;width:100%;padding:5px 8px;
+  border:none;border-radius:10px;background:transparent;color:var(--text-2);
+  font:inherit;font-size:var(--fs-sm);line-height:1.5;cursor:pointer;text-align:left;
+  transition:background-color .15s ease}
+.chat-call-head:hover{background:var(--fill);color:var(--text)}
+.chat-call-head > svg{width:14px;height:14px;flex:none}
+.chat-call-title{font-weight:600;color:var(--text)}
+.chat-call.err .chat-call-title{color:var(--red,#e0483d)}
+.chat-call-target{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-call-fail{flex:none;font-size:var(--fs-xs);color:var(--red,#e0483d);font-weight:600}
+.chat-call-chev{margin-left:auto;flex:none;display:inline-flex;color:var(--text-2);
+  transition:transform .18s ease}
+.chat-call-chev svg{width:13px;height:13px;display:block}
+.chat-call.open .chat-call-chev{transform:rotate(180deg)}
+/* 明细：默认折起；参数/结果两块等宽字体，超长内部滚 */
+.chat-call-detail{display:none;padding:2px 8px 8px 29px}
+.chat-call.open .chat-call-detail{display:block}
+.chat-call-sec{margin-top:6px}
+.chat-call-sec > b{display:block;font-size:var(--fs-xs);color:var(--text-2);margin-bottom:3px}
+.chat-call-sec pre{margin:0;max-height:220px;overflow:auto;padding:8px 10px;
+  border-radius:8px;background:var(--fill);font-size:12px;line-height:1.55;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  white-space:pre-wrap;word-break:break-word;color:var(--text)}
+/* ---- 助手正文 markdown（js/markdown.js 产出的块）---- */
+.chat-md > :first-child{margin-top:0}
+.chat-md > :last-child{margin-bottom:0}
+.chat-md p{margin:8px 0}
+.chat-md h3,.chat-md h4,.chat-md h5,.chat-md h6{margin:16px 0 6px;line-height:1.4}
+.chat-md h3{font-size:17px}
+.chat-md h4{font-size:15.5px}
+.chat-md h5,.chat-md h6{font-size:var(--fs-base)}
+.chat-md ul,.chat-md ol{margin:8px 0;padding-left:22px}
+.chat-md li{margin:3px 0}
+.chat-md li::marker{color:var(--text-2)}
+.chat-md code{padding:1px 5px;border-radius:6px;background:var(--fill);
+  font-size:.88em;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.chat-md pre{margin:10px 0;padding:10px 12px;border-radius:10px;background:var(--fill);
+  overflow-x:auto}
+.chat-md pre code{padding:0;background:none;font-size:12.5px;line-height:1.6}
+.chat-md table{margin:10px 0;border-collapse:collapse;font-size:var(--fs-sm)}
+.chat-md th,.chat-md td{padding:5px 12px;border:1px solid var(--separator);text-align:left}
+.chat-md th{background:var(--fill);font-weight:600}
+.chat-md blockquote{margin:10px 0;padding:2px 0 2px 12px;border-left:3px solid var(--separator);
+  color:var(--text-2)}
+.chat-md a{color:var(--blue);text-decoration:none}
+.chat-md a:hover{text-decoration:underline}
 /* 在途态「思考中」+ 三点跳动（一轮真实请求可能是多轮 LLM + 工具调用，此态会停留一会儿） */
 .chat-thinking{display:inline-flex;align-items:center;gap:4px;color:var(--text-2)}
 .chat-thinking i{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.3;
@@ -930,16 +965,73 @@ input:disabled{opacity:.5;background:var(--fill)}
 .chat-thinking i:nth-child(2){animation-delay:.15s}
 .chat-thinking i:nth-child(3){animation-delay:.3s}
 @keyframes chat-dot{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:.85;transform:translateY(-2.5px)}}
-/* 空态/加载失败一行居中浅字（在 flex 列里上下居中） */
-.chat-empty{margin:auto;padding:var(--sp-4) 0;text-align:center;font-size:var(--fs-sm);color:var(--text-2)}
+/* 空态 = 居中 hero：渐变爪印徽章（Logo 同族）+ 标题 + 一句引导 */
+.chat-empty{margin:auto;display:flex;flex-direction:column;align-items:center;gap:10px;
+  padding:var(--sp-4) 0;text-align:center}
+.chat-empty-err{font-size:var(--fs-sm);color:var(--text-2)}
+.chat-hero-logo{display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;
+  border-radius:18px;background:linear-gradient(135deg,#FF7AA2,#F13D77 55%,#7AA5FF 130%);color:#fff;
+  box-shadow:0 8px 20px rgba(240,61,119,.22)}
+.chat-hero-logo svg{width:32px;height:32px;display:block}
+.chat-hero-title{font-size:20px;font-weight:700;letter-spacing:.01em}
+.chat-hero-sub{font-size:var(--fs-sm);color:var(--text-2)}
 
-/* 底部区（固定不动）：一条通宽分隔线 + 上下文偏长提示行 + 输入区。
-   提示行与输入区同栏同宽，输入区底部留卡片内边距（--inset），与卡片头对称 */
-.chat-foot{flex:none;border-top:1px solid var(--divider);padding:var(--sp-3) 0 var(--inset)}
-.chat-note{width:100%;max-width:var(--thread);margin:0 auto var(--sp-2);padding:0 var(--pad);
-  font-size:var(--fs-sm);color:var(--text-2)}
-/* 输入区：多行输入框 + 发送按钮（按钮贴底与输入框最后一行对齐）；在途整块禁用 */
-.chat-composer{display:flex;align-items:flex-end;gap:var(--sp-2);width:100%;max-width:var(--thread);
-  margin:0 auto;padding:0 var(--pad)}
-.chat-composer .inp{flex:1;min-width:0;resize:none}
-.chat-composer textarea:disabled{opacity:.5;background:var(--bg-soft)}
+/* 底部区（固定不动）：上下文偏长提示行 + codex 式大输入盒。提示行与输入盒同栏同宽；
+   输入盒底距 = --pad，与全局卡片内容边距一致（同 sched-body 的底边距口径） */
+.chat-foot{flex:none;padding-top:var(--sp-2);padding-bottom:var(--pad)}
+.chat-note{width:100%;max-width:var(--thread);margin:0 auto var(--sp-2);
+  text-align:center;font-size:var(--fs-xs);color:var(--text-2)}
+/* 输入盒：描边大圆角白盒（20 圆角，介于控件 --r-md 与卡片 --r-lg 之间），
+   聚焦蓝边 + 蓝环；盒内 = 无边框文本域 + 底部工具条 */
+.chat-composer{width:100%;max-width:var(--thread);margin:0 auto;
+  border:1px solid rgba(0,0,0,.10);border-radius:20px;background:var(--card-bg);
+  box-shadow:0 1px 2px rgba(0,0,0,.04),0 10px 28px rgba(0,0,0,.06);
+  transition:border-color .16s ease,box-shadow .16s ease}
+/* 聚焦 = 单层蓝色描边（不再叠 spread 环——外环与描边半径不同会看成两层框）；
+   高亮只认文本域（:focus-within 会让点工具条按钮也亮边，太吵） */
+.chat-composer:has(#chat-input:focus){border-color:var(--blue)}
+#chat-input{display:block;width:100%;border:none;background:transparent;outline:none;resize:none;
+  font:inherit;font-size:var(--fs-base);line-height:1.55;color:var(--text);
+  padding:14px 16px 4px;min-height:52px;max-height:200px}
+/* 生产兼容段的 textarea:not(.inp):focus 会给它画 3px 蓝环——环在文本域上、比输入盒小一圈，
+   与盒子的聚焦蓝边叠成「两层框」；输入盒的聚焦态只留盒边那一层 */
+#chat-input:focus{box-shadow:none}
+#chat-input::placeholder{color:var(--text-2);opacity:.75}
+#chat-input:disabled{opacity:.55}
+/* 工具条：左 = 重置（圆形图标钮，codex 的「+」位）+ 写模式双态胶囊；
+   右 = 模型选择（无边框紧凑下拉）+ 圆形发送钮 */
+.chat-bar{display:flex;align-items:center;gap:var(--sp-2);padding:4px 8px 8px}
+.chat-tool-btn{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:30px;height:30px;border:none;border-radius:999px;background:transparent;
+  color:var(--text-2);cursor:pointer;transition:background-color .15s ease,color .15s ease}
+.chat-tool-btn:hover{background:var(--fill);color:var(--text)}
+.chat-tool-btn svg{width:16px;height:16px;display:block}
+/* 写模式双态胶囊：常态灰字；自动修改 = 琥珀色（放权态，codex「Full access」同语义强调） */
+.chat-mode-chip{display:inline-flex;align-items:center;gap:5px;flex:none;height:30px;padding:0 11px;
+  border:none;border-radius:999px;background:transparent;color:var(--text-2);
+  font:inherit;font-size:var(--fs-sm);font-weight:600;cursor:pointer;white-space:nowrap;
+  transition:background-color .15s ease,color .15s ease}
+.chat-mode-chip:hover{background:var(--fill);color:var(--text)}
+.chat-mode-chip.auto{color:var(--amber)}
+.chat-mode-chip.auto:hover{background:rgba(232,161,58,.12);color:var(--amber)}
+.chat-mode-chip svg{width:14px;height:14px;display:block}
+/* 模型选择：复用自绘下拉，盒内退成无边框胶囊触发器（窄字、灰字，hover 才显底） */
+.chat-provider-pick{margin-left:auto;flex:none;min-width:0}
+.chat-provider-pick .dd{width:auto}
+.chat-provider-pick .dd-trigger{width:auto;max-width:220px;height:30px;padding:0 6px 0 10px;gap:4px;
+  border:none;border-radius:999px;background:transparent;font-size:var(--fs-sm);color:var(--text-2)}
+.chat-provider-pick .dd-trigger:hover{background:var(--fill);color:var(--text)}
+.chat-provider-pick .dd-trigger:focus{box-shadow:none}
+.chat-provider-pick .dd-trigger > svg{width:13px;height:13px}
+/* 发送：正圆形蓝渐变钮（边栏导航选中态同族），在途禁用 */
+.chat-send{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:32px;height:32px;border:none;border-radius:50%;cursor:pointer;color:#fff;
+  background:linear-gradient(135deg,#7AA5FF,#2F6FEB);box-shadow:0 3px 8px rgba(47,111,235,.26);
+  transition:filter .16s ease,opacity .16s ease}
+.chat-send:hover{filter:brightness(1.06)}
+.chat-send:disabled{opacity:.45;cursor:default;filter:none}
+.chat-send svg{width:16px;height:16px;display:block}
+/* 窄屏：模型名最长 160px，模式胶囊与重置不动（三件本就紧凑） */
+@media (max-width:880px){
+  .chat-provider-pick .dd-trigger{max-width:160px}
+}

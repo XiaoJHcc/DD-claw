@@ -42,6 +42,7 @@ import { HttpError } from '../panel/http-util.js';
 import type { PanelDeps } from '../panel/server.js';
 import { buildSystemPrompt, getChatWriteMode } from './system-prompt.js';
 import { agentToolSpecs, isAgentExposed } from './tool-schema.js';
+import { toolCallView, type ToolCallView } from './tool-view.js';
 
 /** 单轮上限：防止模型无限「调工具 → 再调工具」空转（超了就兜底回复，不卡死） */
 export const AGENT_MAX_STEPS = 8;
@@ -89,6 +90,8 @@ export interface AgentTurnResult {
   truncated: boolean;
   /** 本轮**实际回答**的 provider 名（面板显示「谁答的」；自动路由下每轮可能不同） */
   provider: string;
+  /** 本轮执行的工具调用明细（面板渲染 kimi 式工具行；形状唯一信源 = agent/tool-view.ts） */
+  calls: ToolCallView[];
 }
 
 /**
@@ -171,6 +174,8 @@ export async function runAgentTurn(
   let executed = 0;
   /** 本轮实际回答的 provider（最后一轮的落点：终答是它给的） */
   let answeredBy = '';
+  /** 本轮工具调用的展示明细（随返回值给面板；与 history 回放同一形状信源） */
+  const calls: ToolCallView[] = [];
   for (let step = 1; step <= maxSteps; step++) {
     let out: ChatCompletion;
     try {
@@ -189,7 +194,7 @@ export async function runAgentTurn(
     if (out.toolCalls.length === 0) {
       const reply = out.content.trim() === '' ? (opts.fallbacks?.empty ?? EMPTY_REPLY) : out.content;
       store.append(scope, { role: 'assistant', content: reply, provider: out.provider });
-      return { reply, steps: step, toolCalls: executed, truncated: false, provider: out.provider };
+      return { reply, steps: step, toolCalls: executed, truncated: false, provider: out.provider, calls };
     }
 
     // 工具调用轮次整段落库：下一轮历史回放要靠 toolCalls 里的 call id 与 tool 结果配对
@@ -198,6 +203,7 @@ export async function runAgentTurn(
     for (const call of out.toolCalls) {
       const text = await runOneTool(deps, defByName, call, toolCtx, entry);
       executed++;
+      calls.push(toolCallView(call, text));
       store.append(scope, { role: 'tool', content: text, toolCallId: call.id });
       messages.push({ role: 'tool', content: text, toolCallId: call.id });
     }
@@ -206,7 +212,7 @@ export async function runAgentTurn(
   const reply = opts.fallbacks?.truncated
     ?? `（连续 ${maxSteps} 轮工具调用仍没有得出结论，先停下了。可以把问题拆小一点再问，或直接在面板上操作。）`;
   store.append(scope, { role: 'assistant', content: reply, provider: answeredBy });
-  return { reply, steps: maxSteps, toolCalls: executed, truncated: true, provider: answeredBy };
+  return { reply, steps: maxSteps, toolCalls: executed, truncated: true, provider: answeredBy, calls };
 }
 
 /** 缺省 LLM 接缝：走装配根的 router（与分类任务同一个熔断/降级语义） */

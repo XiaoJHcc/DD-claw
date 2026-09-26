@@ -320,20 +320,29 @@ export const mockUndoHistory = [
   },
 ];
 
-// ---- Agent 聊天（P1 前端聊天视图的 demo 态）：初始会话四条 = 一次完整的「写前询问」往返
-// （用户要改分类关键词 → agent 先要确认 → 确认后回报已执行），一进 demo 就能看到两列气泡
-// 与模式语义。话题与 defaults.json 的种子数据一致（分类「歌回」、渠道「粉丝群」），
-// 免得演示露出后端没有的对象。at 由 mock-api 在冻结时刻后按偏移种入（数组顺序 = 时间顺序）。
-// provider = 选定的模型（'' = 自动路由，用户可在 Agent 卡头的选择器里换）；assistant 消息上的
-// provider 是**该条回复实际由谁提供**（持久化，换模型后旧气泡仍标当时的模型）。
+// ---- Agent 聊天（P1 前端聊天视图的 demo 态）：初始会话 = 一次完整的「写前询问」往返
+// （用户要改分类关键词 → agent 先要确认 → 确认后调工具写入 → markdown 回报），一进 demo 就能看到
+// 气泡、markdown 正文与 kimi 式工具调用行。话题与 defaults.json 的种子数据一致（分类「歌回」、
+// 渠道「粉丝群」），免得演示露出后端没有的对象。at 由 mock-api 在冻结时刻后按偏移种入。
+// 形状与真实 /api/chat/history 同构：id = 消息 id（轮询去重键）；provider = 该条回复实际由谁提供；
+// calls = 工具调用行（中间轮 content 为空、只有 calls，与真实后端配对产出的形状一致；
+// {id, name, title, target, ok, args, output} 逐字对应后端 agent/tool-view.ts 的 ToolCallView）。
 // 交互剧本（mock 的 POST /api/chat 按关键词回话）另见 mock-api.js 的 chatScript。
 export const mockChat = {
   mode: 'ask',
   provider: '',
   messages: [
-    { role: 'user', content: '给「歌回」这个分类加上关键词「演唱会」', at: 0, provider: null },
-    { role: 'assistant', content: '我先确认一下：要给分类「歌回」新增关键词「演唱会」吗？\n确认后我就写入（改动记进设置页的「变更历史」，可撤销）。', at: 0, provider: 'DeepSeek' },
-    { role: 'user', content: '确认', at: 0, provider: null },
-    { role: 'assistant', content: '已写入。分类「歌回」现在的关键词是「唱、歌、音乐、演唱会」，匹配方式仍是「或」。', at: 0, provider: 'DeepSeek' },
+    { id: 1, role: 'user', content: '给「歌回」这个分类加上关键词「演唱会」', at: 0, provider: null },
+    { id: 2, role: 'assistant', content: '我先确认一下：要给分类「歌回」新增关键词「演唱会」吗？\n确认后我就写入（改动记进设置页的「变更历史」，可撤销）。', at: 0, provider: 'DeepSeek' },
+    { id: 3, role: 'user', content: '确认', at: 0, provider: null },
+    { id: 4, role: 'assistant', content: '', at: 0, provider: 'DeepSeek', calls: [
+      { id: 'demo_call_1', name: 'list_categories', title: '列出分类', target: '', ok: true,
+        args: '{}',
+        output: '{\n  "categories": [\n    {\n      "name": "歌回",\n      "keywords": ["唱", "歌", "音乐"],\n      "condMode": "或",\n      "enabled": true\n    }\n  ]\n}' },
+      { id: 'demo_call_2', name: 'upsert_category', title: '保存分类', target: '歌回', ok: true,
+        args: '{\n  "name": "歌回",\n  "keywords": ["唱", "歌", "音乐", "演唱会"],\n  "condMode": "或"\n}',
+        output: '{\n  "ok": true\n}' },
+    ]},
+    { id: 5, role: 'assistant', content: '已写入。分类「歌回」现在长这样：\n\n- **关键词**：唱、歌、音乐、演唱会\n- **匹配方式**：或（任一命中即归类）\n\n改动记进了设置页的「变更历史」，随时可以撤销。', at: 0, provider: 'DeepSeek' },
   ],
 };

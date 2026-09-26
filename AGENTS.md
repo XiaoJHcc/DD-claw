@@ -66,7 +66,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 | `Notifier.send(msg)` | `src/notify/types.ts` | 载荷是 `PushMessage`；`capabilities` 声明能否带图；`alert()` 供健康告警（当前仅 toast） | ✅ |
 | 能力面 tool def | `src/mcp/tools.ts` | 工具名 + zod schema + handler + role；前端不得绕过注册表私接 Db | ✅ v1 |
 | 撤销入口 | `src/panel/server.ts` `PanelDeps.undoLast` + `src/core/undo.ts` `undoEffects` | 撤该调用域栈顶 + 按受影响表/键触发**装配根**的热生效回调（回调不进 Db / UndoStore 层）；撤销自身 `track: false`，不进变更记录 | ✅ |
-| `runAgentTurn(deps, userMessage)` | `src/agent/loop.ts` | 一轮对话的完整回路（历史 → LLM 轮 → 工具执行 → 结果/错误回填 → 终答），返回 `{reply, steps, toolCalls, truncated}`；scope = `adminScope()`、工具一律经 `runToolTracked`（**entry='agent'**）；`opts.completeChat` 是测试注入点；LLM 未就绪 400 / 调用失败 502 | ✅ P1 |
+| `runAgentTurn(deps, userMessage)` | `src/agent/loop.ts` | 一轮对话的完整回路（历史 → LLM 轮 → 工具执行 → 结果/错误回填 → 终答），返回 `{reply, steps, toolCalls, truncated, provider, calls}`（`calls` = 工具调用展示明细，形状信源 `agent/tool-view.ts`）；scope = `adminScope()`、工具一律经 `runToolTracked`（**entry='agent'**）；`opts.completeChat` 是测试注入点；LLM 未就绪 400 / 调用失败 502 | ✅ P1 |
 
 `PushMessage.priority` 目前是**预留字段、无消费者**，等优先级产品方案定了再补。
 
@@ -169,6 +169,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/agent/tool-schema.ts` — 注册表 → LLM 工具面（`AGENT_EXCLUDED_TOOLS` 显式排除名单，与 write-path-inventory 测试互锁）
 - `src/agent/loop.ts` — **agent loop**（`runAgentTurn` / `chatBlockedReason` / `AGENT_MAX_STEPS=8`）：读历史 → `[system, ...history, user]` → 循环 `deps.llm.router.completeChat`（可注入假 LLM）→ tool_calls 逐个经 `runToolTracked` 执行、结果或错误文本回填 → 无 tool_calls 即终答；往来全部落 ChatStore。面板（admin 单会话）与 QQ 渠道（gateway、scope=渠道栈）共用同一 loop，`AgentOptions` 传 scope/role/actor/systemPrompt 泛化。**不按 mode 硬拦写工具**（写纪律在系统提示层）
 - `src/agent/system-prompt.ts` — 系统提示 + 写操作模式（`settings.chat_write_mode`，缺省 `ask`=写前询问 / `auto`）：`buildSystemPrompt`（面板）/ `buildQqbotSystemPrompt`（QQ 渠道变体）/ `getChatWriteMode` / `setChatWriteMode`（`set_chat_mode` 工具用它，且**不在 agent 工具面**）
+- `src/agent/tool-view.ts` — 工具调用 → Agent 视图展示形状（`ToolCallView` `{id,name,title,target,ok,args,output}`；loop 实时回包与 `/api/chat/history` 回放共用的唯一信源；中文名复用 undo-view）
 - `src/panel/server.ts` 的 `/api/chat/{history,reset,mode}` 与 `POST /api/chat` 是 WebUI Agent 的接线（chat dep 不注入则 404）；`POST /onebot` 是 NapCat 直连的事件入口（qqbot dep 存在才挂，不在 /api 下）
 - `src/qqbot/` — **NapCat 直连（P3）**：onebot-event（事件解析/@识别）· settings（`qqbot_enabled` / `qq_channel_map` / `qqbot_trigger_prefix`）· trigger（触发纪律：斜杠命令确定性 + @/前缀进 LLM，私聊直通）· reply（回执裁剪 + /reset 附言）· bot（编排，不抛异常）· napcat-post（上报地址条目自管）。细节见 `docs/modules/qqbot.md`
 - 细节见 `docs/modules/panel.md`、`docs/mcp.md`、`docs/plan/agent-access.md`
