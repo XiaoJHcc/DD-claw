@@ -1,4 +1,4 @@
-import { pathToFileURL } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { makeLogger } from '../logger.js';
 import type { PushMessage, PushTarget } from '../core/types.js';
 import { isLocalImage } from './image-cache.js';
@@ -104,12 +104,26 @@ export class OneBotNotifier implements Notifier {
     const images = withImage ? (msg.images?.length ? msg.images : msg.image ? [msg.image] : []) : [];
     for (const img of images) {
       // B站 CDN 是公网可达的，直接给 URL 让 NapCat 自己拉，不落盘不 base64；
-      // 本地路径（X 图经代理下载后的形态）转成 file:// —— NapCat 与本进程同机，只能取本地。
-      segs.push({ type: 'image', data: { file: isLocalImage(img) ? pathToFileURL(img).href : img } });
+      // 本地文件（X 图经代理下载 / 关键帧缓存）必须 base64 内嵌，不能发 file://：
+      // macOS 沙盒版 QQ 对本进程数据目录无文件读权限，NapCat open() 直接 EPERM
+      // （2026-09-27 实测）。单图 ≤3MB，base64 约 4MB，本地 HTTP 无压力。
+      const ref = this.imageRef(img);
+      if (ref) segs.push({ type: 'image', data: { file: ref } });
     }
     const tail = (msg.attribution ? `\n${msg.attribution}` : '') + (msg.url ? `\n${msg.url}` : '');
     if (tail) segs.push({ type: 'text', data: { text: tail } });
     return segs;
+  }
+
+  /** 本地图读成 base64://；读失败的单张跳过（返回 null），不拖垮整条消息 */
+  private imageRef(img: string): string | null {
+    if (!isLocalImage(img)) return img;
+    try {
+      return 'base64://' + readFileSync(img).toString('base64');
+    } catch (e) {
+      log.warn(`本地图片读取失败，跳过该图: ${img}`, e);
+      return null;
+    }
   }
 
   private async post(target: PushTarget, message: Segment[]): Promise<PostResult> {

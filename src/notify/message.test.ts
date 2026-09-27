@@ -52,7 +52,7 @@ test('postToMessage：默认标题带 @账号，正文与链接各就各位，at
   assert.equal(m.body, '今晚有直播');
   assert.equal(m.url, 'https://x.com/watase_yuzuki/status/9001');
   assert.equal(m.image, 'D:\\cache\\a.jpg', '首图同时进 image（toast 等单图通道用）');
-  assert.deepEqual(m.images, ['D:\\cache\\a.jpg'], '图片是已本地化的路径（OneBot 会转 file://）');
+  assert.deepEqual(m.images, ['D:\\cache\\a.jpg'], '图片是已本地化的路径（OneBot 会内嵌 base64 发出）');
   assert.equal(m.icon, undefined, 'X 帖没有头像字段');
   assert.equal(m.priority, 'normal');
   assert.equal(

@@ -34,7 +34,7 @@ export interface PostMessageInput {
   title?: string;
   /**
    * 已本地化的图片路径（X 图必须经代理下载成**本地文件**再传：NapCat 在同一个墙内
-   * 网络里拉不到 pbs.twimg.com，`file://` 才是它真能取到的形态）。有图的帖全图都传；
+   * 网络里拉不到 pbs.twimg.com，落盘后由 onebot 内嵌 base64 发出）。有图的帖全图都传；
    * 缺省/空数组 = 无图（下载全失败的兜底）。
    */
   images?: string[];
