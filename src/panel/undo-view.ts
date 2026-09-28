@@ -3,22 +3,29 @@
  *
  * 为什么是后端：同一条记录要喂两个前端（面板 + agent 回话），把「这条变更是什么」的判断分散到
  * 前端就会出现两份中文口径（改了一个忘另一个）。故**后端是唯一信源**：
- *   `title`   中文操作名（工具名 → 文案，未知工具回退原名）
- *   `detail`  逐行说明（`label` + `action` + `fields`），行来自 `RowImage` 的差分，不是另算一遍
+ *   `title`    中文操作名（工具名 → 文案，未知工具回退原名；agent 工具行也复用这份）
+ *   `headline` 一句话操作描述（**值感知**：布尔单列变化直接变动词「停用了推送规则「杂谈-开播」」，
+ *              级联写取结构主体行「删除了分类「杂谈」」，多行并列回退「工具名（N 项变更）」）
+ *   `detail`   逐行说明（`label` + `action` + `changes`），行来自 `RowImage` 的差分，不是另算一遍；
+ *              `changes` 带**格式化后的旧值/新值**（布尔 → 开/关、JSON 数组 → 顿号连接、数值
+ *              settings 键 → 带单位、长文本截断），回答「从什么改成了什么」，而非「改了哪些列」
  *   `undoNote` 撤销后的注意事项（`refill` = 该行是 LLM key 隐私例外，撤销 = 清空、需重填）
  *
  * 三条口径纪律：
  * - `undoNote` 的 refill 判定与 `core/undo.ts` 的隐私例外**同源**（`isLlmKeySetting`），别处不再写
  *   第二份 `llm_key:` 前缀判断。
- * - `fields` 的列集合与快照差分**同源**（`DEFAULT_IGNORE_COLUMNS`）：轮询回写列（游标/心跳/头像/
+ * - `changes` 的列集合与快照差分**同源**（`DEFAULT_IGNORE_COLUMNS`）：轮询回写列（游标/心跳/头像/
  *   平台昵称/updated_at）既不算差分也不列进说明，否则「保存主播别名」会顺带说“改了更新时间”。
  *   纯配置表（categories / push_rules / …）的 `updated_at` 不在忽略表、确实每次写都变，
- *   但对用户是噪音，在 `undoChangeDetail` 的 fields 生成处统一滤掉（差分/比对语义不受影响）。
+ *   但对用户是噪音，在 `undoChangeDetail` 的 changes 生成处统一滤掉（差分/比对语义不受影响）。
  * - 翻译不了的键/列/工具**回退原名**，绝不丢信息（新增配置面时先能读，再补文案）。
  *
  * 契约（与 webui/js/undo.js 钉死）：detail 每项形如
- * `{ label: '分类「歌回」', action: 'created'|'deleted'|'updated', fields: ['启用'] }`；
- * `fields` 只在 `action='updated'` 时有列名（其余恒为 `[]`，键始终存在，前端不必判 undefined）。
+ * `{ label: '分类「歌回」', action: 'created'|'deleted'|'updated',
+ *    changes: [{ field: '关键词', from: '唱、歌', to: '唱、歌、演唱会' }] }`；
+ * `changes` 只在 `action='updated'` 时非空（其余恒为 `[]`，键始终存在，前端不必判 undefined）；
+ * 布尔开关变化带 `bool: true`（from/to 恒为 开/关，供前端省略冗余字段名）；
+ * 值不可示人的变化（LLM key、MCP 令牌）给 `{ field, redacted: true }`，无 from/to。
  */
 import {
   DEFAULT_IGNORE_COLUMNS, changeTables, isLlmKeySetting,
@@ -226,20 +233,20 @@ const COLUMN_NAMES: Record<string, Record<string, string>> = {
   settings: { key: '键名', value: '值' },
   categories: {
     name: '名称', llm_prompt: 'LLM 提示词', keywords: '关键词', areas: '分区',
-    cond_mode: '条件关系', enabled: '启用', sort: '排序',
+    cond_mode: '条件关系', enabled: '启用', sort: '位置',
   },
   push_rules: {
     name: '名称', category_id: '分类', uids: '生效主播', channels: '推送渠道',
-    message_template: '推送词', enabled: '启用', sort: '排序', created_by: '创建来源',
+    message_template: '推送词', enabled: '启用', sort: '位置', created_by: '创建来源',
   },
   push_channels: {
     name: '名称', notifier: '通道类型', target_type: '目标类型', target_id: '目标 ID',
-    enabled: '启用', sort: '排序',
+    enabled: '启用', sort: '位置',
   },
   post_rules: {
     name: '名称', filters: '筛选条件', channels: '推送渠道', message_template: '推送词',
     llm_judge: 'LLM 判定', judge_prompt: '判定标准', llm_translate: '翻译',
-    enabled: '启用', sort: '排序', platform: '平台（旧字段）', account_ids: '账号（旧字段）',
+    enabled: '启用', sort: '位置', platform: '平台（旧字段）', account_ids: '账号（旧字段）',
   },
   streamers: {
     uid: 'UID', uname: '昵称', alias: '简称', room_id: '直播间', weibo_uid: '微博 UID',
@@ -288,11 +295,23 @@ function changedColumns(img: RowImage): string[] {
 
 export type UndoRowAction = 'created' | 'deleted' | 'updated';
 
+export interface UndoFieldChange {
+  /** 变化列的中文名（「位置」「启用」「关键词」…；settings kv 行 = 设置项中文名） */
+  field: string;
+  /** 格式化后的旧值 / 新值；redacted 时两者都不存在 */
+  from?: string;
+  to?: string;
+  /** 值不可示人（LLM key、MCP 令牌）：前端只显示「已更新（值不落库）」 */
+  redacted?: boolean;
+  /** 布尔开关变化（from/to 恒为 开/关）：前端据此省略冗余字段名，单行布尔变化甚至整行省略 */
+  bool?: boolean;
+}
+
 export interface UndoDetailRow {
   label: string;
   action: UndoRowAction;
-  /** 变化的非忽略列（中文）；只在 action='updated' 时非空 */
-  fields: string[];
+  /** 带值的变化清单（中文列名 + 格式化旧值/新值）；只在 action='updated' 时非空 */
+  changes: UndoFieldChange[];
 }
 
 /** 行的动作：前像无 = 新建、后像无 = 删除、其余 = 修改（隐私行给后像，故恒为 updated 一类） */
@@ -302,19 +321,198 @@ export function undoRowAction(img: RowImage): UndoRowAction {
   return 'updated';
 }
 
+// ---- 值格式化：把库里的原始值翻成用户语言 ----
+
+/** 整数 0/1 布尔列（按表；忽略列进不了这里） */
+const BOOL_COLUMNS: Record<string, readonly string[]> = {
+  categories: ['enabled'],
+  push_rules: ['enabled'],
+  push_channels: ['enabled'],
+  post_rules: ['enabled', 'llm_judge', 'llm_translate'],
+  streamers: ['watch', 'analyze', 'notify'],
+  x_accounts: ['enabled'],
+  weibo_accounts: ['enabled'],
+  bili_accounts: ['enabled'],
+};
+
+/** 值为 '1'/'0' 的布尔 settings 键（listen_* 按前缀兜底；与 listen.ts / runtime-config.ts 的存储口径一致） */
+const BOOL_SETTING_KEYS: readonly string[] = [
+  'push_enabled', 'llm_enabled', 'napcat_enabled', 'napcat_autorestart', 'qqbot_enabled',
+  'x_fallback_html', 'keyframe_enabled', 'notify_on_first_run', 'notify_on_new_subscription',
+  'backlog_push_enabled',
+];
+
+/** JSON 数组列 → 顿号连接（存的是 JSON 文本；解析失败回退原文截断） */
+const JSON_COLUMNS: Record<string, readonly string[]> = {
+  categories: ['keywords', 'areas'],
+  push_rules: ['uids', 'channels'],
+  post_rules: ['channels', 'filters'],
+  x_accounts: ['rule_ids'],
+  weibo_accounts: ['rule_ids'],
+  bili_accounts: ['rule_ids'],
+};
+
+/** 数值型 settings 键 → 单位（NUM_SPECS 全量 + X 抓取间隔；label 里有单位的不再重复） */
+const SETTING_UNITS: Record<string, string> = {
+  poll_interval_sec: '秒', poll_jitter_sec: '秒', follows_sync_interval_sec: '秒',
+  dynamic_interval_sec: '秒', weibo_interval_sec: '秒', keyframe_interval_sec: '秒',
+  x_interval_sec: '秒', llm_request_timeout_ms: '毫秒', llm_circuit_cooldown_ms: '毫秒',
+  health_alert_after_failures: '次', llm_circuit_threshold: '次', backlog_max_age_hours: '小时',
+};
+
+/** 值不可示人的 settings 键（LLM key 在 undo.ts 层已 redact；这里兜住其余敏感配置） */
+const SECRET_SETTING_KEYS: readonly string[] = ['mcp_tokens'];
+
+/** 小枚举列 → 中文（`表.列` 为键） */
+const ENUM_VALUES: Record<string, Record<string, string>> = {
+  'categories.cond_mode': { and: '且', or: '或' },
+  'push_channels.notifier': { onebot: 'NapCat', toast: '本机 Toast' },
+  'push_channels.target_type': { group: 'QQ 群', private: '私聊' },
+};
+
+/** 长文本统一截断长度（推送词 / 提示词 / 画像这类自由文本） */
+const VALUE_CAP = 30;
+
+function truncate(s: string): string {
+  return s.length > VALUE_CAP ? s.slice(0, VALUE_CAP) + '…' : s;
+}
+
+/** 该 表+列 / settings 键 是否 0/1 布尔（formatValue 与 changes 的 bool 标记同源） */
+function isBoolCell(table: string, column: string, settingKey?: string): boolean {
+  if (BOOL_COLUMNS[table]?.includes(column)) return true;
+  return table === 'settings' && settingKey !== undefined &&
+    (BOOL_SETTING_KEYS.includes(settingKey) || settingKey.startsWith('listen_'));
+}
+
+/** 单值 → 人读形态；返回 null = 值不可示人（调用方给 redacted 变化项） */
+function formatValue(table: string, column: string, v: unknown, settingKey?: string): string | null {
+  if (settingKey !== undefined && SECRET_SETTING_KEYS.includes(settingKey)) return null;
+  if (v === null || v === undefined || v === '') return '（空）';
+  if (isBoolCell(table, column, settingKey)) {
+    return v === 1 || v === '1' || v === true ? '开' : v === 0 || v === '0' || v === false ? '关' : String(v);
+  }
+  const enumMap = ENUM_VALUES[`${table}.${column}`];
+  if (enumMap) return enumMap[String(v)] ?? String(v);
+  if (column === 'sort') return `第 ${String(v)} 位`;
+  if (table === 'settings' && settingKey !== undefined && SETTING_UNITS[settingKey] !== undefined) {
+    const n = Number(v);
+    const unit = SETTING_UNITS[settingKey];
+    // 毫秒值能整除时按秒读（60000 毫秒 → 60 秒），人不按毫秒想问题
+    if (unit === '毫秒' && Number.isFinite(n) && n % 1000 === 0) return `${n / 1000} 秒`;
+    return `${String(v)} ${unit}`;
+  }
+  if (JSON_COLUMNS[table]?.includes(column) ?? false) {
+    try {
+      const parsed: unknown = JSON.parse(String(v));
+      if (Array.isArray(parsed)) return truncate(parsed.map((x) => String(x)).join('、')) || '（空）';
+      return truncate(JSON.stringify(parsed));
+    } catch { return truncate(String(v)); }
+  }
+  // settings 的 JSON 值（llm_providers / x_nitter_instances / qq_channel_map 等）尝试展开，失败回原文
+  if (table === 'settings') {
+    const s = String(v);
+    if (s.startsWith('[') || s.startsWith('{')) {
+      try {
+        const parsed: unknown = JSON.parse(s);
+        if (Array.isArray(parsed)) return truncate(parsed.map((x) => String(x)).join('、')) || '（空）';
+        return truncate(JSON.stringify(parsed));
+      } catch { /* 落下面原文 */ }
+    }
+    return truncate(s);
+  }
+  return truncate(String(v));
+}
+
+/** 一行 updated 的带值变化清单（updated_at 噪音在此滤掉；redacted 行只报列名不给值） */
+function rowChanges(img: RowImage): UndoFieldChange[] {
+  if (undoRowAction(img) !== 'updated') return [];
+  const settingKey = img.table === 'settings' ? String(img.pk.key ?? '') : undefined;
+  return changedColumns(img)
+    .filter((col) => col !== 'updated_at')
+    .map((col) => {
+      // settings 是 kv 面：列名恒为「值」等于没说——字段名直接用设置项中文名（「推送总开关：开 → 关」）
+      const field = img.table === 'settings' && settingKey !== undefined
+        ? settingLabel(settingKey)
+        : columnLabel(img.table, col);
+      if (img.redacted) return { field, redacted: true };
+      const from = formatValue(img.table, col, img.before?.[col], settingKey);
+      const to = formatValue(img.table, col, img.after?.[col], settingKey);
+      if (from === null || to === null) return { field, redacted: true };
+      const bool = isBoolCell(img.table, col, settingKey);
+      return bool ? { field, from, to, bool: true } : { field, from, to };
+    });
+}
+
 export function undoChangeDetail(c: ChangeRecord): UndoDetailRow[] {
-  return c.rows.map((img) => {
-    const action = undoRowAction(img);
-    return {
-      label: undoRowLabel(img),
-      action,
-      // 键恒存在（前端不必判 undefined）；列名只对 updated 有意义，其余给空数组。
-      // updated_at 每次写都变、对用户是噪音（「改了别名、更新时间」），在源头滤掉
-      fields: action === 'updated'
-        ? changedColumns(img).filter((col) => col !== 'updated_at').map((col) => columnLabel(img.table, col))
-        : [],
-    };
-  });
+  return c.rows.map((img) => ({
+    label: undoRowLabel(img),
+    action: undoRowAction(img),
+    changes: rowChanges(img),
+  }));
+}
+
+// ---- headline：一句话操作描述（历史列表的主标题，值感知） ----
+
+/** 行标签的对象部分（「老E」式，供动词组句）；无书名号则回整个标签（settings 名本就不带） */
+function objectPart(label: string): string {
+  const i = label.indexOf('「');
+  return i >= 0 ? label.slice(i) : label;
+}
+
+/** 布尔单列变化 → 动词句；不是布尔单列变化返回 null（调用方回退「修改了…」）。
+ *  settings 行只看 value 列（key 是主键不是「变化」），故 created（首次手动关开关）也能组句 */
+function boolVerbHeadline(img: RowImage): string | null {
+  const cols = changedColumns(img)
+    .filter((c) => c !== 'updated_at' && (img.table !== 'settings' || c === 'value'));
+  if (cols.length !== 1) return null;
+  const col = cols[0]!;
+  const v = img.after?.[col];
+  const on = v === 1 || v === '1' || v === true;
+  if (!on && v !== 0 && v !== '0' && v !== false) return null;
+  const label = undoRowLabel(img);
+  if (img.table === 'settings') {
+    const key = String(img.pk.key ?? '');
+    const isBoolKey = BOOL_SETTING_KEYS.includes(key) || key.startsWith('listen_');
+    return isBoolKey ? `${on ? '开启了' : '关闭了'}${label}` : null;
+  }
+  if (col === 'enabled' && (BOOL_COLUMNS[img.table]?.includes('enabled') ?? false)) {
+    return `${on ? '启用了' : '停用了'}${label}`;
+  }
+  if (img.table === 'streamers') {
+    if (col === 'watch') return `${on ? '开始监听' : '停止监听'}${objectPart(label)}`;
+    if (col === 'analyze') return `${on ? '开启了' : '关闭了'}${objectPart(label)}的 LLM 分析`;
+    if (col === 'notify') return `${on ? '开启了' : '关闭了'}${objectPart(label)}的推送`;
+  }
+  if (img.table === 'post_rules' && col === 'llm_judge') return `${on ? '开启了' : '关闭了'}${label}的 LLM 判定`;
+  if (img.table === 'post_rules' && col === 'llm_translate') return `${on ? '开启了' : '关闭了'}${label}的翻译`;
+  return null;
+}
+
+/**
+ * 一条记录的一句话描述。主行挑选：恰一行的结构性变化（created/deleted）是主体——
+ * 级联写（删分类顺带停用 N 条规则）里它才是人做的事，其余行进 detail；
+ * 全 updated 多行（reorder / 批量 / 多键参数）没有主体，回退「工具名（N 项变更）」。
+ */
+export function undoChangeHeadline(c: ChangeRecord): string {
+  const structural = c.rows.filter((r) => undoRowAction(r) !== 'updated');
+  const primary = structural.length === 1 ? structural[0]! : c.rows.length === 1 ? c.rows[0]! : null;
+  if (primary === null) return `${undoToolTitle(c.tool)}（${c.rows.length} 项变更）`;
+  const label = undoRowLabel(primary);
+  const action = undoRowAction(primary);
+  // LLM key 行（created/updated 都可能，redacted 无值可比）与 settings 布尔键
+  // （首次手动关开关 = created 行）都能给值感知句式，优先于按动作组句
+  if (primary.table === 'settings' && isLlmKeySetting(primary.pk.key)) {
+    return `设置了 ${String(primary.pk.key).slice('llm_key:'.length)} 的 LLM 密钥`;
+  }
+  if (primary.table === 'settings') {
+    const boolHeadline = boolVerbHeadline(primary);
+    if (boolHeadline !== null) return boolHeadline;
+  }
+  if (action === 'created') return `新增了${label}`;
+  if (action === 'deleted') return `删除了${label}`;
+  const boolHeadline = boolVerbHeadline(primary);
+  if (boolHeadline !== null) return boolHeadline;
+  return `修改了${label}`;
 }
 
 /**
@@ -330,7 +528,8 @@ export function undoChangeNote(c: ChangeRecord): 'refill' | null {
 
 /**
  * 变更记录 → 历史端点形状。老字段（id/tool/entry/actor/scope/at/undone/tables/rows）**逐字不动**
- * （前端与 demo mock 已按它写），结构化三字段为增量：`title` / `detail` / `undoNote`。
+ * （前端与 demo mock 已按它写），结构化字段为增量：`title` / `headline` / `detail` / `undoNote` /
+ * `undoneAt`（撤销时刻，秒；未撤销 = null，前端据此显示「已于 HH:MM 撤销」）。
  * `at` 秒级（库里毫秒），`tables` 去重，`rows` = 受影响行数。
  */
 export function undoChangeInfo(c: ChangeRecord): Record<string, unknown> {
@@ -342,9 +541,11 @@ export function undoChangeInfo(c: ChangeRecord): Record<string, unknown> {
     scope: c.scope,
     at: Math.floor(c.at / 1000),
     undone: c.undoneAt !== null,
+    undoneAt: c.undoneAt === null ? null : Math.floor(c.undoneAt / 1000),
     tables: changeTables(c),
     rows: c.rows.length,
     title: undoToolTitle(c.tool),
+    headline: undoChangeHeadline(c),
     detail: undoChangeDetail(c),
     undoNote: undoChangeNote(c),
   };

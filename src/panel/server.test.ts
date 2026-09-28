@@ -2649,59 +2649,63 @@ test('撤销端点未装配 → 404（两个端点各自按 dep 挂载）', asyn
   const { base } = await setup(t);
   assert.equal((await api(base, '/api/undo/history')).status, 404);
   assert.equal((await api(base, '/api/undo', 'POST')).status, 404);
-});test('变更历史结构化：title / detail(label+action+fields) / undoNote，与快照差分同源', async (t) => {
+});test('变更历史结构化：title / headline / detail(label+action+changes) / undoNote，与快照差分同源', async (t) => {
   const { db, base } = await setup(t, { undo: true, listen: { weibo: true } });
 
-  // ① 新建分类：action=created，fields 恒为空数组（列名只对 updated 有意义，但键始终在）
+  // ① 新建分类：action=created，changes 恒为空数组（变化清单只对 updated 有意义，但键始终在）
   assert.equal((await api(base, '/api/categories', 'POST', { name: '歌回', keywords: ['唱歌'] })).status, 201);
   let c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   assert.equal(c[0]!.title, '保存分类', '中文操作名由后端给（工具名 → 文案）');
-  assert.deepEqual(c[0]!.detail, [{ label: '分类「歌回」', action: 'created', fields: [] }]);
+  assert.equal(c[0]!.headline, '新增了分类「歌回」', 'headline = 一句话操作描述');
+  assert.deepEqual(c[0]!.detail, [{ label: '分类「歌回」', action: 'created', changes: [] }]);
   assert.equal(c[0]!.undoNote, null);
 
-  // ② 改分类的启用开关：action=updated，fields = 变化的非忽略列（中文）
+  // ② 改分类的启用开关：changes 带格式化后的旧值/新值（布尔 → 开/关），headline 值感知变动词
   const catId = db.listCategories()[0]!.id;
   assert.equal((await api(base, `/api/categories/${catId}`, 'PUT', { enabled: false })).status, 200);
   c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   const upd = (c[0]!.detail as Array<Record<string, unknown>>)[0]!;
   assert.equal(upd.label, '分类「歌回」');
   assert.equal(upd.action, 'updated');
-  assert.ok((upd.fields as string[]).includes('启用'), `fields 应含启用，实际 ${JSON.stringify(upd.fields)}`);
-  assert.ok(!(upd.fields as string[]).includes('名称'), '没变的列不进 fields');
+  assert.deepEqual(upd.changes, [{ field: '启用', from: '开', to: '关', bool: true }]);
+  assert.equal(c[0]!.headline, '停用了分类「歌回」', '布尔单列变化 → 动词句');
 
   // ③ 删分类：action=deleted（前像在、后像无）
   assert.equal((await api(base, `/api/categories/${catId}`, 'DELETE')).status, 200);
   c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   assert.equal(c[0]!.title, '删除分类');
-  assert.deepEqual(c[0]!.detail, [{ label: '分类「歌回」', action: 'deleted', fields: [] }]);
+  assert.equal(c[0]!.headline, '删除了分类「歌回」');
+  assert.deepEqual(c[0]!.detail, [{ label: '分类「歌回」', action: 'deleted', changes: [] }]);
 
-  // ④ settings 行 = 设置项中文名（「分类「名」」式是行表用的）；value 列翻译成「值」
+  // ④ settings 行 = 设置项中文名（「分类「名」」式是行表用的）；首次手动关开关（created 行）也组动词句
   assert.equal((await api(base, '/api/listen/weibo', 'PUT', { enabled: false })).status, 200);
   c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   assert.equal(c[0]!.title, '监听开关');
-  assert.deepEqual(c[0]!.detail, [{ label: '微博监听开关', action: 'created', fields: [] }]);
+  assert.equal(c[0]!.headline, '关闭了微博监听开关');
+  assert.deepEqual(c[0]!.detail, [{ label: '微博监听开关', action: 'created', changes: [] }]);
   assert.equal(c[0]!.undoNote, null, '普通设置项撤销即完成，没有额外注意事项');
 
-  // 已存在的 settings 键再写一次 = updated，变化列 = value → 「值」
+  // 已存在的 settings 键再写一次 = updated；settings 是 kv 面，字段名直接用设置项中文名，数值键带单位
   assert.equal((await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 30 })).status, 200);
   assert.equal((await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 60 })).status, 200);
   c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   assert.equal(c[0]!.title, '修改运行时参数');
-  assert.deepEqual(c[0]!.detail, [{ label: '直播轮询间隔', action: 'updated', fields: ['值'] }]);
+  assert.equal(c[0]!.headline, '修改了直播轮询间隔');
+  assert.deepEqual(c[0]!.detail, [{ label: '直播轮询间隔', action: 'updated', changes: [{ field: '直播轮询间隔', from: '30 秒', to: '60 秒' }] }]);
 
   // 回到 auto（值等于运行前提）→ 删掉那个键，撤销记录里就是 deleted
   assert.equal((await api(base, '/api/listen/weibo', 'PUT', { enabled: true })).status, 200);
   c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
-  assert.deepEqual(c[0]!.detail, [{ label: '微博监听开关', action: 'deleted', fields: [] }]);
+  assert.deepEqual(c[0]!.detail, [{ label: '微博监听开关', action: 'deleted', changes: [] }]);
 
-  // ⑤ 混合表：主播行的标签用 uname，fields 不含被忽略的轮询列（更新时间/昵称/直播间）
+  // ⑤ 混合表：主播行的标签用 uname，changes 不含被忽略的轮询列（更新时间/昵称/直播间）
   db.upsertStreamer({ uid: '1001', uname: '阿梓', face: 'https://x/f.jpg' });
   assert.equal((await api(base, '/api/streamers/1001', 'PUT', { alias: '梓宝' })).status, 200);
   c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   assert.equal(c[0]!.title, '修改主播设置');
   const sRow = (c[0]!.detail as Array<Record<string, unknown>>)[0]!;
   assert.equal(sRow.label, '主播「阿梓」');
-  assert.deepEqual(sRow.fields, ['简称'], '只报配置列：轮询回写列被忽略表挡在外面');
+  assert.deepEqual(sRow.changes, [{ field: '简称', from: '（空）', to: '梓宝' }], '只报配置列：轮询回写列被忽略表挡在外面');
   assert.equal(c[0]!.undoNote, null);
 });
 
@@ -2711,10 +2715,11 @@ test('变更历史结构化：LLM key 行的 undoNote=refill，撤销响应带 t
   assert.equal((await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-refill' })).status, 200);
   const c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   assert.equal(c[0]!.title, '设置 LLM 密钥');
+  assert.equal(c[0]!.headline, '设置了 ds 的 LLM 密钥');
   assert.deepEqual(c[0]!.detail, [{
     label: 'LLM 密钥（ds）',
     action: 'created',
-    fields: [],
+    changes: [],
   }]);
   assert.equal(c[0]!.undoNote, 'refill', '涉及 llm_key:* → 撤销 = 清空、需重填');
   assert.ok(!JSON.stringify(c[0]).includes('sk-refill'), '明文 key 绝不进历史');
@@ -2928,7 +2933,7 @@ test('PUT /api/chat/provider：选定/自动/不存在 400；history 与发消�
   const changes = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   assert.equal(changes[0]!.tool, 'set_chat_provider');
   assert.equal(changes[0]!.title, '选择 Agent 模型');
-  assert.deepEqual(changes[0]!.detail, [{ label: 'Agent 模型选择', action: 'deleted', fields: [] }]);
+  assert.deepEqual(changes[0]!.detail, [{ label: 'Agent 模型选择', action: 'deleted', changes: [] }]);
 });
 
 test('GET /api/llm 的 providers 带 ready；chatProvider 回显当前选择', async (t) => {

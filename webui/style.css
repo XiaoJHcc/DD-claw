@@ -847,21 +847,76 @@ input:disabled{opacity:.5;background:var(--fill)}
 
 /* ============================================================
    设置页 · 变更历史卡（P0b 撤销的用户面）：通宽卡片压在三张设置卡下方（不占视图）
-   行 = 通用 .row-2（主行：操作名 + 来源/受影响摘要/状态 tag；明细：行级中文明细；
-   副行：时间 · 操作者 · 表名），栈顶那条行尾挂一枚 ghost 按钮「撤销」（标准 .btn，不另造尺寸）。
-   已撤销的行整行置灰（同 .x-card.x-off 口径），空态/加载失败一行居中浅字
+   2026-09-24 重排：条目 = 顶行（恒单行）+ 可选明细块（仅展开）两段式，与 undo.js 文件头互为信源。
+   顶行全项 flex 居中于同一行高（headline 14 / 变化 12 / 警告·开关·meta 11——字号差异
+   不再产生错位）：圆点 + headline（后端值感知组句）+ 琥珀冲突警告 + 变化段（前 3 项自然宽度
+   横排、右端渐隐裁切，逐项 title 兜底全文）+ 折叠开关 + meta（来源 · 操作者 · 时间 ·
+   撤销时刻，margin-left:auto 钉右）+ 恒宽撤销按钮槽（只栈顶有按钮，没按钮也预留——
+   各条 meta 右缘对齐同一竖线）。
+   展开（.undo-open）：变化段内容换成整宽明细块（全部变化逐行平铺、左缘与 headline 对齐），
+   容器留在顶行作占位——顶行元素位置纹丝不动；展开状态信源在前端（undo.js 的 expanded）。
+   2026-09-25 结构修复：条目体改为顶锚定（不再 justify-content:center），顶行上下边距恒定
+   --sp-1——展开/收起两种形态首行位置严格一致；顶行内不同高度的元素（圆点 8 / 各字号文本 /
+   按钮 32）一律 align-items:center 收在同一中线上，按钮槽内按钮压到 32 保证全列表顶行等高。
+   refill 注记（「撤销将清空密钥，需重填」）= 密钥更新事件自身的解释，收作变化行末尾一项（琥珀）。
+   已撤销的行整行置灰；整行 tooltip 只说人话（完整时刻 + 谁从哪操作）。
    ============================================================ */
-.undo-row.undo-off{opacity:.55}
-/* 卡片内容区（无 .set-rows）与行同口径：左右 --inset 外边距、与卡片头同心 */
+/* 分组小标题：今天 / 昨天 / M月D日 + 右侧通栏细分隔线（行间第一组不额外撑顶距） */
+.undo-day{display:flex;align-items:center;gap:var(--sp-3);margin:6px var(--inset) 4px;padding:0 var(--pad);
+  font-size:var(--fs-xs);font-weight:600;color:var(--text-2)}
+.undo-day::after{content:"";flex:1;height:1px;background:var(--divider)}
+.undo-day ~ .undo-day{margin-top:var(--sp-3)}
+.undo-entry.undo-off{opacity:.55}
+/* 条目体：占满行宽的纵列（顶行 + 可选明细块），顶锚定不垂直居中——顶行位置全由
+   undo-top 的定值上下边距决定，展开/收起首行位置严格一致 */
+.undo-body{flex:1;min-width:0;display:flex;flex-direction:column}
+/* 顶行：恒单行，上下边距恒定 --sp-1 ⇒ 收起时条目体 = 4+32+4 = 40，加 .row 上下 padding 4
+   恰满 --row-h；展开时明细块接在下方，顶行上缘位置不变。内部元素高差（圆点 8 / 各字号
+   文本 / 按钮 32）一律 align-items:center 收在同一中线上 */
+.undo-top{display:flex;align-items:center;gap:var(--sp-2);min-height:32px;margin:var(--sp-1) 0}
+/* 来源圆点：面板=蓝 / MCP=紫 / Agent=薄荷 */
+.undo-dot{width:8px;height:8px;border-radius:50%;flex:none;background:#C6C6C6}
+.undo-dot-blue{background:var(--blue)}
+.undo-dot-purple{background:var(--purple)}
+.undo-dot-mint{background:var(--mint)}
+.undo-headline{font-size:var(--fs-base);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
+/* 冲突警告（「已被后续变更覆盖」）：headline 后的琥珀小字 */
+.undo-warn{font-size:var(--fs-xs);color:var(--amber);white-space:nowrap;flex:none}
+/* 变化段：吃掉剩余宽度；各项自然宽度横排（不逐项压碎），整体右端硬切 + 渐隐带提示
+   「还有更多」；字段名/对象名与旧值浅字、新值正常色。展开态内容清空、容器留作占位 */
+.undo-changes{flex:1;min-width:0;display:flex;gap:var(--sp-4);overflow:hidden;white-space:nowrap;
+  font-size:var(--fs-sm);mask-image:linear-gradient(90deg,#000 calc(100% - 32px),transparent)}
+.undo-ch{flex:none;white-space:nowrap}
+.undo-ch-f{color:var(--text-2)}
+.undo-ch-f::after{content:"："}
+/* 对象名后的字段修饰词（无冒号变体：对象名已带冒号） */
+.undo-ch-f2{color:var(--text-2)}
+.undo-ch-obj{color:var(--text-2)}
+.undo-ch-obj::after{content:"："}
+.undo-ch-from{color:var(--text-2)}
+.undo-ch-arr{color:var(--text-2);opacity:.7}
+/* 明细块（仅展开渲染）：整宽纵列、逐行平铺（一行一对象），左缘缩进与 headline 对齐
+   （圆点 8 + 顶行 gap 8）；单行省略 + title 兜底全文；底距 --sp-1 与顶行下边距同值，
+   展开态行底缘与收起态同一条缘 */
+.undo-detail{display:flex;flex-direction:column;gap:2px;padding:0 0 var(--sp-1) 16px;font-size:var(--fs-sm)}
+.undo-dl{line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 展开/收起：变化段之后、meta 之前的固定位置（行内小蓝字，不随内容多少移位） */
+.undo-more{border:none;background:none;padding:0;cursor:pointer;flex:none;
+  font-size:var(--fs-xs);color:var(--blue);white-space:nowrap}
+.undo-more:hover{text-decoration:underline}
+/* 变化行末尾的 refill 注记（「撤销将清空密钥，需重填」）：密钥更新事件自身的解释，琥珀 */
+.undo-note{color:var(--amber)}
+/* meta：钉在按钮槽左侧、不收缩；margin-left:auto 保证无变化段的条目也落在同一右缘 */
+.undo-meta{margin-left:auto;font-size:var(--fs-xs);color:var(--text-2);white-space:nowrap;flex:none}
+/* 撤销按钮槽：恒定宽（= .btn min-width 80），没按钮的条目也预留 */
+.undo-act{flex:0 0 80px;display:flex;justify-content:flex-end}
+/* 槽内按钮压到 32（全局 .btn 是 --ctl-h:36）——顶行高度全列表恒 32，有无按钮的条目
+   首行中线一致，按钮随顶行 align-items:center 居中 */
+.undo-act .btn{height:32px}
+/* 列表容器底距：末行下缘到卡片底边的净距补齐到 --inset（行自带 2px 下 margin，故补 6px） */
+#undo-list{padding-bottom:calc(var(--inset) - 2px)}
 .undo-empty{display:flex;align-items:center;justify-content:center;min-height:var(--row-h);
-  margin:0 var(--inset) var(--inset);font-size:var(--fs-sm);color:var(--text-2)}
-/* 行级明细（服务端 detail，2026-09-22 契约）：一条一行「动作 tag + 中文 label + 改了：字段…」。
-   tag 用小号（明细是副信息，不该抢主行的视觉权重）；超出 6 条由 JS 折叠成「另有 N 条」 */
-.undo-detail{display:flex;flex-direction:column;gap:1px;margin:1px 0}
-.undo-detail-row{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-sm)}
-.undo-detail-row .tag{line-height:16px;padding:0 5px}
-.undo-detail-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.undo-fields{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
+  margin:0 var(--inset) 2px;font-size:var(--fs-sm);color:var(--text-2)}
 
 /* ============================================================
    Agent 视图 · 聊天面板（codex / kimi code 式对话页，2026 重做）：

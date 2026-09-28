@@ -130,9 +130,13 @@ for (const p of store.biliPosts) {
   p.pubTs = nowSec - 2400 * p.id;
   p.createdAt = nowSec;
 }
-// 变更历史的 at 同样用冻结时刻（列表显示「x 分钟前」；偏移与 mockUndoHistory 顺序一一对应，恒新→旧）
-const undoAges = [40, 6 * 60, 22 * 60, 50 * 60, 3 * 3600, 6 * 3600];
-store.undoHistory.forEach((c, i) => { c.at = nowSec - (undoAges[i] ?? 3600); });
+// 变更历史的 at 同样用冻结时刻（列表显示「x 分钟前」；偏移与 mockUndoHistory 顺序一一对应，恒新→旧；
+// 最老一条落到昨天以演示按日分组）；已撤销条目的 undoneAt = 变更后 20 分钟
+const undoAges = [40, 6 * 60, 22 * 60, 50 * 60, 3 * 3600, 30 * 3600];
+store.undoHistory.forEach((c, i) => {
+  c.at = nowSec - (undoAges[i] ?? 3600);
+  if (c.undone) c.undoneAt = c.at + 1200;
+});
 // Agent 初始会话同样用冻结时刻（气泡显示「x 分钟前」；越靠后越新，偏移递减）
 const chatAges = [600, 540, 300, 240, 235];
 store.chat.messages.forEach((m, i) => { m.at = nowSec - (chatAges[i] ?? 60); });
@@ -256,25 +260,26 @@ function restoreStore(snap) {
     store.chat.provider = snap.chatSettings.provider;
   }
 }
-/** 撤销一条记录：标已撤销 +（新记录才有）还原写前快照 */
+/** 撤销一条记录：标已撤销 + 撤销时刻（与真实后端的 undoneAt 同语义）+（新记录才有）还原写前快照 */
 function undoRecord(rec) {
   rec.undone = true;
+  rec.undoneAt = Math.floor(Date.now() / 1000);
   const snap = undoReverts.get(rec.id);
   if (snap) { restoreStore(snap); undoReverts.delete(rec.id); }
 }
 const refillNames = () => store.llmProviders.filter((p) => p.enabled).map((p) => p.name);
 
-/** 写路径 → 记录文案（demo 口径：够读即可，真实文案由后端工具给） */
+/** 写路径 → 记录文案（demo 口径：够读即可，真实文案由后端工具给；形状 = 新契约 headline + changes） */
 function writeMeta(method, path, b) {
   const del = method === 'DELETE';
   const upd = { action: 'updated' };
   if (path === '/api/llm/enabled') {
-    return { tool: 'set_llm_enabled', title: b.enabled ? '启用 LLM 分析' : '停用 LLM 分析', tables: ['settings'],
-      detail: [{ label: '设置项「LLM 总开关」', ...upd, fields: ['启用状态'] }] };
+    return { tool: 'set_llm_enabled', title: '开关 LLM', headline: b.enabled ? '开启了 LLM 总开关' : '关闭了 LLM 总开关', tables: ['settings'],
+      detail: [{ label: 'LLM 总开关', ...upd, changes: [{ field: 'LLM 总开关', from: b.enabled ? '关' : '开', to: b.enabled ? '开' : '关', bool: true }] }] };
   }
   if (path === '/api/llm/providers/order') {
-    return { tool: 'reorder_llm_providers', title: '调整供应商顺序', tables: ['settings'],
-      detail: [{ label: 'LLM 供应商顺序', ...upd, fields: ['排序'] }] };
+    return { tool: 'reorder_llm_providers', title: '调整供应商顺序', headline: '调整了 LLM 供应商顺序', tables: ['settings'],
+      detail: [{ label: 'LLM 供应商名单', ...upd, changes: [{ field: 'LLM 供应商名单', to: '顺序已调整' }] }] };
   }
   if (path === '/api/llm/providers' || /^\/api\/llm\/providers\/[^/]+$/.test(path)) {
     const name = path === '/api/llm/providers' ? b.name : decodeURIComponent(path.split('/').pop());
@@ -282,43 +287,44 @@ function writeMeta(method, path, b) {
     return {
       tool: del ? 'delete_llm_provider' : 'upsert_llm_provider',
       title: del ? '删除 LLM 供应商' : (path === '/api/llm/providers' ? '新增 LLM 供应商' : '保存 LLM 供应商'),
+      headline: del ? `删除了 LLM 供应商「${name}」` : (path === '/api/llm/providers' ? `新增了 LLM 供应商「${name}」` : `修改了 LLM 供应商「${name}」`),
       tables: ['settings'],
       detail: [{ label: `供应商「${name}」`, action: del ? 'deleted' : (path === '/api/llm/providers' ? 'created' : 'updated'),
-        fields: withKey ? ['API key'] : undefined }],
+        changes: withKey ? [{ field: 'API key', redacted: true }] : [] }],
       // 填了 key 的写：撤销 = 清空密钥需重填（与后端 undoNote 同语义）
       undoNote: withKey ? 'refill' : undefined,
       refill: withKey ? [name] : undefined,
     };
   }
   if (path === '/api/advanced') {
-    return { tool: 'update_runtime_config', title: '修改运行时参数', tables: ['settings'],
-      detail: [{ label: '设置项「运行时参数」', ...upd, fields: ['参数值'] }] };
+    return { tool: 'update_runtime_config', title: '修改运行时参数', headline: '修改了运行时参数', tables: ['settings'],
+      detail: [{ label: '运行时参数', ...upd, changes: [] }] };
   }
   if (path === '/api/chat/mode') {
-    return { tool: 'set_chat_mode', title: '设置写模式', tables: ['settings'],
-      detail: [{ label: '设置项「Agent 写模式」', ...upd, fields: ['写模式'] }] };
+    return { tool: 'set_chat_mode', title: '设置写模式', headline: '设置了 Agent 写模式', tables: ['settings'],
+      detail: [{ label: 'Agent 写模式', ...upd, changes: [{ field: 'Agent 写模式', to: b.mode === 'auto' ? '自动（直接写）' : '写前询问' }] }] };
   }
   if (path === '/api/chat/provider') {
-    return { tool: 'set_chat_provider', title: '选择 Agent 模型', tables: ['settings'],
-      detail: [{ label: '设置项「Agent 模型」', ...upd, fields: ['模型'] }] };
+    return { tool: 'set_chat_provider', title: '选择 Agent 模型', headline: '选择了 Agent 模型', tables: ['settings'],
+      detail: [{ label: 'Agent 模型选择', ...upd, changes: [{ field: 'Agent 模型选择', to: b.provider || '自动路由' }] }] };
   }
   if (path === '/api/push/enabled') {
-    return { tool: 'set_push_enabled', title: b.enabled ? '启用推送' : '停用推送', tables: ['settings'],
-      detail: [{ label: '设置项「推送总开关」', ...upd, fields: ['启用状态'] }] };
+    return { tool: 'set_push_enabled', title: '开关推送', headline: b.enabled ? '开启了推送总开关' : '关闭了推送总开关', tables: ['settings'],
+      detail: [{ label: '推送总开关', ...upd, changes: [{ field: '推送总开关', from: b.enabled ? '关' : '开', to: b.enabled ? '开' : '关', bool: true }] }] };
   }
   if (path === '/api/napcat') {
-    return { tool: 'update_napcat', title: '修改 NapCat 配置', tables: ['settings'],
-      detail: [{ label: '设置项「NapCat 连接」', ...upd, fields: ['连接配置'] }] };
+    return { tool: 'update_napcat', title: '修改 NapCat 配置', headline: '修改了 NapCat 配置', tables: ['settings'],
+      detail: [{ label: 'NapCat 连接', ...upd, changes: [] }] };
   }
   if (path === '/api/x') {
-    return { tool: 'update_x_config', title: '修改 X 连接设置', tables: ['settings'],
-      detail: [{ label: '设置项「X 连接」', ...upd, fields: ['代理 / 实例 / 间隔'] }] };
+    return { tool: 'update_x_config', title: '修改 X 连接设置', headline: '修改了 X 连接设置', tables: ['settings'],
+      detail: [{ label: 'X 连接', ...upd, changes: [] }] };
   }
   const lm = path.match(/^\/api\/listen\/(dynamic|weibo|twitter)$/);
   if (lm) {
     const plat = { dynamic: 'B站动态', weibo: '微博', twitter: 'X' }[lm[1]];
-    return { tool: 'set_listen', title: '修改监听开关', tables: ['settings'],
-      detail: [{ label: `设置项「监听开关：${plat}」`, ...upd, fields: ['启用状态'] }] };
+    return { tool: 'set_listen', title: '监听开关', headline: b.enabled ? `开启了${plat}监听开关` : `关闭了${plat}监听开关`, tables: ['settings'],
+      detail: [{ label: `${plat}监听开关`, ...upd, changes: [{ field: `${plat}监听开关`, from: b.enabled ? '关' : '开', to: b.enabled ? '开' : '关', bool: true }] }] };
   }
   // 四类 CRUD 家族：渠道 / 分类 / 推送规则 / 图文规则 / 三张账号名单，形状一致
   const fam = [
@@ -333,18 +339,20 @@ function writeMeta(method, path, b) {
   for (const f of fam) {
     if (!f.re.test(path)) continue;
     if (path.endsWith('/order')) {
-      return { tool: 'reorder', title: `调整${f.noun}顺序`, tables: [f.table],
-        detail: [{ label: `${f.noun}顺序`, ...upd, fields: ['排序'] }] };
+      return { tool: 'reorder', title: `调整${f.noun}顺序`, headline: `调整了${f.noun}顺序`, tables: [f.table],
+        detail: [{ label: `${f.noun}顺序`, ...upd, changes: [{ field: `${f.noun}顺序`, to: '已调整' }] }] };
     }
     const id = path.match(/\/(\d+)$/)?.[1];
     const tool = del ? 'delete' : (method === 'POST' ? 'upsert_new' : 'upsert');
+    const name = b.nickname || b.screenName || b.alias || b.name || (id ? '#' + id : '');
     return {
       tool: `${tool}_${f.table}`,
       title: f.names[del ? 2 : (method === 'POST' ? 0 : 1)],
+      headline: del ? `删除了${f.noun}「${name}」` : (method === 'POST' ? `新增了${f.noun}「${name}」` : `修改了${f.noun}「${name}」`),
       tables: [f.table],
-      detail: [{ label: `${f.noun}「${b.nickname || b.screenName || b.alias || b.name || (id ? '#' + id : '')}」`,
+      detail: [{ label: `${f.noun}「${name}」`,
         action: del ? 'deleted' : (method === 'POST' ? 'created' : 'updated'),
-        fields: del || method === 'POST' ? undefined : ['配置字段'] }],
+        changes: [] }],
     };
   }
   const watch = path.match(/^\/api\/streamers\/([^/]+)(\/watch)?$/);
@@ -354,13 +362,14 @@ function writeMeta(method, path, b) {
     return {
       tool: add ? 'watch_streamer' : 'set_streamer',
       title: add ? '加入监听' : (b.watch === false ? '取消监听' : '修改主播设置'),
+      headline: add ? `开始监听主播 ${uid}` : (b.watch === false ? `停止监听主播 ${uid}` : `修改了主播 ${uid} 的设置`),
       tables: ['streamers'],
-      detail: [{ label: `主播 ${uid}`, action: 'updated', fields: add || b.watch === false ? ['关注状态'] : ['别名 / 备注'] }],
+      detail: [{ label: `主播 ${uid}`, action: 'updated', changes: [] }],
     };
   }
   // 未覆盖的写：不猜语义，只记一条能读的记录（真实后端不会走到这里）
-  return { tool: 'unknown_write', title: '修改设置', tables: ['settings'],
-    detail: [{ label: method + ' ' + path, ...upd }] };
+  return { tool: 'unknown_write', title: '修改设置', headline: '修改了设置', tables: ['settings'],
+    detail: [{ label: method + ' ' + path, ...upd, changes: [] }] };
 }
 
 /** 写成功后往历史头部插一条同构记录（顺序 = 新→旧） */
@@ -370,9 +379,9 @@ function recordWrite(method, path, rawBody, snap) {
   const meta = writeMeta(method, path, b);
   const rec = {
     id: ++undoSeq, tool: meta.tool, entry: 'panel', actor: 'panel', scope: 'admin',
-    at: undoAt(), undone: false,
+    at: undoAt(), undone: false, undoneAt: null,
     tables: meta.tables, rows: meta.detail.length,
-    title: meta.title, detail: meta.detail,
+    title: meta.title, headline: meta.headline ?? meta.title, detail: meta.detail,
     ...(meta.undoNote ? { undoNote: meta.undoNote } : {}),
   };
   store.undoHistory.unshift(rec);
