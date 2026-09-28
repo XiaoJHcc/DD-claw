@@ -42,7 +42,7 @@ export class PostAnalyzer {
     private readonly llmEnabled: () => boolean,
   ) {}
 
-  async analyze(post: PostCandidate, rule: PostRule): Promise<PostAnalysis> {
+  async analyze(post: PostCandidate, rule: PostRule, imageUrls?: string[]): Promise<PostAnalysis> {
     const opts: PostAnalysisOptions = {
       judge: rule.llmJudge,
       judgePrompt: rule.judgePrompt,
@@ -57,9 +57,12 @@ export class PostAnalyzer {
       log.debug(`LLM 不可用（${router === null ? '无 provider' : '总开关关'}），按机械筛选放行`);
       return { source: 'fallback', pass: true, reason: 'LLM 未启用', translation: null };
     }
+    // 附图门控：有图且 vision 路由有可用 provider 才带图；否则降级纯文本——
+    // 带图请求在空 vision 路由上会整路失败，把本可纯文本完成的判定/翻译一起拖死
+    const imgs = imageUrls?.length && router.hasVision() ? imageUrls : undefined;
     try {
       const r = await router.completeJson(
-        buildPostAnalysisRequest(post, opts),
+        buildPostAnalysisRequest(post, opts, imgs),
         (raw) => parsePostAnalysis(raw),
       );
       return {

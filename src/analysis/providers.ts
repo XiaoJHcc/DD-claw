@@ -369,6 +369,14 @@ export class LlmRouter {
   }
 
   /**
+   * vision 路由是否有立即可用的 provider：含图请求先发问，没有就降级纯文本——
+   * 硬着头皮带图会让整个请求在空路由上失败，把本可走 text 路由的判定/翻译一起拖死。
+   */
+  hasVision(): boolean {
+    return this.routes.vision.some((name) => this.byName.get(name)?.isReady() ?? false);
+  }
+
+  /**
    * 走路由调一个可用 provider，返回 parse 后的结果。
    * parse（任务层的 zod 校验）失败同样计入熔断并降级到下一个 ——
    * 模型没按 schema 输出和端点挂掉一样，都是这个 provider 本次不可靠。

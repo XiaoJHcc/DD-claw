@@ -132,8 +132,8 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/analysis/queue.ts` — 分析队列（限流并发 2；`run()` 是图文帖等非分类任务的通用入口）
 - `src/analysis/providers.ts` — LLM provider（路由/熔断/多 key/双协议）
 - `src/analysis/tasks/classify.ts` — 单次批量 LLM 分类任务
-- `src/analysis/tasks/post-analysis.ts` — 图文帖任务：判定 + 翻译合并成一次调用（平台措辞；翻译只对 X）
-- `src/analysis/post-analyzer.ts` — 图文帖分析编排（LLM 不可用/失败一律回退机械筛选）
+- `src/analysis/tasks/post-analysis.ts` — 图文帖任务：判定 + 翻译合并成一次调用（平台措辞；翻译只对 X；附图走 vision 路由）
+- `src/analysis/post-analyzer.ts` — 图文帖分析编排（LLM 不可用/失败一律回退机械筛选；有图且 vision 路由可用才附图，否则纯文本降级）
 - `src/analysis/matcher.ts` — 确定性匹配（`matchCategory` / `matchPushRules` / `matchPostRules` / `renderTemplate` / `renderPostTemplate`）
 - `src/rules/types.ts` — `DecisionRule` / `NotifyDecision`
 - `src/rules/once-per-session.ts` — 每场直播推一次

@@ -1,4 +1,5 @@
 import { makeLogger } from '../logger.js';
+import { readFile } from 'node:fs/promises';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage, postToMessage } from '../notify/message.js';
 import {
@@ -305,6 +306,26 @@ export class Pipeline {
       return;
     }
 
+    // 图片先落本地文件：推送要带图，LLM 判定也要看图（「只推自拍」这类标准只看文字判不出来）。
+    // X 图床（pbs.twimg.com）墙内直连不通，NapCat / LLM provider 都拉不到远程 URL ——
+    // 唯一可行形态是先经代理隧道下载到本地，推送发本地文件、LLM 发 base64 data URL。
+    // 有图的帖全图都下，每张独立容错、失败的单张跳过；全部失败按无图走，不阻塞通知。
+    // 微博图床（sinaimg.cn）与B站图床（hdslb.com）境内直连可达 → 普通 fetch，不给代理链路添无关流量。
+    let images: string[] | undefined;
+    let imageDataUrls: string[] | undefined;
+    if (post.pics.length > 0 && this.deps.imageCacheDir) {
+      const proxyUrl = getXConfig(db).proxyUrl;
+      const downloaded = await mapLimit(post.pics, 3, (pic) =>
+        platform === 'twitter'
+          ? localizeImageViaProxy(pic, this.deps.imageCacheDir!, proxyUrl)
+          : localizeImage(pic, this.deps.imageCacheDir!));
+      const ok = downloaded.filter((p): p is string => p != null);
+      if (ok.length > 0) {
+        images = ok;
+        imageDataUrls = await toDataUrls(ok);
+      }
+    }
+
     // LLM 判定 / 翻译（规则级，默认关）：判定语义 = 「这条规则是否还贡献渠道」——
     // 开了判定且模型说不推的规则不贡献渠道（与「命中规则独立生效、渠道取并集」一致），
     // 没开判定的规则照常贡献。LLM 不可用/失败一律按机械筛选放行（post-analyzer 内部处理）。
@@ -320,7 +341,7 @@ export class Pipeline {
       const key = `${r.llmJudge ? 1 : 0}|${r.judgePrompt ?? ''}|${r.llmTranslate ? 1 : 0}`;
       let a = analyzed.get(key);
       if (!a) {
-        a = await this.deps.queue.run(() => this.deps.postAnalyzer!.analyze(post, r));
+        a = await this.deps.queue.run(() => this.deps.postAnalyzer!.analyze(post, r, imageDataUrls));
         analyzed.set(key, a);
       }
       if (r.llmJudge && a.source === 'llm' && !a.pass) {
@@ -348,22 +369,6 @@ export class Pipeline {
     if (channelIds.length === 0) {
       log.info(`不推送 ${label}: 命中 ${hits.length} 条规则但都未勾选渠道`);
       return;
-    }
-
-    // 图片必须先落成本地文件再推（NapCat 与本进程同网络，远程 URL 交给它同样拉不到；
-    // toast 的 Win32 限制也不支持远程图）。有图的帖全图都下，每张独立容错、失败的单张跳过；
-    // 全部失败按无图发，不阻塞通知。两条路线：
-    //  · X 图床（pbs.twimg.com）墙内直连不通 → 走代理隧道下载；
-    //  · 微博图床（sinaimg.cn）与B站图床（hdslb.com）境内直连可达 → 普通 fetch，不给代理链路添无关流量。
-    let images: string[] | undefined;
-    if (post.pics.length > 0 && this.deps.imageCacheDir) {
-      const proxyUrl = getXConfig(db).proxyUrl;
-      const downloaded = await mapLimit(post.pics, 3, (pic) =>
-        platform === 'twitter'
-          ? localizeImageViaProxy(pic, this.deps.imageCacheDir!, proxyUrl)
-          : localizeImage(pic, this.deps.imageCacheDir!));
-      const ok = downloaded.filter((p): p is string => p != null);
-      if (ok.length > 0) images = ok;
     }
 
     const tpl = templateOverride ?? defaultPostTitle(post);
@@ -394,4 +399,20 @@ export class Pipeline {
       qqTarget || undefined,
     );
   }
+}
+
+/** 一次喂给 vision 模型的配图上限（微博/B站动态最多 9 张，全带） */
+const MAX_VISION_IMAGES = 9;
+
+/** 本地图片 → base64 data URL（LLM provider 拉不到墙内/外的远程图床，只认随请求带过去的字节）；读失败的单张跳过 */
+async function toDataUrls(paths: string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const p of paths.slice(0, MAX_VISION_IMAGES)) {
+    try {
+      const buf = await readFile(p);
+      const mime = p.endsWith('.png') ? 'image/png' : p.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
+      out.push(`data:${mime};base64,${buf.toString('base64')}`);
+    } catch { /* 单张读失败跳过，剩下的照常带 */ }
+  }
+  return out;
 }

@@ -155,3 +155,42 @@ test('非 X 帖开了判定 + 翻译 → 调 LLM 判定但译文被丢弃（判�
   assert.equal(r.pass, false, '判定不受平台影响');
   assert.equal(r.translation, null, '非 X 帖不采纳译文');
 });
+
+// ---- 附图：判定输入要包含全部可用信息（「只推自拍」靠文字判不出来）；无 vision 路由降级纯文本 ----
+
+test('带图且 vision 路由可用 → 请求带 image_url 部件（走 vision 路由）', async () => {
+  let seen: { messages: Array<{ content: unknown }> } | null = null;
+  const r = {
+    hasVision: () => true,
+    completeJson: async (req: { messages: Array<{ content: unknown }> }, parse: (raw: unknown) => unknown) => {
+      seen = req;
+      return parse({ pass: true, reason: '', translation: null });
+    },
+  } as unknown as LlmRouter;
+  const a = new PostAnalyzer(() => r, () => true);
+  const res = await a.analyze(
+    post({ pics: ['https://pbs.twimg.com/media/1.jpg'] }),
+    judgeRule,
+    ['data:image/jpeg;base64,QUJD'],
+  );
+  assert.equal(res.source, 'llm');
+  const content = seen!.messages[1]!.content;
+  assert.ok(Array.isArray(content), '带图时 user 消息应是 ContentPart 数组');
+  const parts = content as Array<{ type: string; image_url?: { url: string } }>;
+  assert.equal(parts[0]!.type, 'text');
+  assert.deepEqual(parts[1], { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,QUJD' } });
+});
+
+test('带图但无可用 vision provider → 降级纯文本（含图请求会在空路由上整路失败）', async () => {
+  let seen: { messages: Array<{ content: unknown }> } | null = null;
+  const r = {
+    hasVision: () => false,
+    completeJson: async (req: { messages: Array<{ content: unknown }> }, parse: (raw: unknown) => unknown) => {
+      seen = req;
+      return parse({ pass: true, reason: '', translation: null });
+    },
+  } as unknown as LlmRouter;
+  const a = new PostAnalyzer(() => r, () => true);
+  await a.analyze(post({ pics: ['https://pbs.twimg.com/media/1.jpg'] }), judgeRule, ['data:image/jpeg;base64,QUJD']);
+  assert.equal(typeof seen!.messages[1]!.content, 'string', '无 vision 路由时不带图');
+});

@@ -8,13 +8,16 @@
  * **翻译只对 X 帖出现**（微博与B站动态本就中文，译文没有意义）——运行时由
  * post-analyzer 按 `platformSupportsTranslate(post.platform)` 门控，非 X 帖根本不会带 translate=true 进来。
  *
+ * 附图：调用方传入已本地化的配图（data URL）时，请求带 image_url 部件、自动走 vision 路由——
+ * 「只推自拍」这类判定标准只看文字判不出来；没传图（或没有可用 vision provider）就是纯文本请求。
+ *
  * 口径由人填（与分类一致的原则）：没开判定时要求模型 pass 恒 true，
  * 没开翻译时要求 translation 恒 null，免得调用方还要猜模型有没有越权替它决定。
  */
 import { z } from 'zod';
 import { platformLabel } from '../../core/post-rules.js';
 import type { PostCandidate } from '../matcher.js';
-import type { LlmRequest } from '../providers.js';
+import type { ContentPart, LlmRequest } from '../providers.js';
 
 export interface PostAnalysisOptions {
   /** 是否要判定「要不要推」 */
@@ -42,19 +45,25 @@ const SYSTEM_PROMPT =
 
 const MAX_TRANSLATION_CHARS = 1200;
 
-export function buildPostAnalysisRequest(post: PostCandidate, opts: PostAnalysisOptions): LlmRequest {
+export function buildPostAnalysisRequest(
+  post: PostCandidate,
+  opts: PostAnalysisOptions,
+  /** 已本地化的配图（data URL）。带上 = 请求含图 → providers 层自动走 vision 路由 */
+  imageUrls?: string[],
+): LlmRequest {
   // 平台决定措辞：对模型说「推文」而给它一条微博/动态，只会白白引入噪声
   const kind = post.platform === 'weibo' ? '微博' : post.platform === 'bili_dynamic' ? '动态' : '推文';
   const author = post.platform === 'twitter'
     ? `@${post.screenName}`
     : (post.displayName ? `${post.displayName}（uid ${post.screenName}）` : `uid ${post.screenName}`);
+  const withImages = (imageUrls?.length ?? 0) > 0;
   const head = [
     `平台：${platformLabel(post.platform)}`,
     `账号：${author}`,
     post.biliName ? `关联主播：${post.biliName}` : '',
     `类型：${post.type === 'retweet' ? '转发' : '原创'}`,
     post.pubTs > 0 ? `发布时间：${new Date(post.pubTs * 1000).toISOString()}` : '',
-    post.pics.length > 0 ? `配图：${post.pics.length} 张` : '',
+    post.pics.length > 0 ? `配图：${post.pics.length} 张${withImages ? '（见下方附图）' : ''}` : '',
   ].filter(Boolean);
 
   const tail = [
@@ -65,15 +74,19 @@ export function buildPostAnalysisRequest(post: PostCandidate, opts: PostAnalysis
     opts.translate
       ? '同时把正文翻译成简体中文（原文已是中文则原样返回），译文放 translation。'
       : '本次不做翻译：translation 一律返回 null。',
+    // 判定输入要包含全部可用信息：「只推自拍」这类标准靠文字判不出来
+    ...(withImages ? ['下方附图就是这条帖子的配图，判定与翻译都要结合图片内容，不要只看文字。'] : []),
   ];
+
+  const text = [...head, '', `${kind}正文：`, post.text || `（无正文，仅图片）`, '', ...tail].join('\n');
+  const content: string | ContentPart[] = withImages
+    ? [{ type: 'text', text }, ...imageUrls!.map((url) => ({ type: 'image_url' as const, image_url: { url } }))]
+    : text;
 
   return {
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: [...head, '', `${kind}正文：`, post.text || `（无正文，仅图片）`, '', ...tail].join('\n'),
-      },
+      { role: 'user', content },
     ],
     jsonSchema: {
       name: 'post_analysis',
