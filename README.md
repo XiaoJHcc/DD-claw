@@ -79,7 +79,7 @@ NapCat 必须先自己跑通一次，DD-claw 才接得上（面板在未跑通�
 1. 装好 QQ NT，解压 NapCat 一键包，**手动运行一次 `launcher.bat <机器人QQ号>`**（自动提权），把机器人 QQ 扫码登录成功。这一步生成 NapCat 自己的配置，不能跳过。
 2. 面板「NapCat」卡片：开启通道，**路径填 `launcher.bat` 所在目录**（注意一键包真实载荷可能在 `napcat\` 子目录），填机器人 QQ 号。
 3. 开「失活自动拉起」（Windows 弹一次 UAC 创建计划任务），或跑 `npm run napcat-setup`，二者等价。
-4. 之后改路径或 QQ 号，要关开一次「失活自动拉起」（或重跑 `npm run napcat-setup`）重建拉起任务——任务里钉死的是创建时的路径。
+4. 之后改路径或 QQ 号：「失活自动拉起」开着时保存会**自动按新配置重建**拉起任务（Windows 会再弹一次 UAC）；关着时下次开启即按新配置创建。
 5. 验证：`npm run test-notify` 用假消息走完整推送链路。
 
 开发期用 `npm run dev`（改动自动重启）。常用验证命令：`npm run probe`（测一次开播状态接口）、`npm run probe-llm`（测 LLM 接入）、`npm run test-notify`（假消息走完整推送链路）。

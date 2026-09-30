@@ -14,7 +14,7 @@ import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
 import {
   NapcatWatchdog, readOnebotEndpoint, probeNapCat, getNapcatConfig, saveNapcatConfig,
-  effectiveNapcatDir,
+  effectiveNapcatDir, defaultNapcatDir,
   ensureNapcatEntry,
   napcatRelaunchDriver, isNapcatTaskRegistered, setupNapcatTask, launchNapcatViaTask, NAPCAT_TASK_NAME,
 } from './notify/napcat.js';
@@ -785,14 +785,29 @@ async function main(): Promise<void> {
         }),
         save: async (patch) => {
           const prev = getNapcatConfig(db);
+          const prevDir = effectiveNapcatDir(db);
+          // 合并 patch 后的生效值（patch.dir='' = 清空回落默认）。计划任务里钉死的是
+          // 建任务那一刻的路径/QQ，所以下面两处「建/重建」都必须用合并值，
+          // 不能读落库前的 settings（否则同一笔保存里改 dir + 开开关会钉旧路径）
+          const nextDir = patch.dir !== undefined ? (patch.dir || defaultNapcatDir()) : prevDir;
+          const nextUin = patch.uin !== undefined ? patch.uin : prev.uin;
           // 「失活自动拉起」开关：开启先建拉起能力（Windows 弹 UAC，macOS no-op），
           // 失败不落开关；关闭先落开关再彻底移除拉起任务。
           if (patch.autorestart === true && prev.autorestart !== true) {
-            const dir = effectiveNapcatDir(db);
-            const uin = patch.uin !== undefined && patch.uin !== '' ? patch.uin : prev.uin;
-            if (!dir || !/^\d+$/.test(uin)) throw new Error('先填好路径与机器人 QQ 号再开启自动拉起');
-            if (!napcatConfigReady(dir)) throw new Error(napcatNotReadyMessage(napcatDriver.platform) + '，再开启自动拉起');
-            await napcatDriver.setup(dir, uin, join(projectRoot, 'data'));
+            if (!nextDir || !/^\d+$/.test(nextUin)) throw new Error('先填好路径与机器人 QQ 号再开启自动拉起');
+            if (!napcatConfigReady(nextDir)) throw new Error(napcatNotReadyMessage(napcatDriver.platform) + '，再开启自动拉起');
+            await napcatDriver.setup(nextDir, nextUin, join(projectRoot, 'data'));
+          } else if (prev.autorestart && patch.autorestart !== false
+            && (nextDir !== prevDir || nextUin !== prev.uin)) {
+            // 自动拉起已开时改路径/QQ：自动重建拉起任务（Windows 再弹一次 UAC），
+            // 否则任务仍钉旧路径（失活拉起静默失败的来源）。新值不完整（清空中）
+            // 则不重建，任务留旧配置，补全后再次保存时再触发
+            if (nextDir && /^\d+$/.test(nextUin)) {
+              await napcatDriver.setup(nextDir, nextUin, join(projectRoot, 'data'));
+              log.info(`NapCat 路径/QQ 已变更，拉起任务已按新配置重建（${nextDir}，${nextUin}）`);
+            } else {
+              log.warn('NapCat 路径/QQ 变更后不完整，拉起任务保留旧配置（补全后再次保存会重建）');
+            }
           }
           saveNapcatConfig(db, patch);
           if (patch.autorestart === false && prev.autorestart !== false) {

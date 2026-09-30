@@ -85,7 +85,7 @@ posts 表的行类型与「行 ↔ 对象」映射（pics JSON 序列化集中�
 CLI：`--dry-run` / `--test-notify` / `--probe` / `--probe-llm` / `--force-uid` / `--napcat-setup`（一次性创建 NapCat 最高权限计划任务，弹一次 UAC，做完即退出）。
 
 - onebot 端点只读跟随 NapCat 自己的 onebot11 配置（dd-claw 专属条目；发现失败 = **降级不装配 QQ 通道**，log 说明、不阻塞启动——没配 QQ 是正常状态）。
-- `reconcileNapcat` 统一看门狗启停（生效配置 enabled && onebot 已装配，双平台；`napcatRelaunchDriver` 按 platform 装配拉起能力、`autoRestart` 每 tick 读 settings 热生效；面板保存后重装配 + 立即 tick，dir/uin 热生效）。装配无通道级开关，通道启停走 `push_channels`。
+- `reconcileNapcat` 统一看门狗启停（生效配置 enabled && onebot 已装配，双平台；`napcatRelaunchDriver` 按 platform 装配拉起能力、`autoRestart` 每 tick 读 settings 热生效；面板保存后重装配 + 立即 tick，dir/uin 热生效，**自动拉起开着时 dir/uin 变更自动重建拉起任务**——任务钉死建任务时的路径/QQ）。装配无通道级开关，通道启停走 `push_channels`。
 - **`eff = withRuntimeConfig(defaultAppConfig, settings)` 生效配置**：sources 的 `ctx.config` / llm router 重建全消费它；`reconcileRuntime`（`/api/advanced` 保存回调）间隔/阈值变化重启对应源、LLM 超时熔断变化重建 router。
 - follows 有 cookie 即跑（无开关）；dynamic/weibo 由 `reconcileListen` 按面板监听开关 + cookie 启停；`panel.enabled` 时起控制面板。
 - follows / dynamic / weibo 三 source 单独持有（有各自 cookie 才创建，扫码登录后 `onCookiesSaved` 热重启；shutdown 停最新实例）。live-status source 单独持有 `liveSrc`（轮询参数热更新时 stop + 新建 + start，restore 从库恢复状态不丢轨迹）；`KeyframeCache` 总是创建（dir = `data/cache/keyframes/`），开关/间隔走 `configure` 热更新、实例跨 liveSrc 重启复用；`snapshots: {dir}` 注入面板 `/api/snapshot`。`onLoginState` → 面板平台状态。

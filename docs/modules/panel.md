@@ -33,7 +33,7 @@
 | PUT /api/llm/providers/order | 整体重排，names 必须是现有名单的排列（长度一致/无重复/无增删） |
 | POST /api/llm/providers/:name/test | 可用性 ping：404 不存在 / 400 缺 key / 200 {ok,ms} / 502 端点错误；错误信息不含 key |
 | PUT /api/llm/enabled | LLM 总开关（settings.llm_enabled，缺省关） |
-| GET/PUT /api/napcat · POST /api/napcat/launch | NapCat 通道；GET 回生效配置（含 autorestart）+ 端点 + 实时三态探测 + taskRegistered + configReady（`<dir>/config` 存在 = NapCat 自己跑通过；false 时前端禁用「失活自动拉起」并把原因写进副行）；PUT 校验（布尔/纯数字，**空串 = 清空字段，settings 唯一信源无回落**）后 await save——autorestart 开 = 建拉起任务（失败 400 透传、不落开关；configReady=false 同样 400 拒绝）、关 = 移除任务；launch 失败 400 透传原因（含未跑通指引，前端 toast 即指引） |
+| GET/PUT /api/napcat · POST /api/napcat/launch | NapCat 通道；GET 回生效配置（含 autorestart）+ 端点 + 实时三态探测 + taskRegistered + configReady（`<dir>/config` 存在 = NapCat 自己跑通过；false 时前端禁用「失活自动拉起」并把原因写进副行）；PUT 校验（布尔/纯数字，**空串 = 清空字段，settings 唯一信源无回落**）后 await save——autorestart 开 = 建拉起任务（失败 400 透传、不落开关；configReady=false 同样 400 拒绝）、关 = 移除任务、**开着时改 dir/uin 自动按新配置重建任务**（失败 400 不落库）；launch 失败 400 透传原因（含未跑通指引，前端 toast 即指引） |
 | /mcp | MCP 端点（Bearer token 鉴权 + 按角色注册工具面），实现委托 src/mcp/ |
 | GET/PUT /api/x · POST /api/x/test | X 连接配置与探测（GET **只读快照、绝不打网络**；POST 测试允许未保存的输入值「先测后存」，只有测已保存配置才更新快照；配置变了相关旧结论作废） |
 | /api/x/accounts · /:id | X 独立名单 CRUD；新建时走免登录存在性校验（账号不存在 400 / 链路不通照收并回报 `verify`），**POST 后经 `kickAccount` 即时首拉**（不等周期、不在全量轮里排队）；`biliUid` 必须在监听名单；`ruleIds` 选用图文帖规则（规则存在即可，规则平台无关） |
