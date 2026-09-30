@@ -228,8 +228,12 @@ export interface PanelDeps {
       uin?: string;
       alertQq?: string;
     }) => Promise<void>;
-    /** 实时状态：发现的端点 + 三态探测 + 拉起能力是否就绪 */
-    state: () => Promise<{ endpoint: string | null; probe: ProbeResult | null; taskRegistered: boolean }>;
+    /**
+     * 实时状态：发现的端点 + 三态探测 + 拉起能力是否就绪。
+     * configReady = NapCat 自己是否跑通过（<dir>/config 存在 = 至少成功启动过一次；
+     * false 时前端禁用拉起/自动拉起并提示先手动跑通，不承诺做不到的事）
+     */
+    state: () => Promise<{ endpoint: string | null; probe: ProbeResult | null; taskRegistered: boolean; configReady: boolean }>;
     /** 手动拉起（双平台）；失败抛中文错 */
     launch: () => Promise<void>;
   };

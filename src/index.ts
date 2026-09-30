@@ -1,4 +1,5 @@
 import { loadConfig, ConfigError, projectRoot } from './config/index.js';
+import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { makeLogger } from './logger.js';
 import { Db } from './core/db.js';
@@ -349,6 +350,15 @@ async function main(): Promise<void> {
     postAnalyzer: new PostAnalyzer(() => llmDep.router ?? null, () => isLlmEnabled(db)),
   });
   pipeline.attach();
+
+  // NapCat 是否自己跑通过：<dir>/config 存在 = 至少成功启动过一次（onebot11/webui 配置
+  // 由 NapCat 自己生成，DD-claw 只读改）。没跑通时拉起是空头支票（QQ 从未登录，快速登录
+  // 无从谈起），自动拉起与手动拉起都在此闸住并给出指引
+  const napcatConfigReady = (dir: string): boolean => dir !== '' && existsSync(join(dir, 'config'));
+  const napcatNotReadyMessage = (platform: NodeJS.Platform): string =>
+    platform === 'win32'
+      ? 'NapCat 尚未跑通：先在该目录手动运行一次 launcher.bat 并登录 QQ'
+      : 'NapCat 尚未跑通：先打开一次 QQ 并登录';
 
   // NapCat 看门狗：双平台运行（Windows 计划任务 / macOS open QQ）。生效配置
   // （settings 唯一信源）「使用 NapCat 通道」开时周期探测（60s）；「失活自动拉起」
@@ -781,6 +791,7 @@ async function main(): Promise<void> {
             const dir = effectiveNapcatDir(db);
             const uin = patch.uin !== undefined && patch.uin !== '' ? patch.uin : prev.uin;
             if (!dir || !/^\d+$/.test(uin)) throw new Error('先填好路径与机器人 QQ 号再开启自动拉起');
+            if (!napcatConfigReady(dir)) throw new Error(napcatNotReadyMessage(napcatDriver.platform) + '，再开启自动拉起');
             await napcatDriver.setup(dir, uin, join(projectRoot, 'data'));
           }
           saveNapcatConfig(db, patch);
@@ -800,12 +811,13 @@ async function main(): Promise<void> {
             ep ? probeNapCat(ep) : Promise.resolve(null),
             napcatDriver.available(),
           ]);
-          return { endpoint: ep?.baseUrl ?? null, probe: probeResult, taskRegistered };
+          return { endpoint: ep?.baseUrl ?? null, probe: probeResult, taskRegistered, configReady: napcatConfigReady(dir) };
         },
         launch: async () => {
           const nc = getNapcatConfig(db);
           const dir = effectiveNapcatDir(db);
           if (!dir || !nc.uin) throw new Error('先填好路径与机器人 QQ 号');
+          if (!napcatConfigReady(dir)) throw new Error(napcatNotReadyMessage(napcatDriver.platform));
           const ep = await ensureNapcatEntry(dir, nc.uin);
           if (ep) onebotNotifier?.updateEndpoint(ep.baseUrl, ep.token);
           // Windows：旧实例可能还在旧配置上跑（高权限进程只能经任务杀），先停再拉起；

@@ -5,6 +5,9 @@
 // 编辑走 sheet（留空 = 清空该字段，settings 表是唯一信源，无 config 回落）。
 // 「失活自动拉起」= 独立开关：开启时建拉起任务（Windows 弹一次 UAC，macOS 无任务
 // 直接 open QQ），关闭时彻底移除任务。状态每 30s 重取（GET 是一次真实探测）。
+// 配置不当守卫（configReady = NapCat 自己跑通过）：未填路径/QQ、NapCat 未跑通时
+// 禁用「失活自动拉起」，原因与做法直接写进可见副行（不用 hover 浮窗）；
+// 「手动拉起」始终可点——不行时服务端 400 透传中文原因 toast 出来。
 import { api, toast, ACTIONS, CHANGES, esc, field, openSheet, closeSheet, switchHtml } from './core.js';
 import { icon } from './icons.js';
 
@@ -25,7 +28,13 @@ function napcatStateHtml(j) {
 function loadNapcat() {
   return api('/api/napcat').then(function (j) {
     ncCache = j;
+    const isWin = j.platform === 'win32';
     const hasUin = !!j.uin;
+    const hasDir = !!j.dir; // macOS 未显式设置时回落自动检测路径，dir 恒非空
+    const configReady = !!j.configReady;
+    const runOnceSub = isWin
+      ? '先跑通 NapCat：手动运行一次 launcher.bat 登录 QQ'
+      : '先跑通 NapCat：打开一次 QQ 并登录';
     const ncSwitch = document.getElementById('napcat-enabled');
     // 没填机器人 QQ 号 = 无法装配 onebot（端点配置文件名含 uin），开关禁用并显示关闭
     ncSwitch.checked = hasUin && !!j.enabled;
@@ -43,19 +52,35 @@ function loadNapcat() {
         `<span class="row-sub"${tip ? ` title="${esc(tip)}"` : ''}>${esc(val)}</span></span>` +
         `<span class="row-end"><span class="row-afford">${icon('chevron')}</span></span></div>`;
     };
+    // 状态行副行：有端点显示端点（title 供截断时看全）；没端点时这一格空转，
+    // 直接拿来放「怎么办」指引——没填路径 → 填什么；填了 → 先跑通 NapCat
+    const stSub = j.endpoint || (!hasDir && isWin
+      ? '先在「路径」填 NapCat 目录（launcher.bat 所在目录）'
+      : runOnceSub);
+    // 自动拉起行：配置不全 / NapCat 未跑通时禁用，原因与做法直接写进副行
+    let arSub, arDisabled = false;
+    if (!hasUin || (isWin && !hasDir)) {
+      arSub = '先填路径与机器人 QQ'; arDisabled = true;
+    } else if (!configReady) {
+      arSub = '未跑通 · ' + (isWin ? '先手动跑一次 launcher.bat' : '先打开一次 QQ 登录'); arDisabled = true;
+    } else {
+      arSub = j.taskRegistered ? '拉起任务已就绪'
+        : (isWin ? '未就绪 · 开启将创建任务（弹一次 UAC）' : '未就绪 · 未找到 QQ.app');
+    }
     document.getElementById('napcat-rows').innerHTML =
       `<div class="row row-2"><span class="dot ${st.cls}"></span>` +
       `<span class="row-main"><span class="row-line"><span class="row-title">${st.text}</span></span>` +
-      `<span class="row-sub" title="${esc(j.endpoint || '')}">${esc(j.endpoint || '未发现端点')}</span></span></div>` +
+      `<span class="row-sub"${j.endpoint ? ` title="${esc(j.endpoint)}"` : ''}>${esc(stSub)}</span></span></div>` +
       cfgRow('路径', dirText, j.dir || '') +
       cfgRow('机器人 QQ', j.uin || '未设置') +
       cfgRow('超时失败告警 QQ 号', j.alertQq || '不告警') +
       '<div class="row row-2"><span class="row-main"><span class="row-line">' +
       '<span class="row-title">失活自动拉起</span></span>' +
-      `<span class="row-sub">${j.taskRegistered ? '拉起任务已就绪' : '拉起任务未就绪'}</span></span>` +
+      `<span class="row-sub">${arSub}</span></span>` +
       '<span class="row-end">' +
-      switchHtml('id="napcat-autorestart" data-change="toggle-napcat-autorestart"', ar, !hasUin) +
+      switchHtml('id="napcat-autorestart" data-change="toggle-napcat-autorestart"', ar, arDisabled) +
       '</span></div>';
+    // 「手动拉起」始终可点：不行时服务端 400 透传中文原因，toast 出来即指引
   }).catch(function (e) { toast(e.message, true); });
 }
 

@@ -90,14 +90,15 @@ export const mockAdvanced = {
 export const mockNapcat = {
   enabled: true,
   autorestart: false,
-  dir: '',
+  dir: 'D:/CLI/NapCat.Shell',
   uin: '10001',
   alertQq: '10001',
   platform: 'win32',
-  source: { enabled: 'panel', autorestart: 'panel', dir: 'default', uin: 'panel' },
+  source: { enabled: 'panel', autorestart: 'panel', dir: 'panel', uin: 'panel' },
   endpoint: 'http://127.0.0.1:41990',
   probe: { state: 'ok', loggedIn: true },
   taskRegistered: true,
+  configReady: true,
 };
 
 // ---- 系统状态骨架（startedAt/watchedCount/liveCount 由 mock-api 在冻结时间后计算）----

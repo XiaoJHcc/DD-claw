@@ -1324,6 +1324,7 @@ function fakeNapcatDep(): NonNullable<PanelDeps['napcat']> & { saved: Array<Reco
       endpoint: 'http://127.0.0.1:3000',
       probe: { state: 'ok', loggedIn: true },
       taskRegistered: true,
+      configReady: true,
     }),
     launch: async () => {},
   };
@@ -1346,6 +1347,7 @@ test('GET /api/napcat：生效配置 + source + 状态；无 dep 404', async (t)
     endpoint: 'http://127.0.0.1:3000',
     probe: { state: 'ok', loggedIn: true },
     taskRegistered: true,
+    configReady: true,
   });
 });
 
