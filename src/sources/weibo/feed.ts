@@ -11,7 +11,9 @@
  * 反查（面板 enrich 走 `db.listRecentPostsMixed`），所以主播卡第三栏混排行为不变。
  *
  * 失败纪律：HTTP 错 / 响应结构异常（跳登录页）→ 跳过本轮保留旧数据；
- * 单账号连续失败到阈值发一次 health_alert，持续失败超阈值再报一次，恢复复位。
+ * 故障分两级（2026-11 重构）：登录态失效 = 链路级（login_drop 立即告警）；
+ * 一轮全灭（非登录态：整 IP 风控等）= 链路级聚合告警一条；
+ * 个别账号失败 = 账号级（长期问题不推送，持续满阈值落库 fetch_fail_* 给面板账号卡展示）。
  * cookie 值绝不进日志。
  */
 import { makeLogger } from '../../logger.js';
@@ -234,16 +236,19 @@ export class WeiboFeedSource implements Source {
   private status: WeiboFeedSnapshot = emptyWeiboFeedSnapshot();
   /** 已成功跑过一轮的账号 uid（本实例内不再算缺口轮；语义见 core/backlog.ts） */
   private polled = new Set<string>();
+  /** 账号级失败计数（内存）；持续满阈值才落库 fetch_fail_*，恢复清位 */
   private failures = new Map<string, number>();
-  private uidAlerted = new Set<string>();
-  /** 各 uid 本轮连续失败的起点（秒）。用于「持续失败超阈值再报一次」 */
+  /** 各 uid 本轮连续失败的起点（秒）；账号级故障落库时作 since */
   private firstFailTs = new Map<string, number>();
-  /** 持续失败告警（durationAlert）每 uid 每轮故障只发一次，恢复后复位 */
-  private durationAlerted = new Set<string>();
   /** 同一轮登录失效只告警一次，恢复后才复位（同 FollowsSource） */
   private loginAlerted = false;
   /** 本进程内是否成功登录过：没成功过 = 本来就没登录，只记日志不告警 */
   private hadOkLogin = false;
+  // ---- 链路级状态（一轮全灭才算链路故障；聚合告警，不逐账号发）----
+  private linkFailRounds = 0;
+  private linkFirstFailTs = 0;
+  private linkAlerted = false;
+  private linkDurationAlerted = false;
 
   private readonly cookie: string;
   private readonly fetcher: MblogFetcher;
@@ -345,17 +350,38 @@ export class WeiboFeedSource implements Source {
 
     let ok = 0;
     let lastError: string | null = null;
+    /** 本轮失败的账号（链路正常时才按账号级故障落库，全灭轮不标——那不是账号的问题） */
+    const roundFailures: { account: WeiboAccount; error: string }[] = [];
     await mapLimit(accounts, 2, async (a) => {
       const r = await this.pollAccount(a);
       if (r.ok) ok++;
-      if (r.error) lastError = r.error;
+      else {
+        if (r.error) roundFailures.push({ account: a, error: r.error });
+        if (r.error) lastError = `${a.uid}: ${r.error}`;
+      }
     });
+
+    // 故障分两级：全灭 = 链路级（整 IP 风控等，聚合告警一条）；有人成功下的个别失败
+    // = 账号级（长期问题不推送，持续满阈值落库，面板账号卡展示）
+    if (ok === 0) {
+      this.onLinkFailure(lastError);
+    } else {
+      this.onLinkSuccess();
+      // 链路正常下的个别失败 = 账号级故障：持续满阈值落库给面板账号卡展示（不推送）
+      const toastSec = ctx.config.healthAlertToastAfterSec;
+      for (const f of roundFailures) {
+        const since = this.firstFailTs.get(f.account.uid);
+        if (since !== undefined && nowSec - since >= toastSec) {
+          ctx.db.touchWeiboAccount(f.account.id, { fetchFail: { since, error: f.error } });
+        }
+      }
+    }
     this.patchStatus({
       lastRunAt: nowSec,
       accounts: accounts.length,
       okAccounts: ok,
       lastOkAt: ok > 0 ? nowSec : this.status.lastOkAt,
-      lastError,
+      lastError: ok > 0 ? null : lastError,
     });
   }
 
@@ -381,8 +407,8 @@ export class WeiboFeedSource implements Source {
       // 关键：拉取失败绝不当成「没微博」—— 保留旧数据，什么都不写
       const msg = e instanceof Error ? e.message : String(e);
       log.error(`微博时间线拉取失败（微博 ${weiboUid}），保留旧数据：${msg}`);
-      this.onFailure(weiboUid, msg);
-      return { ok: false, error: `微博 ${weiboUid}: ${msg}` };
+      this.onFailure(weiboUid);
+      return { ok: false, error: msg };
     }
     this.onSuccess(weiboUid);
 
@@ -416,6 +442,8 @@ export class WeiboFeedSource implements Source {
       ...(nicknameOf(items[0]) ? { nickname: nicknameOf(items[0]) } : {}),
       // 恢复位消费：本轮按 resume 轮静默处理过了，顺手清位
       ...(account.silentNext ? { silentNext: false } : {}),
+      // 账号级故障恢复：清面板上的失败标记
+      ...(account.fetchError !== null ? { fetchFail: null } : {}),
     });
 
     // 轮次语义（core/backlog.ts）：resume=主动关闭恢复，一律静默；gap=本实例首轮
@@ -471,42 +499,61 @@ export class WeiboFeedSource implements Source {
     const n = this.failures.get(uid) ?? 0;
     if (n > 0) log.info(`微博 ${uid} 时间线拉取恢复正常（此前连续失败 ${n} 次）`);
     this.failures.delete(uid);
-    this.uidAlerted.delete(uid);
     this.firstFailTs.delete(uid);
-    this.durationAlerted.delete(uid);
   }
 
-  private onFailure(uid: string, err: string): void {
+  private onFailure(uid: string): void {
     const nowSec = Math.floor(Date.now() / 1000);
     const n = (this.failures.get(uid) ?? 0) + 1;
     if (n === 1) this.firstFailTs.set(uid, nowSec);
     this.failures.set(uid, n);
-    const durationSec = nowSec - (this.firstFailTs.get(uid) ?? nowSec);
-    const threshold = this.ctx!.config.healthAlertAfterFailures;
-    if (n >= threshold && !this.uidAlerted.has(uid)) {
-      this.uidAlerted.add(uid); // 同一轮故障只告警一次，恢复后才复位
-      this.emitUidAlert(uid, n, durationSec, err, false);
+    // 落库不在这里做：账号级故障的判定要等 pollOnce 聚合出「链路正常」才成立，
+    // 全灭轮里所有账号都在失败，标账号故障是冤枉它们（见 pollOnce 末尾）
+  }
+
+  // ---- 链路级失败：一轮全灭才算（非登录态原因，多为整 IP 风控）；聚合告警一条 ----
+
+  private onLinkSuccess(): void {
+    if (this.linkFailRounds > 0) {
+      log.info(`微博链路抓取恢复正常（此前连续全灭 ${this.linkFailRounds} 轮）`);
     }
-    // 持续失败超阈值再报一次（网络波动通常几分钟内恢复）——pipeline 据此路由到告警 QQ
-    if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.durationAlerted.has(uid)) {
-      this.durationAlerted.add(uid);
-      this.emitUidAlert(uid, n, durationSec, err, true);
+    this.linkFailRounds = 0;
+    this.linkFirstFailTs = 0;
+    this.linkAlerted = false;
+    this.linkDurationAlerted = false;
+  }
+
+  private onLinkFailure(err: string | null): void {
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (this.linkFailRounds === 0) this.linkFirstFailTs = nowSec;
+    this.linkFailRounds++;
+    const durationSec = nowSec - this.linkFirstFailTs;
+    // 两级告警都是时间口径：持续满 healthAlertToastAfterSec → 本机 toast；
+    // 满 STREAK_QQ_ALERT_AFTER_SEC → 告警 QQ（pipeline 按 durationAlert 路由）
+    if (durationSec >= this.ctx!.config.healthAlertToastAfterSec && !this.linkAlerted) {
+      this.linkAlerted = true; // 同一轮故障只告警一次，恢复后才复位
+      this.emitLinkAlert(durationSec, err, false);
+    }
+    if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.linkDurationAlerted) {
+      this.linkDurationAlerted = true;
+      this.emitLinkAlert(durationSec, err, true);
     }
   }
 
-  private emitUidAlert(uid: string, failures: number, durationSec: number, err: string, durationAlert: boolean): void {
+  private emitLinkAlert(durationSec: number, err: string | null, durationAlert: boolean): void {
+    const message =
+      `微博抓取已中断约 ${Math.max(1, Math.round(durationSec / 60))} 分钟：${err ?? '未知原因'}。` +
+      '自动重试中，恢复后自动继续。';
     this.ctx!.bus.emit({
       source: this.name,
       kind: 'health_alert',
-      uid,
+      uid: '',
       roomId: '',
       ts: Math.floor(Date.now() / 1000),
       payload: {
         alertKind: 'streak',
-        message: `微博时间线拉取连续失败 ${failures} 次（微博 ${uid}），该账号本轮已暂停。\n` +
-          '多为登录态失效或被风控，恢复后自动继续。' +
-          (durationAlert ? `\n已持续失败约 ${Math.round(durationSec / 60)} 分钟。` : ''),
-        failures,
+        message,
+        failures: this.linkFailRounds,
         lastError: err,
         ...(durationAlert ? { durationAlert: true } : {}),
       },

@@ -16,7 +16,7 @@ function cfg(): AppConfig {
   return {
     pollIntervalSec: 45, pollJitterSec: 0,
     notifyOnFirstRun: false, notifyOnNewSubscription: true,
-    healthAlertAfterFailures: 2,
+    healthAlertToastAfterSec: 60,
     follows: { enabled: true, syncIntervalSec: 1800 },
     dynamic: { enabled: true, intervalSec: 300 },
     subscriptions: [],
@@ -251,6 +251,7 @@ test('多个监听 uid：各 uid 首轮各自静默', async (t) => {
 });
 
 test('412 HTML（非 JSON）/ -352 / 网络异常：本轮跳过、旧数据不动、失败计数与告警', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
   let failWith: (() => Error) | null = null;
   const h = harness(async () => {
     if (failWith) throw failWith();
@@ -274,46 +275,73 @@ test('412 HTML（非 JSON）/ -352 / 网络异常：本轮跳过、旧数据不�
     await h.src.pollOnce(); // 成功一轮复位计数，隔离下一个用例
   }
 
-  // threshold=2：连挂 2 次 → 恰好 1 个 health_alert；第 3 次不重复告警
+  // 时间口径：持续满 60s → 恰好 1 个 health_alert；继续失败不重复告警
   failWith = () => new BiliHttpError('响应不是合法 JSON（可能是风控页面）', 412);
   await h.src.pollOnce();
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '第 1 次失败未达阈值');
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '刚失败（持续 0 秒）未达阈值');
+  t.mock.timers.setTime(Date.now() + 61_000);
   await h.src.pollOnce();
   const alerts = h.signals.filter((s) => s.kind === 'health_alert');
-  assert.equal(alerts.length, 1, '到阈值告警一次');
+  assert.equal(alerts.length, 1, '持续满阈值告警一次');
   assert.equal(alerts[0]!.source, 'bili/dynamic');
+  t.mock.timers.setTime(Date.now() + 61_000);
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '同一轮故障不重复告警');
 
-  // 恢复复位：成功后再次连挂会重新告警
+  // 恢复复位：成功后再次持续失败会重新告警
   failWith = null;
   await h.src.pollOnce();
   failWith = () => new BiliApiError(-352, '风控校验失败');
   await h.src.pollOnce();
+  t.mock.timers.setTime(Date.now() + 61_000);
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 2, '恢复后故障重新告警');
 });
 
-test('单 uid 连续失败持续满 10 分钟再发 durationAlert 告警（QQ 路由依据）', async (t) => {
+test('链路全灭持续满 10 分钟再发 durationAlert 告警（QQ 路由依据）', async (t) => {
   t.mock.timers.enable({ apis: ['Date'] });
   const h = harness(async () => { throw new BiliApiError(-352, '风控'); });
   t.after(h.cleanup);
 
   const isDur = (s: Signal) => (s.payload as { durationAlert?: boolean } | undefined)?.durationAlert === true;
 
-  await h.src.pollOnce(); // 第 1 次失败，计起点
+  await h.src.pollOnce(); // 第 1 轮全灭，计起点
   t.mock.timers.setTime(Date.now() + 61_000);
-  await h.src.pollOnce(); // 达次数阈值（2），只持续 1 分钟
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '次数阈值告警');
+  await h.src.pollOnce(); // 持续 1 分钟：满 toast 阈值（60s），未到 QQ 线
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, 'toast 阈值告警');
   assert.equal(h.signals.filter(isDur).length, 0, '未到 10 分钟不发持续告警');
 
   t.mock.timers.setTime(Date.now() + 600_000);
   await h.src.pollOnce();
   const dur = h.signals.filter(isDur);
   assert.equal(dur.length, 1, '持续满 10 分钟应再报一次');
-  assert.match((dur[0]!.payload as { message: string }).message, /已持续失败约 11 分钟/);
+  assert.match((dur[0]!.payload as { message: string }).message, /已中断约 11 分钟/);
   await h.src.pollOnce();
   assert.equal(h.signals.filter(isDur).length, 1, '持续告警同轮故障不重复');
+});
+
+test('个别 uid 失败（链路正常）：不推送告警，名单账号持续满阈值落库 fetch_fail_*，恢复清库', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  let fail = true;
+  const h = harness(async (_c, uid) => {
+    if (uid === '2' && fail) throw new BiliApiError(-352, '风控校验失败');
+    return [DRAW];
+  }, ['1'], undefined, { biliAccounts: [{ uid: '2' }] });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce(); // uid2 首次失败，持续 0 秒未达阈值
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '账号级故障不告警');
+  assert.equal(h.db.getBiliAccountByUid('2')!.fetchError, null, '未达阈值不落库');
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await h.src.pollOnce(); // 持续满 60s → 落库
+  const acc = h.db.getBiliAccountByUid('2')!;
+  assert.match(acc.fetchError ?? '', /风控校验失败/);
+  assert.ok(acc.fetchFailSince !== null);
+
+  fail = false;
+  await h.src.pollOnce(); // 恢复 → 清库
+  assert.equal(h.db.getBiliAccountByUid('2')!.fetchError, null);
+  assert.equal(h.db.getBiliAccountByUid('2')!.fetchFailSince, null);
 });
 
 test('单 uid 失败不影响其他 uid 本轮归档', async (t) => {

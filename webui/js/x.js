@@ -121,8 +121,10 @@ function renderXStatus() {
   const sw = document.getElementById('x-listen-enabled');
   if (sw) sw.checked = !!(row && row.enabled);
   const [dot, sub] = connState();
-  // 诊断行只在出问题时出现：轮询最近报错说原因（代理未配置已由连接行说明）
-  const diag = feed.lastError ? '最近错误：' + feed.lastError : '';
+  // 诊断行只在出问题时出现：链路中断中说明在自动重试（canary 退避），其余显示最近错误
+  const diag = feed.linkDown
+    ? '链路中断，自动重试中：' + (feed.lastError || '全部账号拉取失败')
+    : feed.lastError ? '最近错误：' + feed.lastError : '';
   box.innerHTML = rowHtml('<span class="dot ' + dot + '"></span>', '连接', sub) +
     (diag ? rowHtml('<span class="dot bad"></span>', '监听', diag) : '');
 }
@@ -479,6 +481,13 @@ function rulesBlockHtml(a) {
 }
 
 // ---- X 账号卡：身份段（头像 + 显示名/昵称 + @ID）+ 规则摘要 + 推文段 ----
+// 账号级抓取故障标记：源连续失败达阈值落库 fetchError（长期问题不推送，只在这里显示）；
+// 红字 + 悬停看完整原因，抓取恢复后源自动清库、标记消失
+function failTagHtml(a) {
+  if (!a.fetchError) return '';
+  return `<small class="x-fail" title="${esc(a.fetchError)}">抓取失败${a.fetchFailSince ? ' · 始于 ' + relTime(a.fetchFailSince) : ''}</small>`;
+}
+
 function xCardHtml(a) {
   const name = a.displayName || a.nickname || a.screenName;
   // 头像链：X 链路抓到的本地缓存 → 关联主播的 B站头像 → 首字占位圆（avatarHtml 加载失败也兜底成占位圆）
@@ -495,7 +504,7 @@ function xCardHtml(a) {
       <div class="x-id-row">
         <div class="st-id">
           ${avatarHtml(face, name)}
-          <div class="nm"><span class="x-plat-row"><span class="x-plat x-plat-x">X</span></span><b>${esc(name)}</b><small>${esc(meta)}</small></div>
+          <div class="nm"><span class="x-plat-row"><span class="x-plat x-plat-x">X</span></span><b>${esc(name)}</b><small>${esc(meta)}</small>${failTagHtml(a)}</div>
         </div>
         ${switchHtml('data-change="toggle-x-account" title="抓取该账号的新推文"', a.enabled)}
       </div>
@@ -526,7 +535,7 @@ function weiboCardHtml(a) {
       <div class="x-id-row">
         <div class="st-id">
           ${avatarHtml(face, name)}
-          <div class="nm"><span class="x-plat-row"><span class="x-plat x-plat-weibo">微博</span></span><b>${esc(name)}</b><small>${esc(meta)}</small></div>
+          <div class="nm"><span class="x-plat-row"><span class="x-plat x-plat-weibo">微博</span></span><b>${esc(name)}</b><small>${esc(meta)}</small>${failTagHtml(a)}</div>
         </div>
         ${switchHtml('data-change="toggle-weibo-account" title="抓取该账号的新微博"', a.enabled)}
       </div>
@@ -554,7 +563,7 @@ function biliCardHtml(a) {
       <div class="x-id-row">
         <div class="st-id">
           ${avatarHtml(face, name)}
-          <div class="nm"><span class="x-plat-row"><span class="x-plat x-plat-bili">B站</span></span><b>${esc(name)}</b><small>${esc(meta)}</small></div>
+          <div class="nm"><span class="x-plat-row"><span class="x-plat x-plat-bili">B站</span></span><b>${esc(name)}</b><small>${esc(meta)}</small>${failTagHtml(a)}</div>
         </div>
         ${switchHtml('data-change="toggle-bili-account" title="抓取该账号的新动态"', a.enabled)}
       </div>

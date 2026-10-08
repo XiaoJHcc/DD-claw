@@ -83,11 +83,17 @@ store.x.status.web.checkedAt = nowSec;
 store.x.status.updatedAt = nowSec;
 store.x.status.feed.lastRunAt = nowSec - 120;
 store.x.status.feed.lastOkAt = nowSec - 120;
+store.x.status.feed.linkDown = false;
 for (const a of store.xAccounts) {
   if (a.lastTweetAt) a.lastTweetAt = nowSec - 4200;
   if (a.lastOkAt) a.lastOkAt = nowSec - 120;
   a.createdAt = nowSec;
   a.updatedAt = nowSec;
+}
+// 账号级抓取故障样例（长期问题不推送，只上账号卡）：第一个 X 账号标一个「账号不存在」
+if (store.xAccounts[0]) {
+  store.xAccounts[0].fetchFailSince = nowSec - 3600 * 26;
+  store.xAccounts[0].fetchError = 'x.com 返回 404（账号不存在或已改名）';
 }
 // 微博快照与名单同样用冻结时刻（卡片显示「微博 x 小时前」；快照本身面板不展示，保留以免与后端契约分叉）
 store.weibo.status.feed.lastRunAt = nowSec - 90;
@@ -362,7 +368,8 @@ for (const p of store.twitterPosts) {
       displayName: b.displayName ? String(b.displayName) : null,
       biliUid: b.biliUid ? String(b.biliUid) : null, enabled: b.enabled !== false,
       ruleIds: (b.ruleIds || []).map(Number),
-      lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null, createdAt: nowSec, updatedAt: nowSec,
+      lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null,
+      fetchFailSince: null, fetchError: null, createdAt: nowSec, updatedAt: nowSec,
     };
     store.xAccounts.push(row);
     return ok({ account: xAccountView(row), verify: { checked: true, ok: true, kind: 'ok', name: demoNames[screenName] || null, message: `账号存在（页面含 7 条推文）` } });
@@ -489,7 +496,7 @@ for (const p of store.twitterPosts) {
       biliUid: b.biliUid ?? null,
       enabled: b.enabled !== false, ruleIds: (b.ruleIds || []).map(Number),
       lastPostId: null, lastPostAt: null, lastOkAt: null,
-      avatar: null, createdAt: nowSec, updatedAt: nowSec,
+      avatar: null, fetchFailSince: null, fetchError: null, createdAt: nowSec, updatedAt: nowSec,
     };
     store.weiboAccounts.push(row);
     return ok({ account: weiboAccountView(row) });
@@ -555,7 +562,7 @@ for (const p of store.twitterPosts) {
       id: ++store.biliAccountSeq, uid, uname: null,
       displayName: b.displayName ? String(b.displayName) : null,
       enabled: b.enabled !== false, ruleIds: (b.ruleIds || []).map(Number),
-      lastOkAt: null, avatar: null, createdAt: nowSec, updatedAt: nowSec,
+      lastOkAt: null, avatar: null, fetchFailSince: null, fetchError: null, createdAt: nowSec, updatedAt: nowSec,
     };
     store.biliAccounts.push(row);
     return ok({ account: biliAccountView(row) });

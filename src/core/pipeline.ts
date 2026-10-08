@@ -385,8 +385,8 @@ export class Pipeline {
 
   private async handleHealthAlert(signal: Signal): Promise<void> {
     const p = signal.payload as HealthAlertPayload | undefined;
-    // QQ 告警政策：登录掉线立即报；连续失败满 10 分钟的二次告警（durationAlert）才报
-    // ——次数阈值的告警通常是网络波动，只发本机 toast。告警 QQ 留空 = 全不发。
+    // QQ 告警政策：登录掉线立即报；故障持续满 10 分钟的二次告警（durationAlert）才报
+    // ——toast 阈值的告警通常是网络波动，只发本机 toast。告警 QQ 留空 = 全不发。
     const toQq = p?.alertKind === 'login_drop' || p?.durationAlert === true;
     const qqTarget = toQq ? getNapcatAlertQq(this.deps.db) : '';
     await this.deps.dispatcher.alertAll(

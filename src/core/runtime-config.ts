@@ -15,7 +15,7 @@ import type { AppConfig } from '../config/schema.js';
 export interface RuntimeConfig {
   pollIntervalSec: number;
   pollJitterSec: number;
-  healthAlertAfterFailures: number;
+  healthAlertToastAfterSec: number;
   followsSyncIntervalSec: number;
   dynamicIntervalSec: number;
   weiboIntervalSec: number;
@@ -44,7 +44,11 @@ interface NumSpec {
 export const NUM_SPECS: NumSpec[] = [
   { key: 'poll_interval_sec', field: 'pollIntervalSec', label: '直播轮询间隔', def: 45, min: 20, max: 3600 },
   { key: 'poll_jitter_sec', field: 'pollJitterSec', label: '轮询抖动', def: 8, min: 0, max: 120 },
-  { key: 'health_alert_after_failures', field: 'healthAlertAfterFailures', label: '连续失败告警阈值', def: 5, min: 1, max: 100 },
+  // 时间口径（2026-11 重构：轮数口径会随轮询间隔倒挂两级告警顺序）；旧轮数键
+  // health_alert_after_failures 由 Db 构造时一次性删除（settings 只留这一个键）。
+  // 语义：链路故障持续满它 → 本地 toast（QQ 级固定 600s，core/types.STREAK_QQ_ALERT_AFTER_SEC）；
+  // 账号级故障持续满它 → 落库面板展示
+  { key: 'health_alert_toast_after_sec', field: 'healthAlertToastAfterSec', label: '故障持续告警阈值（秒）', def: 180, min: 30, max: 3600 },
   { key: 'follows_sync_interval_sec', field: 'followsSyncIntervalSec', label: '关注列表同步间隔', def: 1800, min: 300, max: 86400 },
   { key: 'dynamic_interval_sec', field: 'dynamicIntervalSec', label: '动态轮询间隔', def: 300, min: 120, max: 86400 },
   { key: 'weibo_interval_sec', field: 'weiboIntervalSec', label: '微博轮询间隔', def: 300, min: 120, max: 86400 },
@@ -134,7 +138,7 @@ export function withRuntimeConfig(app: AppConfig, rc: RuntimeConfig): AppConfig 
     ...app,
     pollIntervalSec: rc.pollIntervalSec,
     pollJitterSec: rc.pollJitterSec,
-    healthAlertAfterFailures: rc.healthAlertAfterFailures,
+    healthAlertToastAfterSec: rc.healthAlertToastAfterSec,
     notifyOnFirstRun: rc.notifyOnFirstRun,
     notifyOnNewSubscription: rc.notifyOnNewSubscription,
     follows: { syncIntervalSec: rc.followsSyncIntervalSec },

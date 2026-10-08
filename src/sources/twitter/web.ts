@@ -12,7 +12,7 @@
  */
 import { parseProxyUrl, tunnelFetch, describeTunnelError } from '../../core/proxy.js';
 import { normalizeScreenName } from '../../core/x-accounts.js';
-import { decodeEntities, type ParsedTweet } from './nitter.js';
+import { decodeEntities, FeedFetchError, scopeOfTunnelError, type ParsedTweet } from './nitter.js';
 
 const TWEET_RESULT_HOST = 'cdn.syndication.twimg.com';
 
@@ -60,7 +60,7 @@ export async function fetchWebTweetIds(
 ): Promise<WebIdsResult> {
   const started = Date.now();
   const proxy = parseProxyUrl(proxyUrl);
-  if (!proxy) throw new Error('未配置代理，无法访问 x.com');
+  if (!proxy) throw new FeedFetchError('proxy', '未配置代理，无法访问 x.com');
   const user = normalizeScreenName(screen);
   let res;
   try {
@@ -69,9 +69,9 @@ export async function fetchWebTweetIds(
       maxBytes: 8 * 1024 * 1024,
     });
   } catch (e) {
-    throw new Error(`x.com 请求失败：${describeTunnelError(e)}`);
+    throw new FeedFetchError(scopeOfTunnelError(e, 'web'), `x.com 请求失败：${describeTunnelError(e)}`);
   }
-  if (res.status !== 200) throw new Error(`x.com HTTP ${res.status}`);
+  if (res.status !== 200) throw new FeedFetchError('web', `x.com HTTP ${res.status}`);
   const ids = [...new Set([...res.text.matchAll(/rest_id:"(\d{15,25})"/g)].map((m) => m[1]!))]
     .sort((a, b) => (BigInt(b) > BigInt(a) ? 1 : -1));
   return {
@@ -173,7 +173,7 @@ export async function fetchTweetDetail(
   opts: { timeoutMs?: number } = {},
 ): Promise<ParsedTweet> {
   const proxy = parseProxyUrl(proxyUrl);
-  if (!proxy) throw new Error('未配置代理，无法访问 x.com');
+  if (!proxy) throw new FeedFetchError('proxy', '未配置代理，无法访问 x.com');
   let res;
   try {
     res = await tunnelFetch(`https://${TWEET_RESULT_HOST}/tweet-result?id=${id}&lang=ja&token=dd-claw`, proxy, {
@@ -181,16 +181,16 @@ export async function fetchTweetDetail(
       maxBytes: 2 * 1024 * 1024,
     });
   } catch (e) {
-    throw new Error(`单推接口请求失败：${describeTunnelError(e)}`);
+    throw new FeedFetchError(scopeOfTunnelError(e, 'web'), `单推接口请求失败：${describeTunnelError(e)}`);
   }
-  if (res.status !== 200) throw new Error(`单推接口 HTTP ${res.status}`);
+  if (res.status !== 200) throw new FeedFetchError('web', `单推接口 HTTP ${res.status}`);
   let j: SyndicationTweet;
   try {
     j = JSON.parse(res.text) as SyndicationTweet;
   } catch {
-    throw new Error('单推接口返回的不是 JSON');
+    throw new FeedFetchError('web', '单推接口返回的不是 JSON');
   }
-  if (!j.id_str) throw new Error(`推文 ${id} 不可见或已删除（接口返回空对象）`);
+  if (!j.id_str) throw new FeedFetchError('web', `推文 ${id} 不可见或已删除（接口返回空对象）`);
 
   const author = normalizeScreenName(j.user?.screen_name ?? '');
   const pics: string[] = [];
@@ -245,7 +245,7 @@ export async function fetchWebTimeline(
   }
   // 一条都没取到且有失败 → 抛错让 feed 记一次失败；部分失败只少几条，不算整体失败
   if (tweets.length === 0 && failures.length > 0) {
-    throw new Error(`单推详情全部失败：${failures.join('；')}`);
+    throw new FeedFetchError('web', `单推详情全部失败：${failures.join('；')}`, failures);
   }
   return {
     tweets: tweets.sort((a, b) => b.pubTs - a.pubTs),

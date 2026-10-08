@@ -368,6 +368,15 @@ export class Db {
     this.ensureColumn('x_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('weibo_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('bili_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
+    // 账号级抓取故障（长期问题，不推送、面板账号卡展示）：持续满阈值才落，
+    // 成功即清；旧库在线补列，默认 NULL = 正常
+    for (const t of ['x_accounts', 'weibo_accounts', 'bili_accounts']) {
+      this.ensureColumn(t, 'fetch_fail_since', 'fetch_fail_since INTEGER');
+      this.ensureColumn(t, 'fetch_error', 'fetch_error TEXT');
+    }
+    // 健康告警阈值 2026-11 从轮数口径改为时间口径（秒）：旧键一次性删除
+    // （settings 只留 health_alert_toast_after_sec 一个键；旧值是轮数，语义不通不可继承）
+    this.db.prepare("DELETE FROM settings WHERE key = 'health_alert_after_failures'").run();
     // weibo_accounts 本身由 SCHEMA 的 CREATE TABLE IF NOT EXISTS 建出；这里只做数据搬家
     this.migrateWeiboAccounts();
     this.migratePostRuleScopes();
@@ -1422,6 +1431,10 @@ export class Db {
     if (touch.nickname) { sets.push('nickname = ?'); args.push(touch.nickname); }
     if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
     if (touch.silentNext !== undefined) { sets.push('silent_next = ?'); args.push(touch.silentNext ? 1 : 0); }
+    if (touch.fetchFail !== undefined) {
+      sets.push('fetch_fail_since = ?', 'fetch_error = ?');
+      args.push(touch.fetchFail ? touch.fetchFail.since : null, touch.fetchFail ? touch.fetchFail.error : null);
+    }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
     args.push(now(), id);
@@ -1502,6 +1515,10 @@ export class Db {
     if (touch.nickname) { sets.push('nickname = ?'); args.push(touch.nickname); }
     if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
     if (touch.silentNext !== undefined) { sets.push('silent_next = ?'); args.push(touch.silentNext ? 1 : 0); }
+    if (touch.fetchFail !== undefined) {
+      sets.push('fetch_fail_since = ?', 'fetch_error = ?');
+      args.push(touch.fetchFail ? touch.fetchFail.since : null, touch.fetchFail ? touch.fetchFail.error : null);
+    }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
     args.push(now(), id);
@@ -1586,6 +1603,10 @@ export class Db {
     if (touch.lastOkAt !== undefined) { sets.push('last_ok_at = ?'); args.push(touch.lastOkAt); }
     if (touch.avatar !== undefined) { sets.push('avatar = ?'); args.push(touch.avatar); }
     if (touch.silentNext !== undefined) { sets.push('silent_next = ?'); args.push(touch.silentNext ? 1 : 0); }
+    if (touch.fetchFail !== undefined) {
+      sets.push('fetch_fail_since = ?', 'fetch_error = ?');
+      args.push(touch.fetchFail ? touch.fetchFail.since : null, touch.fetchFail ? touch.fetchFail.error : null);
+    }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
     args.push(now(), id);

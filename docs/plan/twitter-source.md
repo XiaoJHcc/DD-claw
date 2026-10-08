@@ -264,6 +264,7 @@ src/sources/twitter/
 
 - 轮询对象 = `x_accounts` 里 `enabled=1` 的行（不再读 `streamers`）；
 - **源纪律照抄微博源**：首轮静默归档、`insertPosts` 靠 `(platform,item_id)` UNIQUE 去重、新帖 `emit feed_post`；**拉取失败绝不当成「没有新推文」**（保留旧数据 + 连续失败告警 + 恢复复位）；每轮写回 `last_ok_at`；
+  - **2026-11 修订（告警刷屏教训）**：失败分两级——一轮全灭 = 链路级（代理/Nitter/回退，按 `FeedFetchError.scope` 分型说真实原因；聚合告警一条 + canary 退避：中断中每轮只探第一个账号）；个别账号失败 = 账号级（不推送，达阈值落库 `x_accounts.fetch_fail_since`/`fetch_error`，面板账号卡红字展示，恢复清库）。不再有逐账号 health_alert。
 - **心跳**不再是登录态，而是**代理 + 实例可用性**；
 - 能力面：账号 CRUD、连接设置、监听开关全部先进 `mcp/tools.ts` 注册表（轴 B 唯一能力信源）。
 

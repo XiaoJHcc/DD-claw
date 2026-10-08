@@ -18,7 +18,7 @@ function cfg(): AppConfig {
   return {
     pollIntervalSec: 45, pollJitterSec: 0,
     notifyOnFirstRun: false, notifyOnNewSubscription: true,
-    healthAlertAfterFailures: 2,
+    healthAlertToastAfterSec: 60,
     follows: { enabled: true, syncIntervalSec: 1800 },
     subscriptions: [],
     notify: { onebot: { enabled: false, targets: [] }, toast: { enabled: true } },

@@ -186,13 +186,12 @@ export class LiveStatusSource implements Source {
     if (this.consecutiveFailures === 0) this.firstFailureTs = nowSec;
     this.consecutiveFailures++;
     const durationSec = nowSec - this.firstFailureTs;
-    const threshold = this.ctx!.config.healthAlertAfterFailures;
-    if (this.consecutiveFailures >= threshold && !this.alerted) {
+    // 两级告警都是时间口径（2026-11 统一）：持续满 healthAlertToastAfterSec → 本机 toast；
+    // 满 STREAK_QQ_ALERT_AFTER_SEC → 告警 QQ。同一根时间轴上的两个点，顺序永不倒挂
+    if (durationSec >= this.ctx!.config.healthAlertToastAfterSec && !this.alerted) {
       this.alerted = true; // 同一轮故障只告警一次，恢复后才复位
       this.emitAlert({ failures: this.consecutiveFailures, durationSec, lastError: String(err) });
     }
-    // 次数阈值之外再按持续时间报一次（网络波动通常几分钟内恢复，
-    // 持续失败说明是真故障）——pipeline 据此路由到告警 QQ
     if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.durationAlerted) {
       this.durationAlerted = true;
       this.emitAlert({

@@ -23,16 +23,23 @@ test('无 settings 时返回全部默认值', (t) => {
 
 test('save/get 往返；库存越界值回落默认', (t) => {
   const db = memDb(t);
-  saveRuntimeConfig(db, { healthAlertAfterFailures: 10, notifyOnFirstRun: true });
+  saveRuntimeConfig(db, { healthAlertToastAfterSec: 300, notifyOnFirstRun: true });
   let rc = getRuntimeConfig(db);
-  assert.equal(rc.healthAlertAfterFailures, 10);
+  assert.equal(rc.healthAlertToastAfterSec, 300);
   assert.equal(rc.notifyOnFirstRun, true);
 
-  db.setSetting('health_alert_after_failures', '99999'); // 越界
+  db.setSetting('health_alert_toast_after_sec', '99999'); // 越界
   db.setSetting('poll_interval_sec', 'abc'); // 非数字
   rc = getRuntimeConfig(db);
-  assert.equal(rc.healthAlertAfterFailures, 5, '越界值回落默认');
+  assert.equal(rc.healthAlertToastAfterSec, 180, '越界值回落默认');
   assert.equal(rc.pollIntervalSec, 45, '非法值回落默认');
+});
+
+test('旧的轮数口径键 health_alert_after_failures 开库即删（时间口径统一后只留一个键）', (t) => {
+  const db = memDb(t);
+  assert.equal(db.getSetting('health_alert_after_failures'), null, '构造时已清除');
+  db.setSetting('health_alert_after_failures', '3'); // 模拟老库残留再开库的场景由构造覆盖，这里验证读不到
+  assert.equal(getRuntimeConfig(db).healthAlertToastAfterSec, 180, '旧键不参与取值');
 });
 
 test('withRuntimeConfig：运行时参数覆盖回 AppConfig', (t) => {

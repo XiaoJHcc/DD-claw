@@ -30,10 +30,14 @@ export type TunnelErrorKind =
   | 'timeout'
   | 'truncated';
 
+/** 错误发生在隧道哪一段：connect=连代理/建隧道（代理责任）；established=隧道内 TLS/读写（目标责任） */
+export type TunnelErrorStage = 'connect' | 'established';
+
 export class TunnelError extends Error {
   constructor(
     public readonly kind: TunnelErrorKind,
     message: string,
+    public readonly stage: TunnelErrorStage = 'established',
   ) {
     super(message);
     this.name = 'TunnelError';
@@ -126,10 +130,10 @@ function connectTunnel(
       sock.destroy();
       reject(err);
     };
-    sock.setTimeout(timeoutMs, () => fail(new TunnelError('timeout', `连代理超时（${proxy.host}:${proxy.port}）`)));
+    sock.setTimeout(timeoutMs, () => fail(new TunnelError('timeout', `连代理超时（${proxy.host}:${proxy.port}）`, 'connect')));
     sock.on('error', (e: NodeJS.ErrnoException) => {
       const kind: TunnelErrorKind = e.code === 'ECONNREFUSED' ? 'proxy-refused' : 'proxy-unreachable';
-      fail(new TunnelError(kind, `代理不可达（${proxy.host}:${proxy.port}）：${e.code ?? e.message}`));
+      fail(new TunnelError(kind, `代理不可达（${proxy.host}:${proxy.port}）：${e.code ?? e.message}`, 'connect'));
     });
     sock.on('connect', () => {
       sock.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
@@ -141,7 +145,7 @@ function connectTunnel(
       sock.setTimeout(0);
       const line = head.split('\r\n')[0] ?? '';
       if (!/ 200/.test(line)) {
-        fail(new TunnelError('proxy-refused', `代理拒绝 CONNECT：${line}`));
+        fail(new TunnelError('proxy-refused', `代理拒绝 CONNECT：${line}`, 'connect'));
         return;
       }
       settled = true;

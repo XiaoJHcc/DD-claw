@@ -20,7 +20,7 @@ function cfg(): AppConfig {
   return {
     pollIntervalSec: 45, pollJitterSec: 0,
     notifyOnFirstRun: false, notifyOnNewSubscription: true,
-    healthAlertAfterFailures: 2,
+    healthAlertToastAfterSec: 60,
     follows: { enabled: true, syncIntervalSec: 1800 },
     dynamic: { enabled: true, intervalSec: 300 },
     weibo: { enabled: true, intervalSec: 300 },
@@ -432,7 +432,8 @@ test('心跳本身抛异常：跳过本轮不告警', async (t) => {
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '网络失败 ≠ 失效，不告警');
 });
 
-test('单账号拉取失败：保留旧数据、阈值告警一次、恢复复位；不影响其他账号', async (t) => {
+test('个别账号失败（链路正常）：不告警，持续满阈值落库 fetch_fail_*，恢复清库；不影响其他账号', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
   let fail = false;
   const h = harness({
     fetcher: async (_c, weiboUid) => {
@@ -447,25 +448,26 @@ test('单账号拉取失败：保留旧数据、阈值告警一次、恢复复�
   await h.src.pollOnce();
   assert.equal(h.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 1);
 
-  fail = true; // threshold=2：连挂 2 次告警一次
-  await h.src.pollOnce();
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '第 1 次失败未达阈值');
+  fail = true;
+  await h.src.pollOnce(); // 首次失败，持续 0 秒未达阈值
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '账号级故障不告警');
   assert.equal(h.db.listRecentPosts([W_UID], 10).get(W_UID)!.length, 1, '旧数据原样保留');
-  await h.src.pollOnce();
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '到阈值告警一次');
-  await h.src.pollOnce();
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '同一轮故障不重复告警');
+  assert.equal(h.db.getWeiboAccountByUid(W_UID)!.fetchError, null, '未达阈值不落库');
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await h.src.pollOnce(); // 持续满 60s → 落库
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 0, '达阈值也不告警（面板展示）');
+  const acc = h.db.getWeiboAccountByUid(W_UID)!;
+  assert.match(acc.fetchError ?? '', /HTTP 500/);
+  assert.ok(acc.fetchFailSince !== null);
   assert.equal(h.db.listRecentPosts(['111'], 10).get('111')!.length >= 1, true, '其他账号正常归档');
 
-  fail = false; // 恢复复位
+  fail = false; // 恢复清库
   await h.src.pollOnce();
-  fail = true;
-  await h.src.pollOnce();
-  await h.src.pollOnce();
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 2, '恢复后故障重新告警');
+  assert.equal(h.db.getWeiboAccountByUid(W_UID)!.fetchError, null);
+  assert.equal(h.db.getWeiboAccountByUid(W_UID)!.fetchFailSince, null);
 });
 
-test('单账号连续失败持续满 10 分钟再发 durationAlert 告警（QQ 路由依据）', async (t) => {
+test('链路全灭（所有账号都失败）持续满 10 分钟再发 durationAlert 告警（QQ 路由依据）', async (t) => {
   t.mock.timers.enable({ apis: ['Date'] });
   const h = harness({
     fetcher: async () => { throw new Error('微博 mymblog HTTP 500'); },
@@ -474,10 +476,12 @@ test('单账号连续失败持续满 10 分钟再发 durationAlert 告警（QQ �
 
   const isDur = (s: Signal) => (s.payload as { durationAlert?: boolean } | undefined)?.durationAlert === true;
 
-  await h.src.pollOnce(); // 第 1 次失败，计起点
+  await h.src.pollOnce(); // 第 1 轮全灭，计起点
   t.mock.timers.setTime(Date.now() + 61_000);
-  await h.src.pollOnce(); // 达次数阈值（2），只持续 1 分钟
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '次数阈值告警');
+  await h.src.pollOnce(); // 持续 1 分钟：满 toast 阈值（60s），未到 QQ 线
+  const alerts = h.signals.filter((s) => s.kind === 'health_alert');
+  assert.equal(alerts.length, 1, '全灭持续满 toast 阈值聚合告警一条');
+  assert.match((alerts[0]!.payload as { message: string }).message, /微博抓取已中断约 1 分钟/);
   assert.equal(h.signals.filter(isDur).length, 0, '未到 10 分钟不发持续告警');
 
   t.mock.timers.setTime(Date.now() + 600_000);

@@ -161,7 +161,7 @@ ACTIONS['open-fetch-settings'] = function () {
       advField('轮询间隔（秒，20~3600）', 'ft-poll', j.pollIntervalSec) +
       advField('轮询抖动（秒，0~120）', 'ft-jitter', j.pollJitterSec) +
       '</div>' +
-      advField('连续失败多少次后告警（1~100）', 'ft-threshold', j.healthAlertAfterFailures) +
+      advField('故障持续多少秒后本地告警（30~3600；QQ 告警固定 600 秒）', 'ft-threshold', j.healthAlertToastAfterSec) +
       '<div class="two">' +
       field('关键帧缓存', checkRowHtml('id="ft-b-keyframe"', j.keyframeEnabled, '缓存直播关键帧')) +
       advField('缓存间隔（秒，60~3600）', 'ft-keyframe', j.keyframeIntervalSec) +
@@ -187,7 +187,7 @@ ACTIONS['save-fetch-settings'] = function () {
   api('/api/advanced', 'PUT', {
     pollIntervalSec: vals['ft-poll'],
     pollJitterSec: vals['ft-jitter'],
-    healthAlertAfterFailures: vals['ft-threshold'],
+    healthAlertToastAfterSec: vals['ft-threshold'],
     followsSyncIntervalSec: vals['ft-follows'],
     dynamicIntervalSec: vals['ft-dynamic'],
     keyframeIntervalSec: vals['ft-keyframe'],

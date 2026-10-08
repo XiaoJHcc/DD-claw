@@ -14,8 +14,32 @@
  * 已知短板（实现时别当 bug）：RSS 不标引用推文（`is_quote_status` 只在免登录 HTML/单推接口里有），
  * 也拿不到转发自身的 id（RSS 给的是原推 id）——"同一推文被多次转发"因此折叠成一条。
  */
-import { parseProxyUrl, tunnelFetch, describeTunnelError } from '../../core/proxy.js';
+import { parseProxyUrl, tunnelFetch, describeTunnelError, TunnelError } from '../../core/proxy.js';
 import { normalizeScreenName } from '../../core/x-accounts.js';
+
+/** 失败责任归属：proxy=代理层（隧道没建成）；instance=Nitter 实例层；web=免登录 x.com 回退 */
+export type FetchScope = 'proxy' | 'instance' | 'web';
+
+/**
+ * 抓取失败的分型错误：scope 供 feed 层区分「链路故障的原因」（代理 vs 实例 vs 回退），
+ * reasons 保留每个实例的逐条原因（聚合错误时）。message 始终是人读的一句话。
+ */
+export class FeedFetchError extends Error {
+  constructor(
+    public readonly scope: FetchScope,
+    message: string,
+    public readonly reasons: string[] = [],
+  ) {
+    super(message);
+    this.name = 'FeedFetchError';
+  }
+}
+
+/** 底层错误 → 责任归属：隧道没建成（含代理地址配置错）算代理；隧道内失败算目标（实例/web） */
+export function scopeOfTunnelError(e: unknown, target: 'instance' | 'web'): FetchScope {
+  if (e instanceof TunnelError && (e.stage === 'connect' || e.kind === 'bad-proxy-url')) return 'proxy';
+  return target;
+}
 
 export interface ParsedTweet {
   /** 推文 id（转发时=原作者推文 id） */
@@ -186,7 +210,7 @@ export async function fetchNitterTimeline(
 ): Promise<NitterFetchResult> {
   const started = Date.now();
   const proxy = parseProxyUrl(proxyUrl);
-  if (!proxy) throw new Error('未配置代理，无法访问 Nitter 实例');
+  if (!proxy) throw new FeedFetchError('proxy', '未配置代理，无法访问 Nitter 实例');
   const user = normalizeScreenName(screen);
   let res;
   try {
@@ -195,11 +219,11 @@ export async function fetchNitterTimeline(
       maxBytes: 4 * 1024 * 1024,
     });
   } catch (e) {
-    throw new Error(`${host} 请求失败：${describeTunnelError(e)}`);
+    throw new FeedFetchError(scopeOfTunnelError(e, 'instance'), `${host} 请求失败：${describeTunnelError(e)}`);
   }
-  if (res.status !== 200) throw new Error(`${host} HTTP ${res.status}`);
+  if (res.status !== 200) throw new FeedFetchError('instance', `${host} HTTP ${res.status}`);
   if (!/<rss|<feed/i.test(res.text.slice(0, 500))) {
-    throw new Error(`${host} 返回的不是 RSS（实例可能已被换成挑战页）`);
+    throw new FeedFetchError('instance', `${host} 返回的不是 RSS（实例可能已被换成挑战页）`);
   }
   return {
     host,
@@ -222,20 +246,25 @@ export async function fetchFromAnyInstance(
   proxyUrl: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<NitterFetchResult> {
-  if (hosts.length === 0) throw new Error('没有配置任何 Nitter 实例');
+  if (hosts.length === 0) throw new FeedFetchError('instance', '没有配置任何 Nitter 实例');
   const reasons: string[] = [];
+  const scopes: FetchScope[] = [];
   for (const host of hosts) {
     try {
       const r = await fetchNitterTimeline(host, screen, proxyUrl, opts);
       if (r.tweets.length === 0) {
         // 空 feed 也可能是实例半死（RSS 正常但内容为空），继续试下一个，但记下这条
         reasons.push(`${host} 返回 0 条`);
+        scopes.push('instance');
         continue;
       }
       return r;
     } catch (e) {
       reasons.push(e instanceof Error ? e.message : String(e));
+      scopes.push(e instanceof FeedFetchError ? e.scope : 'instance');
     }
   }
-  throw new Error(`全部 ${hosts.length} 个实例都失败：${reasons.join('；')}`);
+  // 责任归属：全部死在代理层 → proxy；只要有一个实例是自身问题（HTTP 码/非 RSS/隧道内超时）→ instance
+  const scope: FetchScope = scopes.every((s) => s === 'proxy') ? 'proxy' : 'instance';
+  throw new FeedFetchError(scope, `全部 ${hosts.length} 个实例都失败：${reasons.join('；')}`, reasons);
 }

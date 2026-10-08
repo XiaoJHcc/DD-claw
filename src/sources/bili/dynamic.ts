@@ -161,8 +161,9 @@ export function parseDynamicItem(item: unknown, uid: string): NewPost | null {
  * （follows.enabled=false 时这是 B站登录态唯一的心跳来源）。
  * 轮次政策（core/backlog.ts）：缺口轮（首轮）默认只归档，补推开关开了才按时间窗+
  * 条数上限补推；主动关闭恢复轮（silent_next）一律静默。
- * 失败纪律：拉取失败绝不当成「没动态」——本轮跳过、旧数据不动；
- * 同一 uid 连续失败到阈值发一次 health_alert，恢复复位（live-status 模式）。
+ * 失败纪律：拉取失败绝不当成「没动态」——本轮跳过、旧数据不动；故障分两级
+ * （2026-11 重构）：一轮全灭 = 链路级（多为风控 412/-352）聚合告警一条；
+ * 个别 uid 失败 = 账号级（长期问题不推送，持续满阈值落库 fetch_fail_* 给面板展示）。
  * 无 cookie 不启动（装配处判断），扫码登录后随 follows 热重启。
  */
 export class DynamicSource implements Source {
@@ -172,16 +173,19 @@ export class DynamicSource implements Source {
   private task?: PeriodicTask;
   /** 已成功跑过一轮的 uid（本实例内不再算缺口轮；语义见 core/backlog.ts） */
   private polled = new Set<string>();
+  /** 账号级失败计数（内存）；持续满阈值才落库 fetch_fail_*，恢复清位 */
   private failures = new Map<string, number>();
-  private alerted = new Set<string>();
-  /** 各 uid 本轮连续失败的起点（秒）。用于「持续失败超阈值再报一次」 */
+  /** 各 uid 本轮连续失败的起点（秒）；账号级故障落库时作 since */
   private firstFailTs = new Map<string, number>();
-  /** 持续失败告警（durationAlert）每 uid 每轮故障只发一次，恢复后复位 */
-  private durationAlerted = new Set<string>();
   /** 同一轮登录失效只告警一次，恢复后才复位（同 FollowsSource） */
   private loginAlerted = false;
   /** 本进程内是否成功登录过：没成功过 = 本来就没登录，只记日志不告警 */
   private hadOkLogin = false;
+  // ---- 链路级状态（一轮全灭才算链路故障；聚合告警，不逐账号发）----
+  private linkFailRounds = 0;
+  private linkFirstFailTs = 0;
+  private linkAlerted = false;
+  private linkDurationAlerted = false;
 
   private readonly cookie: string;
   private readonly fetcher: DynamicFetcher;
@@ -278,13 +282,39 @@ export class DynamicSource implements Source {
       : [];
     const listedSet = new Set(listedUids);
     const uids = [...new Set([...ctx.db.listWatchedUids(), ...listedUids])];
+    let ok = 0;
+    let lastError: string | null = null;
+    const roundFailures: { uid: string; error: string }[] = [];
     await mapLimit(uids, 2, async (uid) => {
-      await this.pollUid(uid, listedSet.has(uid));
+      const r = await this.pollUid(uid, listedSet.has(uid));
+      if (r.ok) ok++;
+      else {
+        roundFailures.push({ uid, error: r.error ?? '' });
+        lastError = r.error ?? null;
+      }
     });
+
+    // 故障分两级（同 twitter/feed）：全灭 = 链路级（多为风控 412/-352，聚合告警一条）；
+    // 有人成功下的个别失败 = 账号级（长期问题，持续满阈值落库 fetch_fail_*，面板账号卡展示，不推送）
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (uids.length > 0 && ok === 0) {
+      this.onLinkFailure(lastError);
+    } else if (ok > 0) {
+      this.onLinkSuccess();
+      // 链路正常下的个别失败 = 账号级故障：持续满阈值落库给面板账号卡展示（不推送）
+      const toastSec = ctx.config.healthAlertToastAfterSec;
+      for (const f of roundFailures) {
+        const since = this.firstFailTs.get(f.uid);
+        const account = ctx.db.getBiliAccountByUid(f.uid);
+        if (account && since !== undefined && nowSec - since >= toastSec) {
+          ctx.db.touchBiliAccount(account.id, { fetchFail: { since, error: f.error } });
+        }
+      }
+    }
   }
 
   /** 单 uid 一轮：拉 → 归档 →（动态名单账号）新帖发信号 → 名单账号回写。 */
-  private async pollUid(uid: string, asListed: boolean): Promise<void> {
+  private async pollUid(uid: string, asListed: boolean): Promise<{ ok: boolean; error?: string }> {
     const ctx = this.ctx!;
     let items: unknown[];
     try {
@@ -293,8 +323,8 @@ export class DynamicSource implements Source {
       // 关键：拉取失败绝不当成「没动态」—— 保留旧数据，什么都不写
       const kind = e instanceof BiliApiError ? '业务层' : 'HTTP层';
       log.error(`${kind}拉取失败 uid=${uid}，保留旧数据`, e);
-      this.onFailure(uid, e);
-      return;
+      this.onFailure(uid);
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
     this.onSuccess(uid);
 
@@ -318,6 +348,8 @@ export class DynamicSource implements Source {
         lastOkAt: nowSec,
         ...(uname ? { uname } : {}),
         ...(account.silentNext ? { silentNext: false } : {}),
+        // 账号级故障恢复：清面板上的失败标记
+        ...(account.fetchError !== null ? { fetchFail: null } : {}),
       });
     }
 
@@ -358,6 +390,7 @@ export class DynamicSource implements Source {
 
     // 头像最后做：下载慢也不能挡 feed_post 信号。已有本地头像不重复下载，失败静默下轮再试。
     await this.maybeSaveAvatar(account, face);
+    return { ok: true };
   }
 
   /** 动态名单账号且尚无本地头像时，抠 face URL 落盘并回写文件名；未注入 avatarDir 则只抠不落 */
@@ -373,43 +406,62 @@ export class DynamicSource implements Source {
     const n = this.failures.get(uid) ?? 0;
     if (n > 0) log.info(`uid=${uid} 动态拉取恢复正常（此前连续失败 ${n} 次）`);
     this.failures.delete(uid);
-    this.alerted.delete(uid);
     this.firstFailTs.delete(uid);
-    this.durationAlerted.delete(uid);
   }
 
-  private onFailure(uid: string, err: unknown): void {
+  private onFailure(uid: string): void {
     const nowSec = Math.floor(Date.now() / 1000);
     const n = (this.failures.get(uid) ?? 0) + 1;
     if (n === 1) this.firstFailTs.set(uid, nowSec);
     this.failures.set(uid, n);
-    const durationSec = nowSec - (this.firstFailTs.get(uid) ?? nowSec);
-    const threshold = this.ctx!.config.healthAlertAfterFailures;
-    if (n >= threshold && !this.alerted.has(uid)) {
-      this.alerted.add(uid); // 同一轮故障只告警一次，恢复后才复位
-      this.emitUidAlert(uid, n, durationSec, err, false);
+    // 落库不在这里做：账号级故障的判定要等 pollOnce 聚合出「链路正常」才成立，
+    // 全灭轮里所有 uid 都在失败，标账号故障是冤枉它们（见 pollOnce 末尾）
+  }
+
+  // ---- 链路级失败：一轮全灭才算（多为风控 412/-352）；聚合告警一条 ----
+
+  private onLinkSuccess(): void {
+    if (this.linkFailRounds > 0) {
+      log.info(`动态链路抓取恢复正常（此前连续全灭 ${this.linkFailRounds} 轮）`);
     }
-    // 持续失败超阈值再报一次（网络波动通常几分钟内恢复）——pipeline 据此路由到告警 QQ
-    if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.durationAlerted.has(uid)) {
-      this.durationAlerted.add(uid);
-      this.emitUidAlert(uid, n, durationSec, err, true);
+    this.linkFailRounds = 0;
+    this.linkFirstFailTs = 0;
+    this.linkAlerted = false;
+    this.linkDurationAlerted = false;
+  }
+
+  private onLinkFailure(err: string | null): void {
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (this.linkFailRounds === 0) this.linkFirstFailTs = nowSec;
+    this.linkFailRounds++;
+    const durationSec = nowSec - this.linkFirstFailTs;
+    // 两级告警都是时间口径：持续满 healthAlertToastAfterSec → 本机 toast；
+    // 满 STREAK_QQ_ALERT_AFTER_SEC → 告警 QQ（pipeline 按 durationAlert 路由）
+    if (durationSec >= this.ctx!.config.healthAlertToastAfterSec && !this.linkAlerted) {
+      this.linkAlerted = true; // 同一轮故障只告警一次，恢复后才复位
+      this.emitLinkAlert(durationSec, err, false);
+    }
+    if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.linkDurationAlerted) {
+      this.linkDurationAlerted = true;
+      this.emitLinkAlert(durationSec, err, true);
     }
   }
 
-  private emitUidAlert(uid: string, failures: number, durationSec: number, err: unknown, durationAlert: boolean): void {
+  private emitLinkAlert(durationSec: number, err: string | null, durationAlert: boolean): void {
+    const message =
+      `B站动态抓取已中断约 ${Math.max(1, Math.round(durationSec / 60))} 分钟：${err ?? '未知原因'}。` +
+      '自动重试中，恢复后自动继续。';
     this.ctx!.bus.emit({
       source: this.name,
       kind: 'health_alert',
-      uid,
+      uid: '',
       roomId: '',
       ts: Math.floor(Date.now() / 1000),
       payload: {
         alertKind: 'streak',
-        message: `B站动态拉取连续失败 ${failures} 次（uid=${uid}），动态源已暂停该对象本轮。\n` +
-          `多为风控（412/-352）或 cookie 失效，恢复后自动继续。` +
-          (durationAlert ? `\n已持续失败约 ${Math.round(durationSec / 60)} 分钟。` : ''),
-        failures,
-        lastError: String(err),
+        message,
+        failures: this.linkFailRounds,
+        lastError: err,
         ...(durationAlert ? { durationAlert: true } : {}),
       },
     });

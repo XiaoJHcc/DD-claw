@@ -22,6 +22,8 @@ export interface BiliAccountRow {
   silent_next: number;
   last_ok_at: number | null;
   avatar: string | null;
+  fetch_fail_since: number | null;
+  fetch_error: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -44,6 +46,10 @@ export interface BiliAccount {
   lastOkAt: number | null;
   /** 本地头像缓存文件名；未抓到为 null */
   avatar: string | null;
+  /** 账号级抓取故障起点（持续满阈值才落；null = 正常）。长期问题不推送，面板账号卡展示 */
+  fetchFailSince: number | null;
+  /** 账号级抓取故障的最近原因（与 fetchFailSince 同生同灭） */
+  fetchError: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -71,6 +77,8 @@ export interface BiliAccountFetchTouch {
   avatar?: string | null;
   /** 恢复位消费：源在恢复轮传 false 清位（置位只走重新启用/开关重开路径，抓取不置位） */
   silentNext?: boolean;
+  /** 账号级抓取故障记账：对象 = 落故障（since = 连续失败起点），null = 清故障，undefined = 不动 */
+  fetchFail?: { since: number; error: string } | null;
 }
 
 /** uid 归一化：去空白、从 space.bilibili.com/<uid>（含 /dynamic 等后缀）提取，只留数字 */
@@ -97,6 +105,8 @@ export function rowToBiliAccount(r: BiliAccountRow): BiliAccount {
     silentNext: r.silent_next === 1,
     lastOkAt: r.last_ok_at,
     avatar: r.avatar,
+    fetchFailSince: r.fetch_fail_since ?? null,
+    fetchError: r.fetch_error ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

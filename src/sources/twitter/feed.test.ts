@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TwitterFeedSource, type TwitterFeedSourceOpts } from './feed.js';
-import type { NitterFetchResult, ParsedTweet } from './nitter.js';
+import { FeedFetchError, type NitterFetchResult, type ParsedTweet } from './nitter.js';
 import { Bus } from '../../core/bus.js';
 import { Db } from '../../core/db.js';
 import type { Signal } from '../../core/types.js';
@@ -19,7 +19,7 @@ function cfg(): AppConfig {
   return {
     pollIntervalSec: 45, pollJitterSec: 0,
     notifyOnFirstRun: false, notifyOnNewSubscription: true,
-    healthAlertAfterFailures: 2,
+    healthAlertToastAfterSec: 60,
     follows: { enabled: true, syncIntervalSec: 1800 },
     dynamic: { enabled: true, intervalSec: 300 },
     weibo: { enabled: true, intervalSec: 300 },
@@ -235,7 +235,8 @@ test('Nitter 全挂 → 回退免登录路线；via 记为 web 且 host 为空',
   assert.equal(last.okAccounts, 1);
 });
 
-test('回退关着就不走 web；两条都失败 → 不写库、记 lastError、达阈值发健康告警', async (t) => {
+test('回退关着就不走 web；两条都失败 → 不写库、记 lastError、全灭持续满阈值聚合告警一条', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
   let webCalls = 0;
   let healthy = false;
   const h = harness({
@@ -251,25 +252,136 @@ test('回退关着就不走 web；两条都失败 → 不写库、记 lastError�
   await h.src.pollOnce();
   assert.equal(webCalls, 0, '回退关闭时不得调用 web 路线');
   assert.equal(h.posts().length, 0, '拉取失败绝不写库');
-  assert.equal(h.alerts().length, 0, '第一次失败不到阈值（2）不告警');
+  assert.equal(h.alerts().length, 0, '刚失败（持续 0 秒）不到阈值不告警');
   let last = h.statuses[h.statuses.length - 1]!;
   assert.equal(last.okAccounts, 0);
+  assert.equal(last.linkDown, true, '全灭 = 链路中断');
   assert.match(last.lastError ?? '', /实例全挂/);
 
+  t.mock.timers.setTime(Date.now() + 61_000);
   await h.src.pollOnce();
-  assert.equal(h.alerts().length, 1, '连续 2 次失败 → 一次健康告警');
+  assert.equal(h.alerts().length, 1, '全灭持续满 60s → 聚合告警一条（不逐账号）');
   const alert = h.alerts()[0]!.payload as { alertKind: string; message: string; failures: number };
   assert.equal(alert.alertKind, 'streak');
   assert.equal(alert.failures, 2);
-  assert.match(alert.message, /测试全部/, '告警要指向面板的自查入口');
+  assert.match(alert.message, /已中断约 1 分钟/, '文案按时间口径');
+  assert.match(alert.message, /Nitter 实例全挂/, '原因按分型说真话');
+  assert.match(alert.message, /自动重试中/, '文案承诺自动重试（canary 退避）');
+  assert.doesNotMatch(alert.message, /已暂停/, '不再谎称「本轮已暂停」');
 
-  // 恢复：正常归档并复位告警状态
+  // 恢复：canary 成功 → 当轮继续全量，正常归档并复位告警状态
   healthy = true;
   await h.src.pollOnce();
   assert.equal(h.posts()[0]!.itemId, '501', '恢复后正常归档');
   last = h.statuses[h.statuses.length - 1]!;
   assert.equal(last.okAccounts, 1);
+  assert.equal(last.linkDown, false);
   assert.equal(last.lastError, null, '恢复后清掉错误');
+});
+
+test('canary 退避：链路中断中每轮只探第一个账号；canary 失败跳过其余账号', async (t) => {
+  const calls: string[] = [];
+  const h = harness({
+    fallbackHtml: false, // 失败用例必须关回退/注入 webFetcher，否则会走真实网络（本机代理在跑就翻车）
+    accounts: [{ screenName: 'acc_a' }, { screenName: 'acc_b' }, { screenName: 'acc_c' }],
+    rssFetcher: async (_hosts, screen) => {
+      calls.push(screen);
+      throw new Error('实例全挂');
+    },
+  });
+  t.after(h.cleanup);
+
+  await h.src.pollOnce();
+  assert.deepEqual(calls, ['acc_a', 'acc_b', 'acc_c'], '首轮正常全量');
+  calls.length = 0;
+
+  await h.src.pollOnce();
+  assert.deepEqual(calls, ['acc_a'], '链路中断中只探 canary，不打扰其余账号');
+  const last = h.statuses[h.statuses.length - 1]!;
+  assert.equal(last.linkDown, true);
+  assert.equal(last.okAccounts, 0);
+  assert.equal(last.accounts, 3, '状态仍报告真实账号数');
+});
+
+test('个别账号失败（链路正常）：不告警，持续满阈值落库 fetch_fail_*，恢复清库', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  let fail = false;
+  const h = harness({
+    fallbackHtml: false,
+    accounts: [{ screenName: SCREEN }, { screenName: 'other_acc' }],
+    rssFetcher: async (_hosts, screen) => {
+      if (screen === SCREEN && fail) throw new FeedFetchError('instance', 'nitter.a.example HTTP 404');
+      return { host: 'nitter.a.example', tweets: [tweet({ id: '7' + screen.length + screen, author: screen })], bytes: 1, ms: 1 };
+    },
+  });
+  t.after(h.cleanup);
+
+  fail = true;
+  await h.src.pollOnce(); // 首次失败，持续 0 秒未达阈值
+  assert.equal(h.alerts().length, 0, '账号级故障不告警');
+  assert.equal(h.account().fetchError, null, '未达阈值不落库');
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await h.src.pollOnce(); // 持续满 60s → 落库
+  const acc = h.account();
+  assert.match(acc.fetchError ?? '', /HTTP 404/);
+  assert.ok(acc.fetchFailSince !== null);
+  assert.equal(h.alerts().length, 0, '达阈值也不告警（面板展示）');
+
+  fail = false;
+  await h.src.pollOnce();
+  assert.equal(h.account().fetchError, null, '恢复清库');
+  assert.equal(h.account().fetchFailSince, null);
+});
+
+test('链路告警按分型说原因：代理层全挂 → 「代理不可用」', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  const h = harness({
+    fallbackHtml: false,
+    rssFetcher: async () => { throw new FeedFetchError('proxy', '代理不可达（127.0.0.1:7890）'); },
+  });
+  t.after(h.cleanup);
+  await h.src.pollOnce();
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await h.src.pollOnce(); // 持续满 60s → 告警
+  assert.equal(h.alerts().length, 1);
+  const alert = h.alerts()[0]!.payload as { message: string };
+  assert.match(alert.message, /代理不可用/, 'proxy 分型的文案直指代理');
+  assert.doesNotMatch(alert.message, /Nitter 实例全挂/);
+});
+
+test('链路持续中断满 10 分钟再发 durationAlert（QQ 路由依据）；恢复复位后可重新告警', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  let healthy = false;
+  const h = harness({
+    fallbackHtml: false,
+    rssFetcher: async () => {
+      if (!healthy) throw new FeedFetchError('instance', 'nitter.a.example HTTP 429');
+      return { host: 'nitter.a.example', tweets: [tweet({ id: '800' })], bytes: 1, ms: 1 };
+    },
+  });
+  t.after(h.cleanup);
+  const isDur = (s: Signal) => (s.payload as { durationAlert?: boolean } | undefined)?.durationAlert === true;
+
+  await h.src.pollOnce(); // 第 1 轮全灭，计起点
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await h.src.pollOnce(); // 达次数阈值（2），持续 1 分钟
+  assert.equal(h.alerts().length, 1);
+  assert.equal(h.alerts().filter(isDur).length, 0, '未到 10 分钟不发持续告警');
+
+  t.mock.timers.setTime(Date.now() + 600_000);
+  await h.src.pollOnce();
+  const dur = h.alerts().filter(isDur);
+  assert.equal(dur.length, 1, '持续满 10 分钟再报一次');
+  assert.match((dur[0]!.payload as { message: string }).message, /已中断约 11 分钟/);
+  assert.equal(h.alerts().length, 2, '整轮故障只有两条聚合告警（刷屏修复的证据）');
+
+  healthy = true;
+  await h.src.pollOnce(); // 恢复复位
+  healthy = false;
+  await h.src.pollOnce(); // 新一轮故障起点
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await h.src.pollOnce(); // 持续满 60s → 重新告警
+  assert.equal(h.alerts().length, 3, '恢复后再次全灭可重新告警');
 });
 
 test('只轮询 enabled=1 的账号；名单为空时不发信号也不报错', async (t) => {

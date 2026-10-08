@@ -70,7 +70,7 @@ export const mockChannels = [
 export const mockAdvanced = {
   pollIntervalSec: 45,
   pollJitterSec: 8,
-  healthAlertAfterFailures: 5,
+  healthAlertToastAfterSec: 180,
   followsSyncIntervalSec: 1800,
   dynamicIntervalSec: 300,
   weiboIntervalSec: 300,

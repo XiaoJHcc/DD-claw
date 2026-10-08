@@ -801,6 +801,8 @@ input:disabled{opacity:.5;background:var(--fill)}
 /* 停用的账号卡整卡压灰（meta 里也有「已停用」字样，视觉只是加强） */
 .x-card.x-off{opacity:.55}
 .x-card.x-off:hover{opacity:.85}
+/* 账号级抓取故障标记（账号卡身份段的小红字；悬停 title 看完整原因） */
+.x-fail{display:block;color:var(--red);font-size:11px;line-height:1.4}
 /* 账号浮窗规则区底部的「添加规则」：通宽 ghost，与规则行 8px 缝 */
 .x-add-rule{width:100%;margin-top:8px}
 

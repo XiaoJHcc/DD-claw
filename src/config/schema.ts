@@ -51,7 +51,8 @@ export interface AppConfig {
   pollJitterSec: number;
   notifyOnFirstRun: boolean;
   notifyOnNewSubscription: boolean;
-  healthAlertAfterFailures: number;
+  /** 健康告警的本地 toast 阈值（秒）：故障持续满它才报第一级；QQ 级固定 STREAK_QQ_ALERT_AFTER_SEC */
+  healthAlertToastAfterSec: number;
   follows: { syncIntervalSec: number };
   dynamic: { intervalSec: number };
   weibo: { intervalSec: number };
@@ -72,7 +73,7 @@ export function defaultAppConfig(): AppConfig {
     pollJitterSec: 8,
     notifyOnFirstRun: false,
     notifyOnNewSubscription: true,
-    healthAlertAfterFailures: 5,
+    healthAlertToastAfterSec: 180,
     follows: { syncIntervalSec: 1800 },
     dynamic: { intervalSec: 300 },
     weibo: { intervalSec: 300 },

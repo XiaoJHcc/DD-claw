@@ -24,7 +24,7 @@ function config(_uids: string[], over: Partial<AppConfig> = {}): AppConfig {
   return {
     pollIntervalSec: 45, pollJitterSec: 0,
     notifyOnFirstRun: false, notifyOnNewSubscription: true,
-    healthAlertAfterFailures: 2,
+    healthAlertToastAfterSec: 60,
     subscriptions: [],
     notify: { onebot: { enabled: false, targets: [] }, toast: { enabled: true } },
     ...over,
@@ -82,7 +82,8 @@ test('拉取失败不产生 signal，且保留已知状态', async (t) => {
   assert.equal(h.db.loadRoomStates().get('1')?.isLive, true, '失败不得把状态改成已下播');
 });
 
-test('拉取失败达到阈值 emit 一次 health_alert，恢复后计数复位', async (t) => {
+test('拉取失败持续满阈值 emit 一次 health_alert，恢复后计数复位', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
   let fail = true;
   const h = harness(['1'], async () => {
     if (fail) throw new Error('boom');
@@ -91,15 +92,17 @@ test('拉取失败达到阈值 emit 一次 health_alert，恢复后计数复位'
   t.after(h.cleanup);
 
   await h.src.pollOnce();
-  assert.equal(h.signals.length, 0, '第 1 次失败还没到阈值');
+  assert.equal(h.signals.length, 0, '刚失败（持续 0 秒）还没到阈值');
+  t.mock.timers.setTime(Date.now() + 61_000);
   await h.src.pollOnce();
   const alerts = h.signals.filter((s) => s.kind === 'health_alert');
-  assert.equal(alerts.length, 1, '第 2 次达到阈值应告警');
+  assert.equal(alerts.length, 1, '持续满 60s 阈值应告警');
   const p = alerts[0]!.payload as { failures: number; subscriptions: number; lastError: string };
   assert.equal(p.failures, 2);
   assert.equal(p.subscriptions, 1, 'payload 要带上受影响的订阅数');
   assert.match(p.lastError, /boom/);
 
+  t.mock.timers.setTime(Date.now() + 61_000);
   await h.src.pollOnce();
   assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '不应重复告警刷屏');
 
@@ -121,8 +124,8 @@ test('连续失败持续满 10 分钟再发一次 durationAlert 告警（QQ 路�
 
   await h.src.pollOnce(); // t0：第 1 次失败，计起点
   t.mock.timers.setTime(Date.now() + 61_000);
-  await h.src.pollOnce(); // 达次数阈值（2 次），但只持续 1 分钟
-  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, '次数阈值告警');
+  await h.src.pollOnce(); // 持续 1 分钟：满 toast 阈值（60s），未到 QQ 线
+  assert.equal(h.signals.filter((s) => s.kind === 'health_alert').length, 1, 'toast 阈值告警');
   assert.equal(h.signals.filter(isDur).length, 0, '未到 10 分钟不发持续告警');
 
   t.mock.timers.setTime(Date.now() + 600_000);

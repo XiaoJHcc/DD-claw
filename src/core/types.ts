@@ -56,8 +56,10 @@ export interface Signal {
 /**
  * health_alert 的 QQ 告警政策（pipeline 判定，见 core/pipeline）：
  * - payload.alertKind === 'login_drop'：运行中登录态意外失效 → 立即向告警 QQ 报
- * - payload.durationAlert === true：连续失败持续满本阈值后 source 再发一次 → 向告警 QQ 报
- * 其余 health_alert（次数阈值、看门狗）只发本机 toast。告警 QQ 为空 = 全不发。
+ * - payload.durationAlert === true：故障持续满本阈值后 source 再发一次 → 向告警 QQ 报
+ * 其余 health_alert（本地 toast 阈值、看门狗）只发本机 toast。告警 QQ 为空 = 全不发。
+ * 两级阈值都是时间口径（2026-11 统一）：toast 级 = settings `health_alert_toast_after_sec`
+ * （默认 180s），QQ 级 = 本常量；同一根时间轴上的两个点，顺序永不倒挂。
  */
 export const STREAK_QQ_ALERT_AFTER_SEC = 600;
 

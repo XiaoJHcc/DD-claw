@@ -97,6 +97,7 @@ async function fetchWithRetry(
       throw new TunnelError(
         e2 instanceof TunnelError ? e2.kind : 'truncated',
         `${describeTunnelError(e2)}（已重试 1 次）`,
+        e2 instanceof TunnelError ? e2.stage : 'established',
       );
     }
   }

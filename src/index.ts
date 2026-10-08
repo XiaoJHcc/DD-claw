@@ -509,7 +509,7 @@ async function main(): Promise<void> {
       fallbackHtml: cfg.fallbackHtml,
       intervalSec: cfg.intervalSec,
       jitterSec: eff.pollJitterSec,
-      healthAlertAfterFailures: eff.healthAlertAfterFailures,
+      healthAlertToastAfterSec: eff.healthAlertToastAfterSec,
       avatarCacheDir: xAvatarDir,
       onStatus: (s) => { xStatus = { ...xStatus, feed: s }; },
     });
@@ -581,9 +581,9 @@ async function main(): Promise<void> {
       });
       log.info(`关键帧缓存参数已热更新（${eff.keyframe.enabled ? '开' : '关'}，间隔 ${eff.keyframe.intervalSec}s）`);
     }
-    const thresholdChanged = prev.healthAlertAfterFailures !== eff.healthAlertAfterFailures;
+    const thresholdChanged = prev.healthAlertToastAfterSec !== eff.healthAlertToastAfterSec;
     if (prev.pollIntervalSec !== eff.pollIntervalSec || prev.pollJitterSec !== eff.pollJitterSec || thresholdChanged) {
-      log.info(`直播轮询参数已热更新（间隔 ${eff.pollIntervalSec}s + 抖动 ${eff.pollJitterSec}s，阈值 ${eff.healthAlertAfterFailures}）`);
+      log.info(`直播轮询参数已热更新（间隔 ${eff.pollIntervalSec}s + 抖动 ${eff.pollJitterSec}s，告警阈值 ${eff.healthAlertToastAfterSec}s）`);
       restartLiveStatus();
     }
     if (prev.follows.syncIntervalSec !== eff.follows.syncIntervalSec && followsSrc && biliCookieHdr) {

@@ -82,6 +82,8 @@ export interface XFeedSnapshot {
   accounts: number;
   okAccounts: number;
   lastError: string | null;
+  /** 链路中断中（上一轮全灭）：面板据此显示「自动重试中」，canary 退避也看它 */
+  linkDown: boolean;
 }
 
 export function emptyXFeedSnapshot(): XFeedSnapshot {
@@ -94,6 +96,7 @@ export function emptyXFeedSnapshot(): XFeedSnapshot {
     accounts: 0,
     okAccounts: 0,
     lastError: null,
+    linkDown: false,
   };
 }
 

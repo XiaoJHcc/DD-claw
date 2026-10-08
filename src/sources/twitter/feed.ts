@@ -7,8 +7,14 @@
  *   ② 免登录 x.com HTML + 单推接口（备）：零第三方依赖，但**看不到转发**
  *
  * 失败纪律（与"拉取失败绝不能当成下播"同源）：
- * - 拉取失败**绝不当成「没有新推文」**：保留旧数据、什么都不写，只记账告警；
- * - 单账号连续失败到阈值发一次 health_alert，持续失败超阈值再报一次，恢复复位；
+ * - 拉取失败**绝不当成「没有新推文」**：保留旧数据、什么都不写，只记账；
+ * - 故障分两级（2026-11 重构，刷屏教训）：
+ *   · 链路级 = 一轮内全部账号失败（代理挂 / Nitter 实例全挂 / 回退也挂）→ 源级计数，
+ *     聚合告警一条（次数阈值 → toast；持续超阈值 → 告警 QQ），恢复复位；
+ *     全灭后下一轮进入 canary 退避：先只拉第一个账号，通了才继续全量，不通计一次全灭——
+ *     链路故障期间不做 N×M 的必然失败请求（浪费且加剧实例限流）。
+ *   · 账号级 = 一轮内有人成功、个别账号失败（改名/销号/被单点 ban，长期问题）→
+ *     不推送，持续失败满阈值落库 fetch_fail_since/fetch_error，面板账号卡展示，成功即清。
  * - 「登录态心跳」在这里换成**代理/实例可用性心跳**（X 没有登录态）。
  *
  * 轮次政策见 core/backlog.ts：缺口轮（首轮）默认只归档，补推开关开了才按时间窗+
@@ -23,8 +29,15 @@ import type { NewPost } from '../../core/posts.js';
 import { pickBacklogPush, roundKind } from '../../core/backlog.js';
 import { getPostBacklogConfig } from '../../core/runtime-config.js';
 import { emptyXFeedSnapshot, type XFeedSnapshot } from '../../core/x-config.js';
+import type { XAccount } from '../../core/x-accounts.js';
 import type { Source, SourceContext } from '../types.js';
-import { fetchFromAnyInstance, type NitterFetchResult, type ParsedTweet } from './nitter.js';
+import {
+  fetchFromAnyInstance,
+  FeedFetchError,
+  type FetchScope,
+  type NitterFetchResult,
+  type ParsedTweet,
+} from './nitter.js';
 import { fetchWebTimeline } from './web.js';
 import { cacheXAvatar } from './avatar.js';
 
@@ -50,7 +63,8 @@ export interface TwitterFeedSourceOpts {
   fallbackHtml: boolean;
   intervalSec: number;
   jitterSec?: number;
-  healthAlertAfterFailures?: number;
+  /** 本地 toast 告警阈值（秒，故障持续时长）；缺省读全局配置 */
+  healthAlertToastAfterSec?: number;
   /** 头像本地缓存目录（cache/x-avatars）；不注入则只抠 URL 不落盘 */
   avatarCacheDir?: string;
   /** 头像落盘注入点（单测用；默认 cacheXAvatar 走代理隧道下载） */
@@ -76,6 +90,16 @@ export function tweetToPost(t: ParsedTweet, screenName: string, via: TwitterRout
   };
 }
 
+/** 单账号拉取结果（pollOnce 聚合判定用） */
+interface AccountPollResult {
+  acc: XAccount;
+  ok: boolean;
+  via: TwitterRoute | null;
+  host: string | null;
+  error?: string;
+  scope?: FetchScope;
+}
+
 export class TwitterFeedSource implements Source {
   readonly name = 'twitter/feed';
 
@@ -84,10 +108,17 @@ export class TwitterFeedSource implements Source {
   private status: XFeedSnapshot = emptyXFeedSnapshot();
   /** 已成功跑过一轮的账号（本实例内不再算缺口轮；语义见 core/backlog.ts） */
   private polled = new Set<string>();
+  /** 账号级失败计数（内存）；持续满阈值才落库 fetch_fail_*，恢复清位 */
   private failures = new Map<string, number>();
-  private uidAlerted = new Set<string>();
   private firstFailTs = new Map<string, number>();
-  private durationAlerted = new Set<string>();
+
+  // ---- 链路级状态（一轮全灭才算链路故障；聚合告警，不逐账号发）----
+  /** 上一轮全灭 = 链路中断中：本轮进入 canary 退避（先只探一个账号） */
+  private linkDown = false;
+  private linkFailRounds = 0;
+  private linkFirstFailTs = 0;
+  private linkAlerted = false;
+  private linkDurationAlerted = false;
 
   private readonly opts: TwitterFeedSourceOpts;
 
@@ -123,7 +154,7 @@ export class TwitterFeedSource implements Source {
     );
   }
 
-  /** 一轮：逐账号拉时间线 → 归档 → 新帖发信号；单账号失败不影响其他账号 */
+  /** 一轮：逐账号拉时间线 → 归档 → 新帖发信号；链路中断时 canary 退避 */
   async pollOnce(): Promise<void> {
     const ctx = this.ctx!;
     const accounts = ctx.db.listXAccounts(true);
@@ -138,14 +169,48 @@ export class TwitterFeedSource implements Source {
     let via: TwitterRoute | null = null;
     let host: string | null = null;
     let lastError: string | null = null;
-    await mapLimit(accounts, 2, async (a) => {
-      const r = await this.pollAccount(a.screenName, a.lastTweetId);
+    let lastScope: FetchScope | null = null;
+    /** 本轮失败的账号（链路正常时才按账号级故障落库，全灭轮不标——那不是账号的问题） */
+    const roundFailures: AccountPollResult[] = [];
+    const collect = (r: AccountPollResult) => {
       if (r.ok) ok++;
+      else roundFailures.push(r);
       if (r.via) via = r.via;
       if (r.host) host = r.host;
       if (r.error) lastError = r.error;
-    });
+      if (r.scope) lastScope = r.scope;
+    };
 
+    if (this.linkDown) {
+      // canary 退避：链路中断中只探第一个账号；通了当轮继续全量，不通跳过其余账号
+      collect(await this.pollAccount(accounts[0]!));
+      if (ok === 0) {
+        this.onLinkFailure(accounts.length, lastError, lastScope);
+        this.patchStatus({
+          lastRunAt: nowSec, accounts: accounts.length, okAccounts: 0,
+          lastError, linkDown: true,
+        });
+        return;
+      }
+      log.info(`X 链路恢复（canary @${accounts[0]!.screenName} 成功），本轮继续全量轮询`);
+      await mapLimit(accounts.slice(1), 2, async (a) => collect(await this.pollAccount(a)));
+    } else {
+      await mapLimit(accounts, 2, async (a) => collect(await this.pollAccount(a)));
+    }
+
+    if (ok === 0) {
+      this.onLinkFailure(accounts.length, lastError, lastScope);
+    } else {
+      this.onLinkSuccess();
+      // 链路正常下的个别失败 = 账号级故障：持续满阈值落库给面板账号卡展示（不推送）
+      const toastSec = this.opts.healthAlertToastAfterSec ?? ctx.config.healthAlertToastAfterSec;
+      for (const f of roundFailures) {
+        const since = this.firstFailTs.get(f.acc.screenName);
+        if (f.error && since !== undefined && nowSec - since >= toastSec) {
+          ctx.db.touchXAccount(f.acc.id, { fetchFail: { since, error: f.error } });
+        }
+      }
+    }
     this.patchStatus({
       lastRunAt: nowSec,
       accounts: accounts.length,
@@ -153,7 +218,8 @@ export class TwitterFeedSource implements Source {
       via,
       host,
       lastOkAt: ok > 0 ? nowSec : this.status.lastOkAt,
-      lastError,
+      lastError: ok > 0 ? null : lastError,
+      linkDown: ok === 0,
     });
   }
 
@@ -163,27 +229,27 @@ export class TwitterFeedSource implements Source {
     if (!ctx) return;
     const acc = ctx.db.getXAccountByScreenName(screenName);
     if (!acc) return;
-    await this.pollAccount(acc.screenName, acc.lastTweetId);
+    await this.pollAccount(acc);
   }
 
-  private async pollAccount(
-    screenName: string,
-    sinceId: string | null,
-  ): Promise<{ ok: boolean; via: TwitterRoute | null; host: string | null; error?: string }> {
+  private async pollAccount(acc: XAccount): Promise<AccountPollResult> {
     const ctx = this.ctx!;
+    const screenName = acc.screenName;
     let fetched: TimelineFetch;
     try {
-      fetched = await this.fetchTimeline(screenName, sinceId);
+      fetched = await this.fetchTimeline(screenName, acc.lastTweetId);
     } catch (e) {
       // 关键：拉取失败绝不当成「没有新推文」—— 保留旧数据，什么都不写
       const msg = e instanceof Error ? e.message : String(e);
       log.error(`X 时间线拉取失败 @${screenName}（保留旧数据）：${msg}`);
-      this.onFailure(screenName, msg);
-      return { ok: false, via: null, host: null, error: `@${screenName}: ${msg}` };
+      this.onAccountFailure(acc);
+      return {
+        acc, ok: false, via: null, host: null, error: `@${screenName}: ${msg}`,
+        scope: e instanceof FeedFetchError ? e.scope : undefined,
+      };
     }
-    this.onSuccess(screenName);
+    this.onAccountSuccess(acc);
 
-    const acc = ctx.db.getXAccountByScreenName(screenName)!;
     const posts = fetched.tweets.map((t) => tweetToPost(t, screenName, fetched.via, fetched.host));
     const inserted = ctx.db.insertPosts(posts);
     const firstRound = !this.polled.has(screenName);
@@ -203,6 +269,8 @@ export class TwitterFeedSource implements Source {
       ...(fetched.authorName ? { nickname: fetched.authorName } : {}),
       // 恢复位消费：本轮按 resume 轮静默处理过了，顺手清位
       ...(acc.silentNext ? { silentNext: false } : {}),
+      // 账号级故障恢复：清面板上的失败标记
+      ...(acc.fetchError !== null ? { fetchFail: null } : {}),
     });
 
     // 轮次语义（core/backlog.ts）：resume=主动关闭恢复，一律静默；gap=本实例首轮
@@ -249,16 +317,18 @@ export class TwitterFeedSource implements Source {
       const avatar = await saver(fetched.avatarUrl, this.opts.avatarCacheDir, this.opts.proxyUrl);
       if (avatar) ctx.db.touchXAccount(acc.id, { avatar });
     }
-    return { ok: true, via: fetched.via, host: fetched.host };
+    return { acc, ok: true, via: fetched.via, host: fetched.host };
   }
 
   /**
    * 主路线 Nitter RSS；失败且开了回退时走免登录 HTML。
    * 回退路线用 `sinceId` 只取增量详情，避免每次把最新十几条都换成单推请求。
+   * 抛出的 FeedFetchError.scope 取主路线（nitter）的责任归属——回退只是备，
+   * 链路告警的原因按主路线说。
    */
   private async fetchTimeline(screenName: string, sinceId: string | null): Promise<TimelineFetch> {
     const { proxyUrl, instances, fallbackHtml } = this.opts;
-    let rssError: string | null = null;
+    let rssError: FeedFetchError | null = null;
     if (instances.length > 0) {
       try {
         const rss = this.opts.rssFetcher
@@ -266,11 +336,13 @@ export class TwitterFeedSource implements Source {
           : await fetchFromAnyInstance(instances, screenName, proxyUrl);
         return { tweets: rss.tweets, via: 'nitter', host: rss.host, avatarUrl: rss.avatarCdn ?? null, authorName: rss.authorName ?? null };
       } catch (e) {
-        rssError = e instanceof Error ? e.message : String(e);
+        rssError = e instanceof FeedFetchError
+          ? e
+          : new FeedFetchError('instance', e instanceof Error ? e.message : String(e));
       }
     }
     if (!fallbackHtml) {
-      throw new Error(rssError ?? '没有可用路线（未配置实例且回退已关）');
+      throw rssError ?? new FeedFetchError('instance', '没有可用路线（未配置实例且回退已关）');
     }
     try {
       const web = this.opts.webFetcher
@@ -278,8 +350,11 @@ export class TwitterFeedSource implements Source {
         : await fetchWebTimeline(screenName, proxyUrl, { sinceId });
       return { tweets: web.tweets, via: 'web', host: null, avatarUrl: web.avatarUrl ?? null, authorName: web.authorName ?? null };
     } catch (e) {
-      const webError = e instanceof Error ? e.message : String(e);
-      throw new Error(rssError ? `Nitter 失败（${rssError}）；回退也失败（${webError}）` : `回退路线失败（${webError}）`);
+      const webMsg = e instanceof Error ? e.message : String(e);
+      throw new FeedFetchError(
+        rssError ? rssError.scope : e instanceof FeedFetchError ? e.scope : 'web',
+        rssError ? `Nitter 失败（${rssError.message}）；回退也失败（${webMsg}）` : `回退路线失败（${webMsg}）`,
+      );
     }
   }
 
@@ -288,46 +363,89 @@ export class TwitterFeedSource implements Source {
     this.opts.onStatus?.(this.status);
   }
 
-  private onSuccess(uid: string): void {
-    const n = this.failures.get(uid) ?? 0;
-    if (n > 0) log.info(`@${uid} X 时间线拉取恢复正常（此前连续失败 ${n} 次）`);
-    this.failures.delete(uid);
-    this.uidAlerted.delete(uid);
-    this.firstFailTs.delete(uid);
-    this.durationAlerted.delete(uid);
+  // ---- 账号级失败：不推送，持续满阈值落库给面板展示，成功即清 ----
+
+  private onAccountSuccess(acc: XAccount): void {
+    const n = this.failures.get(acc.screenName) ?? 0;
+    if (n > 0) log.info(`@${acc.screenName} X 时间线拉取恢复正常（此前连续失败 ${n} 次）`);
+    this.failures.delete(acc.screenName);
+    this.firstFailTs.delete(acc.screenName);
+    // 库里的故障标记在 pollAccount 成功路径顺手清（fetchFail: null）
   }
 
-  private onFailure(uid: string, err: string): void {
-    const ctx = this.ctx!;
+  private onAccountFailure(acc: XAccount): void {
     const nowSec = Math.floor(Date.now() / 1000);
-    const n = (this.failures.get(uid) ?? 0) + 1;
-    if (n === 1) this.firstFailTs.set(uid, nowSec);
-    this.failures.set(uid, n);
-    const durationSec = nowSec - (this.firstFailTs.get(uid) ?? nowSec);
-    const threshold = this.opts.healthAlertAfterFailures ?? ctx.config.healthAlertAfterFailures;
-    if (n >= threshold && !this.uidAlerted.has(uid)) {
-      this.uidAlerted.add(uid);
-      this.emitAlert(uid, n, durationSec, err, false);
+    const n = (this.failures.get(acc.screenName) ?? 0) + 1;
+    if (n === 1) this.firstFailTs.set(acc.screenName, nowSec);
+    this.failures.set(acc.screenName, n);
+    // 落库不在这里做：账号级故障的判定要等 pollOnce 聚合出「链路正常」才成立，
+    // 全灭轮里所有账号都在失败，标账号故障是冤枉它们（见 pollOnce 末尾）
+  }
+
+  // ---- 链路级失败：一轮全灭才算；聚合告警一条 + canary 退避（见 pollOnce）----
+
+  private onLinkSuccess(): void {
+    if (this.linkDown || this.linkFailRounds > 0) {
+      log.info(`X 链路抓取恢复正常（此前连续全灭 ${this.linkFailRounds} 轮）`);
     }
-    if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.durationAlerted.has(uid)) {
-      this.durationAlerted.add(uid);
-      this.emitAlert(uid, n, durationSec, err, true);
+    this.linkDown = false;
+    this.linkFailRounds = 0;
+    this.linkFirstFailTs = 0;
+    this.linkAlerted = false;
+    this.linkDurationAlerted = false;
+  }
+
+  private onLinkFailure(accounts: number, err: string | null, scope: FetchScope | null): void {
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (this.linkFailRounds === 0) this.linkFirstFailTs = nowSec;
+    this.linkFailRounds++;
+    this.linkDown = true;
+    const durationSec = nowSec - this.linkFirstFailTs;
+    // 两级告警都是时间口径（同一根时间轴上的两个点，顺序永不倒挂）：
+    // 持续满 healthAlertToastAfterSec → 本机 toast；满 STREAK_QQ_ALERT_AFTER_SEC → 告警 QQ
+    const toastSec = this.opts.healthAlertToastAfterSec ?? this.ctx!.config.healthAlertToastAfterSec;
+    if (durationSec >= toastSec && !this.linkAlerted) {
+      this.linkAlerted = true; // 同一轮故障只告警一次，恢复后才复位
+      this.emitLinkAlert(accounts, durationSec, err, scope, false);
+    }
+    if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.linkDurationAlerted) {
+      this.linkDurationAlerted = true;
+      this.emitLinkAlert(accounts, durationSec, err, scope, true);
     }
   }
 
-  private emitAlert(uid: string, failures: number, durationSec: number, err: string, durationAlert: boolean): void {
+  /** 链路告警的一句话原因：按底层分型说真实原因，不猜 */
+  private linkReason(scope: FetchScope | null, err: string | null): string {
+    if (scope === 'proxy') {
+      return `代理不可用（${this.opts.proxyUrl || '未配置'}）`;
+    }
+    if (scope === 'instance') {
+      // 首条实例原因做摘要（剥掉账号前缀与聚合前缀），详情在面板「测试全部」
+      const first = (err ?? '').replace(/^@[A-Za-z0-9_]+: /, '').replace(/^全部 \d+ 个实例都失败：/, '').split('；')[0] ?? '';
+      return `Nitter 实例全挂（${this.opts.instances.length} 个均失败${first ? `：${first}` : ''}）` +
+        (this.opts.fallbackHtml ? '，免登录回退也不可用' : '');
+    }
+    if (scope === 'web') return '免登录回退路线不可用';
+    return err ?? '未知原因';
+  }
+
+  private emitLinkAlert(accounts: number, durationSec: number, err: string | null, scope: FetchScope | null, durationAlert: boolean): void {
+    const reason = this.linkReason(scope, err);
+    // 两级共用同一句式（时间口径统一后，两级只是同一根时间轴上的两个点）
+    const message =
+      `X 抓取已中断约 ${Math.max(1, Math.round(durationSec / 60))} 分钟：${reason}。` +
+      '自动重试中，恢复后自动继续。';
     this.ctx!.bus.emit({
       source: this.name,
       kind: 'health_alert',
-      uid,
+      uid: '',
       roomId: '',
       ts: Math.floor(Date.now() / 1000),
       payload: {
         alertKind: 'streak',
-        message: `X 时间线拉取连续失败 ${failures} 次（@${uid}），该账号本轮已暂停。\n` +
-          '多为代理不可用或 Nitter 实例全挂，恢复后自动继续；可在面板「X / 推特」页点「测试全部」看具体原因。' +
-          (durationAlert ? `\n已持续失败约 ${Math.round(durationSec / 60)} 分钟。` : ''),
-        failures,
+        message,
+        failures: this.linkFailRounds,
+        accounts,
         lastError: err,
         ...(durationAlert ? { durationAlert: true } : {}),
       },

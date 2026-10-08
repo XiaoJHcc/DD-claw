@@ -89,9 +89,9 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/onboarding.ts` — 首启默认值种入（一次性闸门）
 - `src/core/onboarding-defaults.gen.ts` — 构建期生成物（勿手改）
 - `src/core/concurrency.ts` — `mapLimit` 有界并发
-- `src/core/proxy.ts` — **隧道 fetch**（HTTP 代理 CONNECT；Node 22 原生 fetch 不认代理），X 链路唯一出网通道
+- `src/core/proxy.ts` — **隧道 fetch**（HTTP 代理 CONNECT；Node 22 原生 fetch 不认代理），X 链路唯一出网通道；`TunnelError.stage` 区分代理责任（connect）与目标责任（established），告警分型的依据
 - `src/core/x-config.ts` — X/推特连接配置 + 探测状态快照（settings 唯一信源）
-- `src/core/x-accounts.ts` — X 独立关注名单（行类型/映射/归一化；表在 db.ts，独立于 streamers）
+- `src/core/x-accounts.ts` — X 独立关注名单（行类型/映射/归一化 + 账号级故障列 `fetch_fail_since`/`fetch_error`；表在 db.ts，独立于 streamers）
 - `src/core/weibo-accounts.ts` — 微博独立关注名单（行/映射/uid 归一化 + 源运行状态快照；表在 db.ts）
 - `src/core/bili-accounts.ts` — B站动态独立账号名单（行/映射/uid 归一化；表在 db.ts，独立于 streamers）
 - `src/core/post-rules.ts` — 图文帖规则（平台无关的通用规则：只定义筛选+渠道+推送词，生效范围在账号侧 rule_ids；quote/翻译按帖子平台运行时生效）
@@ -110,11 +110,11 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/sources/bili/qrcode.ts` — passport 扫码客户端（要响应头）
 - `src/sources/bili/followings.ts` — `x/relation/followings` 分页（50/页，无 WBI）
 - `src/sources/bili/follows.ts` — `FollowsSource`（正轮成功才落库；不自动入监听）
-- `src/sources/bili/dynamic.ts` — `DynamicSource`：`feed/space`（无 WBI）→ posts；轮询对象 = 监听主播 ∪（图文开关开着时的）bili_accounts 启用账号，`feed_post` **只对名单账号发**（监听主播只归档）；FORWARD 归一 `retweet`、LIVE_RCMD 彻底舍弃；名单账号回写 uname/last_ok_at/头像；`kickAccount` 添加后即时首拉
+- `src/sources/bili/dynamic.ts` — `DynamicSource`：`feed/space`（无 WBI）→ posts；轮询对象 = 监听主播 ∪（图文开关开着时的）bili_accounts 启用账号，`feed_post` **只对名单账号发**（监听主播只归档）；FORWARD 归一 `retweet`、LIVE_RCMD 彻底舍弃；名单账号回写 uname/last_ok_at/头像；`kickAccount` 添加后即时首拉；故障两级同 X（全灭=风控链路级聚合告警，个别失败落库不推送）
 - `src/sources/bili/avatar.ts` — B站头像本地化（**直连下载**，hdslb 境内可达且不校验 Referer；md5 文件名入库，面板按文件名读）
 - `src/sources/bili/dm.ts` — dm 设备指纹参数（RSSHub 算法）
 - `src/sources/media/keyframe.ts` — `KeyframeCache`（md5 去重、相对路径入库）
-- `src/sources/weibo/feed.ts` — `WeiboFeedSource`：轮 `weibo_accounts` → mymblog → posts → `feed_post`（`posts.uid` = 微博账号 uid）；登录态心跳折进周期；抓取顺手抠头像落 `cache/weibo-avatars`；每轮上报运行状态快照
+- `src/sources/weibo/feed.ts` — `WeiboFeedSource`：轮 `weibo_accounts` → mymblog → posts → `feed_post`（`posts.uid` = 微博账号 uid）；登录态心跳折进周期；抓取顺手抠头像落 `cache/weibo-avatars`；每轮上报运行状态快照；故障两级同 X（登录态失效=链路级 login_drop；全灭聚合告警；个别失败落库不推送）
 - `src/sources/weibo/avatar.ts` — 微博头像本地化（**直连下载**，sinaimg 境内可达；md5 文件名入库，面板经 `/api/weibo-avatar` 读）
 - `src/sources/weibo/qrcode.ts` — 微博扫码（generate 必须带 Referer）
 - `src/sources/weibo/auth.ts` — weibo-cookies + `X-Log-Uid` 心跳
@@ -122,7 +122,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/sources/twitter/probe.ts` — **X 连通性探测**（代理 / 实例 RSS / 免登录回退），`npm run probe-x` 与 `/api/x/test` 共用
 - `src/sources/twitter/nitter.ts` — Nitter RSS 解析（主路线：唯一能区分原创/转发）；多实例轮询
 - `src/sources/twitter/web.ts` — 免登录回退：`x.com` HTML 发现 id + 单推接口补详情；账号存在性校验（og:title 顺手抠显示名，verify 回报）
-- `src/sources/twitter/feed.ts` — `TwitterFeedSource`：轮询 `x_accounts` → posts → `feed_post`（模子与 weibo/feed 互为参照）；顺手抠头像 URL 落盘回写、免登录路线回写平台昵称
+- `src/sources/twitter/feed.ts` — `TwitterFeedSource`：轮询 `x_accounts` → posts → `feed_post`（模子与 weibo/feed 互为参照）；顺手抠头像 URL 落盘回写、免登录路线回写平台昵称；**故障两级**：一轮全灭=链路级（聚合告警一条 + canary 退避：中断中每轮只探第一个账号），个别失败=账号级（不推送，持续满阈值落库 `fetch_fail_*` 上面板账号卡）
 - `src/sources/twitter/avatar.ts` — X 头像本地化（代理隧道下载 → cache/x-avatars，md5 文件名入库；面板经 `/api/x-avatar` 读）
 
 ### analysis / rules
