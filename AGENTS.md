@@ -97,7 +97,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/post-rules.ts` — 图文帖规则（平台无关的通用规则：只定义筛选+渠道+推送词，生效范围在账号侧 rule_ids；quote/翻译按帖子平台运行时生效）
 - `src/config/index.ts` — 读 `.env` + `config.json`（只有 panel 段生效）
 - `src/config/schema.ts` — panel 校验 + provider schema + 默认配置
-- `src/logger.ts` — 极简结构化日志
+- `src/logger.ts` — 极简结构化日志（console + 文件 sink：`data/logs/dd-claw-YYYY-MM-DD.log` 按天滚动、保留 7 天，`initFileSink` 在 index.ts 装配，写盘失败静默）
 
 ### sources — 抓取
 
@@ -130,7 +130,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/analysis/types.ts` — `Classifier` / `Classification` / `AnalysisContext` / `LlmTask`
 - `src/analysis/classifier.ts` — `RulesClassifier`（LLM 优先 + 确定性回退，入 verdicts）
 - `src/analysis/queue.ts` — 分析队列（限流并发 2；`run()` 是图文帖等非分类任务的通用入口）
-- `src/analysis/providers.ts` — LLM provider（路由/熔断/多 key/双协议）
+- `src/analysis/providers.ts` — LLM provider（路由/可重试失败就地重试/熔断/多 key/双协议）
 - `src/analysis/tasks/classify.ts` — 单次批量 LLM 分类任务
 - `src/analysis/tasks/post-analysis.ts` — 图文帖任务：判定 + 翻译合并成一次调用（平台措辞；翻译只对 X；附图走 vision 路由）
 - `src/analysis/post-analyzer.ts` — 图文帖分析编排（LLM 不可用/失败一律回退机械筛选；有图且 vision 路由可用才附图，否则纯文本降级）

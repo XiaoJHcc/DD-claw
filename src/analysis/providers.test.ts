@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  OpenAiProvider, LlmRouter, AllProvidersExhaustedError, createLlmRouter,
+  OpenAiProvider, LlmRouter, AllProvidersExhaustedError, ProviderCallError, createLlmRouter,
   listLlmProviders, saveLlmProviders, deriveRoutes,
   isLlmEnabled, setLlmEnabled, dbKeysOf,
   type ChatMessage, type FetchLike,
@@ -39,7 +39,7 @@ function fakeFetch(queue: Array<Response | Error>) {
   return { fn, calls };
 }
 
-const OPTS = { timeoutMs: 5000, circuitThreshold: 2, circuitCooldownMs: 60_000 };
+const OPTS = { timeoutMs: 5000, circuitThreshold: 2, circuitCooldownMs: 60_000, retryBackoffMs: [0, 0] };
 
 function provider(
   over: Partial<LlmProviderConfig> = {},
@@ -116,10 +116,12 @@ test('首个 provider 失败降级到下一个；失败原因不含 key', async 
 test('连续失败到阈值打开熔断，冷却期内跳过，冷却结束恢复', async () => {
   let clock = 0;
   const now = () => clock;
-  // 前两次失败 → 熔断；第三次应在熔断期被跳过；时钟前进后第四次恢复
+  // 前两次失败 → 熔断；第三次应在熔断期被跳过；时钟前进后第四次恢复。
+  // 用 400（非可重试）让每次 completeJson 只发一次请求，隔离熔断机制本身；
+  // 可重试失败的重试耗尽后计入熔断由「429 重试耗尽」用例覆盖
   const { fn, calls } = fakeFetch([
-    new Response('x', { status: 500 }),
-    new Response('x', { status: 500 }),
+    new Response('x', { status: 400 }),
+    new Response('x', { status: 400 }),
     okResponse('{"ok":true}'),
   ]);
   const p = provider({ name: 'a' }, [], fn, now);
@@ -154,6 +156,75 @@ test('parse（zod 校验）失败同样计入熔断并降级', async () => {
   };
   const r = await router.completeJson({ messages: textMsg }, parse);
   assert.equal(r.v, 2);
+});
+
+// ---- 可重试失败：就地重试，重试耗尽才计入熔断 ----
+
+test('429 后 200：重试成功，不计失败', async () => {
+  const { fn, calls } = fakeFetch([
+    new Response('quota', { status: 429 }),
+    okResponse('{"ok":true}'),
+  ]);
+  const p = provider({ name: 'a' }, [], fn);
+  const router = new LlmRouter([p], { text: ['a'], vision: [] });
+  const r = await router.completeJson<{ ok: boolean }>({ messages: textMsg });
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 2, '重试了一次');
+  assert.equal(p.status(), 'ready', '重试成功不进熔断统计');
+});
+
+test('网络异常（fetch 抛错）后重试成功', async () => {
+  const { fn, calls } = fakeFetch([new Error('socket hangup'), okResponse('{"ok":true}')]);
+  const router = new LlmRouter([provider({ name: 'a' }, [], fn)], { text: ['a'], vision: [] });
+  const r = await router.completeJson<{ ok: boolean }>({ messages: textMsg });
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 2);
+});
+
+test('正文非法 JSON 后重试成功（模型输出抽风是瞬时故障）', async () => {
+  const { fn, calls } = fakeFetch([okResponse('好的，主播在唱歌'), okResponse('{"v":1}')]);
+  const router = new LlmRouter([provider({ name: 'a' }, [], fn)], { text: ['a'], vision: [] });
+  const r = await router.completeJson<{ v: number }>({ messages: textMsg });
+  assert.equal(r.v, 1);
+  assert.equal(calls.length, 2);
+});
+
+test('400 是确定性错误：不重试，直接抛出', async () => {
+  const { fn, calls } = fakeFetch([new Response('bad request', { status: 400 })]);
+  const p = provider({ name: 'a' }, [], fn);
+  await assert.rejects(
+    p.complete({ messages: textMsg }),
+    (e) => e instanceof ProviderCallError && e.retryable === false,
+  );
+  assert.equal(calls.length, 1, '非可重试错误只发一次请求');
+});
+
+test('429 重试耗尽（共 3 次尝试）才抛错，且一次 completeJson 只计一次失败', async () => {
+  const { fn, calls } = fakeFetch([new Response('quota', { status: 429 })]); // 单元素队列无限重复
+  const p = provider({ name: 'a' }, [], fn); // OPTS.circuitThreshold = 2
+  const router = new LlmRouter([p], { text: ['a'], vision: [] });
+
+  await assert.rejects(router.completeJson({ messages: textMsg }), AllProvidersExhaustedError);
+  assert.equal(calls.length, 3, '1 + MAX_RETRIES 次尝试');
+  assert.equal(p.status(), 'ready', '重试耗尽只算一次失败，未到阈值不熔断');
+
+  await assert.rejects(router.completeJson({ messages: textMsg }), AllProvidersExhaustedError);
+  assert.equal(calls.length, 6);
+  assert.equal(p.status(), '熔断中', '第二次真失败到阈值才熔断');
+});
+
+test('重试轮换池内下一个 key', async () => {
+  const { fn, calls } = fakeFetch([
+    new Response('x', { status: 500 }),
+    okResponse('{}'),
+  ]);
+  const router = new LlmRouter(
+    [provider({ name: 'a' }, ['K1', 'K2'], fn)],
+    { text: ['a'], vision: [] },
+  );
+  await router.completeJson({ messages: textMsg });
+  const auths = calls.map((c) => (c.init.headers as Record<string, string>).Authorization);
+  assert.deepEqual(auths, ['Bearer K1', 'Bearer K2'], '重试换了下一个 key');
 });
 
 // ---- key 池与鉴权 ----

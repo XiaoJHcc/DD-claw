@@ -1,7 +1,7 @@
 import { loadConfig, ConfigError, projectRoot } from './config/index.js';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { makeLogger } from './logger.js';
+import { initFileSink, makeLogger } from './logger.js';
 import { Db } from './core/db.js';
 import { Bus } from './core/bus.js';
 import { Pipeline } from './core/pipeline.js';
@@ -102,6 +102,9 @@ let xStatus: XStatus = emptyXStatus();
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const { app, secrets } = loadConfig();
+
+  // 日志落盘：进程后台运行时 console 输出会蒸发，失败原因要能在 data/logs/ 事后追查
+  initFileSink(join(dirname(secrets.dbPath), 'logs'));
 
   // --napcat-setup 一次性提权设置：创建「最高权限」计划任务（弹一次 UAC），
   // 之后看门狗用 schtasks /run 静默拉起 NapCat。与面板「失活自动拉起」开关等效

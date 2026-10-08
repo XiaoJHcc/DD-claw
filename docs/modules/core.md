@@ -78,7 +78,7 @@ posts 表的行类型与「行 ↔ 对象」映射（pics JSON 序列化集中�
 
 - `index.ts`：读 `.env` + `config.json`（**全程可选**：文件不存在 = 全默认值启动；JSONC 注释、BOM 剥离，zod 启动即校验）。config.json 只有 `panel` 段被读取（面板自举），其余顶层字段一律无视（zod 剥离）；AppConfig 运行参数全部是代码默认值，生效值 = settings 叠加。
 - `schema.ts`：`configSchema` 只校验 `panel` 段（enabled/port，默认 8787 只绑 127.0.0.1）；`llmProviderSchema` 供面板 provider CRUD；`AppConfig` 手写字段接口（含 `keyframe` 底形）+ `defaultAppConfig()`。秘密只在 `.env`（DB_PATH/LOG_LEVEL）/ `cookies.json` / `weibo-cookies.json`；LLM key 在 settings（面板明文填写）。
-- `logger.ts`：极简结构化日志。
+- `logger.ts`：极简结构化日志。console + 文件 sink 双写（`initFileSink(dir)` 装配在 index.ts，落 `data/logs/dd-claw-YYYY-MM-DD.log` 按天滚动、保留 7 天）；文件与 console 同一阈值，写盘/初始化失败静默（日志绝不影响主流程）。
 
 ## 装配根 `src/index.ts`
 

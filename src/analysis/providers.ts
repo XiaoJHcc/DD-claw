@@ -14,6 +14,8 @@ const log = makeLogger('llm');
  * - 任务按「输入是否含图」选路由：含图一律走 vision 路由（多模态模型），
  *   纯文本走 text 路由（便宜文本模型打头）
  * - 熔断：连续失败到阈值打开，冷却期内直接跳过，不去撞已知挂掉的端点
+ * - 可重试失败（网络/超时/429/5xx/脏响应）先就地重试，重试耗尽才计入熔断——
+ *   瞬时抖动不该喂给熔断计数器，更不该让译文因单次抖动凭空消失
  * - 多 key 池：同 provider 下多个 key 轮询，延长额度寿命
  *
  * key 绝不进日志：只在 Authorization 头里出现，错误信息只带 provider name。
@@ -53,9 +55,20 @@ export function dbKeysOf(db: Db): SpecKeysOf {
   };
 }
 
-/** 单次调用失败（HTTP 错误 / 响应缺内容 / JSON 解析失败），计入熔断 */
+/**
+ * 单次调用失败（HTTP 错误 / 响应缺内容 / JSON 解析失败），计入熔断。
+ * retryable=true 表示瞬时故障（网络抖动 / 超时 / 429 / 5xx / 网关返回脏数据），
+ * complete() 会先就地重试，重试耗尽才抛给上层计入熔断；
+ * false = 确定性错误（401 key 失效 / 404 模型名错 / 400 请求不被接受），重试无意义。
+ */
 export class ProviderCallError extends Error {
   override name = 'ProviderCallError';
+  constructor(
+    message: string,
+    readonly retryable = false,
+  ) {
+    super(message);
+  }
 }
 
 /** 路由内所有 provider 都不可用或全部失败 */
@@ -74,8 +87,17 @@ export interface ProviderOptions {
   circuitThreshold: number;
   circuitCooldownMs: number;
   fetchFn?: FetchLike;
+  /** 可重试失败的重试间隔（毫秒，按第 N 次重试取下标）；缺省 [1s, 3s]。测试可传 [0, 0] */
+  retryBackoffMs?: number[];
   /** 可注入时钟，测试用 */
   now?: () => number;
+}
+
+/** 可重试失败的额外重试次数（共 1 + MAX_RETRIES 次尝试） */
+const MAX_RETRIES = 2;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 export class OpenAiProvider {
@@ -158,16 +180,31 @@ export class OpenAiProvider {
     return key;
   }
 
-  /** 按 spec.api 选调用的协议，返回解析后的 JSON。任何失败抛 ProviderCallError */
+  /**
+   * 按 spec.api 选调用的协议，返回解析后的 JSON。任何失败抛 ProviderCallError。
+   * 可重试失败（retryable）就地重试 MAX_RETRIES 次（间隔 retryBackoffMs，每次重试
+   * 自然轮换池内下一个 key），重试耗尽才抛出——上层 recordFailure 计的是「真失败」。
+   */
   async complete(req: LlmRequest): Promise<unknown> {
-    const content = this.spec.api === 'responses'
-      ? await this.callResponses(req)
-      : await this.callChatCompletions(req);
-    try {
-      // structuredOutput=none 的端点可能把 JSON 包在 ```json 围栏里，剥掉兜底
-      return JSON.parse(stripCodeFence(content));
-    } catch {
-      throw new ProviderCallError(`正文不是合法 JSON: ${content.slice(0, 120)}`);
+    const backoff = this.opts.retryBackoffMs ?? [1_000, 3_000];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const content = this.spec.api === 'responses'
+          ? await this.callResponses(req)
+          : await this.callChatCompletions(req);
+        try {
+          // structuredOutput=none 的端点可能把 JSON 包在 ```json 围栏里，剥掉兜底
+          return JSON.parse(stripCodeFence(content));
+        } catch {
+          // 模型输出抽风是采样级抖动，重试一次常能救 → retryable
+          throw new ProviderCallError(`正文不是合法 JSON: ${content.slice(0, 120)}`, true);
+        }
+      } catch (e) {
+        const retryable = e instanceof ProviderCallError && e.retryable;
+        if (!retryable || attempt >= MAX_RETRIES) throw e;
+        log.debug(`provider ${this.name} 第 ${attempt + 1} 次重试: ${e.message}`);
+        await sleep(backoff[attempt] ?? backoff[backoff.length - 1] ?? 3_000);
+      }
     }
   }
 
@@ -187,17 +224,23 @@ export class OpenAiProvider {
         signal: AbortSignal.timeout(this.opts.timeoutMs),
       });
     } catch (e) {
-      throw new ProviderCallError(`请求异常: ${(e as Error).message}`);
+      // 网络异常 / 超时：瞬时故障
+      throw new ProviderCallError(`请求异常: ${(e as Error).message}`, true);
     }
     if (!res.ok) {
-      // 响应体可能含限流/额度信息，截断带上；key 不在响应里
+      // 响应体可能含限流/额度信息，截断带上；key 不在响应里。
+      // 408/409/425/429/5xx 是瞬时故障可重试；4xx 其余（401 key 失效 / 404 模型名错 /
+      // 400 请求不被接受 / 402 欠费）是确定性错误，重试无意义
+      const retryable = res.status === 408 || res.status === 409 || res.status === 425 ||
+        res.status === 429 || res.status >= 500;
       const text = (await res.text().catch(() => '')).slice(0, 200);
-      throw new ProviderCallError(`HTTP ${res.status}${text ? `: ${text}` : ''}`);
+      throw new ProviderCallError(`HTTP ${res.status}${text ? `: ${text}` : ''}`, retryable);
     }
     try {
       return await res.json();
     } catch {
-      throw new ProviderCallError('响应不是合法 JSON 信封');
+      // 200 但信封脏：网关/中间层抽风，重试常有救
+      throw new ProviderCallError('响应不是合法 JSON 信封', true);
     }
   }
 
@@ -380,6 +423,9 @@ export class LlmRouter {
    * 走路由调一个可用 provider，返回 parse 后的结果。
    * parse（任务层的 zod 校验）失败同样计入熔断并降级到下一个 ——
    * 模型没按 schema 输出和端点挂掉一样，都是这个 provider 本次不可靠。
+   * 注意 parse 失败不做就地重试（schema 不符偏确定性，重试同一模型意义不大，
+   * 且 retryable 标记是传输层的概念，够不着任务层）；provider 内部的
+   * 可重试失败（网络/超时/429/5xx/正文非 JSON）已在 complete() 里重试过。
    */
   async completeJson<T>(req: LlmRequest, parse?: (raw: unknown) => T): Promise<T> {
     const routeKind: 'text' | 'vision' = req.vision ?? hasImage(req.messages) ? 'vision' : 'text';
