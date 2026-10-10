@@ -136,7 +136,7 @@ test('非 live_start 信号不判定（不调 LLM、不入库）', async (t) => 
   const clf = new RulesClassifier(db, () => router, () => true);
   assert.deepEqual(await clf.classify(ctx('live_end')), []);
   assert.equal(calls.length, 0);
-  assert.equal(db.listVerdicts('r1', 1_785_310_737).length, 0);
+  assert.equal(db.listVerdicts('live', 'r1:1785310737').length, 0);
 });
 
 test('LLM 命中：总开关开 → LLM 判定权威入库（source=llm）', async (t) => {
@@ -151,8 +151,11 @@ test('LLM 命中：总开关开 → LLM 判定权威入库（source=llm）', asy
   assert.deepEqual(out, [
     { categoryId: catId, name: '歌回', source: 'llm', confidence: 0.88, evidence: '主播在唱歌' },
   ]);
-  const v = db.listVerdicts('r1', 1_785_310_737);
+  const v = db.listVerdicts('live', 'r1:1785310737');
   assert.equal(v.length, 1);
+  assert.equal(v[0]!.subjectType, 'live', '直播判定归档为 live 主体');
+  assert.equal(v[0]!.subjectId, 'r1:1785310737', 'subject_id = room_id:live_time');
+  assert.equal(v[0]!.ruleId, 0);
   assert.equal(v[0]!.source, 'llm');
   assert.equal(v[0]!.confidence, 0.88);
 });
@@ -166,7 +169,7 @@ test('LLM 说否：不回看确定性条件（关键词命中也不入）', asyn
   const clf = new RulesClassifier(db, () => router, () => true);
 
   assert.deepEqual(await clf.classify(ctx()), [], 'LLM 判否即不命中，确定性条件不参与');
-  assert.equal(db.listVerdicts('r1', 1_785_310_737).length, 0);
+  assert.equal(db.listVerdicts('live', 'r1:1785310737').length, 0);
 });
 
 test('router 抛错（含熔断耗尽）：回退确定性条件', async (t) => {
@@ -178,7 +181,7 @@ test('router 抛错（含熔断耗尽）：回退确定性条件', async (t) => 
 
   const out = await clf.classify(ctx());
   assert.deepEqual(out.map((c) => [c.categoryId, c.source]), [[catId, 'rule']], '回退后关键词命中');
-  const v = db.listVerdicts('r1', 1_785_310_737);
+  const v = db.listVerdicts('live', 'r1:1785310737');
   assert.equal(v[0]!.source, 'rule');
   assert.equal(v[0]!.confidence, null, 'rule 路径置信度为 null');
   assert.match(v[0]!.evidence, /关键词「歌」/);
@@ -230,5 +233,5 @@ test('verdicts 入库去重：同一场重复判定只留一条', async (t) => {
   const clf = new RulesClassifier(db, () => null, () => true);
   await clf.classify(ctx());
   await clf.classify(ctx());
-  assert.equal(db.listVerdicts('r1', 1_785_310_737).length, 1, 'UNIQUE(room_id, live_time, category_id) 去重');
+  assert.equal(db.listVerdicts('live', 'r1:1785310737').length, 1, 'UNIQUE(subject_type, subject_id, category_id, rule_id) 去重');
 });

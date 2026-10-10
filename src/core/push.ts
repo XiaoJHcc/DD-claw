@@ -208,17 +208,30 @@ export function splitPushRuleChannel(
   };
 }
 
-// ---- verdicts：每场直播的分类判定结果 ----
+// ---- verdicts：内容判定归档（直播场次与图文帖同表，身份键 = subject_type + subject_id）----
+
+export type VerdictSubjectType = 'live' | 'post';
+
+/** 直播场次的 subject_id（`room_id:live_time`）；图文帖用 `platform:item_id` */
+export function liveVerdictSubjectId(roomId: string, liveTime: number): string {
+  return `${roomId}:${liveTime}`;
+}
 
 export interface VerdictRow {
   id: number;
-  room_id: string;
-  live_time: number;
+  subject_type: VerdictSubjectType;
+  /** live = `room_id:live_time`；post = `platform:item_id` */
+  subject_id: string;
   uid: string;
+  /** 分类引用；0 = 不适用哨兵（规则级判定只填 rule_id） */
   category_id: number;
+  /** 图文规则级判定引用（P1b）；0 = 不适用哨兵（分类级判定） */
+  rule_id: number;
   /** 冗余存名，分类删除后历史仍可读 */
   category_name: string;
   source: 'llm' | 'rule' | 'decision';
+  /** 1 = 判定通过（属于）；0 = 判定不通过（P1b 图文规则级判定用） */
+  pass: number;
   /** LLM 路径置信度，rule 路径为 NULL */
   confidence: number | null;
   /** LLM 证据 / 命中的关键词·分区说明 */
@@ -228,15 +241,29 @@ export interface VerdictRow {
 
 export interface Verdict {
   id: number;
-  roomId: string;
-  liveTime: number;
+  subjectType: VerdictSubjectType;
+  subjectId: string;
   uid: string;
+  /** 0 = 不适用哨兵 */
   categoryId: number;
+  /** 0 = 不适用哨兵 */
+  ruleId: number;
   categoryName: string;
   source: 'llm' | 'rule' | 'decision';
+  pass: boolean;
   confidence: number | null;
   evidence: string;
   createdAt: number;
 }
 
-export type NewVerdict = Omit<Verdict, 'id' | 'createdAt'>;
+/** 判定入参：pass 缺省 true（直播现存语义 = 只记「属于」） */
+export type NewVerdict = Omit<Verdict, 'id' | 'createdAt' | 'pass'> & { pass?: boolean };
+
+export function rowToVerdict(r: VerdictRow): Verdict {
+  return {
+    id: r.id, subjectType: r.subject_type, subjectId: r.subject_id, uid: r.uid,
+    categoryId: r.category_id, ruleId: r.rule_id, categoryName: r.category_name,
+    source: r.source, pass: r.pass === 1,
+    confidence: r.confidence, evidence: r.evidence, createdAt: r.created_at,
+  };
+}

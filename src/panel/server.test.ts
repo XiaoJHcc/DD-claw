@@ -1550,7 +1550,8 @@ test('/api/schedule：日界归属 + 空日期占位 + segments/verdicts 组装'
     `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, area_name, parent_area_name, keyframe, created_at)
      VALUES ('rA', 1001, ?, NULL, '下半场', '虚拟Singer', '虚拟主播', 'k2.jpg', 1)`,
   ).run(startA + 3600);
-  db.insertVerdict({ roomId: 'rA', liveTime: 1001, uid: '1', categoryId: 1, categoryName: '歌回',
+  db.insertVerdict({ subjectType: 'live', subjectId: 'rA:1001', uid: '1',
+    categoryId: 1, ruleId: 0, categoryName: '歌回',
     source: 'llm', confidence: 0.9, evidence: '在唱歌' });
 
   // B：08-10 06:01 开播 —— 归 08-10（06:00 后开播算当天）

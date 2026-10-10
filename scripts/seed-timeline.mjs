@@ -64,8 +64,8 @@ const seed = db.transaction(() => {
   );
   const insVerdict = db.prepare(
     `INSERT OR IGNORE INTO verdicts
-       (room_id, live_time, uid, category_id, category_name, source, confidence, evidence, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (subject_type, subject_id, uid, category_id, rule_id, category_name, source, pass, confidence, evidence, created_at)
+     VALUES ('live', ?, ?, ?, 0, ?, ?, 1, ?, ?, ?)`,
   );
 
   const today = bjToday();
@@ -82,7 +82,7 @@ const seed = db.transaction(() => {
       title, area, start, start, end);
     for (const [s0, e0, st, sa, sp] of segs) insSegment.run(roomId, liveTime, s0, e0, st, sa, sp, t);
     if (verdict) {
-      insVerdict.run(roomId, liveTime, uid,
+      insVerdict.run(roomId + ':' + liveTime, uid,
         verdict.source === 'llm' ? catSong : catChat,
         verdict.source === 'llm' ? '演示·歌回' : '演示·杂谈',
         verdict.source, verdict.confidence, verdict.evidence, t);

@@ -1,7 +1,7 @@
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { LiveEvent } from '../core/types.js';
-import type { Category } from '../core/push.js';
+import { liveVerdictSubjectId, type Category } from '../core/push.js';
 import type { LlmRouter } from './providers.js';
 import { matchCategory } from './matcher.js';
 import { buildClassifyRequest, parseClassifyResults, toClassifyCategory } from './tasks/classify.js';
@@ -63,10 +63,13 @@ export class RulesClassifier implements Classifier {
     }
 
     for (const c of out) {
-      // INSERT OR IGNORE：同一场同一分类重复判定静默跳过
+      // INSERT OR IGNORE：同一主体同一分类重复判定静默跳过
       this.db.insertVerdict({
-        roomId: event.roomId, liveTime: event.liveTime, uid: event.uid,
+        subjectType: 'live',
+        subjectId: liveVerdictSubjectId(event.roomId, event.liveTime),
+        uid: event.uid,
         categoryId: c.categoryId, categoryName: c.name,
+        ruleId: 0,
         source: c.source, confidence: c.confidence, evidence: c.evidence,
       });
     }

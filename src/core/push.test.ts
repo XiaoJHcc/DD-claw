@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Db } from './db.js';
 import {
-  isPushEnabled, setPushEnabled, splitPushRuleChannel,
+  isPushEnabled, liveVerdictSubjectId, setPushEnabled, splitPushRuleChannel,
   type NewCategory, type NewPushChannel, type NewPushRule, type NewVerdict,
 } from './push.js';
 
@@ -38,7 +38,8 @@ function rule(over: Partial<NewPushRule> = {}): NewPushRule {
 
 function verdict(over: Partial<NewVerdict> = {}): NewVerdict {
   return {
-    roomId: 'r1', liveTime: 1_785_310_737, uid: '1', categoryId: 1, categoryName: '歌回',
+    subjectType: 'live', subjectId: 'r1:1785310737', uid: '1',
+    categoryId: 1, ruleId: 0, categoryName: '歌回',
     source: 'rule', confidence: null, evidence: '关键词「歌回」',
     ...over,
   };
@@ -231,15 +232,20 @@ test('splitPushRuleChannel：单渠道就地不拆；本渠道不在规则里则
 
 // ---- verdicts ----
 
-test('verdicts：插入 / UNIQUE(room_id, live_time, category_id) 去重 / 按场查询', (t) => {
+test('verdicts：插入 / UNIQUE(subject_type, subject_id, category_id, rule_id) 去重 / 按主体查询', (t) => {
   const db = memDb(t);
+  assert.equal(liveVerdictSubjectId('r1', 1_785_310_737), 'r1:1785310737', 'live 身份键 = room_id:live_time');
   db.insertVerdict(verdict());
   db.insertVerdict(verdict({ categoryId: 2, categoryName: '游戏', source: 'llm', confidence: 0.9, evidence: '在打 APEX' }));
   db.insertVerdict(verdict({ evidence: '重复插入' }));
 
-  const list = db.listVerdicts('r1', 1_785_310_737);
-  assert.equal(list.length, 2, '同场同分类重复插入被 IGNORE');
+  const list = db.listVerdicts('live', 'r1:1785310737');
+  assert.equal(list.length, 2, '同主体同分类同 rule_id 重复插入被 IGNORE');
   assert.equal(list[0]!.categoryName, '歌回');
+  assert.equal(list[0]!.subjectType, 'live');
+  assert.equal(list[0]!.subjectId, 'r1:1785310737');
+  assert.equal(list[0]!.ruleId, 0);
+  assert.equal(list[0]!.pass, true, 'pass 缺省 true');
   assert.equal(list[0]!.source, 'rule');
   assert.equal(list[0]!.confidence, null, 'rule 路径置信度为 null');
   assert.equal(list[0]!.evidence, '关键词「歌回」', '首插生效，重复插入不覆盖');
@@ -247,7 +253,34 @@ test('verdicts：插入 / UNIQUE(room_id, live_time, category_id) 去重 / 按�
   assert.equal(list[1]!.source, 'llm');
   assert.equal(list[1]!.confidence, 0.9);
 
-  assert.equal(db.listVerdicts('r1', 999).length, 0, '另一场直播互不影响');
+  assert.equal(db.listVerdicts('live', 'r1:999').length, 0, '另一场直播互不影响');
+});
+
+test('verdicts：0 哨兵参与唯一键（同分类不同 rule_id 共存，同 rule_id 去重）', (t) => {
+  const db = memDb(t);
+  db.insertVerdict(verdict());
+  db.insertVerdict(verdict({ ruleId: 5 }));
+  db.insertVerdict(verdict({ ruleId: 5, evidence: '重复插入' }));
+
+  const list = db.listVerdicts('live', 'r1:1785310737');
+  assert.deepEqual(list.map((v) => v.ruleId), [0, 5], '哨兵 0 是真实值：与 rule_id=5 各占一行');
+  assert.equal(list[1]!.evidence, '关键词「歌回」', '同 rule_id 重复插入不覆盖');
+});
+
+test('verdicts：subject_type 命名空间隔离（同 subject_id 字符串互不冲突）', (t) => {
+  const db = memDb(t);
+  db.insertVerdict(verdict());
+  db.insertVerdict(verdict({
+    subjectType: 'post', subjectId: 'r1:1785310737', ruleId: 7, categoryId: 0,
+    categoryName: '图文规则', source: 'llm', confidence: 0.5, pass: false,
+  }));
+
+  assert.equal(db.listVerdicts('live', 'r1:1785310737').length, 1, 'live 行不受 post 行影响');
+  const post = db.listVerdicts('post', 'r1:1785310737');
+  assert.equal(post.length, 1);
+  assert.equal(post[0]!.categoryId, 0, '规则级判定分类填 0 哨兵');
+  assert.equal(post[0]!.ruleId, 7);
+  assert.equal(post[0]!.pass, false, '判定不通过可落库');
 });
 
 // ---- settings ----

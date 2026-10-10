@@ -8,11 +8,12 @@ import {
   type Follow, type FollowRow, type Streamer, type StreamerInput, type StreamerRow,
 } from './streamers.js';
 import {
-  rowToCategory, rowToChannel, rowToRule,
+  rowToCategory, rowToChannel, rowToRule, rowToVerdict,
   type Category, type CategoryInput, type CategoryRow, type NewCategory,
   type NewPushChannel, type NewPushRule, type NewVerdict,
   type PushChannel, type PushChannelInput, type PushChannelRow,
-  type PushRule, type PushRuleInput, type PushRuleRow, type Verdict, type VerdictRow,
+  type PushRule, type PushRuleInput, type PushRuleRow,
+  type Verdict, type VerdictRow, type VerdictSubjectType,
 } from './push.js';
 import {
   rowToPost,
@@ -36,6 +37,28 @@ import {
 } from './post-rules.js';
 
 const log = makeLogger('core/db');
+
+/**
+ * verdicts 建表 DDL（SCHEMA 首建与身份键迁移重建共用，表名参数化防两处漂移）。
+ * 身份键 = (subject_type, subject_id)：live = `room_id:live_time`、post = `platform:item_id`；
+ * category_id / rule_id 的 0 是「不适用」哨兵（不用 NULL——SQLite UNIQUE 对 NULL 不去重）。
+ */
+const verdictsDdl = (name: string) => `
+CREATE TABLE IF NOT EXISTS ${name} (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_type  TEXT    NOT NULL CHECK(subject_type IN ('live','post')),
+  subject_id    TEXT    NOT NULL,
+  uid           TEXT    NOT NULL,
+  category_id   INTEGER NOT NULL DEFAULT 0,
+  rule_id       INTEGER NOT NULL DEFAULT 0,
+  category_name TEXT    NOT NULL,
+  source        TEXT    NOT NULL CHECK(source IN ('llm','rule','decision')),
+  pass          INTEGER NOT NULL DEFAULT 1,
+  confidence    REAL,
+  evidence      TEXT    NOT NULL DEFAULT '',
+  created_at    INTEGER NOT NULL,
+  UNIQUE(subject_type, subject_id, category_id, rule_id)
+)`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS live_sessions (
@@ -113,19 +136,7 @@ CREATE TABLE IF NOT EXISTS categories (
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS verdicts (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  room_id       TEXT    NOT NULL,
-  live_time     INTEGER NOT NULL,
-  uid           TEXT    NOT NULL,
-  category_id   INTEGER NOT NULL,
-  category_name TEXT    NOT NULL,
-  source        TEXT    NOT NULL CHECK(source IN ('llm','rule')),
-  confidence    REAL,
-  evidence      TEXT    NOT NULL DEFAULT '',
-  created_at    INTEGER NOT NULL,
-  UNIQUE(room_id, live_time, category_id)
-);
+${verdictsDdl('verdicts')};
 CREATE TABLE IF NOT EXISTS push_rules (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   name             TEXT    NOT NULL DEFAULT '',
@@ -381,6 +392,7 @@ export class Db {
     this.migrateWeiboAccounts();
     this.migratePostRuleScopes();
     this.dropLiveRcmdPosts();
+    this.migrateVerdictsSubjectKeys();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -503,6 +515,38 @@ export class Db {
     if (r.changes > 0) {
       log.info(`开播动态舍弃迁移：清理 ${r.changes} 条 LIVE_RCMD 历史动态`);
     }
+  }
+
+  /**
+   * verdicts 身份键通用化（P1a）：`(room_id, live_time)` → `(subject_type, subject_id)`，
+   * 为图文判定归档铺路。SQLite 改不了约束，走「建新表 + 拷数据 + 改名」重建：
+   * 老行一律搬成 subject_type='live'、subject_id = `room_id || ':' || live_time`，
+   * rule_id 取 0 哨兵、pass 取 1（老语义只记「属于」）；id 原样保留（排序/历史引用不变）。
+   *
+   * 幂等靠列存在性检测而不是 settings 闸门：重建后 room_id 列消失，重跑是空操作；
+   * 备份还原回旧 schema 的库也能再次迁移。老库无 verdicts 表时 SCHEMA 已按新结构建出，
+   * 这里直接跳过；整段重建在一个事务里，崩溃不落半成品。
+   */
+  private migrateVerdictsSubjectKeys(): void {
+    const cols = this.db.prepare('PRAGMA table_info(verdicts)').all() as Array<{ name: string }>;
+    if (cols.length === 0 || !cols.some((c) => c.name === 'room_id')) return;
+    const tx = this.db.transaction(() => {
+      this.db.exec(`DROP TABLE IF EXISTS verdicts_v2; ${verdictsDdl('verdicts_v2')}`);
+      const moved = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO verdicts_v2
+             (id, subject_type, subject_id, uid, category_id, rule_id,
+              category_name, source, pass, confidence, evidence, created_at)
+           SELECT id, 'live', room_id || ':' || live_time, uid, category_id, 0,
+              category_name, source, 1, confidence, evidence, created_at
+             FROM verdicts`,
+        )
+        .run();
+      this.db.exec('DROP TABLE verdicts; ALTER TABLE verdicts_v2 RENAME TO verdicts;');
+      return moved.changes;
+    });
+    const moved = tx();
+    log.info(`verdicts 身份键迁移：${moved} 行老判定搬迁为 subject_type='live'`);
   }
 
   loadRoomStates(): Map<string, PrevState> {
@@ -735,16 +779,19 @@ export class Db {
          ORDER BY s.start_ts, s.id`,
       )
       .all(fromTs, toTs) as LiveSegmentRow[];
+    // verdicts 身份键 = (subject_type, subject_id)：live 行以 `room_id:live_time` 对场次；
+    // pass=0（判定不通过）不进时间线——这里展示的是「属于哪些分类」
     const verdictRows = this.db
       .prepare(
-        `SELECT v.room_id, v.live_time, v.category_name, v.source, v.confidence, v.evidence
+        `SELECT v.subject_id, v.category_name, v.source, v.confidence, v.evidence
          FROM verdicts v
-         JOIN live_sessions ls ON ls.room_id = v.room_id AND ls.live_time = v.live_time
-         WHERE ls.first_seen >= ? AND ls.first_seen < ?
+         JOIN live_sessions ls
+           ON v.subject_type = 'live' AND v.subject_id = ls.room_id || ':' || ls.live_time
+         WHERE ls.first_seen >= ? AND ls.first_seen < ? AND v.pass = 1
          ORDER BY v.id`,
       )
       .all(fromTs, toTs) as Array<{
-        room_id: string; live_time: number; category_name: string;
+        subject_id: string; category_name: string;
         source: 'llm' | 'rule' | 'decision'; confidence: number | null; evidence: string;
       }>;
     const streamerByUid = new Map(this.listStreamers().map((s) => [s.uid, s]));
@@ -762,7 +809,7 @@ export class Db {
     }
     const verdictsBySession = new Map<string, TimelineEntry['verdicts']>();
     for (const v of verdictRows) {
-      const k = key(v.room_id, v.live_time);
+      const k = v.subject_id;
       const list = verdictsBySession.get(k) ?? [];
       list.push({
         categoryName: v.category_name, source: v.source,
@@ -1226,30 +1273,28 @@ export class Db {
     return this.db.prepare('DELETE FROM push_rules WHERE id = ?').run(id).changes > 0;
   }
 
-  // ---- verdicts：每场直播的分类判定结果（UNIQUE(room_id, live_time, category_id) 去重）----
+  // ---- verdicts：内容判定归档（UNIQUE(subject_type, subject_id, category_id, rule_id) 去重）----
 
-  /** INSERT OR IGNORE：同一场同一分类重复判定静默跳过。 */
+  /** INSERT OR IGNORE：同一主体同一分类/规则重复判定静默跳过（0 哨兵参与唯一键）。 */
   insertVerdict(v: NewVerdict): void {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO verdicts
-           (room_id, live_time, uid, category_id, category_name, source, confidence, evidence, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (subject_type, subject_id, uid, category_id, rule_id,
+            category_name, source, pass, confidence, evidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(v.roomId, v.liveTime, v.uid, v.categoryId, v.categoryName,
-        v.source, v.confidence, v.evidence, now());
+      .run(v.subjectType, v.subjectId, v.uid, v.categoryId, v.ruleId,
+        v.categoryName, v.source, v.pass === false ? 0 : 1,
+        v.confidence, v.evidence, now());
   }
 
-  /** 一场直播的全部判定结果（面板/调试用）。 */
-  listVerdicts(roomId: string, liveTime: number): Verdict[] {
+  /** 一个主体（直播场次 / 图文帖）的全部判定结果（面板/调试用）。 */
+  listVerdicts(subjectType: VerdictSubjectType, subjectId: string): Verdict[] {
     const rows = this.db
-      .prepare('SELECT * FROM verdicts WHERE room_id = ? AND live_time = ? ORDER BY id')
-      .all(roomId, liveTime) as VerdictRow[];
-    return rows.map((r) => ({
-      id: r.id, roomId: r.room_id, liveTime: r.live_time, uid: r.uid,
-      categoryId: r.category_id, categoryName: r.category_name,
-      source: r.source, confidence: r.confidence, evidence: r.evidence, createdAt: r.created_at,
-    }));
+      .prepare('SELECT * FROM verdicts WHERE subject_type = ? AND subject_id = ? ORDER BY id')
+      .all(subjectType, subjectId) as VerdictRow[];
+    return rows.map(rowToVerdict);
   }
 
   // ---- posts：动态/微博时间线归档 ----

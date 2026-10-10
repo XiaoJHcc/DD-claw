@@ -83,7 +83,7 @@ test('旧库迁移：新列补齐，旧数据原样保留', (t) => {
   assert.equal(db.listFollows().find((f) => f.uid === '1')?.uname, '旧关注');
 });
 
-test('全新库直接建出 v2 push_rules + categories + verdicts', (t) => {
+test('全新库直接建出 v2 push_rules + categories + verdicts（身份键版）', (t) => {
   let db: Db | undefined;
   const path = join(tmpdir_(t, () => db?.close()), 'new.db');
   db = new Db(path);
@@ -92,6 +92,113 @@ test('全新库直接建出 v2 push_rules + categories + verdicts', (t) => {
     assert.ok(cols.length > 0, `${table} 表应存在`);
   }
   assert.ok(!columns(path, 'push_rules').includes('uid'), '新库 push_rules 无 uid 列');
+  const vcols = columns(path, 'verdicts');
+  for (const col of ['subject_type', 'subject_id', 'rule_id', 'pass']) {
+    assert.ok(vcols.includes(col), `verdicts 应有身份键列 ${col}`);
+  }
+  assert.ok(!vcols.includes('room_id') && !vcols.includes('live_time'), '新库 verdicts 无 room_id/live_time 列');
+});
+
+/** 手工建一个「旧身份键」的 verdicts 表：(room_id, live_time, category_id) 唯一 */
+function makeOldVerdictsDb(path: string): void {
+  const raw = new Database(path);
+  raw.exec(`
+    CREATE TABLE verdicts (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      room_id       TEXT    NOT NULL,
+      live_time     INTEGER NOT NULL,
+      uid           TEXT    NOT NULL,
+      category_id   INTEGER NOT NULL,
+      category_name TEXT    NOT NULL,
+      source        TEXT    NOT NULL CHECK(source IN ('llm','rule')),
+      confidence    REAL,
+      evidence      TEXT    NOT NULL DEFAULT '',
+      created_at    INTEGER NOT NULL,
+      UNIQUE(room_id, live_time, category_id)
+    );
+    INSERT INTO verdicts (room_id, live_time, uid, category_id, category_name, source, confidence, evidence, created_at)
+      VALUES ('80397', 1785310737, '1', 3, '歌回', 'llm', 0.9, '在唱歌', 1800000000),
+             ('80397', 1785310737, '1', 4, '杂谈', 'rule', NULL, '关键词「杂谈」', 1800000001),
+             ('80397', 99, '2', 3, '歌回', 'rule', NULL, '关键词「歌」', 1800000002);
+  `);
+  raw.close();
+}
+
+test('verdicts 身份键迁移：老行搬迁成 subject_type=live / subject_id=room_id:live_time，id 保留', (t) => {
+  let db: Db | undefined;
+  let raw: Database.Database | undefined;
+  const path = join(tmpdir_(t, () => { db?.close(); raw?.close(); }), 'vmig.db');
+  makeOldVerdictsDb(path);
+  db = new Db(path);
+  raw = new Database(path);
+
+  const vcols = columns(path, 'verdicts');
+  for (const col of ['subject_type', 'subject_id', 'rule_id', 'pass']) {
+    assert.ok(vcols.includes(col), `重建后应有 ${col}`);
+  }
+  assert.ok(!vcols.includes('room_id') && !vcols.includes('live_time'), '重建后无 room_id/live_time 列');
+
+  const rows = raw.prepare('SELECT * FROM verdicts ORDER BY id').all() as Array<{
+    id: number; subject_type: string; subject_id: string; uid: string;
+    category_id: number; rule_id: number; category_name: string;
+    source: string; pass: number; confidence: number | null;
+  }>;
+  assert.equal(rows.length, 3, '三行老判定全部搬迁');
+  assert.deepEqual(
+    rows.map((r) => [r.id, r.subject_type, r.subject_id, r.category_id, r.rule_id, r.pass]),
+    [
+      [1, 'live', '80397:1785310737', 3, 0, 1],
+      [2, 'live', '80397:1785310737', 4, 0, 1],
+      [3, 'live', '80397:99', 3, 0, 1],
+    ],
+    'subject_id 拼 room_id:live_time；rule_id 取 0 哨兵、pass 取 1；id 原样保留',
+  );
+  assert.equal(rows[0]!.confidence, 0.9);
+  assert.equal(rows[1]!.confidence, null, 'rule 路径 NULL 置信度原样保留');
+
+  assert.equal(db.listVerdicts('live', '80397:1785310737').length, 2);
+  assert.equal(db.listVerdicts('live', '80397:99').length, 1);
+  // 迁移后的新键去重照常：同分类同哨兵 rule_id=0 重复插不进，换 rule_id 另占一行
+  db.insertVerdict({
+    subjectType: 'live', subjectId: '80397:1785310737', uid: '1',
+    categoryId: 3, ruleId: 0, categoryName: '歌回', source: 'rule', evidence: '重复',
+  });
+  db.insertVerdict({
+    subjectType: 'live', subjectId: '80397:1785310737', uid: '1',
+    categoryId: 3, ruleId: 5, categoryName: '歌回', source: 'rule', evidence: '规则级',
+  });
+  assert.equal(db.listVerdicts('live', '80397:1785310737').length, 3);
+});
+
+test('verdicts 身份键迁移：幂等重跑不搬两次；空老表 / 无老表也安全', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'vmig2.db');
+  makeOldVerdictsDb(path);
+  db = new Db(path);
+  db.close();
+  db = new Db(path); // 幂等重跑：room_id 列已消失，跳过
+
+  assert.equal(db.listVerdicts('live', '80397:1785310737').length, 2, '重跑不搬两次');
+  assert.equal(db.listVerdicts('live', '80397:99').length, 1);
+
+  // 空老表：重建后仍是空表，后续插入正常
+  db.close();
+  const raw = new Database(path);
+  raw.exec(`DROP TABLE verdicts; CREATE TABLE verdicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, room_id TEXT NOT NULL, live_time INTEGER NOT NULL,
+    uid TEXT NOT NULL, category_id INTEGER NOT NULL, category_name TEXT NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('llm','rule')), confidence REAL,
+    evidence TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
+    UNIQUE(room_id, live_time, category_id))`);
+  raw.close();
+  db = new Db(path);
+  assert.equal(db.listVerdicts('live', 'x:1').length, 0, '空老表迁移后仍为空');
+  db.insertVerdict({
+    subjectType: 'post', subjectId: 'twitter:1', uid: 'u',
+    categoryId: 0, ruleId: 7, categoryName: '图文规则', source: 'decision', pass: false,
+    confidence: 0.5, evidence: '决策模型判否',
+  });
+  assert.equal(db.listVerdicts('post', 'twitter:1').length, 1, '迁移后新键插入正常');
 });
 
 test('saveRoomState / loadRoomStates 新字段往返一致', (t) => {
@@ -296,8 +403,13 @@ test('listTimeline：场次 + 段 + verdicts + 主播信息归并；旧场次无
   raw.prepare('UPDATE live_segments SET start_ts = 1000 WHERE live_time = 100').run();
   db.rotateSegment('r1', 100, 5000, { title: '唱歌', areaName: '虚拟Singer', parentAreaName: '虚拟主播' });
   db.insertVerdict({
-    roomId: 'r1', liveTime: 100, uid: '1', categoryId: 1, categoryName: '歌回',
-    source: 'llm', confidence: 0.9, evidence: '在唱歌',
+    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1, ruleId: 0,
+    categoryName: '歌回', source: 'llm', confidence: 0.9, evidence: '在唱歌',
+  });
+  // pass=0（判定不通过）不进时间线
+  db.insertVerdict({
+    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 2, ruleId: 0,
+    categoryName: '游戏', source: 'llm', confidence: 0.3, evidence: '不像游戏', pass: false,
   });
   // 旧场次：手工插入，无 segment（模拟 segments 表建立前归档的场次）
   raw.prepare(
