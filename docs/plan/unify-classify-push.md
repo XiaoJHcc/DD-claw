@@ -71,8 +71,53 @@
 每期验收：`npm run typecheck && npm test && npm run build` 全绿 + `--dry-run` / `--force-uid` 全链路手动验证；P3 另需 `?demo=1` mock 目检两页。
 
 ## 五、明确不做
-
 - 不改抓取层三源结构与故障两级语义；不动 backlog 权威定义（`src/core/backlog.ts`）。
 - 不做 NL→结构化编译；分类口径始终人填（决策模型的 criteria 也从人填条件映射）。
 - 不引入静音名单 / 静默时段 / 定时推 /「不推」偏好（`docs/design.md` §11 既定）。
 - 翻译、schedule-extract 等生成类任务不接决策模型。
+
+## 附录 A：P2 目标模型详规（2026-10-10 拍板后定稿）
+
+### A.1 categories 表扩展（吸收 post_rules.filters / judgePrompt）
+
+新增列（`ensureColumn` 在线补列即可，无需重建）：
+
+| 列 | 类型 | 语义 |
+|---|---|---|
+| `applies_to` | TEXT NOT NULL DEFAULT `'live'`，CHECK IN ('live','post') | 分类服务的内容类型（UI 按此渲染可用算子） |
+| `post_types` | TEXT NOT NULL DEFAULT `'[]'` | JSON：`'original'/'retweet'` 子集，空 = 不限（对应旧 filters.original/retweet 的勾选集合） |
+| `require_quote` | INTEGER NOT NULL DEFAULT 0 | 必须是引用帖（仅 X 免登录回退路线产出 isQuote，其余平台永不命中——沿用旧 quote 语义） |
+| `require_media` | INTEGER NOT NULL DEFAULT 0 | 必须带图 |
+
+- 条件组泛化：keywords（通用）/ areas（仅 live）/ post_types / require_quote / require_media 各为一组，组间关系仍由 `cond_mode`（且/或）统辖；两组皆空 = 不命中的口径扩展为「所有非 LLM 条件组皆空且 llm_prompt 为空 = 死分类」（`checkCategoryConditions` 同步扩展）。
+- 算子注册表补 `postType` / `quote` / `media` 三个算子（appliesTo: ['post']）；keyword 算子对 post 判定 text。
+
+### A.2 push_rules 表扩展（统一规则，post_rules 退役）
+
+- 新增 `subject_kind` TEXT NOT NULL DEFAULT `'live'` CHECK IN ('live','post')；新增 `llm_translate` INTEGER NOT NULL DEFAULT 0（D3：规则层附加动作，仅 X 内容运行时生效）。
+- `uids` 列更名泛化为 `scope`：live = 主播 uid 列表；post = 账号引用列表（`'twitter:screenName'/'weibo:uid'/'bili:uid'`）。**空 = 全部生效**（D1，两形态统一）。uids → scope 随表重建搬迁。
+- 三张账号表的 `rule_ids` 列删除（表重建）；账号勾选视图（P3）改写规则 scope——同一份数据的双向入口。
+- 删分类级联停用引用规则的语义两形态统一沿用；删规则不再有账号侧清扫（无 rule_ids）。
+
+### A.3 post_rules 一次性搬家（migratePostRulesToCategories，不进撤销栈）
+
+每条 post_rule（含停用）→ 一条分类 + 一条规则：
+
+- 分类：applies_to='post'；name=规则名；llm_prompt =（llmJudge 且 judgePrompt 非空）? judgePrompt : null；keywords=filters.keywords；post_types 由 filters.original/retweet 勾选集合映射；require_quote=filters.quote；require_media=filters.media；enabled/sort 随规则。
+- 规则：subject_kind='post'；category_id=新分类 id；scope=三账号表 rule_ids 反查出的选用账号引用列表；channels/message_template 原样；llm_translate=llmTranslate；sort 接现有全局序追加。
+- **行为保持闸**：原语义「账号 rule_ids 空 = 该账号不推」，若一条 post_rule 没有任何账号选用 → 原语义下永不生效；搬家后 scope 空按新语义 = 全部生效会翻转行为——故**无账号选用的规则一律 enabled=0 落地**并在迁移日志注明。
+- 幂等：post_rules 表不存在即跳过；搬完 DROP TABLE post_rules。
+- 遗留列 `platform`/`account_ids` 随表删除一并消失。
+
+### A.4 判定与匹配语义（P2 行为变化点）
+
+- **图文判定分类制**：feed_post 与 live_start 同走判决链（ContentItem 投影已在 P2a 就位），对 applies_to 匹配内容类型的启用分类判定；verdicts 落真实 categoryId（ruleId 回 0 哨兵）。post 侧 LLM 判否也落 pass=0（「为什么没推」可回看；直播侧保持只记「属于」）。
+- **匹配统一**：`matchRules(rules, item, matchedCategoryIds, subjectRef)`——命中 = (categoryId 空 ∨ ∈ 匹配集) ∧ (scope 空 ∨ 含 subjectRef)；live 的 subjectRef=uid，post 的 subjectRef=`platform:key`。matchPushRules/matchPostRules 退役或改薄封装。
+- **翻译**：post-analyzer 的 llmJudge/judgePrompt 路径退役，只留翻译（命中规则聚合后，任一 llm_translate=1 且平台支持时调一次生成）。
+- **推送等不等判定规则级化**：仅当「存在引用了分类的启用规则且其 scope 覆盖本内容」时才 await 分类；纯「任意内容」规则的推送不再排在 LLM 后面。按场/按帖单次判定，不产生双推。
+
+### A.5 轴 B 接点（P2 内同步完成）
+
+- 工具注册表：upsert_category 带 applies_to + post 条件；upsert_push_rule 带 subject_kind/scope/llm_translate；upsert_post_rule/list_post_rules/delete_post_rule 退役；账号工具的 ruleIds 入参退役。write-path-inventory 互锁随之更新。
+- undo-view 中文名映射登记新列（scope/llm_translate/applies_to/…）与表变更；undo.ts 忽略列清单核对（rule_ids 消失）。
+- webui 最小可用适配（能配、能看、不崩；体验精修在 P3）：分类弹窗按 applies_to 渲染算子区；规则弹窗带 subject_kind；账号卡「选用规则」勾选改写规则 scope；demo mock 同步。
