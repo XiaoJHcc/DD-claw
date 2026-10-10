@@ -1212,13 +1212,15 @@ async function sendWeiboImage(deps: PanelDeps, url: URL, res: http.ServerRespons
 function enrichedStreamers(db: Db): unknown[] {
   const streamers = db.listStreamers();
   const roomStates = db.listRoomStatesFull();
-  // 每个 uid 的生效规则名（listPushRules 已按全局 sort 排序，含 disabled；
-  // scope 空 = 对全部主播生效，含未来新增；只看开播规则——图文规则不进主播卡）
-  const allRules = db.listPushRules();
+  // 每个 uid 的生效规则（listPushRules 已按全局 sort 排序，含 disabled；
+  // scope 空 = 对全部主播生效，含未来新增；只看开播规则——图文规则不进主播卡）。
+  // names 保留纯名列表（旧消费方）；items 带 id 与 allScope 供前端 hover 标注空范围语义（P3 作用域双向视图）
+  const liveRules = db.listPushRules().filter((r) => r.subjectKind === 'live');
   // 一次分组查询：每个 uid 最近 5 条（B站动态 + 关联微博账号的微博，按 pub_ts 混排），raw 不下发
   const recentPosts = db.listRecentPostsMixed(streamers.map((s) => s.uid), 5);
   return streamers.map((s) => {
     const rs = roomStates.get(s.uid);
+    const applied = liveRules.filter((r) => r.scope.length === 0 || r.scope.includes(s.uid));
     return {
       ...s,
       face: s.face,
@@ -1232,9 +1234,8 @@ function enrichedStreamers(db: Db): unknown[] {
           }
         : null,
       rules: {
-        names: allRules
-          .filter((r) => r.subjectKind === 'live' && (r.scope.length === 0 || r.scope.includes(s.uid)))
-          .map((r) => r.name),
+        names: applied.map((r) => r.name),
+        items: applied.map((r) => ({ id: r.id, name: r.name, allScope: r.scope.length === 0 })),
       },
       posts: (recentPosts.get(s.uid) ?? []).map((p) => ({
         platform: p.platform, type: p.type, text: p.text,

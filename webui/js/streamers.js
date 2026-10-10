@@ -13,7 +13,6 @@ import { icon } from './icons.js';
 
 // follows.js / push.js / categories.js 在 import：loadStreamers 与 avatarHtml（core 的转发）
 export { avatarHtml };
-
 let streamers = [];
 let modalUid = null;
 let modalChannels = [];
@@ -95,7 +94,11 @@ function streamerCard(s) {
   const isLive = !!(live && live.isLive);
   // 第三栏最多 3 条（容器定高 166px）；开播动态已彻底舍弃（不入库，旧行由迁移清理）
   const posts = (s.posts || []).slice(0, 3);
-  const ruleNames = (s.rules && s.rules.names) || [];
+  // 生效规则标签：items 带 id/allScope（P3 作用域双向视图）——空范围规则显示为生效中，
+  // hover 注明「该规则对全部主播生效」；非空范围 = 仅指定主播（本主播在范围内）。
+  // 兼容旧形状（仅 names，items 缺失时回退：allScope 一律按 false 提示）
+  const ruleItems = (s.rules && s.rules.items)
+    || ((s.rules && s.rules.names) || []).map(function (n) { return { id: 0, name: n, allScope: false }; });
   const meta = `直播间 ${s.roomId ? esc(s.roomId) : '—'}` +
     ` · 微博 ${s.weiboNick ? esc(s.weiboNick) : (s.weiboUid ? esc(s.weiboUid) : '—')}`;
 
@@ -107,8 +110,11 @@ function streamerCard(s) {
         <div class="nm"><b>${esc(name)}</b><small>${meta}</small></div>
       </div>
       <div class="st-rules"><span class="rl-dot"></span><span class="rl-t">推送规则</span>${
-        ruleNames.length
-          ? ruleNames.map(function (n) { return `<span class="tag">${esc(n)}</span>`; }).join('')
+        ruleItems.length
+          ? ruleItems.map(function (it) {
+              const tip = it.allScope ? '该规则对全部主播生效' : '仅指定主播生效（本主播在范围内）';
+              return `<span class="tag" title="${esc(tip)}">${esc(it.name)}</span>`;
+            }).join('')
           : '<span class="rl-none">未配置</span>'
       }</div>
     </div>
@@ -209,9 +215,12 @@ function modalCatName(categoryId) {
 }
 
 // 行序 = 全局 sort。不可达规则（ruleDeadReason）整行置灰划线、只留原因标签；
-// 停用渠道的标签不显示（是否可用看渠道卡）。每行是 --bg-soft 圆角块（.sheet-rules .row）
+// 停用渠道的标签不显示（是否可用看渠道卡）。每行是 --bg-soft 圆角块（.sheet-rules .row）。
+// hover 提示空范围语义（scope 空 = 对全部主播生效），与主播卡标签行同一口径
 function modalRuleRowHtml(r) {
   const dead = ruleDeadReason(r, modalCats, modalChannels);
+  const tip = dead || ((r.scope || []).length === 0
+    ? '该规则对全部主播生效（空范围）' : '仅指定主播生效（本主播在范围内）');
   const tags = dead
     ? `<span class="tag">${esc(dead)}</span>`
     : `<span class="tag">${esc(modalCatName(r.categoryId))}</span>` +
@@ -219,7 +228,7 @@ function modalRuleRowHtml(r) {
         const c = modalChannelById(cid);
         return c && c.enabled ? `<span class="tag">${esc(c.name)}</span>` : '';
       }).join('');
-  return `<div class="row row-click${dead ? ' rule-dead' : ''}" data-action="goto-push-rule" data-rid="${r.id}">` +
+  return `<div class="row row-click${dead ? ' rule-dead' : ''}" title="${esc(tip)}" data-action="goto-push-rule" data-rid="${r.id}">` +
     `<span class="row-title">${esc(r.name)}</span>` +
     tags +
     `<span class="row-end">${icon('chevron-right')}</span>` +

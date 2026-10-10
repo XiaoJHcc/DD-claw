@@ -175,9 +175,17 @@ export const mockPostRules = [
   },
   {
     id: 104, name: '动态预告', subjectKind: 'post', categoryId: 103,
-    scope: ['bili:80397'], channels: [2, 3],
+    scope: ['bili:3546661873781168'], channels: [2, 3],
     messageTemplate: null, llmTranslate: false,
     enabled: true, sort: 3, createdAt: 1, updatedAt: 1,
+  },
+  {
+    // D1 演示：空 scope = 对全部账号生效（启用中）——账号卡标签 hover 注明「对全部账号生效」，
+    // 账号浮窗勾选恒亮；分类引用留空 = 任意内容（规则行副行显示「任意内容」）
+    id: 105, name: '任意帖兜底', subjectKind: 'post', categoryId: null,
+    scope: [], channels: [1],
+    messageTemplate: null, llmTranslate: false,
+    enabled: true, sort: 4, createdAt: 1, updatedAt: 1,
   },
 ];
 
@@ -260,19 +268,19 @@ export const mockTwitterPosts = [
 
 // ---- 帖子判定行（账号卡帖子段「推 / 不推」标记的演示数据，键 = `platform:item_id`）----
 // 形状与真实后端 accountPosts 附带的 verdicts 逐字段同构（ruleId/ruleName/pass/evidence/source）；
-// ruleName = 判定时冗余的规则名（规则删除后历史仍可读）。三条演示三种形态：
-// LLM 判过（绿「推」）/ LLM 判否（灰「不推」）/ LLM 不可用回退机械筛选放行（source=rule）；
+// P2 判定分类制：verdicts 落分类级（ruleId=0 哨兵、ruleName 字段实为分类名，规则删除后历史仍可读）。
+// 三条演示三种形态：LLM 判过（绿「推」）/ LLM 判否（灰「不推」）/ LLM 不可用回退机械筛选放行（source=rule）；
 // 没跑过判定的帖子不在此表 = 无判定行 = 不显示标记。
 export const mockPostVerdicts = {
   'twitter:2101671199457894850': [
-    { ruleId: 1, ruleName: '带图原创', pass: true, evidence: '内容是活动出席预告，与直播相关', source: 'llm' },
+    { ruleId: 0, ruleName: '带图原创', pass: true, evidence: '内容是活动出席预告，与直播相关', source: 'llm' },
   ],
   'twitter:2101668953844064324': [
-    { ruleId: 1, ruleName: '带图原创', pass: false, evidence: '台风导致的活动变更通知，不是直播预告', source: 'llm' },
+    { ruleId: 0, ruleName: '带图原创', pass: false, evidence: '台风导致的活动变更通知，不是直播预告', source: 'llm' },
   ],
   'weibo:5345338974275832': [
     {
-      ruleId: 1, ruleName: '带图原创', pass: true,
+      ruleId: 0, ruleName: '带图原创', pass: true,
       evidence: 'LLM 不可用/失败，回退机械筛选放行（LLM 未启用）', source: 'rule',
     },
   ],

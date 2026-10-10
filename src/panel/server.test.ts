@@ -270,7 +270,8 @@ test('GET /api/streamers：enrich face / live=null / 生效规则名标签（含
     uid: string; face: string | null; roomId: string | null;
     watch: boolean; notify: boolean; analyze: boolean;
     weiboNick: string | null; weiboUid: string | null;
-    live: unknown; rules: { names: string[] };
+    live: unknown;
+    rules: { names: string[]; items: Array<{ id: number; name: string; allScope: boolean }> };
   }>;
   const s1 = list.find((s) => s.uid === '1001')!;
   const s2 = list.find((s) => s.uid === '1002')!;
@@ -281,9 +282,18 @@ test('GET /api/streamers：enrich face / live=null / 生效规则名标签（含
   assert.equal(s1.weiboUid, null);
   assert.equal(s1.roomId, null);
   assert.equal(s1.live, null, '无 room_state 记录时 live=null');
-  assert.deepEqual(s1.rules, { names: ['全局规则', '仅阿梓', '停用的'] },
-    '生效规则按全局 sort 序，disabled 也带上');
-  assert.deepEqual(s2.rules, { names: ['全局规则'] }, 'scope 空 = 对全部主播生效（含未来新增）');
+  assert.deepEqual(s1.rules, {
+    names: ['全局规则', '仅阿梓', '停用的'],
+    items: [
+      { id: 1, name: '全局规则', allScope: true },
+      { id: 2, name: '仅阿梓', allScope: false },
+      { id: 3, name: '停用的', allScope: false },
+    ],
+  }, '生效规则按全局 sort 序，disabled 也带上；items 带 id + allScope（空范围=true）');
+  assert.deepEqual(s2.rules, {
+    names: ['全局规则'],
+    items: [{ id: 1, name: '全局规则', allScope: true }],
+  }, 'scope 空 = 对全部主播生效（含未来新增）');
 });
 
 test('GET /api/streamers：有 room_state 时 live 带实况字段与下播锚点', async (t) => {

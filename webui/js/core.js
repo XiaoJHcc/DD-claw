@@ -189,10 +189,11 @@ export function checkRowHtml(attrs, checked, innerHtml, extraClass) {
     `<span class="cr-main">${innerHtml}</span>` +
     `<span class="checkdot"><i>${icon('check')}</i></span></label>`;
 }
-// 推送规则可达性（推送规则卡与主播详情弹窗共用）：引用对象被停用/删除会让规则实际失效。
-// 返回 null = 可达；否则为原因文案：规则自身停用 / 分类已删除 / 分类已停用（分类判定只跑启用分类，
-// 永不命中）/ 未选渠道（命中后渠道并集为空不推）/ 渠道不可用（所选渠道全部停用或已删除，
-// dispatcher 只发「选中且启用」）。uids 全为主播 watch=0 属临时态，不算死态。
+// 推送规则可达性（两张规则卡与主播详情弹窗共用，live/post 两形态同一套判定）：引用对象被
+// 停用/删除会让规则实际失效。返回 null = 可达；否则为原因文案：规则自身停用 / 分类已删除 /
+// 分类已停用（分类判定只跑启用分类，永不命中）/ 分类与内容形态不符（分类只服务另一种内容，
+// 判定集里永远没有它）/ 未选渠道（命中后渠道并集为空不推）/ 渠道不可用（所选渠道全部停用或
+// 已删除，dispatcher 只发「选中且启用」）。uids 全为主播 watch=0 属临时态，不算死态。
 export function ruleDeadReason(r, cats, chans) {
   if (!r.enabled) return '已停用';
   if (r.categoryId != null) {
@@ -200,6 +201,7 @@ export function ruleDeadReason(r, cats, chans) {
     for (let i = 0; i < cats.length; i++) if (cats[i].id === r.categoryId) cat = cats[i];
     if (!cat) return '分类已删除';
     if (cat.enabled === false) return '分类已停用';
+    if ((cat.appliesTo || 'live') !== (r.subjectKind || 'live')) return '分类与内容形态不符';
   }
   if (!r.channels || r.channels.length === 0) return '未选渠道';
   let usable = 0;
@@ -599,21 +601,36 @@ export function makeSortable(container, opts) {
 // 全部隐藏后才轮到标题截断（.row-title 的 ellipsis），两侧控件（flex:none）永不被挤。
 // CSS 表达不了「按内容」的优先级（flex 收缩只会把标签压成无信息量的碎片），故用 JS：
 // ResizeObserver 跟行宽变化（含视图从隐藏切回），MutationObserver 捕获重渲插入的新行 ----
+// 标签可以在行直接子级（.row-title + .tag 同层的单行档）或 .row-main > .row-line 内部
+//（分类卡/规则卡：标题与摘要标签同在一条 line 里）——两种结构同一套舍弃逻辑。
 // 溢出判定不能看 row.scrollWidth：行右 padding + 行尾负 margin 有约 20px 静默余量，
 // 小溢出会被吞掉（表现为标签完整、标题反被 flex 压出省略号）。改为钉回标题自然宽度后，
-// 比较末个子元素右缘与行内容区右缘（行尾负 margin 豁免照常计入）。
+// 比较行内容区右缘与「参照末元素」（有 line 看 line 的末元素，否则行的末元素）右缘。
 function rowOverflows(row) {
-  var last = row.children[row.children.length - 1];
+  var main = row.querySelector(':scope > .row-main');
+  var line = main && main.querySelector(':scope > .row-line');
+  // 有 line 的行（标题 + 摘要标签嵌在 row-main 里）：可用宽度止于 row-end（编辑/删除钮，
+  // flex:none）之前——以 row-main 右缘为界，否则标签盖到按钮上也不算溢出；
+  // 单行档（标签是行直接子级）：以行内容区右缘为界（原口径）。
+  // 末元素要跳过已隐藏（fitRow 正在逐枚舍弃的）标签，否则 rect 全 0 永不溢出、循环提前退出
+  var kids = line ? line.children : row.children;
+  var last = null;
+  for (var i = kids.length - 1; i >= 0; i--) {
+    if (kids[i].getBoundingClientRect().width > 0) { last = kids[i]; break; }
+  }
   if (!last) return false;
-  var padR = parseFloat(getComputedStyle(row).paddingRight) || 0;
+  var limitEl = line ? main : row;
+  var padR = line ? 0 : parseFloat(getComputedStyle(row).paddingRight) || 0;
   var mr = parseFloat(getComputedStyle(last).marginRight) || 0;
-  var limit = row.getBoundingClientRect().right - padR + Math.max(0, -mr);
+  var limit = limitEl.getBoundingClientRect().right - padR + Math.max(0, -mr);
   return last.getBoundingClientRect().right > limit + 1;
 }
 function fitRow(row) {
-  var tags = row.querySelectorAll(':scope > .tag');
+  var line = row.querySelector(':scope > .row-main > .row-line');
+  var scope = line || row;
+  var tags = scope.querySelectorAll(':scope > .tag');
   if (!tags.length) return;
-  var title = row.querySelector(':scope > .row-title');
+  var title = scope.querySelector(':scope > .row-title');
   for (var i = 0; i < tags.length; i++) tags[i].style.display = '';
   // 标题平时靠 flex 收缩吃掉小溢出，先钉回自然宽度才能测出真实溢出
   if (title) title.style.flex = 'none';

@@ -300,7 +300,10 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .check-row{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);
   padding:var(--sp-1) var(--sp-3);margin:var(--sp-2) 0;border-radius:var(--r-md);background:var(--bg-soft);cursor:pointer;font-size:var(--fs-base);transition:background-color .15s ease}
 .check-row:hover{background:var(--bg-soft-deep)}
-.check-row .cr-main{flex:1;min-width:0}
+/* 行内容 = 可选内容类型角标（.tag）+ 文案（.row-title 兜住 ellipsis）；无角标时行为不变 */
+.check-row .cr-main{flex:1;min-width:0;display:flex;align-items:center;gap:var(--sp-2)}
+.check-row .cr-main > .tag{flex:none}
+.check-row .cr-main > .row-title{flex:1;min-width:0}
 /* 表单字段内的多选行（如 LLM「能力」）：与输入框同标准高 36、无外边距，label 顶部对齐 */
 .field .check-row{min-height:var(--ctl-h);margin:0}
 /* ---- 生效主播挑选弹窗（推送规则）：关注列表同款头像卡网格（头像 + 昵称，无 UID、无胶囊——
@@ -321,6 +324,17 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .pick-card.on:hover{background:#DFEAFF}
 .pick-card:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
 .pick-empty{padding:48px 0;text-align:center;font-size:var(--fs-sm);color:var(--text-2)}
+
+/* ---- 生效账号挑选栅格（统一规则弹窗 post 形态）：账号墙同款 pick-card（头像 + 名字）+
+   平台角标（三平台混排必须一眼看出归属）；失效引用（账号已删）= 可点移除的灰 chip ---- */
+.acct-pick{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;
+  max-height:clamp(200px,38vh,320px);overflow-y:auto;scrollbar-width:thin}
+.acct-pick::-webkit-scrollbar{width:8px}
+.acct-pick::-webkit-scrollbar-thumb{background:var(--separator);border-radius:4px}
+.acct-pick .pick-card{padding:12px 8px;gap:5px;min-width:0}
+.acct-pick .pick-card .f-name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acct-pick .pick-card .x-plat{margin-bottom:-1px}
+.acct-pick .chip{align-self:center}
 
 /* ---- 生效主播 3D 圆柱卡（推送规则弹窗）：可点卡片，一排头像按圆柱面投影位置排布
    （translate3d + perspective，近大远小；头像正对观察者、不随柱面旋转），scale3d 两侧减半。

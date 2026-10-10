@@ -66,6 +66,14 @@ const demoRules = (defaults?.rules ?? []).map((r, i) => ({
   messageTemplate: r.messageTemplate ?? null, llmTranslate: false,
   enabled: true, createdAt: nowSec, updatedAt: nowSec,
 })).concat(clone(M.mockPostRules));
+// demo 专用补充：一条「指定了主播」的开播规则（scope 非空），让主播卡/规则卡能演
+// allScope=false 的 hover 提示与范围标签（与真实后端 listPushRules 同形状）
+demoRules.push({
+  id: 900, name: '仅第一位主播', subjectKind: 'live', categoryId: null,
+  scope: [String(clone(fixtures?.streamers ?? [])[0]?.uid ?? '')].filter(Boolean),
+  channels: [2], messageTemplate: null, llmTranslate: false,
+  enabled: true, sort: demoRules.length, createdAt: nowSec, updatedAt: nowSec,
+});
 
 // ---- 内存库（深拷贝种子，本会话可改）----
 const store = {
@@ -859,14 +867,17 @@ for (const p of store.twitterPosts) {
 
   // ---- 主播列表 / 关注 ----
   if (path === '/api/streamers' && method === 'GET') {
-    const list = store.streamers.map((s) => ({
-      ...s,
-      rules: {
-        names: store.rules
-          .filter((r) => r.subjectKind === 'live' && (r.scope.length === 0 || r.scope.includes(s.uid)))
-          .map((r) => r.name),
-      },
-    }));
+    const list = store.streamers.map((s) => {
+      const applied = store.rules.filter((r) => r.subjectKind === 'live' && (r.scope.length === 0 || r.scope.includes(s.uid)));
+      return {
+        ...s,
+        rules: {
+          // 与真实后端 enrichedStreamers 同构：names（纯名列表）+ items（id/name/allScope，空范围=true）
+          names: applied.map((r) => r.name),
+          items: applied.map((r) => ({ id: r.id, name: r.name, allScope: r.scope.length === 0 })),
+        },
+      };
+    });
     return ok({ streamers: list });
   }
   if (path === '/api/follows' && method === 'GET') {

@@ -38,7 +38,7 @@
 | sources（B站 / 微博 / 媒体） | 直播间状态 / 关注 / 动态 / 微博 / 关键帧 ✅；弹幕 WS ⬜ | [modules/sources.md](modules/sources.md) |
 | analysis + rules | 分类管线 ✅；triggers / context / schedule-extract 为目标 ⬜；preference 护栏已放弃 ❌ | [modules/analysis.md](modules/analysis.md) |
 | notify | onebot(NapCat) / toast ✅（ntfy 已放弃 ❌） | [modules/notify.md](modules/notify.md) |
-| panel + webui | ✅（verdicts 总览、预告条预留） | [modules/panel.md](modules/panel.md) |
+| panel + webui | ✅（verdicts 总览、预告条预留；直播/图文分类·规则统一组件 = 统一计划 P3） | [modules/panel.md](modules/panel.md)、[plan/unify-classify-push.md](plan/unify-classify-push.md) |
 | mcp | ✅ v1（admin / gateway 双角色）+ gateway 渠道隔离（scope 注入 / 读裁剪 / copy-on-write / 按渠道限流） | [mcp.md](mcp.md) |
 | agent（能力面接入） | ✅ P0 地基（runTool / 撤销）+ P1 WebUI Agent（loop + 聊天视图）+ P3 NapCat 直连（`src/qqbot/`）；P2 MaiBot 插件在独立目录 | [plan/agent-access.md](plan/agent-access.md)、[modules/qqbot.md](modules/qqbot.md) |
 
@@ -54,7 +54,7 @@
 | `src/analysis/context.ts` | 按房间聚合时间窗内多源数据 → 一份 context（喂给分类 prompt） |
 | `src/analysis/tasks/schedule-extract.ts` | 预告解析 → schedules 表（置信度入库，阈值过滤） |
 | `src/sources/twitter/{nitter,web,feed}.ts` | ~~**X/推特图文源**~~ **P1 已落地**（Nitter RSS 主 + 免登录回退 `web.ts` + 源 `feed.ts`）；计划见 [plan/twitter-source.md](plan/twitter-source.md) |
-| `src/core/post-rules.ts` | ~~图文帖规则表~~ **已落地**（与 push_rules 平行的表 + filters 语义）；**平台无关的通用规则**：无 account_ids / platform 维度（两列保留停用），生效范围在账号侧 `rule_ids`，quote/翻译按帖子平台运行时生效（见 [plan/bili-dynamic-posts.md](plan/bili-dynamic-posts.md)） |
+| `src/core/post-rules.ts` | ~~图文帖规则表~~ **已落地→P2 退役**：曾是与 push_rules 平行的表 + filters 语义 + 平台无关通用规则；**统一计划 P2 后 post_rules 已 DROP**，filters/judgePrompt 上移进 categories（applies_to=post）、规则统一进 push_rules（subject_kind/scope/llm_translate）；本文件只剩旧 filters 的迁移解析口径（`parseFilters`，仅 `migratePostRulesToCategories` 用），见 [plan/unify-classify-push.md](plan/unify-classify-push.md) |
 | `src/core/weibo-accounts.ts` | **已落地**：微博独立名单（第 16 张表 `weibo_accounts` 的行类型/映射 + 源运行状态快照） |
 | `src/core/bili-accounts.ts` | **已落地**：B站动态独立名单（第 17 张表 `bili_accounts` 的行类型/映射 + uid 归一化） |
 | `src/analysis/tasks/post-analysis.ts` + `src/analysis/post-analyzer.ts` | ~~推文翻译~~ **P3 已落地**（判定 + 翻译合并一次 LLM 调用，含失败回退机械筛选） |
@@ -62,9 +62,9 @@
 **未落地能力**
 
 - `schedules` 表未建（目标）；`signals` 表已放弃（见 `design.md` §11）
-- **X/推特：P0–P3 全部落地**（隧道 fetch、`/api/x*`、图文分页 `#view-x`（X + 微博：设置条 + 账号卡片墙，规则针对单账号、帖子段入卡）、免登录源 Nitter RSS + 回退、`x_accounts` 独立名单、监听开关 `listen_twitter`、`post_rules` 图文帖规则 + `feed_post` 推送分支（X 图经代理本地化后交 NapCat）、规则级 LLM 判定/翻译（失败回退机械筛选）、账号头像（抓取顺手抠 channel image / og:image → 代理落盘 cache/x-avatars，卡片展示兜底关联主播 B站头像）、MCP 工具）；计划见 [plan/twitter-source.md](plan/twitter-source.md)
-- **微博图文来源：已落地（与 X 同构的第二条图文链路）**——`weibo_accounts` 独立名单（`bili_uid` 仅可选关联，独立博主也能加）、`WeiboFeedSource` 轮独立名单（运行状态快照 / 头像直连落 `cache/weibo-avatars` / 游标与昵称回写）、`post_rules.platform` 平台分流（微博不出「引用」「翻译」）、`feed_post` 双平台推送分支（微博图直连本地化）、图文页**单墙混排 + 平台筛选胶囊**（平台角标区分）、MCP `list/upsert/delete_weibo_account`、老库一次性数据搬家（`streamers.weibo_uid` → `weibo_accounts` + 历史微博帖归属改写，幂等）；主播卡第三栏经关联反查继续混排，开播路径零回归。计划与实现记录见 [plan/weibo-source.md](plan/weibo-source.md)
-- **B站动态图文来源：已落地（第三条图文链路）**——`bili_accounts` 独立名单（动态型 UP 主不开播也能监听推送）、`DynamicSource` 轮询对象 = 监听主播 ∪ 动态名单（监听主播的动态维持只归档不推送）、名单账号 uname/last_ok_at/头像（直连落 `cache/bili-avatars`）回写、`feed_post` 三平台推送分支（B站图直连本地化、`{liver}` 按账号 uid 反查 streamers）、`/api/bili/accounts` 全套 + `/api/bili-avatar`、MCP `list/upsert/delete_bili_account`。**同步完成图文规则重构**：post_rules 去 `account_ids` 内嵌 scope 与 `platform` 绑定，改为**平台无关的通用规则**（quote/翻译差异按帖子平台运行时生效）+ 账号侧 `rule_ids` 选用，旧规则 scope 一次性迁移（`migratePostRuleScopes`，幂等）。计划与实现记录见 [plan/bili-dynamic-posts.md](plan/bili-dynamic-posts.md)
+- **X/推特：P0–P3 全部落地**（隧道 fetch、`/api/x*`、图文分页 `#view-x`（X + 微博：设置条 + 账号卡片墙）、免登录源 Nitter RSS + 回退、`x_accounts` 独立名单、监听开关 `listen_twitter`、图文帖推送分支〔X 图经代理本地化后交 NapCat；规则统一在 push_rules，P2 起 post_rules 退役〕、规则级 LLM 判定/翻译（失败回退机械筛选）、账号头像（抓取顺手抠 channel image / og:image → 代理落盘 cache/x-avatars，卡片展示兜底关联主播 B站头像）、MCP 工具）；计划见 [plan/twitter-source.md](plan/twitter-source.md)
+- **微博图文来源：已落地（与 X 同构的第二条图文链路）**——`weibo_accounts` 独立名单（`bili_uid` 仅可选关联，独立博主也能加）、`WeiboFeedSource` 轮独立名单（运行状态快照 / 头像直连落 `cache/weibo-avatars` / 游标与昵称回写）、`feed_post` 双平台推送分支（微博图直连本地化）、图文页**单墙混排 + 平台筛选胶囊**（平台角标区分）、MCP `list/upsert/delete_weibo_account`、老库一次性数据搬家（`streamers.weibo_uid` → `weibo_accounts` + 历史微博帖归属改写，幂等）；主播卡第三栏经关联反查继续混排，开播路径零回归。计划与实现记录见 [plan/weibo-source.md](plan/weibo-source.md)
+- **B站动态图文来源：已落地（第三条图文链路）**——`bili_accounts` 独立名单（动态型 UP 主不开播也能监听推送）、`DynamicSource` 轮询对象 = 监听主播 ∪ 动态名单（监听主播的动态维持只归档不推送）、名单账号 uname/last_ok_at/头像（直连落 `cache/bili-avatars`）回写、`feed_post` 三平台推送分支（B站图直连本地化、`{liver}` 按账号 uid 反查 streamers）、`/api/bili/accounts` 全套 + `/api/bili-avatar`、MCP `list/upsert/delete_bili_account`。**同步完成图文规则重构（历史记录）**：post_rules 曾去 `account_ids` 内嵌 scope 改账号侧 `rule_ids` 选用；**统一计划 P2 后规则统一进 push_rules（scope 列）、三账号表 rule_ids 删列、post_rules 一次性搬家后 DROP**，见 [plan/unify-classify-push.md](plan/unify-classify-push.md)。计划与实现记录见 [plan/bili-dynamic-posts.md](plan/bili-dynamic-posts.md)
 - verdicts 总览 UI；预告半透明条与「预定时间到」推送
 - dispatcher 通道级规则（群 × 主播屏蔽、优先级阈值）：待产品方案，机制不预设
 - 其余已放弃 / 不采用方案见 `design.md` §11
