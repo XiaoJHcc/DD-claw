@@ -2,7 +2,7 @@
 // + 底部新增按钮。分类 = LLM 提示词 + 确定性条件（关键词/分区，且/或），归类结果供推送规则引用。
 // 新增/编辑走一级 sheet，保存报错内联在按钮行；删除分类会级联停用引用它的推送规则（先 confirm 告知）。
 // 视觉 = v2（行内嵌形态 + tag-purple/blue/mint 摘要标签 + .inp 表单控件），行为与接口不变。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, makeSortable, openSheet, closeSheet, splitCsv } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, makeSortable, openSheet, closeSheet, splitCsv, onTableRefresh } from './core.js';
 import { loadPush } from './push.js';
 import { loadStreamers } from './streamers.js';
 
@@ -140,3 +140,6 @@ makeSortable(document.getElementById('category-list'), {
 });
 
 loadCategories();
+// 分类行（关键词 / 分区 / 判定方式 / 停用）在 categories 表——撤销后重拉本卡
+// （规则卡对分类的引用快照由 push.js 的 loadPush 负责，两处各修各的）
+onTableRefresh(['categories'], loadCategories);

@@ -100,6 +100,15 @@ export function saveRuntimeConfig(db: Db, patch: Partial<RuntimeConfig>): void {
   }
 }
 
+/**
+ * 该 settings 键是否属于运行时参数（NUM_SPECS / BOOL_SPECS 的键）。
+ * 用途：撤销后的热生效映射——撤 runtime config 键要 reconcileRuntime（见 undo.ts undoEffects），
+ * 键名单只有本文件一处信源，别处不要再抄一遍。
+ */
+export function isRuntimeConfigKey(key: string): boolean {
+  return NUM_SPECS.some((s) => s.key === key) || BOOL_SPECS.some((s) => s.key === key);
+}
+
 /** 单键直读 helper：pipeline 处理信号时用（冷启动推送开关，热生效免重启） */
 export function isNotifyOnFirstRun(db: Db): boolean {
   const v = db.getSetting('notify_on_first_run');

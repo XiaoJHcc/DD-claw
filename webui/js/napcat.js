@@ -8,7 +8,7 @@
 // 配置不当守卫（configReady = NapCat 自己跑通过）：未填路径/QQ、NapCat 未跑通时
 // 禁用「失活自动拉起」，原因与做法直接写进可见副行（不用 hover 浮窗）；
 // 「手动拉起」始终可点——不行时服务端 400 透传中文原因 toast 出来。
-import { api, toast, ACTIONS, CHANGES, esc, field, openSheet, closeSheet, switchHtml } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, field, openSheet, closeSheet, switchHtml, onTableRefresh } from './core.js';
 import { icon } from './icons.js';
 
 let ncCache = null;
@@ -139,3 +139,5 @@ ACTIONS['napcat-launch'] = function () {
 
 setInterval(loadNapcat, 30000);
 loadNapcat();
+// NapCat 配置在 settings 表（napcat_*）——撤销后重拉本卡
+onTableRefresh(['settings'], loadNapcat);

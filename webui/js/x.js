@@ -16,7 +16,7 @@
 // 行可点开进规则编辑二级浮窗。
 // 纪律：GET 只读后端快照（后端绝不在读取路径打网络），探测一律由弹窗里的测试 icon 显式触发；
 // 测试允许用输入框里还没保存的值（先测后存），未保存值的结果只动按钮、不污染卡片状态。
-import { api, toast, ACTIONS, CHANGES, INPUTS, esc, field, checkRowHtml, dropdownHtml, openSheet, closeSheet, sheetCleanups, switchHtml, iconBtn, checkDotHtml, gripHtml, makeSortable, avatarHtml, relTime, ruleDeadReason, segnavHtml, layoutSegnav, segnavSelect, splitCsv } from './core.js';
+import { api, toast, ACTIONS, CHANGES, INPUTS, esc, field, checkRowHtml, dropdownHtml, openSheet, closeSheet, sheetCleanups, switchHtml, iconBtn, checkDotHtml, gripHtml, makeSortable, avatarHtml, relTime, ruleDeadReason, segnavHtml, layoutSegnav, segnavSelect, splitCsv, onTableRefresh } from './core.js';
 import { icon } from './icons.js';
 import { openPlatformLogin, PLAT_STATE, setLoginConfirmedHook } from './listen.js';
 
@@ -1117,3 +1117,5 @@ ACTIONS['del-post-rule'] = function (el) {
 
 loadX();
 setInterval(loadX, 60000);
+// 图文规则 + 三张账号名单 + X/微博源设置（settings）一次性重拉——撤销后把图文页拉回真实态
+onTableRefresh(['post_rules', 'x_accounts', 'weibo_accounts', 'bili_accounts', 'settings'], loadX);

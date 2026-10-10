@@ -4,13 +4,15 @@
  *
  * 权限模型（详见 auth.ts 头注释）：工具参数不可信（LLM 生成，可被 prompt injection 伪造），
  * 可信的只有连接级 token 角色。因此 admin 工具在 gateway 连接上根本不注册（tools/list
- * 不可见），而不是注册后拒绝。gateway 唯一可写的是「群推送规则自助」，服务端强制：
- * 只能选已启用的 QQ 群渠道、主播必须在监听名单、规则打 createdBy='mcp' 标记、
- * 只能删同标记规则、单渠道 ≤ 20 条、写操作限流。
+ * 不可见），而不是注册后拒绝。gateway 唯一可写的是「群/私聊推送规则自助」，服务端强制：
+ * **渠道只来自调用域 `ctx.scope.channelId`（令牌绑定）——身份字段永不进工具 schema**
+ * （LLM 填的渠道声明会被 zod 剥离，见 run-tool.ts），未绑渠道一律 403 不回落；
+ * 该渠道必须是已启用的 onebot group/private；读侧按 scope 服务端裁剪（不把别渠道的规则喂进上下文）；
+ * 主播必须在监听名单、规则打 createdBy='mcp'、删除先校验渠道归属、多渠道规则走 copy-on-write 拆分、
+ * 单渠道 ≤ 20 条、写操作按渠道限流。契约见 docs/mcp.md「gateway 写/读的服务端强制」。
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { makeLogger } from '../logger.js';
 import type { PanelDeps } from '../panel/server.js';
 import {
   HttpError, checkAccountRuleIds, checkCategoryConditions, checkChannelShape, checkPostFiltersUsable,
@@ -20,23 +22,23 @@ import {
   parseNewBiliAccount, parseNewCategory, parseNewChannel, parseNewPostRule, parseNewRule, parseNewWeiboAccount,
   parseNewXAccount,
   parsePostRulePatch, parseRulePatch, parseRuntimePatch, parseStreamerPatch, parseWeiboAccountPatch,
-  parseXAccountPatch, parseXPatch, syncStreamerWeiboLink, watchStreamer,
+  parseXAccountPatch, parseXPatch, parseXTestRequest, syncStreamerWeiboLink, watchStreamer,
 } from '../panel/http-util.js';
 import { scheduleInfo } from '../panel/schedule.js';
-import { setPushEnabled } from '../core/push.js';
+import { setPushEnabled, splitPushRuleChannel, type PushChannel } from '../core/push.js';
 import { normalizeCsvText, splitCsvText } from '../core/csv.js';
 import { setListen, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
+import { setChatWriteMode, type ChatWriteMode } from '../agent/system-prompt.js';
 import { X_INTERVAL_MAX, X_INTERVAL_MIN } from '../core/x-config.js';
 import { getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS } from '../core/runtime-config.js';
-import { isLlmEnabled, setLlmEnabled } from '../analysis/providers.js';
+import { hasLlmProvider, isLlmEnabled, setChatProvider, setLlmEnabled } from '../analysis/providers.js';
 import { llmProviderSchema } from '../config/schema.js';
 import type { StreamerInput } from '../core/streamers.js';
-import { mcpWriteLimiter } from './rate-limit.js';
+import { mcpWriteLimiter, writeLimitBucket } from './rate-limit.js';
+import { runToolTracked, scopeChannelId, undoScopeOf } from './run-tool.js';
 import type { McpAuth } from './auth.js';
 
-const log = makeLogger('mcp');
-
-/** gateway 群自助：单渠道 MCP 规则上限 */
+/** gateway 渠道自助：单渠道 MCP 规则上限 */
 const MAX_MCP_RULES_PER_CHANNEL = 20;
 
 type ToolRole = 'shared' | 'admin' | 'gateway';
@@ -50,6 +52,11 @@ export interface McpToolDef {
   role: ToolRole;
   /** 写操作：记审计日志 */
   write?: boolean;
+  /**
+   * 该写工具是否进快照栈（缺省进）。只有一个工具设 false：撤销执行器 `undo_last_change`——
+   * 它的写是把已记录的前像写回去，入栈会把自己变成下一条可撤销记录（见 core/undo.ts）。
+   */
+  track?: false;
   handler: (deps: PanelDeps, args: Record<string, unknown>, ctx: McpAuth) => unknown | Promise<unknown>;
 }
 
@@ -71,6 +78,53 @@ function checkXBiliUidForMcp(deps: PanelDeps, uid: string | null): void {
 /** 微博账号的关联主播校验（与 checkXBiliUidForMcp 同一条纪律） */
 function checkWeiboBiliUidForMcp(deps: PanelDeps, uid: string | null): void {
   if (uid && !deps.db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
+}
+
+/** 排序类工具的公共校验：ids 必须是现有行的全排列（与面板 put*Order 同一口径、同一句文案） */
+function checkFullPermutation(ids: number[], existing: number[], what: string): void {
+  const set = new Set(existing);
+  if (ids.length !== set.size || new Set(ids).size !== ids.length || ids.some((id) => !set.has(id))) {
+    throw new HttpError(400, `ids 必须与现有${what}一一对应`);
+  }
+}
+
+// ---- 调用域（scope）：渠道是 QQ 入口唯一可信的锚点，只由接入层/令牌解析后注入 ----
+// 工具 schema 里没有任何渠道字段（见 run-tool.ts 头注释）：LLM 在参数里声明的渠道会被 zod 剥离，
+// 能力层只认 ctx.scope.channelId。读 / 写 / 限流共用这一个锚点。
+
+/**
+ * 读侧裁剪用的调用域渠道：admin（面板 / Claude Code / 进程内 agent）无 scope = 不裁剪（全量，行为不变）；
+ * gateway 未绑渠道 = **拒绝服务**（绝不回落默认渠道，也绝不回落「全部」——否则一句话就能读到别人的配置）。
+ */
+function scopeChannelForRead(ctx: McpAuth): number | undefined {
+  const ch = scopeChannelId(ctx);
+  if (ch !== undefined || ctx.role === 'admin') return ch;
+  throw new HttpError(403, '本令牌未绑定渠道：推送规则自助只服务令牌绑定的渠道，请让主人给令牌绑定渠道');
+}
+
+/** gateway 自助工具的渠道（必给）：未绑定即拒；admin 走全量 CRUD，不该出现在这里 */
+function requireScopeChannel(ctx: McpAuth): number {
+  const ch = scopeChannelForRead(ctx);
+  if (ch !== undefined) return ch;
+  throw new HttpError(
+    403,
+    'admin 令牌没有渠道 scope：本工具只服务「令牌绑定的渠道」自助，'
+    + '管理侧请用 upsert_push_rule / delete_push_rule（channels 参数显式给）',
+  );
+}
+
+/** 自助可用的渠道：已启用的 onebot 群或私聊（私聊一视同仁，见 plan P2「渠道类型放开」） */
+function isSelfServiceChannel(c: PushChannel): boolean {
+  return c.notifier === 'onebot' && (c.targetType === 'group' || c.targetType === 'private') && c.enabled;
+}
+
+/** 调用域渠道行 + 自助资格（渠道被停用/删掉/换成 toast 时拒绝，绝不静默改到别处） */
+function selfServiceChannel(deps: PanelDeps, channelId: number): PushChannel {
+  const c = deps.db.listPushChannels().find((x) => x.id === channelId);
+  if (!c || !isSelfServiceChannel(c)) {
+    throw new HttpError(400, '本渠道不是已启用的 QQ 群/私聊渠道，不能自助配置推送规则（先 list_group_channels 看可选渠道）');
+  }
+  return c;
 }
 
 // ---- 共享只读工具 ----
@@ -151,10 +205,20 @@ const sharedTools: McpToolDef[] = [
   },
   {
     name: 'list_push_rules',
-    description: '推送规则列表（全局 sort 序）：分类引用（null=任意开播）× 生效主播集合（空=全部）× 渠道 × 推送词覆盖；createdBy=mcp 的是群自助规则',
+    description: '推送规则列表（全局 sort 序）：分类引用（null=任意开播）× 生效主播集合（空=全部）× 渠道 × 推送词覆盖；'
+      + 'createdBy=mcp 的是渠道自助规则。gateway 令牌只能看到推送给**本渠道**的规则'
+      + '（含与其他渠道共享的多渠道规则，那类带 sharedWithOtherChannels=true）',
     schema: {},
     role: 'shared',
-    handler: (deps) => deps.db.listPushRules(),
+    handler: (deps, _args, ctx) => {
+      const rules = deps.db.listPushRules();
+      const ch = scopeChannelForRead(ctx);
+      if (ch === undefined) return rules; // admin / 面板：全量（行为与改造前一致）
+      // 读侧服务端裁剪（plan「渠道隔离」第 2 条）：别的渠道的规则不进调用方上下文
+      return rules
+        .filter((r) => r.channels.includes(ch))
+        .map((r) => ({ ...r, sharedWithOtherChannels: r.channels.length > 1 }));
+    },
   },
   {
     name: 'list_categories',
@@ -165,10 +229,15 @@ const sharedTools: McpToolDef[] = [
   },
   {
     name: 'list_channels',
-    description: '推送渠道列表：toast=系统通知，onebot=QQ（targetType group/private + targetId 群号/QQ号）',
+    description: '推送渠道列表：toast=系统通知，onebot=QQ（targetType group/private + targetId 群号/QQ号）。'
+      + 'gateway 令牌只能看到本渠道这一条（别的渠道不在可见范围内）',
     schema: {},
     role: 'shared',
-    handler: (deps) => deps.db.listPushChannels(),
+    handler: (deps, _args, ctx) => {
+      const all = deps.db.listPushChannels();
+      const ch = scopeChannelForRead(ctx);
+      return ch === undefined ? all : all.filter((c) => c.id === ch);
+    },
   },
   {
     name: 'search_posts',
@@ -226,6 +295,35 @@ const sharedTools: McpToolDef[] = [
     role: 'shared',
     handler: (deps) => ({ rules: deps.db.listPostRules() }),
   },
+  // 撤销是**内部工具**（计划「撤销的用户面」）：不设专门命令，agent 侧自然语言说「撤销刚才那个」即可。
+  // 两个角色都该有——admin 撤全局栈，gateway 撤本渠道栈（调用域由令牌解析，不在参数里）。
+  // 唯一的写工具塞在 shared 里：ToolRole 是按角色过滤的，要让两种角色都看得见只能用 shared。
+  {
+    name: 'undo_last_change',
+    description: '撤销最近一次配置变更（本调用域的栈顶：admin 撤全局栈，gateway 撤本渠道栈）。'
+      + '逐行比对后像与当前值，若该设置已被其他入口改过则中止且一行都不动（宁中止不丢写）；'
+      + '撤销会触发热生效（等同于在面板上改回来）。撤回的是上一次写，不是「把某项改回默认」',
+    schema: {},
+    role: 'shared',
+    write: true,
+    // 撤销是把已记录的前像写回去，不能再进快照（否则撤销自己成了下一条可撤销记录）
+    track: false,
+    handler: (deps, _args, ctx) => {
+      if (!deps.undoLast) throw new HttpError(400, '撤销未装配');
+      const r = deps.undoLast(undoScopeOf(ctx));
+      if (!r.ok) {
+        if (r.reason === 'empty') throw new HttpError(404, '没有可撤销的变更');
+        throw new HttpError(409, '该设置已被其他入口修改，无法撤销本次');
+      }
+      return {
+        ok: true,
+        change: { id: r.id, tool: r.tool ?? null },
+        applied: r.applied,
+        // 隐私例外（LLM key）：值没落库，撤销 = 清空；这里点名要重填的字段
+        ...(r.refill ? { refill: r.refill } : {}),
+      };
+    },
+  },
 ];
 
 // ---- admin 专属（写设置/名单/规则/渠道/LLM）----
@@ -254,11 +352,13 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'set_streamer',
-    description: '更新监听名单条目：alias 别名 / watch 监听 / weiboNick 微博昵称（自动解析 uid，传 null 清除）/ profileNote 备注。至少传一个字段',
+    description: '更新监听名单条目：alias 别名 / watch 监听 / analyze 分析 / notify 通知 / weiboNick 微博昵称（自动解析 uid，传 null 清除）/ profileNote 备注。至少传一个字段',
     schema: {
       uid: uidSchema,
       alias: z.string().nullable().optional(),
       watch: z.boolean().optional(),
+      analyze: z.boolean().optional(),
+      notify: z.boolean().optional(),
       weiboNick: z.string().nullable().optional().describe('微博昵称；传 null 清除（连同 weiboUid）'),
       profileNote: z.string().nullable().optional(),
     },
@@ -269,7 +369,7 @@ const adminTools: McpToolDef[] = [
       const prev = deps.db.getStreamer(uid);
       if (!prev) throw new HttpError(404, '该 uid 不在监听名单');
       const patch = parseStreamerPatch(
-        pickBody(args, ['alias', 'watch', 'weiboNick', 'profileNote']),
+        pickBody(args, ['alias', 'watch', 'analyze', 'notify', 'weiboNick', 'profileNote']),
       );
       // weiboNick → weiboUid 解析（同面板 resolveWeiboNick 语义，内联避免模块循环依赖）
       if (patch.weiboNick !== undefined) {
@@ -335,6 +435,37 @@ const adminTools: McpToolDef[] = [
     },
   },
   {
+    name: 'set_chat_mode',
+    description: 'agent 对话的写操作模式：ask = 每个写工具调用前先复述要改什么、等主人确认；'
+      + 'auto = 可直接修改并简述结果。面板的「写前询问 / 自动修改」开关用它',
+    schema: { mode: z.enum(['ask', 'auto']) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => ({
+      ok: true,
+      mode: setChatWriteMode(deps.db, args.mode as ChatWriteMode),
+    }),
+  },
+  {
+    name: 'set_chat_provider',
+    description: 'agent 对话用哪个 LLM provider 回答（空串 = 自动路由，按 provider 顺序 + 失败降级）。'
+      + '点名后不降级：它不可用时直接报错，不会偷偷换别人回答。面板的 Agent 模型选择用它',
+    schema: {
+      provider: z.string().describe('provider 名；空串 = 自动路由'),
+    },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const provider = (args.provider as string).trim();
+      if (provider !== '') {
+        const list = deps.llm?.store?.list();
+        if (list === undefined) throw new HttpError(400, 'LLM provider 管理未装配');
+        if (!hasLlmProvider(list, provider)) throw new HttpError(400, `没有这个 LLM provider：${provider}`);
+      }
+      return { ok: true, provider: setChatProvider(deps.db, provider) };
+    },
+  },
+  {
     name: 'update_runtime_config',
     description: '更新运行时参数（settings 唯一信源，保存即热生效）。只传要改的字段；各字段范围在 schema 里',
     // 字段形状直接从规格表生成，描述即面板文案
@@ -396,7 +527,7 @@ const adminTools: McpToolDef[] = [
     },
     role: 'admin',
     write: true,
-    handler: (deps, args) => {
+    handler: async (deps, args) => {
       if (args.id === undefined) {
         const input = parseNewXAccount(pickBody(args, ['screenName', 'displayName', 'biliUid', 'enabled', 'ruleIds']));
         if (args.nickname !== undefined) {
@@ -407,9 +538,16 @@ const adminTools: McpToolDef[] = [
         }
         checkXBiliUidForMcp(deps, input.biliUid);
         checkAccountRuleIds(deps.db, input.ruleIds);
-        const id = deps.db.upsertXAccount(input);
+        // 存在性校验（与面板 POST /api/x/accounts 同一条）：「账号不存在」是硬错误（多半敲错了）；
+        // 链路原因（代理不通 / 限流）照收——不能因为代理没开就让人加不了账号，把原因回报给调用方。
+        // verify 顺手抠到的 og:title 显示名直接种入 nickname（抠不到为 null，抓取再回写）
+        const verify = deps.x?.verify ? await deps.x.verify(input.screenName) : undefined;
+        if (verify?.checked && !verify.ok && verify.kind === 'not-found') {
+          throw new HttpError(400, `X 账号不存在：@${input.screenName}`);
+        }
+        const id = deps.db.upsertXAccount({ ...input, nickname: verify?.name ?? null });
         deps.x?.onChanged();
-        return { id, account: deps.db.getXAccount(id) };
+        return { id, account: deps.db.getXAccount(id), ...(verify ? { verify } : {}) };
       }
       const id = Number(args.id);
       if (!deps.db.getXAccount(id)) throw new HttpError(404, 'X 账号不存在');
@@ -554,7 +692,7 @@ const adminTools: McpToolDef[] = [
       id: idSchema.optional(),
       name: z.string().optional(),
       channels: z.array(idSchema).optional().describe('推送渠道 id（与开播规则共用 push_channels）'),
-      filters: z.object({
+      filters: z.strictObject({
         original: z.boolean().optional().describe('原创'),
         retweet: z.boolean().optional().describe('转发'),
         quote: z.boolean().optional().describe('引用（只有 X 帖能标引用；勾上对非 X 帖永不命中，是语义不是错误）'),
@@ -647,8 +785,12 @@ const adminTools: McpToolDef[] = [
     handler: (deps, args) => {
       const id = args.id as number;
       if (!deps.db.listCategories().some((c) => c.id === id)) throw new HttpError(404, '分类不存在');
-      const disabledRules = deps.db.disablePushRulesByCategory(id);
-      deps.db.deleteCategory(id);
+      // 级联停用 + 删除一个事务（P0：撤销快照的前提——两条语句不再可能只成一半）
+      const disabledRules = deps.db.transaction(() => {
+        const n = deps.db.disablePushRulesByCategory(id);
+        deps.db.deleteCategory(id);
+        return n;
+      });
       return { ok: true, disabledRules };
     },
   },
@@ -767,6 +909,7 @@ const adminTools: McpToolDef[] = [
       enabled: z.boolean().optional(),
       structuredOutput: z.enum(['schema', 'object', 'none']).optional(),
       api: z.enum(['chat-completions', 'responses']).optional(),
+      keyEnvs: z.array(z.string().min(1)).optional().describe('从环境变量读 key 的变量名列表（通常留空，key 直接走 key 字段）'),
       key: z.string().optional().describe('API key（多个用逗号分隔，中英文逗号均可）；空串 = 清除'),
     },
     role: 'admin',
@@ -776,7 +919,7 @@ const adminTools: McpToolDef[] = [
       if (!store) throw new HttpError(400, 'LLM provider 管理未装配');
       const list = store.list();
       const prev = list.find((p) => p.name === (args.name as string));
-      const patch = pickBody(args, ['baseURL', 'model', 'vision', 'enabled', 'structuredOutput', 'api']);
+      const patch = pickBody(args, ['baseURL', 'model', 'vision', 'keyEnvs', 'enabled', 'structuredOutput', 'api']);
       const merged = prev ? { ...prev, ...patch } : { name: args.name, ...patch };
       const parsed = llmProviderSchema.safeParse(merged);
       if (!parsed.success) {
@@ -835,26 +978,156 @@ const adminTools: McpToolDef[] = [
       return { ok: true, provider: name };
     },
   },
+  // ---- 排序与测试类（P0 补齐：与对应 REST 路由同一套校验与 Db 调用；
+  // 进注册表是为纳入回滚覆盖/审计，agent 工具面由 AGENT_EXCLUDED_TOOLS 排除）----
+  {
+    name: 'reorder_channels',
+    description: '推送渠道排序：ids 必须是现有渠道 id 的全排列（长度一致/无重复/无增删），按数组顺序重写展示顺序',
+    schema: { ids: z.array(idSchema) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const ids = args.ids as number[];
+      checkFullPermutation(ids, deps.db.listPushChannels().map((c) => c.id), '渠道');
+      deps.db.reorderPushChannels(ids);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'reorder_categories',
+    description: '内容分类排序：ids 必须是现有分类 id 的全排列（长度一致/无重复/无增删），按数组顺序重写展示顺序',
+    schema: { ids: z.array(idSchema) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const ids = args.ids as number[];
+      checkFullPermutation(ids, deps.db.listCategories().map((c) => c.id), '分类');
+      deps.db.reorderCategories(ids);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'reorder_push_rules',
+    description: '推送规则排序：ids 必须是全部规则 id 的全排列（长度一致/无重复/无增删），按数组顺序重写全局匹配优先级',
+    schema: { ids: z.array(idSchema) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const ids = args.ids as number[];
+      checkFullPermutation(ids, deps.db.listPushRules().map((r) => r.id), '规则');
+      deps.db.reorderPushRules(ids);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'reorder_post_rules',
+    description: '图文帖规则排序：ids 必须是全部图文帖规则 id 的全排列（长度一致/无重复/无增删），按数组顺序重写',
+    schema: { ids: z.array(idSchema) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const ids = args.ids as number[];
+      checkFullPermutation(ids, deps.db.listPostRules().map((r) => r.id), '图文帖规则');
+      deps.db.reorderPostRules(ids);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'reorder_llm_providers',
+    description: 'LLM provider 排序：names 必须是现有 provider 名单的一个排列（长度一致/无重复/无增删）；顺序 = 路由优先级，保存后路由热重建',
+    schema: { names: z.array(z.string().min(1)) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const store = deps.llm?.store;
+      if (!store) throw new HttpError(400, 'LLM provider 管理未装配');
+      const names = args.names as string[];
+      if (new Set(names).size !== names.length) throw new HttpError(400, 'names 有重复');
+      const list = store.list();
+      const byName = new Map(list.map((p) => [p.name, p]));
+      if (names.length !== list.length || names.some((n) => !byName.has(n))) {
+        throw new HttpError(400, 'names 必须与现有 provider 名单一一对应');
+      }
+      store.save(names.map((n) => byName.get(n)!));
+      deps.llm?.onProvidersChanged?.();
+      return { ok: true };
+    },
+  },
+  {
+    name: 'test_push',
+    description: '测试推送：假开播消息走完整推送链路（会真发一条消息到所有启用渠道），返回 总数/成功数',
+    schema: {},
+    role: 'admin',
+    write: true,
+    handler: async (deps) => {
+      if (!deps.testPush) throw new HttpError(400, '测试推送未装配');
+      const r = await deps.testPush();
+      return { ok: true, ...r };
+    },
+  },
+  {
+    name: 'test_llm_provider',
+    description: '测试某个 LLM provider：绕过熔断发一个最小 ping，返回毫秒耗时；失败照常计入熔断统计（与面板「测试」按钮同一语义）',
+    schema: { name: z.string().min(1) },
+    role: 'admin',
+    write: true,
+    handler: async (deps, args) => {
+      const router = deps.llm?.router;
+      if (!router) throw new HttpError(400, 'LLM 未装配');
+      const name = args.name as string;
+      const status = router.providerStatus(name);
+      if (status === null) throw new HttpError(404, 'provider 不存在');
+      if (status.startsWith('缺 key')) throw new HttpError(400, '缺 key，请先填写');
+      try {
+        const ms = await router.ping(name);
+        return { ok: true, ms };
+      } catch (e) {
+        // 同 REST 的 502：错误信息只含 HTTP 状态/对端响应摘要，不含 key
+        throw new HttpError(502, e instanceof Error ? e.message : String(e));
+      }
+    },
+  },
+  {
+    name: 'test_x_connection',
+    description: 'X/推特 连通性探测（代理 / Nitter 实例 / 免登录回退）。允许传入尚未保存的覆盖值（先测后存）；'
+      + '测的就是已保存配置时，探测结果快照写 settings（面板卡片读它）',
+    schema: {
+      target: z.enum(['all', 'proxy', 'instances', 'web']).optional().describe('探测目标，缺省 all'),
+      proxyUrl: z.string().optional().describe('覆盖已保存的代理地址（先测后存）'),
+      instances: z.string().optional().describe('覆盖已保存的 Nitter 实例 host（逗号分隔）'),
+      screenName: z.string().optional().describe('探测用账号（免登录路线）；缺省用基准账号'),
+    },
+    role: 'admin',
+    write: true,
+    handler: async (deps, args) => {
+      if (!deps.x) throw new HttpError(400, 'X 分页未装配');
+      return deps.x.test(parseXTestRequest(pickBody(args, ['target', 'proxyUrl', 'instances', 'screenName'])));
+    },
+  },
 ];
 
-// ---- gateway 专属（群推送规则自助；服务端强制收敛，不信任任何调用方声明的群号/身份）----
+// ---- gateway 专属（渠道推送规则自助；渠道只由令牌绑定的调用域确定，不信任任何调用方声明的身份）----
 
 const gatewayTools: McpToolDef[] = [
   {
     name: 'list_group_channels',
-    description: '可自助配置的 QQ 群渠道列表（已启用的 onebot 群渠道）',
+    description: '本渠道（令牌绑定的 QQ 群/私聊）信息：id / 名称 / targetType / 群号或 QQ 号。'
+      + '只回本渠道一条——别的渠道不在本渠道的可见范围内',
     schema: {},
     role: 'gateway',
-    handler: (deps) =>
-      deps.db.listPushChannels()
-        .filter((c) => c.notifier === 'onebot' && c.targetType === 'group' && c.enabled)
-        .map((c) => ({ id: c.id, name: c.name, groupId: c.targetId })),
+    handler: (deps, _args, ctx) => {
+      const channelId = requireScopeChannel(ctx);
+      const c = deps.db.listPushChannels().find((x) => x.id === channelId);
+      if (!c || !isSelfServiceChannel(c)) return []; // 令牌绑的渠道不可自助（toast/停用/已删）→ 空列表
+      return [{ id: c.id, name: c.name, targetType: c.targetType, groupId: c.targetId }];
+    },
   },
   {
     name: 'add_group_push_rule',
-    description: `往某个 QQ 群渠道添加主播开播推送规则。限制：主播必须已在监听名单（否则先让主人在面板添加）；单群最多 ${MAX_MCP_RULES_PER_CHANNEL} 条自助规则；同主播同分类去重`,
+    description: `往**本渠道**（令牌绑定的 QQ 群/私聊，渠道不需要也不接受传参）添加主播开播推送规则。`
+      + `限制：主播必须已在监听名单（否则先让主人在面板添加）；本渠道自助规则最多 ${MAX_MCP_RULES_PER_CHANNEL} 条；同主播同分类去重`,
+    // 身份字段不进 schema：渠道由 ctx.scope.channelId 注入（LLM 填了也会被 zod 剥离）
     schema: {
-      channelId: idSchema.describe('群渠道 id（先 list_group_channels 获取）'),
       uid: uidSchema.describe('主播 uid（先 search_streamers 确认）'),
       categoryId: idSchema.nullable().optional().describe('分类 id（list_categories 获取）；null/不传 = 任意开播都推'),
       messageTemplate: z.string().optional().describe('推送词覆盖，{liver}/{uname}/{title} 占位；不传 = 内置默认'),
@@ -863,12 +1136,9 @@ const gatewayTools: McpToolDef[] = [
     role: 'gateway',
     write: true,
     handler: (deps, args, ctx) => {
-      if (!mcpWriteLimiter.allow(ctx.name)) throw new HttpError(429, '操作太频繁，请稍后再试');
-      const channelId = args.channelId as number;
-      const ch = deps.db.listPushChannels().find((c) => c.id === channelId);
-      if (!ch || ch.notifier !== 'onebot' || ch.targetType !== 'group' || !ch.enabled) {
-        throw new HttpError(400, '只能往已启用的 QQ 群渠道添加规则（先 list_group_channels 看可选渠道）');
-      }
+      const channelId = requireScopeChannel(ctx);
+      if (!mcpWriteLimiter.allow(writeLimitBucket(ctx))) throw new HttpError(429, '操作太频繁，请稍后再试');
+      selfServiceChannel(deps, channelId);
       const uid = args.uid as string;
       if (!deps.db.getStreamer(uid)) {
         throw new HttpError(400, '该主播不在监听名单（想监听新主播请联系主人在面板添加）');
@@ -880,7 +1150,7 @@ const gatewayTools: McpToolDef[] = [
       const mine = deps.db.listPushRules()
         .filter((r) => r.createdBy === 'mcp' && r.channels.includes(channelId));
       if (mine.length >= MAX_MCP_RULES_PER_CHANNEL) {
-        throw new HttpError(400, `该群的自助规则已达上限（${MAX_MCP_RULES_PER_CHANNEL} 条），请先删除不需要的`);
+        throw new HttpError(400, `本渠道的自助规则已达上限（${MAX_MCP_RULES_PER_CHANNEL} 条），请先删除不需要的`);
       }
       const dup = mine.find((r) => r.uids.includes(uid) && r.categoryId === categoryId);
       if (dup) throw new HttpError(409, `已有相同规则：#${dup.id} ${dup.name}`);
@@ -899,20 +1169,41 @@ const gatewayTools: McpToolDef[] = [
   },
   {
     name: 'remove_group_push_rule',
-    description: '删除群自助推送规则（只能删 add_group_push_rule 创建的规则，面板创建的规则动不了）',
+    description: '让本渠道不再收到某条推送规则（只处理令牌绑定的渠道，id 从 list_push_rules 取）：'
+      + '自助规则整条删除；主人配置的规则不整条删——只把本渠道移出'
+      + '（它还推别的渠道时其余渠道原样保留；唯一渠道就是本渠道时渠道置空、规则行与内容全留）',
     schema: { id: idSchema.describe('规则 id（list_push_rules 获取）') },
     role: 'gateway',
     write: true,
     handler: (deps, args, ctx) => {
-      if (!mcpWriteLimiter.allow(ctx.name)) throw new HttpError(429, '操作太频繁，请稍后再试');
+      const channelId = requireScopeChannel(ctx);
+      if (!mcpWriteLimiter.allow(writeLimitBucket(ctx))) throw new HttpError(429, '操作太频繁，请稍后再试');
       const id = args.id as number;
       const rule = deps.db.listPushRules().find((r) => r.id === id);
       if (!rule) throw new HttpError(404, '规则不存在');
-      if (rule.createdBy !== 'mcp') {
-        throw new HttpError(403, '只能删除群自助创建的规则（createdBy=mcp），面板规则请联系主人');
+      // 渠道归属校验（不再只认 createdBy）：不推本渠道的规则，本渠道碰不到
+      if (!rule.channels.includes(channelId)) {
+        throw new HttpError(403, `规则 #${id} 不推送本渠道，本渠道无权改动（只能动 list_push_rules 里列出的规则）`);
       }
-      deps.db.deletePushRule(id);
-      return { ok: true };
+      const selfCreated = rule.createdBy === 'mcp';
+      // copy-on-write（plan「多渠道规则」）：多渠道规则先拆出只含本渠道的一条（createdBy='mcp'），
+      // 后续写只操作这条——原规则保留其余渠道、内容一行不动；单渠道就是就地操作。
+      // 拆分与后续写同一个事务：不留半成品，也不存在「拆了却没删」的中间态。
+      let split = false;
+      const ruleRemoved = deps.db.transaction(() => {
+        if (!selfCreated && rule.channels.length === 1) {
+          // 非 mcp 规则只允许**渠道级操作**（不得整条删除）：本渠道是它唯一渠道时，
+          // 移出 = channels 置空——行与内容全留（主人在面板可见可删），createdBy 原样不动。
+          // 这类规则没有「其余的渠道」可保留，因此不拆新行（拆出来也只是随即删掉）。
+          deps.db.upsertPushRule({ id, channels: [], createdBy: rule.createdBy });
+          return false;
+        }
+        const target = splitPushRuleChannel(deps.db, rule, channelId);
+        split = target.split;
+        deps.db.deletePushRule(target.id);
+        return target.id === id;
+      });
+      return { ok: true, id, split, ruleRemoved };
     },
   },
 ];
@@ -921,35 +1212,31 @@ export function allToolDefs(): McpToolDef[] {
   return [...sharedTools, ...adminTools, ...gatewayTools];
 }
 
+/** 按名取工具定义（REST 收敛后面板路由经它进注册表；找不到 = 装配错误） */
+export function toolDefByName(name: string): McpToolDef | undefined {
+  return allToolDefs().find((d) => d.name === name);
+}
+
 /** 该角色可见的工具（gateway 看不到 admin 工具，反之亦然——不可见即不存在） */
 export function toolDefsForRole(role: McpAuth['role']): McpToolDef[] {
   return allToolDefs().filter((t) => t.role === 'shared' || t.role === role);
 }
 
-/** 审计日志：写操作落日志（角色 + 工具 + 参数摘要；llm key 值打码） */
-function auditLog(ctx: McpAuth, tool: string, args: Record<string, unknown>): void {
-  const sanitized = { ...args };
-  if (tool === 'set_llm_key' && 'value' in sanitized) sanitized.value = '***';
-  if ('key' in sanitized) sanitized.key = '***';
-  log.info(`MCP 写操作 [${ctx.role}:${ctx.name}] ${tool} ${JSON.stringify(sanitized)}`);
-}
-
-/** 按角色把工具注册进 SDK server（每请求一个新 server 实例，无状态模式） */
+/** 按角色把工具注册进 SDK server（每请求一个新 server 实例，无状态模式）。
+ *  执行统一走 runTool（能力层唯一执行入口：zod 再校验 + 审计 + 错误归一）；
+ *  text 映射保持与改造前逐字一致（契约见 run-tool.ts 头注释）。 */
 export function registerTools(server: McpServer, deps: PanelDeps, ctx: McpAuth): void {
   for (const def of toolDefsForRole(ctx.role)) {
     server.registerTool(
       def.name,
       { description: def.description, inputSchema: def.schema },
-      // args 已由 SDK 按 zod shape 校验过，handler 内部按 Record 取用
+      // args 已由 SDK 按 zod shape 校验过；runToolTracked 内再校验一次（第二个适配器也绕不过），
+      // 写操作顺带过 UndoStore 落变更记录（快照方案见 undo.ts track()）
       (async (args: Record<string, unknown>) => {
-        try {
-          if (def.write) auditLog(ctx, def.name, args);
-          const result = await def.handler(deps, args, ctx);
-          return { content: [{ type: 'text' as const, text: JSON.stringify(result ?? { ok: true }, null, 2) }] };
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          return { content: [{ type: 'text' as const, text: `错误：${msg}` }], isError: true as const };
-        }
+        const r = await runToolTracked(deps, def, args, ctx, 'mcp');
+        return r.ok
+          ? { content: [{ type: 'text' as const, text: r.text }] }
+          : { content: [{ type: 'text' as const, text: r.text }], isError: true as const };
       }) as never,
     );
   }

@@ -39,7 +39,8 @@
 | analysis + rules | 分类管线 ✅；triggers / context / schedule-extract 为目标 ⬜；preference 护栏已放弃 ❌ | [modules/analysis.md](modules/analysis.md) |
 | notify | onebot(NapCat) / toast ✅（ntfy 已放弃 ❌） | [modules/notify.md](modules/notify.md) |
 | panel + webui | ✅（verdicts 总览、预告条预留） | [modules/panel.md](modules/panel.md) |
-| mcp | ✅ v1（admin / gateway 双角色） | [mcp.md](mcp.md) |
+| mcp | ✅ v1（admin / gateway 双角色）+ gateway 渠道隔离（scope 注入 / 读裁剪 / copy-on-write / 按渠道限流） | [mcp.md](mcp.md) |
+| agent（能力面接入） | ✅ P0 地基（runTool / 撤销）+ P1 WebUI Agent（loop + 聊天视图）+ P3 NapCat 直连（`src/qqbot/`）；P2 MaiBot 插件在独立目录 | [plan/agent-access.md](plan/agent-access.md)、[modules/qqbot.md](modules/qqbot.md) |
 
 ## 未实现清单
 

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Db } from './db.js';
 import {
-  isPushEnabled, setPushEnabled,
+  isPushEnabled, setPushEnabled, splitPushRuleChannel,
   type NewCategory, type NewPushChannel, type NewPushRule, type NewVerdict,
 } from './push.js';
 
@@ -179,6 +179,54 @@ test('规则拖拽排序：reorderPushRules 全局重写匹配优先级，新规
   assert.deepEqual(db.listEnabledPushRules().map((x) => x.name), ['c', 'b', 'a'], '全局排序，不按主播分组');
   const d = db.upsertPushRule(rule({ name: 'd' }));
   assert.deepEqual(db.listEnabledPushRules().map((x) => x.name), ['c', 'b', 'a', 'd'], '新规则排末尾');
+});
+
+// ---- 渠道拆分（copy-on-write，docs/plan/agent-access.md「多渠道规则」）----
+
+test('splitPushRuleChannel：多渠道规则拆出只含本渠道的一条（createdBy=mcp），原规则保留其余渠道', (t) => {
+  const db = memDb(t);
+  const a = db.upsertPushChannel(channel({ name: 'A群' }));
+  const b = db.upsertPushChannel(channel({ name: 'B群' }));
+  const id = db.upsertPushRule(rule({
+    name: '双群规则', uids: ['1'], channels: [a, b], messageTemplate: '{liver} 来了', createdBy: null,
+  }));
+
+  const { id: splitId, split } = splitPushRuleChannel(db, db.listPushRules().find((x) => x.id === id)!, a);
+  assert.equal(split, true);
+  assert.notEqual(splitId, id, '拆出来的是一条新规则');
+
+  const original = db.listPushRules().find((x) => x.id === id)!;
+  assert.deepEqual(original.channels, [b], '原规则保留其余渠道');
+  assert.equal(original.createdBy, null, '原规则 createdBy 原样（不沿用 admin 之外的值，也不被标成 mcp 规则）');
+  assert.equal(original.name, '双群规则', '内容一行不动');
+  assert.equal(original.messageTemplate, '{liver} 来了');
+
+  const copy = db.listPushRules().find((x) => x.id === splitId)!;
+  assert.deepEqual(copy.channels, [a], '拆出的一条只含本渠道');
+  assert.equal(copy.createdBy, 'mcp', '拆出的副本显式打 mcp 标记');
+  assert.deepEqual(copy.uids, ['1']);
+  assert.equal(copy.messageTemplate, '{liver} 来了');
+  assert.equal(db.listPushRules().length, 2);
+});
+
+test('splitPushRuleChannel：单渠道就地不拆；本渠道不在规则里则拒绝且不留半成品', (t) => {
+  const db = memDb(t);
+  const a = db.upsertPushChannel(channel({ name: 'A群' }));
+  const b = db.upsertPushChannel(channel({ name: 'B群' }));
+
+  const single = db.upsertPushRule(rule({ channels: [a] }));
+  const inplace = splitPushRuleChannel(db, db.listPushRules().find((x) => x.id === single)!, a);
+  assert.deepEqual(inplace, { id: single, split: false }, '只剩本渠道 → 返回原 id 就地操作');
+  assert.equal(db.listPushRules().length, 1);
+
+  const other = db.upsertPushRule(rule({ channels: [b] }));
+  assert.throws(
+    () => splitPushRuleChannel(db, db.listPushRules().find((x) => x.id === other)!, a),
+    /不含渠道/,
+    '调用方须先做渠道归属校验（能力层不允许拿别渠道的规则来拆）',
+  );
+  assert.equal(db.listPushRules().length, 2, '拒绝时不留半成品');
+  assert.deepEqual(db.listPushRules().find((x) => x.id === other)!.channels, [b], '原规则一行不动');
 });
 
 // ---- verdicts ----

@@ -1,6 +1,6 @@
-// 面板前端公共模块：esc / api / toast（顶部胶囊）/ sheet（两级统一弹窗）/ 开关与勾选框与图标按钮 /
+// 面板前端公共模块：esc / api（含配置写白名单 → 联动刷新钩子）/ toast（顶部胶囊）/ sheet（两级统一弹窗）/ 开关与勾选框与图标按钮 /
 // 自绘下拉 dropdownHtml / 通用拖拽排序 makeSortable / 事件委托（data-action / data-change / data-input）/
-// fitRow 行宽适配 / 头像兜底 avatarHtml / 时长每秒重算。
+// fitRow 行宽适配 / 头像兜底 avatarHtml / 时长每秒重算 / onConfigWrite + onTableRefresh（写成功与撤销后的刷新注册表）。
 // 视觉 = UI 重设计 v2 基座（2026-09 平移），接口保持生产现状（卡片模块在用，导出签名不变）。
 // 本模块是被各卡模块显式 import 的唯一公共依赖，导出全部共享符号。
 import { icon } from './icons.js';
@@ -14,6 +14,35 @@ export function esc(s) {
 export function splitCsv(v) {
   return String(v == null ? '' : v).split(/[,，]/).map(function (s) { return s.trim(); }).filter(Boolean);
 }
+// ---- 配置写白名单（统一联动刷新的口径；2026-09-22 「同页操作后历史不更新」的重做）----
+// 只有「人改配置」的写请求才触发联动：非 GET 且路径落在下面这些前缀里。前缀后必须是 / 或结尾，
+// 免得 /api/x 误吞 /api/x-avatar 这类读接口。排除项逐条都有明确理由：
+//   · `/test` 结尾的探活（POST /api/llm/providers/<n>/test、/api/push/test、/api/x/test）——不改库；
+//   · /api/napcat/launch 这类动作按钮——不改配置，也不进变更历史；
+//   · /api/chat 的回合（POST /api/chat 很慢）与 /api/chat/reset——不碰配置；
+//   · /api/undo*——撤销执行器自己会刷历史（见 undo.js）；
+//   · /api/auth/*——扫码建码与轮询，都不进配置面。
+// 唯一「看起来该排除、其实要收」的是 /api/chat/mode 与 /api/chat/provider：它们经注册表
+// （set_chat_mode / set_chat_provider）落库，是**真配置写**，会进变更历史，故按整条路径列进来。
+// 轮询一律是 GET，天然被挡在门外。
+const CONFIG_WRITE_PREFIXES = [
+  '/api/llm', '/api/advanced', '/api/categories', '/api/rules', '/api/channels',
+  '/api/post-rules', '/api/streamers', '/api/follows', '/api/listen', '/api/push',
+  '/api/x', '/api/weibo', '/api/bili', '/api/napcat', '/api/chat/mode', '/api/chat/provider',
+];
+function isConfigWrite(path, method) {
+  if (!method || String(method).toUpperCase() === 'GET') return false;
+  if (path.indexOf('/test') >= 0 || path === '/api/napcat/launch') return false;
+  for (var i = 0; i < CONFIG_WRITE_PREFIXES.length; i++) {
+    var p = CONFIG_WRITE_PREFIXES[i];
+    if (path === p || path.indexOf(p + '/') === 0) return true;
+  }
+  return false;
+}
+// 配置写成功后的钩子（undo.js 用它刷「变更历史」；注册表而非直接 import，避免 core ←→ 卡片模块成环）
+const configWriteHooks = [];
+export function onConfigWrite(fn) { if (configWriteHooks.indexOf(fn) < 0) configWriteHooks.push(fn); }
+
 export function api(path, method, body) {
   return fetch(path, {
     method: method || 'GET',
@@ -22,9 +51,39 @@ export function api(path, method, body) {
   }).then(function (r) {
     return r.json().then(function (j) {
       if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+      if (isConfigWrite(path, method)) {
+        for (var i = 0; i < configWriteHooks.length; i++) {
+          try { configWriteHooks[i](path); } catch (e) { /* 联动刷新失败绝不影响本次写的成功 */ }
+        }
+      }
       return j;
     });
   });
+}
+// ---- 表名 → 数据刷新函数（撤销后把页面状态拉回真实态）----
+// 注册表：卡片模块 import 副作用即登记自己的 loader（各模块的 loader 不必为此外抛）。
+// 表名口径 = 服务端 /api/undo/history 的 tables（core/undo.ts 的 DEFAULT_CONFIG_TABLES）；
+// 一个表可以挂多个 loader（如 categories → 分类卡与规则卡的分类快照），同一函数只跑一次。
+const tableRefreshers = new Map();
+export function onTableRefresh(tables, fn) {
+  for (var i = 0; i < tables.length; i++) {
+    var t = tables[i];
+    var set = tableRefreshers.get(t);
+    if (!set) { set = []; tableRefreshers.set(t, set); }
+    if (set.indexOf(fn) < 0) set.push(fn);
+  }
+}
+/** 按受影响表刷新卡片（去重；单个 loader 抛错不影响其余） */
+export function refreshTables(tables) {
+  var fns = [];
+  for (var i = 0; i < (tables || []).length; i++) {
+    var set = tableRefreshers.get(tables[i]) || [];
+    for (var j = 0; j < set.length; j++) if (fns.indexOf(set[j]) < 0) fns.push(set[j]);
+  }
+  for (var k = 0; k < fns.length; k++) {
+    try { fns[k](); } catch (e) { /* 刷新失败由各 loader 自己 toast */ }
+  }
+  return fns.length;
 }
 // ---- toast：顶部居中浮动胶囊，成功绿/错误红，约 3s 自动消失，多条纵向堆叠 ----
 export function toast(msg, isErr) {

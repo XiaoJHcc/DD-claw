@@ -14,11 +14,19 @@ import { saveNapcatConfig } from '../notify/napcat.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { defaultPostFilters } from '../core/post-rules.js';
+import { UndoStore, adminScope, undoEffects, type UndoEffect, type UndoResult } from '../core/undo.js';
+import { ChatStore } from '../core/chat-store.js';
 
 interface Fixture {
   db: Db;
   base: string;
   llmRouter?: LlmRouter;
+  /** 注入 undo dep 时（opts.undo）可取到，验证写快照落库 */
+  undo?: UndoStore;
+  /** 注入 undo dep 时装配的撤销执行器触发计数（按 undoEffects 标签分桶） */
+  undoFired?: Record<UndoEffect, number>;
+  /** 注入 chat dep 时（opts.chat）可取到，验证会话落库 / reset 语义 */
+  chat?: ChatStore;
 }
 
 /** 记录 listen dep 的 onChanged 被调用次数（面板改开关 → 热启停源） */
@@ -66,6 +74,10 @@ async function setup(
     weiboImages?: PanelDeps['weiboImages'];
     /** 注入 biliFeed dep（添加 B站动态账号后的即时首拉钩子）；缺省不注入（跳过） */
     biliFeed?: PanelDeps['biliFeed'];
+    /** 注入 UndoStore（P0 写快照接线测试）；缺省不注入（写不落变更记录） */
+    undo?: boolean;
+    /** 注入 ChatStore（P1 /api/chat* 对话端点）；缺省不注入（404） */
+    chat?: boolean;
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -104,8 +116,26 @@ async function setup(
     dep.onProvidersChanged = () => { dep.router = build(); };
     llm = dep;
   }
+  const undoStore = opts.undo ? new UndoStore(db.raw) : undefined;
+  undoStore?.migrate();
+  const chatStore = opts.chat ? new ChatStore(db.raw) : undefined;
+  chatStore?.migrate();
+  // 撤销执行器（生产装配形状：撤栈顶 + 按 core/undo.ts 的 undoEffects 触发热生效回调）。
+  // 回调闭包在 index.ts，测试里用计数桩代替——映射函数本身是生产代码，不是测试自己的复刻。
+  const undoFired: Record<UndoEffect, number> = { runtime: 0, listen: 0, llm: 0, notifiers: 0 };
+  const undoLast = undoStore === undefined
+    ? undefined
+    : (scope?: string): UndoResult => {
+        const r = undoStore.undo(scope ?? 'admin');
+        if (!r.ok) return r;
+        for (const e of undoEffects(r)) undoFired[e]++;
+        return r;
+      };
   const server: Server = createPanelServer({
     db,
+    ...(undoStore ? { undo: undoStore } : {}),
+    ...(undoLast ? { undoLast } : {}),
+    ...(chatStore ? { chat: chatStore } : {}),
     weiboResolver: opts.weiboResolver,
     status: () => ({
       ...status,
@@ -146,7 +176,11 @@ async function setup(
     db.close();
   });
   const { port } = server.address() as AddressInfo;
-  return { db, base: `http://127.0.0.1:${port}`, llmRouter: llm?.router };
+  return {
+    db, base: `http://127.0.0.1:${port}`, llmRouter: llm?.router,
+    ...(undoStore ? { undo: undoStore, undoFired } : {}),
+    ...(chatStore ? { chat: chatStore } : {}),
+  };
 }
 
 interface ApiResult {
@@ -179,13 +213,13 @@ async function api(
 
 // ---- 页面 ----
 
-test('GET / 返回内嵌页面，包含主要卡片与主播导航（监听/LLM供应商/推送/时间表/主播/关注列表）', async (t) => {
+test('GET / 返回内嵌页面，包含主要卡片与视图导航（时间表/主播/图文/设置、监听/LLM供应商/推送/关注列表）', async (t) => {
   const { base } = await setup(t);
   const res = await fetch(base + '/', { headers: { connection: 'close' } });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type') ?? '', /text\/html/);
   const html = await res.text();
-  for (const marker of ['监听', 'LLM 供应商', '推送', 'id="schedule-body"', 'data-view="streamers"', '关注列表']) {
+  for (const marker of ['监听', 'LLM 供应商', '推送', 'id="schedule-body"', 'data-view="streamers"', '关注列表', 'id="view-schedule"', 'id="view-streamers"', 'id="view-x"', 'id="view-settings"']) {
     assert.ok(html.includes(marker), `页面应包含「${marker}」`);
   }
   // 关注列表是独立卡片（不再嵌在主播列表里），且带搜索框
@@ -2429,3 +2463,535 @@ test('/api/bili-avatar：按文件名读缓存目录；坏文件名 400、缺文
   assert.equal((await api(bare.base, '/api/bili-avatar?file=' + name)).status, 404, '未装配 dep');
 });
 
+// ---- P0 写快照接线：面板写经 runTool 落变更记录（撤销栈的数据源）----
+
+test('写快照：配置写落 undo_changes（settings 前像/后像差分；streamers 混合表按列过滤后同样落记录）', async (t) => {
+  const { db, base, undo } = await setup(t, { undo: true });
+  db.upsertStreamer({ uid: '1001', uname: '阿梓' }); // 直调 Db（不过注册表），不留记录
+  assert.equal(undo!.history().length, 0, '直调 Db 的写（轮询源就是这么写的）不进变更记录');
+
+  // 配置写：推送总开关 → settings 行的前像/后像
+  const r = await api(base, '/api/push/enabled', 'PUT', { enabled: false });
+  assert.equal(r.status, 200);
+  const hist = undo!.history();
+  assert.equal(hist.length, 1);
+  assert.equal(hist[0]!.tool, 'set_push_enabled');
+  assert.equal(hist[0]!.entry, 'panel');
+  assert.equal(hist[0]!.scope, 'admin', '面板写进全局 admin 栈');
+  const row = hist[0]!.rows[0]!;
+  assert.equal(row.table, 'settings');
+  assert.deepEqual(row.pk, { key: 'push_enabled' });
+  assert.equal(row.before, null, '首次写：前像不存在');
+  assert.equal((row.after as { value: string }).value, '0');
+
+  // streamers 是「配置 + 归档」混合表：按列过滤后与纯配置表同待遇——写生效、落记录、可撤销
+  const r2 = await api(base, '/api/streamers/1001', 'PUT', { alias: '梓宝', notify: false });
+  assert.equal(r2.status, 200);
+  assert.equal(db.getStreamer('1001')!.alias, '梓宝');
+  const hist2 = undo!.history();
+  assert.equal(hist2.length, 2, 'streamers 写落变更记录（2026-09-21 口径变更；P1 冒烟的「改别名撤不掉」由此闭合）');
+  assert.equal(hist2[0]!.tool, 'set_streamer');
+  const srow = hist2[0]!.rows[0]!;
+  assert.equal(srow.table, 'streamers');
+  assert.deepEqual(srow.pk, { uid: '1001' });
+  assert.equal((srow.before as { alias: string | null }).alias, null, '前像 = 改之前那一行');
+  assert.equal((srow.after as { alias: string; notify: number }).alias, '梓宝');
+
+  // 撤销前轮询源回填了同一行（uname/face/room_id/updated_at，直写库不走注册表）→ 比对只看配置列，仍撤得掉
+  db.raw
+    .prepare(`UPDATE streamers SET uname = '阿梓从小就很可爱', face = 'f.jpg', room_id = '80397', updated_at = 9999 WHERE uid = ?`)
+    .run('1001');
+  const u = await api(base, '/api/undo', 'POST');
+  assert.equal(u.status, 200, '轮询列前进不得让撤销 409');
+  const s = db.getStreamer('1001')!;
+  assert.equal(s.alias, null, '配置列还原');
+  assert.equal(s.notify, true, '配置列还原');
+  assert.equal(s.uname, '阿梓从小就很可爱', '平台事实列保持撤销前的值');
+  assert.equal(s.face, 'f.jpg', '头像同属轮询列');
+  assert.equal(s.roomId, '80397', '房间号同属轮询列');
+});
+
+test('写快照：watch_streamer 的两种形状都可撤销（不在名单 = 插行；已在名单 = 更新同一行）', async (t) => {
+  const { db, base, undo } = await setup(t, { undo: true });
+  db.upsertFollows([{ uid: '1001', uname: '阿梓', face: 'f.jpg' }]);
+
+  // 形状 A：uid 只在关注候选池里 → 建行；撤销 = 整行删除
+  const w = await api(base, '/api/streamers/1001/watch', 'POST');
+  assert.equal(w.status, 200);
+  assert.equal(db.getStreamer('1001')!.watch, true);
+  assert.equal(undo!.history()[0]!.tool, 'watch_streamer');
+  assert.equal(undo!.history()[0]!.rows[0]!.beforeExists, false, '前像不存在 = 插行');
+  assert.equal((await api(base, '/api/undo', 'POST')).status, 200);
+  assert.equal(db.getStreamer('1001'), undefined, '撤销新建 = 行没了');
+
+  // 形状 B：已在名单但 watch=0（先下过监听）→ upsertStreamer 走 ON CONFLICT 更新同一行；撤销 = 只还原配置列
+  db.upsertStreamer({ uid: '1001', uname: '阿梓', alias: '别删我', watch: false });
+  db.raw.prepare(`UPDATE streamers SET face = 'f.jpg', updated_at = 9999 WHERE uid = ?`).run('1001');
+  const w2 = await api(base, '/api/streamers/1001/watch', 'POST');
+  assert.equal(w2.status, 200);
+  assert.equal(db.getStreamer('1001')!.watch, true);
+  assert.equal(undo!.history()[0]!.rows[0]!.beforeExists, true, '前像存在 = 更新已存在行');
+  assert.equal((await api(base, '/api/undo', 'POST')).status, 200);
+  const s = db.getStreamer('1001')!;
+  assert.equal(s.watch, false, 'watch 还原');
+  assert.equal(s.alias, '别删我', '别名原样保留');
+  assert.equal(s.face, 'f.jpg', '轮询列不还原');
+});
+
+test('写快照：删分类级联停用收敛为同一笔记录（事务化差分），撤销整体还原', async (t) => {
+  const { db, base, undo } = await setup(t, { undo: true });
+  const mk = { llmPrompt: null, keywords: ['x'], areas: [], condMode: 'and' as const, enabled: true };
+  const cat = db.upsertCategory({ ...mk, name: '歌回' });
+  db.upsertPushRule({ name: 'r1', categoryId: cat, uids: [], channels: [], messageTemplate: null, enabled: true });
+
+  const r = await api(base, `/api/categories/${cat}`, 'DELETE');
+  assert.equal(r.status, 200);
+  const hist = undo!.history();
+  assert.equal(hist.length, 1, '级联停用 + 删除 = 一笔记录');
+  assert.equal(hist[0]!.tool, 'delete_category');
+  const shapes = hist[0]!.rows.map((x) => `${x.table}:${x.beforeExists}->${x.afterExists}`).sort();
+  assert.deepEqual(shapes, ['categories:true->false', 'push_rules:true->true']);
+
+  // 撤销能整体还原（分类回来 + 规则恢复启用）——面板端点属切片 C，这里先经 store 验证记录可用
+  const ur = undo!.undo('admin');
+  assert.equal(ur.ok, true);
+  assert.ok(db.listCategories().some((c) => c.id === cat), '撤销后分类还原');
+  assert.equal(db.listPushRules().find((x) => x.name === 'r1')!.enabled, true, '撤销后规则恢复启用');
+});
+
+// ---- P0 撤销执行器（切片 C）：/api/undo/history 与 POST /api/undo ----
+
+test('撤销端点：写 → history 可见 → undo 还原并触发热生效回调；空栈 404', async (t) => {
+  const { db, base, undo, undoFired } = await setup(t, { undo: true, listen: { weibo: true } });
+  const before = Math.floor(Date.now() / 1000);
+
+  // 面板写一笔（listen 开关：want=false ≠ ready=true → 落手动值 '0'）
+  const w = await api(base, '/api/listen/weibo', 'PUT', { enabled: false });
+  assert.equal(w.status, 200);
+  assert.equal(db.getSetting('listen_weibo'), '0', '手动关 = 落 settings');
+
+  // history：新→旧，契约形状逐字（at 秒级、tables 去重、rows = 受影响行数）
+  const h = await api(base, '/api/undo/history');
+  assert.equal(h.status, 200);
+  const changes = h.json.changes as Array<Record<string, unknown>>;
+  assert.equal(changes.length, 1);
+  const c = changes[0]!;
+  assert.equal(typeof c.id, 'number');
+  assert.equal(c.tool, 'set_listen');
+  assert.equal(c.entry, 'panel');
+  assert.equal(c.actor, 'panel');
+  assert.equal(c.scope, 'admin');
+  assert.equal(c.undone, false);
+  assert.deepEqual(c.tables, ['settings']);
+  assert.equal(c.rows, 1);
+  assert.ok((c.at as number) >= before && (c.at as number) <= Math.floor(Date.now() / 1000));
+  assert.ok((c.at as number) < 1e10, 'at 是秒级时间戳');
+
+  // POST /api/undo：忽略 body，撤 admin 全局栈栈顶（title 与 change.title 都给：前端两种读法）
+  const u = await api(base, '/api/undo', 'POST', { anything: '忽略' });
+  assert.equal(u.status, 200);
+  assert.deepEqual(u.json, {
+    ok: true,
+    change: { id: c.id, tool: 'set_listen', title: '监听开关' },
+    title: '监听开关',
+  });
+  assert.equal(db.getSetting('listen_weibo'), null, '撤销 = 回到 auto（key 被删，区别于写值）');
+  assert.equal(undoFired!.listen, 1, '撤 listen 开关要跑 reconcileListen');
+  assert.equal(undoFired!.runtime + undoFired!.llm + undoFired!.notifiers, 0);
+
+  // 历史全量保留（只标记 undone）；撤销自身不入栈
+  const h2 = await api(base, '/api/undo/history');
+  const changes2 = h2.json.changes as Array<Record<string, unknown>>;
+  assert.equal(changes2.length, 1, '撤销不产生新记录（撤销自己不该可撤）');
+  assert.equal(changes2[0]!.undone, true);
+  assert.equal(undo!.peek('admin'), null);
+
+  // 第二次撤销：栈已空
+  const empty = await api(base, '/api/undo', 'POST');
+  assert.equal(empty.status, 404);
+  assert.equal(empty.json.error, '没有可撤销的变更');
+});
+
+test('撤销端点：撤 runtime config 走 reconcileRuntime；撤渠道走通道重装配', async (t) => {
+  const { db, base, undoFired } = await setup(t, { undo: true });
+
+  await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 30, backlogPushEnabled: true });
+  const u1 = await api(base, '/api/undo', 'POST');
+  assert.equal(u1.status, 200);
+  assert.equal(db.getSetting('poll_interval_sec'), null, '撤销后回代码默认值（key 不存在）');
+  assert.equal(db.getSetting('backlog_push_enabled'), null);
+  assert.equal(undoFired!.runtime, 1, '撤运行参数要跑 reconcileRuntime');
+
+  // 撤渠道行：装配级重同步（幂等；dispatcher 逐条读表，这里按「撤了什么就重跑什么」）
+  const ch = await api(base, '/api/channels', 'POST', { name: '群', notifier: 'onebot', targetType: 'group', targetId: '12345' });
+  assert.equal(ch.status, 201);
+  const u2 = await api(base, '/api/undo', 'POST');
+  assert.equal(u2.status, 200);
+  assert.equal(db.listPushChannels().length, 0, '新建的渠道被撤销删除');
+  assert.equal(undoFired!.notifiers, 1);
+});
+
+test('撤销中止：后像 ≠ 当前值 → 409 且一行不动、不触发回调', async (t) => {
+  const { db, base, undo, undoFired } = await setup(t, { undo: true });
+  await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 30 });
+
+  // 第三方入口（绕过注册表直写库，等价于另一个入口的写）改了同一行
+  db.setSetting('poll_interval_sec', '45');
+
+  const r = await api(base, '/api/undo', 'POST');
+  assert.equal(r.status, 409);
+  assert.equal(r.json.error, '该设置已被其他入口修改，无法撤销本次');
+  assert.equal(db.getSetting('poll_interval_sec'), '45', '中止时一行都不动');
+  assert.equal(undo!.history()[0]!.undoneAt, null, '中止不得把记录标记为已撤销');
+  assert.deepEqual(undoFired, { runtime: 0, listen: 0, llm: 0, notifiers: 0 }, '中止不触发热生效');
+
+  // 冲突解除后仍可撤（栈没被动过）
+  db.setSetting('poll_interval_sec', '30');
+  assert.equal((await api(base, '/api/undo', 'POST')).status, 200);
+});
+
+test('撤销端点未装配 → 404（两个端点各自按 dep 挂载）', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/undo/history')).status, 404);
+  assert.equal((await api(base, '/api/undo', 'POST')).status, 404);
+});test('变更历史结构化：title / headline / detail(label+action+changes) / undoNote，与快照差分同源', async (t) => {
+  const { db, base } = await setup(t, { undo: true, listen: { weibo: true } });
+
+  // ① 新建分类：action=created，changes 恒为空数组（变化清单只对 updated 有意义，但键始终在）
+  assert.equal((await api(base, '/api/categories', 'POST', { name: '歌回', keywords: ['唱歌'] })).status, 201);
+  let c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.equal(c[0]!.title, '保存分类', '中文操作名由后端给（工具名 → 文案）');
+  assert.equal(c[0]!.headline, '新增了分类「歌回」', 'headline = 一句话操作描述');
+  assert.deepEqual(c[0]!.detail, [{ label: '分类「歌回」', action: 'created', changes: [] }]);
+  assert.equal(c[0]!.undoNote, null);
+
+  // ② 改分类的启用开关：changes 带格式化后的旧值/新值（布尔 → 开/关），headline 值感知变动词
+  const catId = db.listCategories()[0]!.id;
+  assert.equal((await api(base, `/api/categories/${catId}`, 'PUT', { enabled: false })).status, 200);
+  c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  const upd = (c[0]!.detail as Array<Record<string, unknown>>)[0]!;
+  assert.equal(upd.label, '分类「歌回」');
+  assert.equal(upd.action, 'updated');
+  assert.deepEqual(upd.changes, [{ field: '启用', from: '开', to: '关', bool: true }]);
+  assert.equal(c[0]!.headline, '停用了分类「歌回」', '布尔单列变化 → 动词句');
+
+  // ③ 删分类：action=deleted（前像在、后像无）
+  assert.equal((await api(base, `/api/categories/${catId}`, 'DELETE')).status, 200);
+  c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.equal(c[0]!.title, '删除分类');
+  assert.equal(c[0]!.headline, '删除了分类「歌回」');
+  assert.deepEqual(c[0]!.detail, [{ label: '分类「歌回」', action: 'deleted', changes: [] }]);
+
+  // ④ settings 行 = 设置项中文名（「分类「名」」式是行表用的）；首次手动关开关（created 行）也组动词句
+  assert.equal((await api(base, '/api/listen/weibo', 'PUT', { enabled: false })).status, 200);
+  c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.equal(c[0]!.title, '监听开关');
+  assert.equal(c[0]!.headline, '关闭了微博监听开关');
+  assert.deepEqual(c[0]!.detail, [{ label: '微博监听开关', action: 'created', changes: [] }]);
+  assert.equal(c[0]!.undoNote, null, '普通设置项撤销即完成，没有额外注意事项');
+
+  // 已存在的 settings 键再写一次 = updated；settings 是 kv 面，字段名直接用设置项中文名，数值键带单位
+  assert.equal((await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 30 })).status, 200);
+  assert.equal((await api(base, '/api/advanced', 'PUT', { pollIntervalSec: 60 })).status, 200);
+  c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.equal(c[0]!.title, '修改运行时参数');
+  assert.equal(c[0]!.headline, '修改了直播轮询间隔');
+  assert.deepEqual(c[0]!.detail, [{ label: '直播轮询间隔', action: 'updated', changes: [{ field: '直播轮询间隔', from: '30 秒', to: '60 秒' }] }]);
+
+  // 回到 auto（值等于运行前提）→ 删掉那个键，撤销记录里就是 deleted
+  assert.equal((await api(base, '/api/listen/weibo', 'PUT', { enabled: true })).status, 200);
+  c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.deepEqual(c[0]!.detail, [{ label: '微博监听开关', action: 'deleted', changes: [] }]);
+
+  // ⑤ 混合表：主播行的标签用 uname，changes 不含被忽略的轮询列（更新时间/昵称/直播间）
+  db.upsertStreamer({ uid: '1001', uname: '阿梓', face: 'https://x/f.jpg' });
+  assert.equal((await api(base, '/api/streamers/1001', 'PUT', { alias: '梓宝' })).status, 200);
+  c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.equal(c[0]!.title, '修改主播设置');
+  const sRow = (c[0]!.detail as Array<Record<string, unknown>>)[0]!;
+  assert.equal(sRow.label, '主播「阿梓」');
+  assert.deepEqual(sRow.changes, [{ field: '简称', from: '（空）', to: '梓宝' }], '只报配置列：轮询回写列被忽略表挡在外面');
+  assert.equal(c[0]!.undoNote, null);
+});
+
+test('变更历史结构化：LLM key 行的 undoNote=refill，撤销响应带 title 与 refill 透传', async (t) => {
+  const { db, base } = await setup(t, { undo: true, llm: { config: LLM_CFG } });
+
+  assert.equal((await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-refill' })).status, 200);
+  const c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.equal(c[0]!.title, '设置 LLM 密钥');
+  assert.equal(c[0]!.headline, '设置了 ds 的 LLM 密钥');
+  assert.deepEqual(c[0]!.detail, [{
+    label: 'LLM 密钥（ds）',
+    action: 'created',
+    changes: [],
+  }]);
+  assert.equal(c[0]!.undoNote, 'refill', '涉及 llm_key:* → 撤销 = 清空、需重填');
+  assert.ok(!JSON.stringify(c[0]).includes('sk-refill'), '明文 key 绝不进历史');
+
+  // 撤销：refill 从 UndoResult 透传（同一份口径，不是这里另算的），title 与 /api/undo/history 同源
+  const u = await api(base, '/api/undo', 'POST');
+  assert.equal(u.status, 200);
+  assert.equal(u.json.title, '设置 LLM 密钥');
+  assert.equal((u.json.change as Record<string, unknown>).title, '设置 LLM 密钥');
+  assert.deepEqual(u.json.refill, ['settings.(key=llm_key:ds)']);
+  assert.deepEqual((u.json.change as Record<string, unknown>).refill, ['settings.(key=llm_key:ds)']);
+  assert.equal(db.getSetting('llm_key:ds'), null, '撤销 = 清空该行（值本来就没落库）');
+
+  // 撤销后历史仍标 refill（记录不变），只是 undone=true
+  const c2 = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.equal(c2[0]!.undoNote, 'refill');
+  assert.equal(c2[0]!.undone, true);
+});
+
+// ---- P1 WebUI Agent：/api/chat* 四端点契约（形状/状态码逐字冻结，webui demo mock 同构）----
+
+/**
+ * 假 LLM 端点：按脚本依次返回 chat/completions 信封（最后一条重复，供「工具 → 终答」两轮用）；
+ * 顺带留档请求体，用来验证请求里真的带上了系统提示与工具面。
+ */
+function chatFetch(queue: unknown[]): { fn: FetchLike; bodies: Array<Record<string, unknown>> } {
+  const bodies: Array<Record<string, unknown>> = [];
+  const fn: FetchLike = async (_url, init) => {
+    bodies.push(JSON.parse(String(init.body ?? '{}')) as Record<string, unknown>);
+    const body = queue[Math.min(bodies.length - 1, queue.length - 1)];
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  return { fn, bodies };
+}
+
+test('/api/chat：单轮直答 {ok,reply,usage}；空消息 400；LLM 未就绪 400 并指引设置页', async (t) => {
+  const llm = chatFetch([{ choices: [{ message: { content: '现在没有在播的监听主播。' } }] }]);
+  const { base } = await setup(t, { chat: true, llm: { config: LLM_CFG }, llmFetch: llm.fn });
+
+  // chat dep 有、llm dep 有，但 provider 缺 key = 400（不是 502）：让用户去设置页修
+  const blocked = await api(base, '/api/chat', 'POST', { message: '现在谁在播' });
+  assert.equal(blocked.status, 400);
+  assert.match(blocked.json.error!, /设置页/);
+
+  // message 形状在 LLM 检查之前就拦（空/非字符串一律 400）
+  const empty = await api(base, '/api/chat', 'POST', { message: '   ' });
+  assert.equal(empty.status, 400);
+  assert.equal(empty.json.error, 'message 必须是非空字符串');
+  assert.equal((await api(base, '/api/chat', 'POST', { message: 42 })).status, 400);
+  assert.equal((await api(base, '/api/chat', 'POST', {})).status, 400);
+  assert.equal(llm.bodies.length, 0, '400 的请求不打 LLM');
+
+  await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-chat' });
+  const r = await api(base, '/api/chat', 'POST', { message: '现在谁在播' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(r.json).sort(), ['calls', 'ok', 'provider', 'reply', 'usage'], '响应形状逐字冻结');
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.reply, '现在没有在播的监听主播。');
+  assert.equal(r.json.provider, 'ds', 'provider = 实际回答的模型（自动路由下就是路由落点）');
+  assert.deepEqual(r.json.calls, [], '单轮直答没有工具调用');
+  assert.deepEqual(r.json.usage, { messages: 2, chars: 17, needsResetHint: false });
+
+  // 请求带上了系统提示（写模式纪律）与工具面：真的走了 agent loop
+  const sent = llm.bodies[0]!;
+  const sys = (sent.messages as Array<{ role: string; content: string }>)[0]!;
+  assert.equal(sys.role, 'system');
+  assert.match(sys.content, /写前询问/);
+  const tools = (sent.tools as Array<{ function: { name: string } }>).map((x) => x.function.name);
+  assert.ok(tools.includes('search_streamers') && tools.includes('set_push_enabled'));
+  assert.ok(!tools.includes('set_chat_mode'), '写模式开关不进 LLM 工具面');
+  assert.ok(!tools.includes('set_chat_provider'), '模型选择不进 LLM 工具面（主人决定，模型不能自己点将）');
+});
+
+test('/api/chat：模型请求写工具 → 能力层写库；变更记录 entry=agent（与面板人手可区分）', async (t) => {
+  const llm = chatFetch([
+    {
+      choices: [{
+        message: {
+          content: '好，我把推送总开关关掉。',
+          tool_calls: [{ id: 'c1', type: 'function', function: { name: 'set_push_enabled', arguments: '{"enabled":false}' } }],
+        },
+      }],
+    },
+    { choices: [{ message: { content: '已关闭推送总开关。' } }] },
+  ]);
+  const { base, db, undo } = await setup(t, { chat: true, undo: true, llm: { config: LLM_CFG }, llmFetch: llm.fn });
+  await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-chat' });
+
+  const r = await api(base, '/api/chat', 'POST', { message: '把推送关了' });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.reply, '已关闭推送总开关。');
+  assert.equal(db.getSetting('push_enabled'), '0', '工具真的执行了');
+  assert.equal(llm.bodies.length, 2, '工具结果回填后又问了一轮');
+
+  // 工具调用明细（ToolCallView）：POST 回包与 history 回放同一形状信源
+  const calls = r.json.calls as Array<Record<string, unknown>>;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(Object.keys(calls[0]!).sort(),
+    ['args', 'id', 'name', 'ok', 'output', 'target', 'title'], 'calls 行形状逐字冻结');
+  assert.equal(calls[0]!.id, 'c1');
+  assert.equal(calls[0]!.name, 'set_push_enabled');
+  assert.equal(calls[0]!.title, '开关推送', '中文操作名 = undo-view 唯一信源');
+  assert.equal(calls[0]!.ok, true);
+
+  // history：带调用的中间轮与终答分两条，calls 配在中间轮上；无调用的行不带 calls 键
+  const h = await api(base, '/api/chat/history');
+  const msgs = h.json.messages as Array<Record<string, unknown>>;
+  assert.deepEqual(msgs.map((m) => [m.role, m.content]),
+    [['user', '把推送关了'], ['assistant', '好，我把推送总开关关掉。'], ['assistant', '已关闭推送总开关。']]);
+  assert.equal((msgs[1]!.calls as Array<Record<string, unknown>>).length, 1);
+  assert.equal((msgs[1]!.calls as Array<Record<string, unknown>>)[0]!.id, 'c1');
+  assert.equal(msgs[2]!.calls, undefined);
+
+  // 变更历史：entry 区分入口（面板人手 vs 进程内 agent），都在 admin 全局栈
+  const changes = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.deepEqual(changes.map((c) => `${c.entry}:${c.actor}:${c.tool}`),
+    ['agent:webui-agent:set_push_enabled', 'panel:panel:set_llm_key']);
+  assert.equal(undo!.history()[0]!.scope, 'admin');
+
+  // 结论：agent 写出来的配置，主人一样能从面板撤销
+  const u = await api(base, '/api/undo', 'POST');
+  assert.equal(u.status, 200);
+  assert.equal(db.getSetting('push_enabled'), null);
+});
+
+test('/api/chat/history 与 reset：消息累积、mode 回显、reset 清消息保会话行', async (t) => {
+  const llm = chatFetch([{ choices: [{ message: { content: '答复一' } }] }]);
+  const { base, chat, db } = await setup(t, { chat: true, undo: true, llm: { config: LLM_CFG }, llmFetch: llm.fn });
+
+  const blank = await api(base, '/api/chat/history');
+  assert.equal(blank.status, 200);
+  assert.deepEqual(blank.json.messages, [], '空会话 messages = []');
+  assert.equal(blank.json.mode, 'ask', '缺省写模式 = 写前询问');
+  assert.equal(blank.json.provider, '', '缺省模型选择 = 自动路由');
+  assert.deepEqual(blank.json.usage, { messages: 0, chars: 0, needsResetHint: false });
+
+  await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-chat' });
+  const before = Math.floor(Date.now() / 1000);
+  await api(base, '/api/chat', 'POST', { message: '问题一' });
+
+  const h = await api(base, '/api/chat/history');
+  const messages = h.json.messages as Array<Record<string, unknown>>;
+  assert.deepEqual(messages.map((m) => [m.role, m.content]), [['user', '问题一'], ['assistant', '答复一']]);
+  assert.deepEqual(Object.keys(messages[0]!).sort(), ['at', 'content', 'id', 'provider', 'role']);
+  assert.ok(Number.isInteger(messages[0]!.id) && (messages[0]!.id as number) > 0, 'id = chat_messages.id（轮询去重键）');
+  assert.ok((messages[0]!.at as number) >= before && (messages[0]!.at as number) < 1e10, 'at 是秒级时间戳');
+  assert.deepEqual(h.json.usage, { messages: 2, chars: 6, needsResetHint: false });
+
+  // 写模式：非法值 400；合法值落 settings（经注册表 = 进变更历史，可撤销）
+  assert.equal((await api(base, '/api/chat/mode', 'PUT', { mode: 'nope' })).status, 400);
+  assert.equal((await api(base, '/api/chat/mode', 'PUT', {})).status, 400);
+  const m = await api(base, '/api/chat/mode', 'PUT', { mode: 'auto' });
+  assert.equal(m.status, 200);
+  assert.deepEqual(m.json, { ok: true, mode: 'auto' });
+  assert.equal(db.getSetting('chat_write_mode'), 'auto');
+  assert.equal((await api(base, '/api/chat/history')).json.mode, 'auto');
+  const modeChange = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.deepEqual(modeChange.map((c) => `${c.entry}:${c.tool}`), ['panel:set_chat_mode', 'panel:set_llm_key']);
+
+  // 重置上下文：忽略 body、清空消息、保留会话行（id 不变，供审计与 UI 复用）
+  const sessionId = chat!.find(adminScope())!.id;
+  const reset = await api(base, '/api/chat/reset', 'POST', { ignored: true });
+  assert.equal(reset.status, 200);
+  assert.deepEqual(reset.json, { ok: true });
+  assert.deepEqual((await api(base, '/api/chat/history')).json.messages, []);
+  assert.equal(chat!.find(adminScope())!.id, sessionId, '会话行保留');
+});
+
+test('PUT /api/chat/provider：选定/自动/不存在 400；history 与发消息都回显 provider；写进变更历史', async (t) => {
+  const llm = chatFetch([{ choices: [{ message: { content: '答复' } }] }]);
+  const { base, db } = await setup(t, { chat: true, undo: true, llm: { config: LLM_CFG }, llmFetch: llm.fn });
+
+  // 形状：provider 必须是字符串（zod 层）；名字必须已配置（handler），不存在一律 400
+  assert.equal((await api(base, '/api/chat/provider', 'PUT', {})).status, 400);
+  assert.equal((await api(base, '/api/chat/provider', 'PUT', { provider: 42 })).status, 400);
+  const nope = await api(base, '/api/chat/provider', 'PUT', { provider: 'nope' });
+  assert.equal(nope.status, 400);
+  assert.match(nope.json.error!, /没有这个 LLM provider/);
+  assert.equal(db.getSetting('chat_provider'), null, '400 不落库');
+
+  // 指定 ds（已配置、但还缺 key）：写入成功；chat 前置检查按「选定的那个」判 → 400 且指引改回自动
+  const set = await api(base, '/api/chat/provider', 'PUT', { provider: 'ds' });
+  assert.equal(set.status, 200);
+  assert.deepEqual(set.json, { ok: true, provider: 'ds' });
+  assert.equal(db.getSetting('chat_provider'), 'ds');
+  const blocked = await api(base, '/api/chat', 'POST', { message: '在吗' });
+  assert.equal(blocked.status, 400);
+  assert.match(blocked.json.error!, /选定的 LLM provider「ds」当前不可用/);
+  assert.equal(llm.bodies.length, 0, '选定的 provider 没就绪就不打 LLM');
+
+  // 补上 key 后点名路由成真：回复自带 provider
+  await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-chat' });
+  const r = await api(base, '/api/chat', 'POST', { message: '在吗' });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.provider, 'ds', '点名路由下 provider = 选定的那个');
+
+  // history：当前选定 + 每条 assistant 消息自己是谁答的（user 行恒 null）
+  const h = await api(base, '/api/chat/history');
+  assert.equal(h.json.provider, 'ds');
+  assert.deepEqual((h.json.messages as Array<Record<string, unknown>>).map((m) => [m.role, m.provider]),
+    [['user', null], ['assistant', 'ds']]);
+
+  // 回到自动：''' = 删键（不是写空串），history.provider 回空串
+  const auto = await api(base, '/api/chat/provider', 'PUT', { provider: '' });
+  assert.equal(auto.status, 200);
+  assert.deepEqual(auto.json, { ok: true, provider: '' });
+  assert.equal(db.getSetting('chat_provider'), null);
+  assert.equal((await api(base, '/api/chat/history')).json.provider, '');
+
+  // 配置写 → 进变更历史（可撤销、中文操作名、设置项中文标签）
+  const changes = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.equal(changes[0]!.tool, 'set_chat_provider');
+  assert.equal(changes[0]!.title, '选择 Agent 模型');
+  assert.deepEqual(changes[0]!.detail, [{ label: 'Agent 模型选择', action: 'deleted', changes: [] }]);
+});
+
+test('GET /api/llm 的 providers 带 ready；chatProvider 回显当前选择', async (t) => {
+  const { base } = await setup(t, { chat: true, llm: { config: LLM_CFG } });
+  const first = await api(base, '/api/llm');
+  assert.equal(first.json.chatProvider, '', '缺省模型选择 = 自动路由（与 /api/chat/history 同一个键）');
+  const p0 = (first.json.providers as Array<Record<string, unknown>>)[0]!;
+  assert.equal(p0.ready, false, '缺 key → ready=false');
+  assert.match(String(p0.status), /缺 key/);
+
+  await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-chat' });
+  assert.equal((await api(base, '/api/chat/provider', 'PUT', { provider: 'ds' })).status, 200);
+  const info = (await api(base, '/api/llm')).json;
+  assert.equal(info.chatProvider, 'ds', '选择器只需读这一处就能预选');
+  const p1 = (info.providers as Array<Record<string, unknown>>)[0]!;
+  assert.equal(p1.ready, true);
+  assert.equal(p1.status, 'ready');
+});
+
+test('/api/chat：assistant 消息的 provider 落库（老消息/无 = null；QQ 侧同一张表同一列）', async (t) => {
+  const llm = chatFetch([{ choices: [{ message: { content: '答复二' } }] }]);
+  const { base, chat } = await setup(t, { chat: true, llm: { config: LLM_CFG }, llmFetch: llm.fn });
+  // 直插一条「老消息」（加列之前落库的形态：provider 为 NULL），验证读取不炸、回 null
+  chat!.append(adminScope(), { role: 'assistant', content: '老消息' });
+  await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-chat' });
+
+  await api(base, '/api/chat', 'POST', { message: '第二个问题' });
+
+  const stored = chat!.messages(adminScope());
+  assert.deepEqual(stored.map((m) => [m.role, m.provider]),
+    [['assistant', null], ['user', null], ['assistant', 'ds']], '老消息 null，本轮回答记 ds');
+  const shown = ((await api(base, '/api/chat/history')).json.messages as Array<Record<string, unknown>>)
+    .map((m) => [m.role, m.provider]);
+  assert.deepEqual(shown, [['assistant', null], ['user', null], ['assistant', 'ds']]);
+});
+
+test('/api/chat：LLM 调用彻底失败 → 502（与「未就绪 400」分开）', async (t) => {
+  const failFetch: FetchLike = async () => new Response('boom', { status: 500 });
+  const { base } = await setup(t, { chat: true, llm: { config: LLM_CFG }, llmFetch: failFetch });
+  await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-chat' });
+
+  const r = await api(base, '/api/chat', 'POST', { message: '在吗' });
+  assert.equal(r.status, 502);
+  assert.match(r.json.error!, /LLM 调用失败/);
+  const body = JSON.stringify(r.json);
+  assert.ok(!body.includes('sk-chat'), '错误信息不含 key');
+});
+
+test('无 chat dep 时 /api/chat* 一律 404（五个端点各自按 dep 挂载）', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/chat/history')).status, 404);
+  assert.equal((await api(base, '/api/chat', 'POST', { message: '你好' })).status, 404);
+  assert.equal((await api(base, '/api/chat/reset', 'POST')).status, 404);
+  assert.equal((await api(base, '/api/chat/mode', 'PUT', { mode: 'auto' })).status, 404);
+  assert.equal((await api(base, '/api/chat/provider', 'PUT', { provider: 'ds' })).status, 404);
+});

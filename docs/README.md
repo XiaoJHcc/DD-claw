@@ -15,8 +15,10 @@ B站关注列表全员监听（直播间 + 动态 + 微博）→ 持续追踪 �
 
 | 文档 | 内容 |
 |---|---|
-| [plan/agent-access.md](plan/agent-access.md) | **多前端接入统一计划**：一个能力面 N 种接线（Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连），信任模型矩阵 + 共享组件 + 分期 P1-P3 |
+| [plan/agent-access.md](plan/agent-access.md) | **多前端接入统一计划**：一个能力面 N 种接线（Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连），信任模型矩阵 + 共享组件 + 分期 **P0-P3** + 能力层调用域（scope，已定令牌绑定渠道）+ 拍板记录 |
 | [plan/twitter-source.md](plan/twitter-source.md) | **X/推特图文来源计划**：免登录路线（Nitter RSS 主 + 免登录 HTML 备）、面板可配代理、机械筛选与可选 LLM 判定/翻译，分期 P0-P3 |
+| [plan/weibo-source.md](plan/weibo-source.md) | **微博图文来源计划**：把微博从「主播附属数据源」升级为独立来源（独立名单 / platform 分流 / 单墙混排），已落地 |
+| [plan/bili-dynamic-posts.md](plan/bili-dynamic-posts.md) | **B站动态图文来源 + 图文规则重构**：规则卡 + 每账号选用，已落地 |
 
 （M1 落地计划已完成使命并归档删除，实施经验折叠进 boundaries.md 第 5 节；后续里程碑的实施计划在动手前按同样格式补写。）
 

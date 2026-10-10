@@ -384,6 +384,16 @@ export class Db {
     log.info(`数据库就绪: ${path}`);
   }
 
+  /** better-sqlite3 原始句柄：只供装配层挂同库存储（UndoStore 撤销 / ChatStore 会话），业务代码不得直用 */
+  get raw(): Database.Database {
+    return this.db;
+  }
+
+  /** 同步 SQL 段的事务包装（级联写原子化用；回调必须是同步代码，不得跨 await） */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
   /** 缺列则 ALTER TABLE 补上（旧库在线迁移；新列一律可空或带默认值，不动旧数据） */
   private ensureColumn(table: string, column: string, ddl: string): void {
     const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;

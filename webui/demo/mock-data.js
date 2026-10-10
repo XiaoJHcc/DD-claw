@@ -265,3 +265,94 @@ export const mockTwitterPosts = [
     pubTs: 1, url: 'https://x.com/seigura/status/2101622144761537011', createdAt: 1,
   },
 ];
+
+// ---- 变更历史（P0b 撤销的用户面的 demo 态）：六条 = 设置 LLM 密钥（含 refill 副作用：撤销 = 清空密钥
+// 需重填）/ 保存分类 / 删分类（级联 4 行 = 「多行明细」样例）/ 群渠道关推送（MCP 来源 + 渠道栈）/
+// 修改运行时参数 / 调整渠道顺序（已撤销——演示置灰行与「撤销」按钮只挂栈顶）。
+// 字段与 GET /api/undo/history 的每一条逐字同构（id / tool / entry / actor / scope / at / undone /
+// undoneAt / tables / rows / title / headline / detail / undoNote），顺序恒为**新→旧**（id 降序）；
+// at / undoneAt 由 mock-api 在冻结时刻后按偏移种入。headline / detail 是后端给的中文文案
+// （前端不维护工具名映射），detail 每条 = { label 中文对象名, action: created|updated|deleted,
+// changes: [{ field, from, to }] }（值不可示人 = { field, redacted: true }）。
+// scope 取值同服务端：面板/本机 admin = 'admin'，渠道栈 = 'ch:<channelId>'。
+export const mockUndoHistory = [
+  {
+    id: 6, tool: 'set_llm_key', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: false, undoneAt: null, tables: ['settings'], rows: 1,
+    title: '设置 LLM 密钥', headline: '设置了 DeepSeek 的 LLM 密钥', undoNote: 'refill',
+    detail: [{ label: '设置项「LLM 密钥（DeepSeek）」', action: 'updated', changes: [{ field: '密钥', redacted: true }] }],
+  },
+  {
+    id: 5, tool: 'upsert_category', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: false, undoneAt: null, tables: ['categories'], rows: 1,
+    title: '保存分类', headline: '修改了分类「歌回」',
+    detail: [{ label: '分类「歌回」', action: 'updated', changes: [
+      { field: '关键词', from: '唱、歌、音乐', to: '唱、歌、音乐、演唱会' },
+      { field: '条件关系', from: '或', to: '且' },
+    ] }],
+  },
+  {
+    id: 4, tool: 'delete_category', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: false, undoneAt: null, tables: ['categories', 'push_rules'], rows: 4,
+    title: '删除分类', headline: '删除了分类「杂谈」',
+    detail: [
+      { label: '分类「杂谈」', action: 'deleted', changes: [] },
+      { label: '推送规则「杂谈-开播」', action: 'updated', changes: [{ field: '启用', from: '开', to: '关', bool: true }] },
+      { label: '推送规则「杂谈-闲聊」', action: 'updated', changes: [{ field: '启用', from: '开', to: '关', bool: true }] },
+      { label: '推送规则「全部」', action: 'updated', changes: [{ field: '启用', from: '开', to: '关', bool: true }] },
+    ],
+  },
+  {
+    id: 3, tool: 'set_push_enabled', entry: 'mcp', actor: 'maibot', scope: 'ch:2',
+    at: 0, undone: false, undoneAt: null, tables: ['settings'], rows: 1,
+    title: '开关推送', headline: '关闭了推送总开关',
+    detail: [{ label: '设置项「推送总开关」', action: 'updated', changes: [{ field: '推送总开关', from: '开', to: '关', bool: true }] }],
+  },
+  {
+    id: 2, tool: 'update_runtime_config', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: false, undoneAt: null, tables: ['settings'], rows: 2,
+    title: '修改运行时参数', headline: '修改运行时参数（2 项变更）',
+    detail: [
+      { label: '设置项「LLM 请求超时」', action: 'updated', changes: [{ field: 'LLM 请求超时', from: '60 秒', to: '45 秒' }] },
+      { label: '设置项「LLM 熔断阈值」', action: 'updated', changes: [{ field: 'LLM 熔断阈值', from: '3 次', to: '5 次' }] },
+    ],
+  },
+  {
+    id: 1, tool: 'reorder_channels', entry: 'panel', actor: 'panel', scope: 'admin',
+    at: 0, undone: true, undoneAt: 0, tables: ['push_channels'], rows: 4,
+    title: '调整渠道顺序', headline: '调整渠道顺序（4 项变更）',
+    detail: [
+      { label: '推送渠道「系统通知」', action: 'updated', changes: [{ field: '位置', from: '第 1 位', to: '第 2 位' }] },
+      { label: '推送渠道「粉丝群」', action: 'updated', changes: [{ field: '位置', from: '第 2 位', to: '第 1 位' }] },
+      { label: '推送渠道「我（私聊）」', action: 'updated', changes: [{ field: '位置', from: '第 3 位', to: '第 4 位' }] },
+      { label: '推送渠道「备用群」', action: 'updated', changes: [{ field: '位置', from: '第 4 位', to: '第 3 位' }] },
+    ],
+  },
+];
+
+// ---- Agent 聊天（P1 前端聊天视图的 demo 态）：初始会话 = 一次完整的「写前询问」往返
+// （用户要改分类关键词 → agent 先要确认 → 确认后调工具写入 → markdown 回报），一进 demo 就能看到
+// 气泡、markdown 正文与 kimi 式工具调用行。话题与 defaults.json 的种子数据一致（分类「歌回」、
+// 渠道「粉丝群」），免得演示露出后端没有的对象。at 由 mock-api 在冻结时刻后按偏移种入。
+// 形状与真实 /api/chat/history 同构：id = 消息 id（轮询去重键）；provider = 该条回复实际由谁提供；
+// calls = 工具调用行（中间轮 content 为空、只有 calls，与真实后端配对产出的形状一致；
+// {id, name, title, target, ok, args, output} 逐字对应后端 agent/tool-view.ts 的 ToolCallView）。
+// 交互剧本（mock 的 POST /api/chat 按关键词回话）另见 mock-api.js 的 chatScript。
+export const mockChat = {
+  mode: 'ask',
+  provider: '',
+  messages: [
+    { id: 1, role: 'user', content: '给「歌回」这个分类加上关键词「演唱会」', at: 0, provider: null },
+    { id: 2, role: 'assistant', content: '我先确认一下：要给分类「歌回」新增关键词「演唱会」吗？\n确认后我就写入（改动记进设置页的「变更历史」，可撤销）。', at: 0, provider: 'DeepSeek' },
+    { id: 3, role: 'user', content: '确认', at: 0, provider: null },
+    { id: 4, role: 'assistant', content: '', at: 0, provider: 'DeepSeek', calls: [
+      { id: 'demo_call_1', name: 'list_categories', title: '列出分类', target: '', ok: true,
+        args: '{}',
+        output: '{\n  "categories": [\n    {\n      "name": "歌回",\n      "keywords": ["唱", "歌", "音乐"],\n      "condMode": "或",\n      "enabled": true\n    }\n  ]\n}' },
+      { id: 'demo_call_2', name: 'upsert_category', title: '保存分类', target: '歌回', ok: true,
+        args: '{\n  "name": "歌回",\n  "keywords": ["唱", "歌", "音乐", "演唱会"],\n  "condMode": "或"\n}',
+        output: '{\n  "ok": true\n}' },
+    ]},
+    { id: 5, role: 'assistant', content: '已写入。分类「歌回」现在长这样：\n\n- **关键词**：唱、歌、音乐、演唱会\n- **匹配方式**：或（任一命中即归类）\n\n改动记进了设置页的「变更历史」，随时可以撤销。', at: 0, provider: 'DeepSeek' },
+  ],
+};

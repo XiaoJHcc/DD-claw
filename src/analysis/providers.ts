@@ -26,19 +26,61 @@ export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } };
 
+/** 工具调用：assistant 发起、tool 结果按同一个 id 回填 */
+export interface ToolCall {
+  id: string;
+  name: string;
+  /** **原始 JSON 字符串**（与各协议一致）；解析与校验统一交给 `runTool()`，provider 层不解释业务 */
+  arguments: string;
+}
+
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | ContentPart[];
+  /** role='assistant'：本轮发起的工具调用 */
+  toolCalls?: ToolCall[];
+  /** role='tool'：这是哪次调用的结果 */
+  toolCallId?: string;
+}
+
+/** 暴露给 LLM 的工具定义（参数是 JSON Schema，由 zod shape 转换而来） */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+/** `completeChat` 的结果：正文 + 本轮的工具调用（可能同时有） */
+export interface ChatCompletion {
+  content: string;
+  toolCalls: ToolCall[];
+  /**
+   * **实际回答的 provider 名**（router 路由后的落点）。agent 会话要把它落进库/回给面板——
+   * 自动路由下一轮可能换人，只有 provider 层知道自己是谁。
+   */
+  provider: string;
 }
 
 export interface LlmRequest {
   messages: ChatMessage[];
   /** 强制指定路由；缺省按 messages 里有没有 image_url 自动判断 */
   vision?: boolean;
+  /**
+   * **强制指定哪个 provider 回答**（agent 会话模型选择，settings `chat_provider`）。
+   * 与 `vision` 不同：这是硬约束，指定的 provider 不存在 / 未启用 / 熔断 / 调用失败都
+   * **抛错且绝不回落别人**（`SelectedProviderError`）——主人选了模型，就不该被静默换掉。
+   * 缺省（undefined 或空串）= 按路由优先级自动选，失败逐级降级。
+   * **只被 `completeChat` 使用**（与 `tools` 同款口径）：分类任务走 `completeJson`，不看这个字段。
+   */
+  provider?: string;
   /** 请求级 JSON schema；provider 的 structuredOutput 模式决定怎么下发 */
   jsonSchema?: { name: string; schema: Record<string, unknown>; strict?: boolean };
   maxTokens?: number;
   temperature?: number;
+  /** 工具面（只被 `completeChat` 使用；`complete` / `completeJson` 忽略） */
+  tools?: ToolSpec[];
+  /** 强制走「JSON 模拟」而非原生 tool_calls（端点已知不支持 tools 时用） */
+  simulateTools?: boolean;
 }
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -67,6 +109,14 @@ export class ProviderCallError extends Error {
   }
 }
 
+/**
+ * 端点不支持原生 tool_calls（HTTP 4xx 且报文提到 tool/function 不认识）。
+ * **不算 provider 故障**（端点本身是好的），由 router 就地降级为 JSON 模拟。
+ */
+export class ToolUnsupportedError extends ProviderCallError {
+  override name = 'ToolUnsupportedError';
+}
+
 /** 路由内所有 provider 都不可用或全部失败 */
 export class AllProvidersExhaustedError extends Error {
   override name = 'AllProvidersExhaustedError';
@@ -75,6 +125,21 @@ export class AllProvidersExhaustedError extends Error {
     readonly attempts: string[],
   ) {
     super(`LLM ${route} 路由全部不可用: ${attempts.join(' → ') || '(路由为空或无可用 provider)'}`);
+  }
+}
+
+/**
+ * `LlmRequest.provider` 指定的 provider 这条硬路由走不通（不存在 / 未启用 / 缺 key / 熔断 / 调用失败）。
+ * 与 `AllProvidersExhaustedError` 的区别：**不降级**——主人点名要的模型不该被静默换掉，
+ * 出错比换人回答诚实。文案是中文（直接进 agent 回话与面板错误提示）。
+ */
+export class SelectedProviderError extends Error {
+  override name = 'SelectedProviderError';
+  constructor(
+    readonly provider: string,
+    message: string,
+  ) {
+    super(message);
   }
 }
 
@@ -240,6 +305,48 @@ export class OpenAiProvider {
     }
   }
 
+  /**
+   * 带工具的一轮对话（agent loop 用）：返回正文 + 本轮 tool_calls。
+   * 双协议都实现原生通道：chat/completions 走 `tools` + `tool_calls` 回填；
+   * responses 走 `tools` + `function_call` / `function_call_output`（回填必须带 `call_id`）。
+   * 注意：这条路径**不设 response_format**（与 tools 同时下发会互相打架）；模拟降级见 `simulateToolCall`。
+   */
+  async completeChat(req: LlmRequest): Promise<ChatCompletion> {
+    return this.spec.api === 'responses'
+      ? await this.callResponsesChat(req)
+      : await this.callChatCompletionsChat(req);
+  }
+
+  private async callChatCompletionsChat(req: LlmRequest): Promise<ChatCompletion> {
+    const body: Record<string, unknown> = {
+      model: this.spec.model,
+      messages: req.messages.map(chatCompletionsMessage),
+    };
+    if (req.maxTokens !== undefined) body.max_tokens = req.maxTokens;
+    if (req.temperature !== undefined) body.temperature = req.temperature;
+    const hasTools = req.tools !== undefined && req.tools.length > 0;
+    if (hasTools) {
+      body.tools = req.tools!.map((t) => ({
+        type: 'function',
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }));
+    }
+
+    let data: { choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }> };
+    try {
+      data = (await this.post('/chat/completions', body)) as typeof data;
+    } catch (e) {
+      throw classifyToolError(e, hasTools);
+    }
+    const msg = data.choices?.[0]?.message;
+    if (msg === undefined) throw new ProviderCallError('响应缺少 choices[0].message');
+    return {
+      content: typeof msg.content === 'string' ? msg.content : '',
+      toolCalls: parseChatToolCalls(msg.tool_calls),
+      provider: this.name,
+    };
+  }
+
   private async callChatCompletions(req: LlmRequest): Promise<string> {
     const body: Record<string, unknown> = {
       model: this.spec.model,
@@ -276,25 +383,14 @@ export class OpenAiProvider {
    * 结构化输出走 text.format；正文取 output_text 便捷字段，缺了再从 output 里找
    */
   private async callResponses(req: LlmRequest): Promise<string> {
-    const textOf = (m: ChatMessage): string =>
-      typeof m.content === 'string'
-        ? m.content
-        : m.content.filter((c) => c.type === 'text').map((c) => (c as { text: string }).text).join('\n');
     const instructions = req.messages
       .filter((m) => m.role === 'system')
-      .map(textOf)
+      .map(messageText)
       .filter(Boolean)
       .join('\n');
     const input = req.messages
       .filter((m) => m.role !== 'system')
-      .map((m) => ({
-        role: m.role,
-        content: typeof m.content === 'string'
-          ? [{ type: 'input_text', text: m.content }]
-          : m.content.map((c) => c.type === 'text'
-              ? { type: 'input_text', text: c.text }
-              : { type: 'input_image', image_url: c.image_url.url }),
-      }));
+      .map((m) => ({ role: m.role, content: responsesContent(m) }));
 
     const body: Record<string, unknown> = { model: this.spec.model, input };
     if (instructions) body.instructions = instructions;
@@ -336,11 +432,147 @@ export class OpenAiProvider {
     }
     return content;
   }
+
+  /**
+   * Responses 协议的工具轮次。与 chat/completions 的**形状差异**（计划里点名的坑）：
+   * 工具定义是 `{type:'function', name, parameters}`（不是嵌在 `function` 里）；
+   * assistant 的工具调用在 `output` 里是**顶层** `function_call` 项（带 `call_id`）；
+   * 结果回填是顶层 `function_call_output`（`call_id` + `output`），不是 role='tool' 的消息。
+   */
+  private async callResponsesChat(req: LlmRequest): Promise<ChatCompletion> {
+    const instructions = req.messages
+      .filter((m) => m.role === 'system')
+      .map(messageText)
+      .filter(Boolean)
+      .join('\n');
+
+    const input: Array<Record<string, unknown>> = [];
+    for (const m of req.messages) {
+      if (m.role === 'system') continue;
+      if (m.role === 'tool') {
+        input.push({ type: 'function_call_output', call_id: m.toolCallId ?? '', output: messageText(m) });
+        continue;
+      }
+      if (m.role === 'assistant' && m.toolCalls !== undefined && m.toolCalls.length > 0) {
+        for (const c of m.toolCalls) {
+          input.push({ type: 'function_call', call_id: c.id, name: c.name, arguments: c.arguments });
+        }
+        continue;
+      }
+      input.push({ role: m.role, content: responsesContent(m) });
+    }
+
+    const body: Record<string, unknown> = { model: this.spec.model, input };
+    if (instructions) body.instructions = instructions;
+    if (req.maxTokens !== undefined) body.max_output_tokens = req.maxTokens;
+    if (req.temperature !== undefined) body.temperature = req.temperature;
+    const hasTools = req.tools !== undefined && req.tools.length > 0;
+    if (hasTools) {
+      body.tools = req.tools!.map((t) => ({
+        type: 'function', name: t.name, description: t.description, parameters: t.parameters,
+      }));
+    }
+
+    let data: { output?: Array<Record<string, unknown>> };
+    try {
+      data = (await this.post('/responses', body)) as typeof data;
+    } catch (e) {
+      throw classifyToolError(e, hasTools);
+    }
+
+    let content = '';
+    const toolCalls: ToolCall[] = [];
+    for (const item of data.output ?? []) {
+      if (item.type === 'function_call') {
+        const name = item.name;
+        if (typeof name === 'string' && name) {
+          toolCalls.push({
+            id: typeof item.call_id === 'string' && item.call_id ? item.call_id : `call_${toolCalls.length}`,
+            name,
+            arguments: typeof item.arguments === 'string' ? item.arguments : '{}',
+          });
+        }
+        continue;
+      }
+      if (item.type === 'message' && !content) {
+        for (const part of (item.content as Array<{ type?: string; text?: unknown }> | undefined) ?? []) {
+          if (part.type === 'output_text' && typeof part.text === 'string') {
+            content = part.text;
+            break;
+          }
+        }
+      }
+    }
+    if (!content && toolCalls.length === 0) {
+      throw new ProviderCallError('响应既没有 output_text 也没有 function_call');
+    }
+    return { content, toolCalls, provider: this.name };
+  }
 }
 
 function stripCodeFence(s: string): string {
   const m = s.trim().match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/);
   return m ? m[1]!.trim() : s.trim();
+}
+
+/** 消息正文的纯文本（多模态时只取 text 部件，与旧 callResponses 的行为一致） */
+function messageText(m: ChatMessage): string {
+  return typeof m.content === 'string'
+    ? m.content
+    : m.content.filter((c) => c.type === 'text').map((c) => (c as { text: string }).text).join('\n');
+}
+
+/** 消息 → responses 协议的 content 部件 */
+function responsesContent(m: ChatMessage): Array<Record<string, unknown>> {
+  return typeof m.content === 'string'
+    ? [{ type: 'input_text', text: m.content }]
+    : m.content.map((c) => (c.type === 'text'
+        ? { type: 'input_text', text: c.text }
+        : { type: 'input_image', image_url: c.image_url.url }));
+}
+
+/** 消息 → chat/completions 协议的 message（含 tool_calls 与 tool 回填） */
+function chatCompletionsMessage(m: ChatMessage): Record<string, unknown> {
+  if (m.role === 'tool') {
+    return { role: 'tool', tool_call_id: m.toolCallId ?? '', content: messageText(m) };
+  }
+  if (m.role === 'assistant' && m.toolCalls !== undefined && m.toolCalls.length > 0) {
+    return {
+      role: 'assistant',
+      content: typeof m.content === 'string' ? m.content : messageText(m),
+      tool_calls: m.toolCalls.map((c) => ({
+        id: c.id,
+        type: 'function',
+        function: { name: c.name, arguments: c.arguments },
+      })),
+    };
+  }
+  return { role: m.role, content: m.content };
+}
+
+function parseChatToolCalls(raw: unknown): ToolCall[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ToolCall[] = [];
+  for (const item of raw) {
+    const it = item as { id?: unknown; function?: { name?: unknown; arguments?: unknown } };
+    const name = it.function?.name;
+    if (typeof name !== 'string' || !name) continue;
+    out.push({
+      id: typeof it.id === 'string' && it.id ? it.id : `call_${out.length}`,
+      name,
+      arguments: typeof it.function?.arguments === 'string' ? it.function.arguments : '{}',
+    });
+  }
+  return out;
+}
+
+/** HTTP 4xx 且报文明确说 tools/function 不认识 → 归为「端点不支持原生 tools」 */
+function classifyToolError(e: unknown, hadTools: boolean): unknown {
+  if (!hadTools || !(e instanceof ProviderCallError)) return e;
+  if (!/HTTP (400|404|415|422)/.test(e.message)) return e;
+  if (!/(unsupported|not supported|unrecognized|unknown)/i.test(e.message)) return e;
+  if (!/(tool|function)/i.test(e.message)) return e;
+  return new ToolUnsupportedError(e.message);
 }
 
 export interface ProviderStatus {
@@ -349,6 +581,11 @@ export interface ProviderStatus {
   vision: boolean;
   routes: string[];
   status: string;
+  /**
+   * 此刻能不能真的用（启用 + 有 key + 未熔断，= `isReady()`）：面板只展示，agent loop 用它
+   * 区分「LLM 未就绪（400，去设置页修）」与「调用失败（502）」，不用去 parse status 文案。
+   */
+  ready: boolean;
 }
 
 export class LlmRouter {
@@ -404,6 +641,7 @@ export class LlmRouter {
       vision: p.spec.vision,
       routes: (['text', 'vision'] as const).filter((r) => this.routes[r].includes(p.name)),
       status: p.status(),
+      ready: p.isReady(),
     }));
   }
 
@@ -447,6 +685,167 @@ export class LlmRouter {
     }
     throw new AllProvidersExhaustedError(routeKind, attempts);
   }
+
+  /**
+   * 带工具的一轮对话。熔断 / 路由 / 降级语义与 `completeJson` 同源：
+   * 逐个 provider 试，失败的记熔断、换下一个。
+   *
+   * **点名 provider（`req.provider`）时不降级**：主人选了模型就不该被静默换掉——
+   * 不存在 / 未启用 / 缺 key / 熔断 / 调用失败一律抛 `SelectedProviderError`（中文文案），
+   * 绝不落到别人身上（见 `LlmRequest.provider`）。
+   *
+   * **JSON 模拟降级**：端点不支持原生 tools 时（`ToolUnsupportedError`，或调用方直接指定
+   * `simulateTools`），就用提示词让模型输出 `{"tool":…,"arguments":…}` 再由我们拼成一次工具调用——
+   * 这**不算 provider 故障**，不记熔断。模拟产出的 arguments 与原生 tool_calls 一样是原始 JSON 字符串，
+   * 因此**同样必须过 `runTool()` 的 zod 校验**，写工具不得因此绕过 schema。
+   */
+  async completeChat(req: LlmRequest): Promise<ChatCompletion> {
+    if (req.provider !== undefined && req.provider !== '') return this.completeChatWith(req.provider, req);
+    const routeKind: 'text' | 'vision' = req.vision ?? hasImage(req.messages) ? 'vision' : 'text';
+    const route = this.routes[routeKind];
+    const attempts: string[] = [];
+
+    for (const name of route) {
+      const p = this.byName.get(name);
+      if (!p) continue;
+      if (!p.isReady()) {
+        attempts.push(`${name}[跳过:${p.status()}]`);
+        continue;
+      }
+      const out = await this.tryChat(p, req, attempts, name);
+      if (out !== null) return out;
+    }
+    throw new AllProvidersExhaustedError(routeKind, attempts);
+  }
+
+  /**
+   * 点名路由：只有这一个 provider 会被调用，任何一步不顺都抛错（不换人）。
+   * 「未就绪」在调用前就判定（省一次注定失败的请求），调用失败照常计熔断。
+   */
+  private async completeChatWith(name: string, req: LlmRequest): Promise<ChatCompletion> {
+    const p = this.byName.get(name);
+    if (!p) throw new SelectedProviderError(name, `没有这个 LLM provider：${name}（请在设置页重新选择）`);
+    if (!p.isReady()) {
+      throw new SelectedProviderError(name, `指定的 LLM provider「${name}」当前不可用（${p.status()}）`);
+    }
+    const attempts: string[] = [];
+    const out = await this.tryChat(p, req, attempts, name, true);
+    // strict 下失败一律抛错，这行只是类型兜底（防御）
+    if (out === null) throw new SelectedProviderError(name, `指定的 LLM provider「${name}」调用失败`);
+    return out;
+  }
+
+  /**
+   * 单 provider 的一次工具轮次（原生 → 端点不支持就地降级为 JSON 模拟）。
+   * 成功返回结果；降级链走不通返回 null（由调用方决定「换下一个」还是抛错）。
+   * `strict` = 点名路由：失败直接把原始错误包成 `SelectedProviderError` 抛出，不回落别人。
+   */
+  private async tryChat(
+    p: OpenAiProvider,
+    req: LlmRequest,
+    attempts: string[],
+    name: string,
+    strict = false,
+  ): Promise<ChatCompletion | null> {
+    const fail = (e: unknown, tag: string): null => {
+      p.recordFailure(e);
+      attempts.push(`${name}[${tag}]`);
+      if (strict) {
+        throw new SelectedProviderError(name, `LLM provider「${name}」调用失败：${(e as Error).message}`);
+      }
+      return null;
+    };
+    if (req.simulateTools) {
+      try {
+        const out = await simulateToolCall(p, req);
+        p.recordSuccess();
+        return out;
+      } catch (e) {
+        return fail(e, '模拟失败');
+      }
+    }
+    try {
+      const out = await p.completeChat(req);
+      p.recordSuccess();
+      return out;
+    } catch (e) {
+      if (e instanceof ToolUnsupportedError) {
+        attempts.push(`${name}[无原生 tools→JSON 模拟]`);
+        try {
+          const out = await simulateToolCall(p, req);
+          p.recordSuccess();
+          return out;
+        } catch (e2) {
+          return fail(e2, '模拟失败');
+        }
+      }
+      return fail(e, '失败');
+    }
+  }
+}
+
+/** 模拟降级产出的工具调用 id（同一轮内自洽即可；回填走文本而非 call_id 通道） */
+export const SIMULATED_TOOL_CALL_ID = 'sim_0';
+
+/** 把工具定义与对话渲染成「只输出一个 JSON」的提示词（模拟降级用） */
+function buildSimulationPrompt(req: LlmRequest): ChatMessage[] {
+  const tools = req.tools ?? [];
+  const catalog = tools
+    .map((t) => `- ${t.name}：${t.description}\n  参数 JSON Schema：${JSON.stringify(t.parameters)}`)
+    .join('\n');
+  const instructions = [
+    '你是一个工具执行器。可用工具：',
+    catalog || '（当前没有可用工具）',
+    '',
+    '只输出一个 JSON 对象，不要任何多余文字或代码围栏：',
+    '  需要调用工具时：{"tool":"<工具名>","arguments":{<按该工具的参数 Schema>}}',
+    '  不需要调用工具时：{"reply":"<给用户看的中文回复>"}',
+    '工具结果会在下一条 user 消息里以「工具结果：…」给出。一次只调用一个工具。',
+  ].join('\n');
+
+  const rest: ChatMessage[] = [];
+  for (const m of req.messages) {
+    if (m.role === 'system') continue;
+    if (m.role === 'tool') {
+      rest.push({ role: 'user', content: `工具结果：${messageText(m)}` });
+      continue;
+    }
+    if (m.role === 'assistant' && m.toolCalls !== undefined && m.toolCalls.length > 0) {
+      rest.push({
+        role: 'assistant',
+        content: m.toolCalls.map((c) => `已调用 ${c.name}(${c.arguments})`).join('\n'),
+      });
+      continue;
+    }
+    rest.push(m);
+  }
+  return [{ role: 'system', content: instructions }, ...rest];
+}
+
+/** 用一次普通 JSON 调用模拟工具选择，并把结果拼成 ChatCompletion */
+async function simulateToolCall(p: OpenAiProvider, req: LlmRequest): Promise<ChatCompletion> {
+  const raw = await p.complete({
+    messages: buildSimulationPrompt(req),
+    vision: req.vision,
+    maxTokens: req.maxTokens,
+    temperature: req.temperature,
+  });
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { tool?: unknown; arguments?: unknown; reply?: unknown };
+  if (typeof obj.tool === 'string' && obj.tool) {
+    return {
+      content: typeof obj.reply === 'string' ? obj.reply : '',
+      toolCalls: [{
+        id: SIMULATED_TOOL_CALL_ID,
+        name: obj.tool,
+        arguments: JSON.stringify(obj.arguments ?? {}),
+      }],
+      provider: p.name,
+    };
+  }
+  const reply = typeof obj.reply === 'string'
+    ? obj.reply
+    : (typeof raw === 'string' ? raw : JSON.stringify(raw));
+  return { content: reply, toolCalls: [], provider: p.name };
 }
 
 function hasImage(messages: ChatMessage[]): boolean {
@@ -500,6 +899,32 @@ export function isLlmEnabled(db: Db): boolean {
 
 export function setLlmEnabled(db: Db, on: boolean): void {
   db.setSetting(LLM_ENABLED_SETTING, on ? '1' : '0');
+}
+
+// ---- agent 会话的模型选择：settings 表（'' = 自动路由，缺省）----
+
+const CHAT_PROVIDER_SETTING = 'chat_provider';
+
+/**
+ * agent 对话选定的 provider 名；`''` = 自动路由（按 provider 列表顺序 + 降级）。
+ * 只认**已配置过**的名字（选定后 provider 被删/改名 → 退回自动？不——见 `chatProviderMissing`）：
+ * 读取一律原样返回，配置是否还有效由调用方按 provider 名单判定（`chatBlockedReason`）。
+ */
+export function getChatProvider(db: Db): string {
+  return (db.getSetting(CHAT_PROVIDER_SETTING) ?? '').trim();
+}
+
+/** 写入选定（`''` = 回到自动路由，key 直接删掉，与 listen 开关「回 auto」同语义） */
+export function setChatProvider(db: Db, provider: string): string {
+  const name = provider.trim();
+  if (name === '') db.deleteSetting(CHAT_PROVIDER_SETTING);
+  else db.setSetting(CHAT_PROVIDER_SETTING, name);
+  return getChatProvider(db);
+}
+
+/** 该名字在 provider 名单里有没有（面板下拉与 `PUT /api/chat/provider` 的 400 判据） */
+export function hasLlmProvider(list: readonly LlmProviderConfig[], name: string): boolean {
+  return list.some((p) => p.name === name);
 }
 
 /**
