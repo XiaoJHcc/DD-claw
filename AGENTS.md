@@ -243,4 +243,5 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - `docs/plan/twitter-source.md` — X/推特图文来源计划：独立分页 + 独立账号名单 + 图文帖规则，P0–P3 全部落地
 - `docs/plan/weibo-source.md` — 微博图文来源计划：把微博从「主播附属数据源」升级为独立来源（独立名单 / platform 分流 / 单墙混排），已落地
 - `docs/plan/bili-dynamic-posts.md` — B站动态图文来源 + 图文规则「规则卡 + 每账号选用」重构，已落地
+- `docs/plan/unify-classify-push.md` — 直播/图文「分类 + 推送」统一总计划（产品模型 + 底层抽象 + 分期 P0–P4 + 决策模型通道预留），**dev 分支承载**
 - `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、**twitter**、llm、notify、media-capture、auth-cookie、ts-stack、**decision-models**）
