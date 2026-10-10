@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  defaultPostTitle, matchCategory, matchPostFilters, matchPostRules, matchPushRules,
+  aggregateRuleHits, defaultPostTitle, matchCategory, matchPostFilters, matchPostRules, matchPushRules,
   renderPostTemplate, renderTemplate,
   type PostCandidate,
 } from './matcher.js';
@@ -310,5 +310,85 @@ test('微博帖文案：{author} 用昵称、缺昵称回退 uid；转发语义�
   assert.equal(
     matchPostFilters({ ...defaultPostFilters(), original: false, retweet: true }, weiboPost({ type: 'retweet' })),
     true,
+  );
+});
+
+// ---- aggregateRuleHits：命中规则 → 渠道并集 + 首个非空推送词（直播/图文共用纯聚合）----
+
+test('aggregateRuleHits：无命中 → null；渠道并集去重保序', () => {
+  assert.equal(aggregateRuleHits([]), null, '空命中 = 不推');
+  assert.deepEqual(
+    aggregateRuleHits([
+      { channels: [2, 1], messageTemplate: null },
+      { channels: [1, 3], messageTemplate: null },
+    ]),
+    { channels: [2, 1, 3], template: null },
+    '并集按首次出现序去重，不重排',
+  );
+});
+
+test('aggregateRuleHits：推送词取命中序首个非 null，之后不覆盖', () => {
+  assert.equal(
+    aggregateRuleHits([
+      { channels: [1], messageTemplate: null },
+      { channels: [2], messageTemplate: '模板 A' },
+      { channels: [3], messageTemplate: '模板 B' },
+    ])?.template,
+    '模板 A',
+    '跳过 null，取首个非 null（命中列表已按 sort 序）',
+  );
+  assert.equal(
+    aggregateRuleHits([{ channels: [1], messageTemplate: null }])?.template,
+    null,
+    '全 null = 无推送词（缺省模板由调用方注入）',
+  );
+  assert.equal(
+    aggregateRuleHits([
+      { channels: [1], messageTemplate: '' },
+      { channels: [2], messageTemplate: '模板 B' },
+    ])?.template,
+    '',
+    '??= 语义：空串也算「已填」，不被后续覆盖（与旧内联实现逐字一致）',
+  );
+});
+
+test('aggregateRuleHits：并集为空 → null（有命中、有推送词也一样 = 用户明确不推）', () => {
+  assert.equal(aggregateRuleHits([{ channels: [], messageTemplate: '有词也没用' }]), null);
+  assert.equal(
+    aggregateRuleHits([{ channels: [] }, { channels: [], messageTemplate: 'x' }]),
+    null,
+  );
+});
+
+test('aggregateRuleHits：只要两字段的结构化约束（PushRule / PostRule 子集都能喂）', () => {
+  const pushLike = rule({ channels: [7], messageTemplate: '{liver} 开播了' });
+  const postLike = postRule({ channels: [8], messageTemplate: null });
+  assert.deepEqual(aggregateRuleHits([pushLike, postLike]), {
+    channels: [7, 8],
+    template: '{liver} 开播了',
+  });
+});
+
+// ---- 统一渲染器（renderByVars）：两个语义化入口共用一套实现，变量集互不串 ----
+
+test('统一渲染器：同一占位符多处全替换、未知占位符原样保留', () => {
+  assert.equal(
+    renderTemplate('{liver} vs {liver}｜{unknown}', event()),
+    '主播1 vs 主播1｜{unknown}',
+  );
+  assert.equal(
+    renderPostTemplate('{author} 与 {author}｜{title}', post()),
+    '@watase_yuzuki 与 @watase_yuzuki｜{title}',
+    '{title} 不在图文变量集里，不渲染；{author} 是 replaceAll 语义',
+  );
+});
+
+test('统一渲染器：{screenName} 变量 + 顺序替换语义与旧实现一致', () => {
+  assert.equal(renderPostTemplate('@{screenName}', post()), '@watase_yuzuki');
+  // 顺序替换：先替换出的取值里若含后续占位符，也会被后续替换（旧实现即如此，逐字保持）
+  assert.equal(
+    renderTemplate('{liver} 开播', event({ uname: '{title}', title: '歌回' })),
+    '歌回 开播',
+    '{liver} 展开成 "{title}" 后又被 {title} 替换',
   );
 });

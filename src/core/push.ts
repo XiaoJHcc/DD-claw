@@ -218,7 +218,7 @@ export interface VerdictRow {
   category_id: number;
   /** 冗余存名，分类删除后历史仍可读 */
   category_name: string;
-  source: 'llm' | 'rule';
+  source: 'llm' | 'rule' | 'decision';
   /** LLM 路径置信度，rule 路径为 NULL */
   confidence: number | null;
   /** LLM 证据 / 命中的关键词·分区说明 */
@@ -233,7 +233,7 @@ export interface Verdict {
   uid: string;
   categoryId: number;
   categoryName: string;
-  source: 'llm' | 'rule';
+  source: 'llm' | 'rule' | 'decision';
   confidence: number | null;
   evidence: string;
   createdAt: number;

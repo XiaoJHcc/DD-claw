@@ -55,12 +55,61 @@ export function matchPushRules(
   return hits;
 }
 
+/**
+ * 命中规则的聚合形态（结构化约束）：直播 PushRule / 图文 PostRule 的公共子集，
+ * 聚合只看这两字段。
+ */
+export interface RuleHit {
+  channels: number[];
+  messageTemplate: string | null;
+}
+
+export interface RuleAggregation {
+  /** 各命中规则 channels 的并集（去重保序 = 首次出现序） */
+  channels: number[];
+  /** 命中序（调用方已按 sort 序）里首个非 null 的 messageTemplate；全 null = null */
+  template: string | null;
+}
+
+/**
+ * 命中规则 → 推送聚合（直播 / 图文共用的纯聚合，缺省模板回退由调用方注入）：
+ * 渠道 = 各命中规则 channels 的并集（去重保序）；推送词 = 首个非 null 的 messageTemplate
+ * （??= 语义，与旧两处内联实现逐字一致）。返回 null = 无命中规则 / 并集为空（= 不推）。
+ */
+export function aggregateRuleHits(hits: RuleHit[]): RuleAggregation | null {
+  if (hits.length === 0) return null;
+  const channels: number[] = [];
+  let template: string | null = null;
+  for (const r of hits) {
+    for (const id of r.channels) {
+      if (!channels.includes(id)) channels.push(id);
+    }
+    template ??= r.messageTemplate;
+  }
+  if (channels.length === 0) return null;
+  return { channels, template };
+}
+
+/**
+ * 模板渲染公共实现：变量名 → 取值函数的 map，按定义序逐个 replaceAll
+ * （顺序替换语义与旧实现逐字一致：先替换出的文本若含后续占位符，也会被后续替换）。
+ */
+function renderByVars<T>(tpl: string, vars: Readonly<Record<string, (src: T) => string>>, src: T): string {
+  let out = tpl;
+  for (const [name, get] of Object.entries(vars)) out = out.replaceAll(`{${name}}`, get(src));
+  return out;
+}
+
+/** 直播推送词变量集（定义序 = 替换序）：{liver} = 主播原名 uname，缺省回退简称 alias */
+const LIVE_TEMPLATE_VARS: Readonly<Record<string, (e: LiveEvent) => string>> = {
+  liver: (e) => e.uname || e.alias,
+  uname: (e) => e.uname,
+  title: (e) => e.title,
+};
+
 /** 渲染 {liver} {uname} {title} 变量（{liver} = 主播原名 uname，缺省回退简称 alias；推送文案一律原名） */
 export function renderTemplate(tpl: string, event: LiveEvent): string {
-  return tpl
-    .replaceAll('{liver}', event.uname || event.alias)
-    .replaceAll('{uname}', event.uname)
-    .replaceAll('{title}', event.title);
+  return renderByVars(tpl, LIVE_TEMPLATE_VARS, event);
 }
 
 // ---- 图文帖（X/推特 + 微博 + B站动态共用一套平台无关规则）：与开播规则平行的一套确定性判定 ----
@@ -141,12 +190,16 @@ export function defaultPostTitle(post: PostCandidate): string {
   return `${author} 发布新${noun}`;
 }
 
-/** 渲染图文帖推送词变量：{author} = 作者（X=@账号 / 其余=展示名），{text} = 正文，{url} = 链接，{liver} = 关联主播 */
+/** 图文帖推送词变量集（定义序 = 替换序）：{author} = 作者（X=@账号 / 其余=展示名），{liver} = 关联主播回退作者 */
+const POST_TEMPLATE_VARS: Readonly<Record<string, (p: PostCandidate) => string>> = {
+  author: (p) => postAuthorName(p),
+  screenName: (p) => p.screenName,
+  text: (p) => p.text ?? '',
+  url: (p) => p.url ?? '',
+  liver: (p) => p.biliName || postAuthorName(p),
+};
+
+/** 渲染图文帖推送词变量：{author} = 作者（X=@账号 / 其余=展示名），{screenName} = 账号标识，{text} = 正文，{url} = 链接，{liver} = 关联主播 */
 export function renderPostTemplate(tpl: string, post: PostCandidate): string {
-  return tpl
-    .replaceAll('{author}', postAuthorName(post))
-    .replaceAll('{screenName}', post.screenName)
-    .replaceAll('{text}', post.text ?? '')
-    .replaceAll('{url}', post.url ?? '')
-    .replaceAll('{liver}', post.biliName || postAuthorName(post));
+  return renderByVars(tpl, POST_TEMPLATE_VARS, post);
 }

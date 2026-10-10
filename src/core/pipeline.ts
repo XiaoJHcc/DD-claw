@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage, postToMessage } from '../notify/message.js';
 import {
-  defaultPostTitle, matchPostRules, matchPushRules, postAuthorName, renderPostTemplate, renderTemplate,
+  aggregateRuleHits, defaultPostTitle, matchPostRules, matchPushRules, postAuthorName,
+  renderPostTemplate, renderTemplate,
   type PostCandidate,
 } from '../analysis/matcher.js';
 import { isPushEnabled } from './push.js';
@@ -192,8 +193,8 @@ export class Pipeline {
 
   /**
    * 推送规则 → PushMessage；返回 null = 不推（命中集合渠道并集为空 / 无命中规则）。
-   * - 命中集合非空：所有命中规则独立生效——渠道 = 各命中规则 channels 的并集（去重保序）；
-   *   推送词 = sort 序首个非空 messageTemplate；并集为空 = 用户明确不推（记 log 不推）
+   * - 命中集合非空：所有命中规则独立生效，聚合（渠道并集 + 首个非空推送词）走
+   *   `aggregateRuleHits`；并集为空 = 用户明确不推（记 log 不推）
    * - 无命中规则（含一条都没有）= 不推——「任意开播 × 全部主播」规则即旧全局默认的等价物，
    *   需要兜底推送的用户自建一条即可
    * - 模板：规则覆盖 > 内置默认 '{liver} 开播了'；正文/图片/跳转沿用默认形状
@@ -210,23 +211,16 @@ export class Pipeline {
       log.info(`不推送 ${event.uname || event.alias}: 无命中规则`);
       return null;
     }
-    const channelIds: number[] = [];
-    let templateOverride: string | null = null;
-    for (const r of hits) {
-      for (const id of r.channels) {
-        if (!channelIds.includes(id)) channelIds.push(id);
-      }
-      templateOverride ??= r.messageTemplate;
-    }
-    if (channelIds.length === 0) {
+    const agg = aggregateRuleHits(hits);
+    if (!agg) {
       log.info(`不推送 ${event.uname || event.alias}: 命中 ${hits.length} 条规则但都未勾选渠道`);
       return null;
     }
     log.info(`命中推送规则 ${hits.map((r) => `#${r.id}`).join('/')}（${event.uname || event.alias}）`);
 
-    const tpl = templateOverride ?? '{liver} 开播了';
+    const tpl = agg.template ?? '{liver} 开播了';
     const text = renderTemplate(tpl, event).trim();
-    return { ...base, title: text || base.title, channels: channelIds.map(String) };
+    return { ...base, title: text || base.title, channels: agg.channels.map(String) };
   }
 
   /**
@@ -358,23 +352,16 @@ export class Pipeline {
       return;
     }
 
-    const channelIds: number[] = [];
-    let templateOverride: string | null = null;
-    for (const r of contributing) {
-      for (const id of r.channels) {
-        if (!channelIds.includes(id)) channelIds.push(id);
-      }
-      templateOverride ??= r.messageTemplate;
-    }
-    if (channelIds.length === 0) {
+    const agg = aggregateRuleHits(contributing);
+    if (!agg) {
       log.info(`不推送 ${label}: 命中 ${hits.length} 条规则但都未勾选渠道`);
       return;
     }
 
-    const tpl = templateOverride ?? defaultPostTitle(post);
+    const tpl = agg.template ?? defaultPostTitle(post);
     const msg: PushMessage = {
       ...postToMessage({ post, title: renderPostTemplate(tpl, post), images, translation: translated }),
-      channels: channelIds.map(String),
+      channels: agg.channels.map(String),
     };
     log.info(
       `推送 feed_post ${label} — 命中规则 ${contributing.map((r) => `#${r.id}`).join('/')}` +

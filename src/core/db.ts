@@ -312,7 +312,7 @@ export interface TimelineEntry {
   segments: TimelineSegment[];
   verdicts: Array<{
     categoryName: string;
-    source: 'llm' | 'rule';
+    source: 'llm' | 'rule' | 'decision';
     confidence: number | null;
     evidence: string;
   }>;
@@ -745,7 +745,7 @@ export class Db {
       )
       .all(fromTs, toTs) as Array<{
         room_id: string; live_time: number; category_name: string;
-        source: 'llm' | 'rule'; confidence: number | null; evidence: string;
+        source: 'llm' | 'rule' | 'decision'; confidence: number | null; evidence: string;
       }>;
     const streamerByUid = new Map(this.listStreamers().map((s) => [s.uid, s]));
 

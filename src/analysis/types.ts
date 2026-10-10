@@ -5,8 +5,9 @@ export interface Classification {
   categoryId: number;
   /** 冗余存名（= categories.name），分类删除后历史仍可读 */
   name: string;
-  /** llm = LLM 判定（权威路径）；rule = 确定性条件（无提示词分类 / LLM 不可用时的回退） */
-  source: 'llm' | 'rule';
+  /** llm = LLM 判定（权威路径）；rule = 确定性条件（无提示词分类 / LLM 不可用时的回退）；
+   *  decision = 决策模型通道（占位预留，暂无生产者） */
+  source: 'llm' | 'rule' | 'decision';
   /** LLM 路径置信度（0-1），rule 路径为 null */
   confidence: number | null;
   /** LLM 证据 / 命中的关键词·分区说明 */
