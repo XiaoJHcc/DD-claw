@@ -69,6 +69,7 @@ const store = {
   postRules: clone(M.mockPostRules),
   postRuleSeq: M.mockPostRules.length,
   twitterPosts: clone(M.mockTwitterPosts),
+  postVerdicts: clone(M.mockPostVerdicts),
   pushEnabled: true,
   llmEnabled: true,
   undoHistory: clone(M.mockUndoHistory),
@@ -80,6 +81,13 @@ const store = {
   biliQrStep: 0,
   weiboQrStep: 0,
 };
+
+// 账号卡帖子段的帖子形状（与真实后端 accountPosts 同构）：Post + 该帖判定行 verdicts
+// （键 = `platform:item_id`，字段 ruleId/ruleName/pass/evidence/source；无判定行 = 空数组）
+const postView = (p) => ({
+  ...clone(p),
+  verdicts: clone(store.postVerdicts[p.platform + ':' + p.itemId] ?? []),
+});
 
 // demo 专用的额外供应商：Agent 卡的模型选择器要能演「自动路由 + 多选 + 停用项不出现在选项里」，
 // 而 defaults.json 同时是**真实后端的首启种入信源**（构建期生成 onboarding-defaults.gen.ts），
@@ -618,7 +626,7 @@ for (const p of store.twitterPosts) {
       .filter((p) => p.uid === a.screenName)
       .sort((x2, y2) => y2.pubTs - x2.pubTs)
       .slice(0, 3)
-      .map((p) => clone(p));
+      .map(postView);
     return { ...clone(a), biliName: bili ? (bili.alias || bili.uname || String(a.biliUid)) : null, biliFace: bili ? (bili.face ?? null) : null, posts };
   };
   if (path === '/api/x/accounts' && method === 'GET') {
@@ -713,7 +721,7 @@ for (const p of store.twitterPosts) {
       .filter((p) => p.uid === a.uid)
       .sort((x2, y2) => y2.pubTs - x2.pubTs)
       .slice(0, 3)
-      .map((p) => clone(p));
+      .map(postView);
     return {
       ...clone(a),
       biliName: bili ? (bili.alias || bili.uname || String(a.biliUid)) : null,
@@ -819,7 +827,7 @@ for (const p of store.twitterPosts) {
       .filter((p) => p.uid === a.uid)
       .sort((x2, y2) => y2.pubTs - x2.pubTs)
       .slice(0, 3)
-      .map((p) => clone(p));
+      .map(postView);
     return { ...clone(a), posts };
   };
   if (path === '/api/bili/accounts' && method === 'GET') {

@@ -202,7 +202,8 @@ export const mockWeibo = {
 export const mockWeiboAccounts = [
   {
     id: 1, uid: '1158211483', nickname: 'Hosi_Tiri', biliUid: null, enabled: true,
-    ruleIds: [3],
+    // 选用规则含 rule 1（LLM 判定）——mockPostVerdicts 里那条回退判定行就是它跑出来的
+    ruleIds: [1, 3],
     lastPostId: '5345338974275832', lastPostAt: 1, lastOkAt: 1,
     avatar: '39d3ac4936e727f6ae12b559ee372266.jpg', createdAt: 1, updatedAt: 1,
   },
@@ -265,6 +266,26 @@ export const mockTwitterPosts = [
     pubTs: 1, url: 'https://x.com/seigura/status/2101622144761537011', createdAt: 1,
   },
 ];
+
+// ---- 帖子判定行（账号卡帖子段「推 / 不推」标记的演示数据，键 = `platform:item_id`）----
+// 形状与真实后端 accountPosts 附带的 verdicts 逐字段同构（ruleId/ruleName/pass/evidence/source）；
+// ruleName = 判定时冗余的规则名（规则删除后历史仍可读）。三条演示三种形态：
+// LLM 判过（绿「推」）/ LLM 判否（灰「不推」）/ LLM 不可用回退机械筛选放行（source=rule）；
+// 没跑过判定的帖子不在此表 = 无判定行 = 不显示标记。
+export const mockPostVerdicts = {
+  'twitter:2101671199457894850': [
+    { ruleId: 1, ruleName: '带图原创', pass: true, evidence: '内容是活动出席预告，与直播相关', source: 'llm' },
+  ],
+  'twitter:2101668953844064324': [
+    { ruleId: 1, ruleName: '带图原创', pass: false, evidence: '台风导致的活动变更通知，不是直播预告', source: 'llm' },
+  ],
+  'weibo:5345338974275832': [
+    {
+      ruleId: 1, ruleName: '带图原创', pass: true,
+      evidence: 'LLM 不可用/失败，回退机械筛选放行（LLM 未启用）', source: 'rule',
+    },
+  ],
+};
 
 // ---- 变更历史（P0b 撤销的用户面的 demo 态）：六条 = 设置 LLM 密钥（含 refill 副作用：撤销 = 清空密钥
 // 需重填）/ 保存分类 / 删分类（级联 4 行 = 「多行明细」样例）/ 群渠道关推送（MCP 来源 + 渠道栈）/

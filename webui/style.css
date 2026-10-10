@@ -173,6 +173,7 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 .tag-purple{background:rgba(139,124,246,.12);color:var(--purple)}
 .tag-amber{background:rgba(232,161,58,.14);color:var(--amber)}
 .tag-pink{background:rgba(255,92,138,.10);color:var(--pink)}
+.tag-gray{background:var(--fill);color:var(--text-2)}
 
 /* ---- 按钮：统一 36 高圆角矩形（--r-md）。按钮文字标准 = 13px + 600 加粗（比正文小一档、更挺括）。
    语义与配色同 v1：

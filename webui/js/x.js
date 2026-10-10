@@ -450,6 +450,15 @@ function rulesFor(a) {
 // 帖子行：与主播动态同一套结构（.st-post），streamers.js 的全局 hover 委托直接生效。
 // 「转发」三平台共用（type='retweet'：X/微博在抓取层折进、B站 FORWARD 在源归一）；
 // B站的非转发帖统一标「动态」（细分标签 DYNAMIC_TYPE_* 在主播卡第三栏才有）。
+// 判定标记（判定回看）：该帖每条判定行一个标记——pass=1 绿「推」/ pass=0 灰「不推」，
+// hover/title 看规则名 + 理由；无判定行（没跑过判定）不显示标记。
+function verdictTagsHtml(verdicts) {
+  return (verdicts || []).map(function (v) {
+    const tip = (v.ruleName || '规则 #' + v.ruleId) + (v.evidence ? '：' + v.evidence : '');
+    return `<span class="tag ${v.pass ? 'tag-mint' : 'tag-gray'}" title="${esc(tip)}">${v.pass ? '推' : '不推'}</span>`;
+  }).join('');
+}
+
 function postRowHtml(p, open) {
   const [label, cls] = p.type === 'retweet' ? ['转发', 'tag-purple']
     : p.platform === 'bili_dynamic' ? ['动态', 'tag-pink']
@@ -461,6 +470,7 @@ function postRowHtml(p, open) {
   const inner =
     (pic ? `<img class="pt-img" src="${esc(pic)}" referrerpolicy="no-referrer" alt="">` : '') +
     `<span class="pt-main"><span class="pt-head"><span class="tag ${cls}">${label}</span>` +
+    verdictTagsHtml(p.verdicts) +
     `<small class="pt-tm">${p.pubTs ? relTime(p.pubTs) : ''}</small></span>` +
     `<span class="pt-x">${esc(p.text || '(无文字)')}</span></span>`;
   const clsAttr = `st-post${open ? ' open' : ''}`;

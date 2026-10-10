@@ -212,9 +212,14 @@ export function splitPushRuleChannel(
 
 export type VerdictSubjectType = 'live' | 'post';
 
-/** 直播场次的 subject_id（`room_id:live_time`）；图文帖用 `platform:item_id` */
+/** 直播场次的 subject_id（`room_id:live_time`）；图文帖用 `postVerdictSubjectId` */
 export function liveVerdictSubjectId(roomId: string, liveTime: number): string {
   return `${roomId}:${liveTime}`;
+}
+
+/** 图文帖的 subject_id（`platform:item_id`，与 liveVerdictSubjectId 并列的身份键） */
+export function postVerdictSubjectId(platform: string, itemId: string): string {
+  return `${platform}:${itemId}`;
 }
 
 export interface VerdictRow {

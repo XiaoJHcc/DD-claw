@@ -7,7 +7,7 @@ import {
   renderPostTemplate, renderTemplate,
   type PostCandidate,
 } from '../analysis/matcher.js';
-import { isPushEnabled } from './push.js';
+import { isPushEnabled, postVerdictSubjectId } from './push.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 import { localizeImage, localizeImageViaProxy } from '../notify/image-cache.js';
 import { mapLimit } from './concurrency.js';
@@ -323,6 +323,7 @@ export class Pipeline {
     // LLM 判定 / 翻译（规则级，默认关）：判定语义 = 「这条规则是否还贡献渠道」——
     // 开了判定且模型说不推的规则不贡献渠道（与「命中规则独立生效、渠道取并集」一致），
     // 没开判定的规则照常贡献。LLM 不可用/失败一律按机械筛选放行（post-analyzer 内部处理）。
+    const subjectId = postVerdictSubjectId(platform, p.itemId ?? '');
     const contributing: PostRule[] = [];
     let translated: string | null = null;
     const analyzed = new Map<string, PostAnalysis>();
@@ -337,6 +338,24 @@ export class Pipeline {
       if (!a) {
         a = await this.deps.queue.run(() => this.deps.postAnalyzer!.analyze(post, r, imageDataUrls));
         analyzed.set(key, a);
+      }
+      // 判定落 verdicts（在聚合推送之前，无论最终推不推）：跑了分析的规则各记一行——
+      // memo 共享同一次分析的多条规则也各落一行（ruleId 不同，UNIQUE 兜住重复）。
+      // 'llm' 判否 = 0 落库（「为什么没推」可回看的核心）；'fallback' = 回退机械筛选放行；
+      // 'off' = 该规则没配判定口径，无判定可记，不写。
+      if (a.source === 'llm') {
+        db.insertVerdict({
+          subjectType: 'post', subjectId, uid: String(post.accountId),
+          categoryId: 0, ruleId: r.id, categoryName: r.name,
+          source: 'llm', pass: a.pass, confidence: null, evidence: a.reason,
+        });
+      } else if (a.source === 'fallback') {
+        db.insertVerdict({
+          subjectType: 'post', subjectId, uid: String(post.accountId),
+          categoryId: 0, ruleId: r.id, categoryName: r.name,
+          source: 'rule', pass: true, confidence: null,
+          evidence: `LLM 不可用/失败，回退机械筛选放行${a.reason ? `（${a.reason}）` : ''}`,
+        });
       }
       if (r.llmJudge && a.source === 'llm' && !a.pass) {
         log.info(

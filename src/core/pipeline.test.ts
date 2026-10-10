@@ -6,7 +6,7 @@ import { AnalysisQueue } from '../analysis/queue.js';
 import { OncePerSessionRule } from '../rules/once-per-session.js';
 import type { AnalysisContext, Classification, Classifier } from '../analysis/types.js';
 import type { PushMessage, Signal } from './types.js';
-import type { PushChannel, PushRule } from './push.js';
+import type { NewVerdict, PushChannel, PushRule } from './push.js';
 import { defaultPostFilters, type PostRule } from './post-rules.js';
 import type { XAccount } from './x-accounts.js';
 import type { WeiboAccount } from './weibo-accounts.js';
@@ -90,6 +90,10 @@ class FakeDb {
   getBiliAccountByUid(uid: string) {
     return this.biliAccounts.get(uid);
   }
+
+  // ---- verdicts：判定归档（P1b 图文判定落库，只记形状不碰 SQL）----
+  verdicts: NewVerdict[] = [];
+  insertVerdict(v: NewVerdict) { this.verdicts.push(v); }
 }
 
 function rule(over: Partial<PushRule> = {}): PushRule {
@@ -879,6 +883,89 @@ test('同一（判定标准 + 翻译开关）只问模型一次：两条同配�
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
   assert.equal(allow.calls.length, 1, '同配置合并成一次调用（省额度与延迟）');
+});
+
+// ---- 判定归档（P1b）：跑了 analyze 的规则各落一行 verdicts，在聚合推送之前、无论推不推 ----
+
+test('判定落 verdicts：llm 判定通过/判否都留痕（判否 = 0 落库，「为什么没推」可回看）', async () => {
+  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '是直播预告', translation: null }));
+  const h = feedHarness([judgeRule()], [xAccount()], allow);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+  assert.equal(h.db.verdicts.length, 1);
+  const v = h.db.verdicts[0]!;
+  assert.equal(v.subjectType, 'post');
+  assert.equal(v.subjectId, 'twitter:9001', '身份键 = platform:item_id');
+  assert.equal(v.uid, '1', '账号行 id');
+  assert.equal(v.categoryId, 0, '哨兵：规则级判定不填分类');
+  assert.equal(v.ruleId, 1);
+  assert.equal(v.categoryName, '图文帖规则 1', '规则名冗余，规则删除后仍可读');
+  assert.equal(v.source, 'llm');
+  assert.equal(v.pass, true);
+  assert.equal(v.confidence, null);
+  assert.equal(v.evidence, '是直播预告');
+
+  const deny = new FakePostAnalyzer(() => ({ source: 'llm', pass: false, reason: '只是闲聊', translation: null }));
+  const h2 = feedHarness([judgeRule()], [xAccount()], deny);
+  h2.bus.emit(feedSig());
+  await h2.pipeline.whenIdle();
+  assert.equal(h2.disp.sent.length, 0, '判否不推');
+  assert.equal(h2.db.verdicts.length, 1, '判否也落库');
+  assert.equal(h2.db.verdicts[0]!.pass, false, '判否 = 0 落库');
+  assert.equal(h2.db.verdicts[0]!.evidence, '只是闲聊');
+});
+
+test('判定落 verdicts：LLM 不可用/失败回退 = source rule 放行（evidence 注明回退并保留原 reason）', async () => {
+  const fallback = new FakePostAnalyzer(() => ({
+    source: 'fallback', pass: true, reason: 'LLM 未启用', translation: null,
+  }));
+  const h = feedHarness([judgeRule()], [xAccount()], fallback);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '回退照推');
+  assert.equal(h.db.verdicts.length, 1);
+  const v = h.db.verdicts[0]!;
+  assert.equal(v.source, 'rule');
+  assert.equal(v.pass, true);
+  assert.ok(v.evidence.includes('回退机械筛选放行'), v.evidence);
+  assert.ok(v.evidence.includes('LLM 未启用'), '保留原 reason 信息');
+});
+
+test('判定落 verdicts：source=off（没配判定口径）不写', async () => {
+  // 只开翻译的规则在微博帖上被平台门控掉 → analyze 返回 off，无判定可记（照机械筛选推）
+  const off = new FakePostAnalyzer(() => ({ source: 'off', pass: true, reason: '', translation: null }));
+  const h = weiboHarness([postRule({ llmTranslate: true })], [weiboAccount()], off);
+  h.bus.emit(weiboSig());
+  await h.pipeline.whenIdle();
+  assert.equal(off.calls.length, 1, '跑了 analyze');
+  assert.equal(h.disp.sent.length, 1, 'off = 没判定口径，照推');
+  assert.equal(h.db.verdicts.length, 0, 'off 不写 verdicts');
+});
+
+test('判定落 verdicts：memo 共享同一次分析的多条规则各落一行（ruleId 不同）', async () => {
+  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '是预告', translation: null }));
+  const h = feedHarness([
+    judgeRule({ id: 1, sort: 0, channels: [1] }),
+    judgeRule({ id: 2, name: '图文帖规则 2', sort: 1, channels: [2] }),
+  ], [xAccount()], allow);
+  h.db.channels.push({
+    id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001',
+    enabled: true, createdAt: 0, updatedAt: 0,
+  });
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(allow.calls.length, 1, '同配置只调一次');
+  assert.equal(h.disp.sent.length, 1);
+  assert.deepEqual(h.disp.sent[0]!.channels, ['1', '2']);
+  assert.equal(h.db.verdicts.length, 2, 'memo 共享也各落一行');
+  assert.deepEqual(h.db.verdicts.map((v) => v.ruleId).sort(), [1, 2]);
+  assert.deepEqual(h.db.verdicts.map((v) => v.subjectId), ['twitter:9001', 'twitter:9001'], '同一帖同一身份键');
+  assert.deepEqual(
+    h.db.verdicts.map((v) => v.categoryName),
+    ['图文帖规则 1', '图文帖规则 2'],
+    '规则名各自冗余',
+  );
 });
 
 // ---- feed_post 分支（B站动态）：与 X/微博同一条路径，账号是 bili_accounts ----

@@ -33,7 +33,7 @@ import { isListenEnabled, listenReadyFor, listenSetting, type ListenFeature } fr
 import {
   getRuntimeConfig,
 } from '../core/runtime-config.js';
-import { isPushEnabled } from '../core/push.js';
+import { isPushEnabled, postVerdictSubjectId } from '../core/push.js';
 import type { XConfig } from '../core/x-config.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
@@ -1361,18 +1361,29 @@ function listenInfo(deps: PanelDeps): unknown {
 
 // ---- X 关注账号（独立名单）辅助 ----
 
+/**
+ * 账号卡帖子段的数据形状（X / 微博 / B站动态三平台共用的定义处）：Post 去掉 raw +
+ * 该帖的判定行 `verdicts`（P1b 判定回看，`ruleId/ruleName/pass/evidence/source`）。
+ * ruleName 取 verdicts.category_name 冗余（规则删除后历史仍可读）；无判定行 = 空数组。
+ */
+function accountPosts(db: Db, platform: string, uid: string, limit = 3): unknown[] {
+  return db.searchPosts({ platform, uid, limit }).map(({ raw: _raw, ...p }) => ({
+    ...p,
+    verdicts: db.listVerdicts('post', postVerdictSubjectId(p.platform, p.itemId)).map((v) => ({
+      ruleId: v.ruleId, ruleName: v.categoryName, pass: v.pass, evidence: v.evidence, source: v.source,
+    })),
+  }));
+}
+
 /** 名单行的面板视图：附关联主播展示名（简称优先，同 streamers.alias 约定）+ 最近 3 条推文（卡片动态段）。
  *  biliFace 是头像兜底：X 链路还没抓到头像时，卡片先用关联主播的 B站头像。 */
 function xAccountView(db: Db, a: ReturnType<Db['listXAccounts']>[number]): unknown {
   const bili = a.biliUid ? db.getStreamer(a.biliUid) : undefined;
-  const posts = db
-    .searchPosts({ platform: 'twitter', uid: a.screenName, limit: 3 })
-    .map(({ raw: _raw, ...p }) => p);
   return {
     ...a,
     biliName: bili ? (bili.alias || bili.uname || a.biliUid) : null,
     biliFace: bili?.face ?? null,
-    posts,
+    posts: accountPosts(db, 'twitter', a.screenName),
   };
 }
 
@@ -1394,14 +1405,11 @@ function xAccountInfo(db: Db, id: number): unknown {
  */
 function weiboAccountView(db: Db, a: ReturnType<Db['listWeiboAccounts']>[number]): unknown {
   const bili = a.biliUid ? db.getStreamer(a.biliUid) : undefined;
-  const posts = db
-    .searchPosts({ platform: 'weibo', uid: a.uid, limit: 3 })
-    .map(({ raw: _raw, ...p }) => p);
   return {
     ...a,
     biliName: bili ? (bili.alias || bili.uname || a.biliUid) : null,
     biliFace: bili?.face ?? null,
-    posts,
+    posts: accountPosts(db, 'weibo', a.uid),
   };
 }
 
@@ -1422,10 +1430,7 @@ function weiboAccountInfo(db: Db, id: number): unknown {
  * 账号本身就是主播（uid 即身份锚点），不像 x/weibo 那样需要 biliUid 关联与头像兜底。
  */
 function biliAccountView(db: Db, a: ReturnType<Db['listBiliAccounts']>[number]): unknown {
-  const posts = db
-    .searchPosts({ platform: 'bili_dynamic', uid: a.uid, limit: 3 })
-    .map(({ raw: _raw, ...p }) => p);
-  return { ...a, posts };
+  return { ...a, posts: accountPosts(db, 'bili_dynamic', a.uid) };
 }
 
 function biliAccountList(db: Db): unknown[] {

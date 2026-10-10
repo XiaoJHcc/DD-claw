@@ -2114,6 +2114,61 @@ test('/api/x/accounts：名单行携带最近 3 条推文（不含 raw）+ 关�
   assert.equal(accounts[0]!.posts[0]!.raw, undefined, 'raw 不下发');
 });
 
+test('账号端点：帖子附判定行 verdicts（ruleId/ruleName/pass/evidence/source，按主体不串帖）', async (t) => {
+  const db = new Db(':memory:');
+  const { base } = await setup(t, { db, x: makeXDep(db, []), weibo: makeWeiboDep(db, []) });
+  db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true });
+  db.upsertWeiboAccount({ uid: '2203177060', nickname: null, biliUid: null, enabled: true });
+  db.upsertBiliAccount({ uid: '7706705' });
+  db.insertPosts([
+    { platform: 'twitter', uid: 'watase_yuzuki', itemId: '1', type: 'tweet', text: 'a', pics: [], pubTs: 1000, url: null, raw: null },
+    { platform: 'twitter', uid: 'watase_yuzuki', itemId: '2', type: 'tweet', text: 'b', pics: [], pubTs: 2000, url: null, raw: null },
+    { platform: 'weibo', uid: '2203177060', itemId: '5', type: 'mblog', text: 'c', pics: [], pubTs: 1000, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '7706705', itemId: '9', type: 'DYNAMIC_TYPE_WORD', text: 'd', pics: [], pubTs: 1000, url: null, raw: null },
+  ]);
+  db.insertVerdict({
+    subjectType: 'post', subjectId: 'twitter:1', uid: '1', categoryId: 0, ruleId: 7,
+    categoryName: '带图原创', source: 'llm', pass: false, confidence: null, evidence: '不是预告',
+  });
+  db.insertVerdict({
+    subjectType: 'post', subjectId: 'twitter:1', uid: '1', categoryId: 0, ruleId: 8,
+    categoryName: '备用规则', source: 'rule', pass: true, confidence: null,
+    evidence: 'LLM 不可用/失败，回退机械筛选放行（LLM 未启用）',
+  });
+  db.insertVerdict({
+    subjectType: 'post', subjectId: 'weibo:5', uid: '2', categoryId: 0, ruleId: 3,
+    categoryName: '微博预告', source: 'llm', pass: true, confidence: 0.9, evidence: '是预告',
+  });
+  // live 主体与别帖的判定都不串进本帖
+  db.insertVerdict({
+    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1,
+    categoryName: '游戏', source: 'llm', pass: true, confidence: 0.8, evidence: '在打 APEX',
+  });
+
+  type PostView = { itemId: string; verdicts: unknown[] };
+  const x = (await api(base, '/api/x/accounts')).json.accounts as Array<{ posts: PostView[] }>;
+  const x1 = x[0]!.posts.find((p) => p.itemId === '1')!;
+  assert.deepEqual(x1.verdicts, [
+    { ruleId: 7, ruleName: '带图原创', pass: false, evidence: '不是预告', source: 'llm' },
+    {
+      ruleId: 8, ruleName: '备用规则', pass: true,
+      evidence: 'LLM 不可用/失败，回退机械筛选放行（LLM 未启用）', source: 'rule',
+    },
+  ], '同一帖多条判定按行回看');
+  assert.deepEqual(
+    x[0]!.posts.find((p) => p.itemId === '2')!.verdicts, [],
+    '无判定行 = 空数组（live 主体的判定不串进帖子）',
+  );
+
+  const wb = (await api(base, '/api/weibo/accounts')).json.accounts as Array<{ posts: PostView[] }>;
+  assert.deepEqual(wb[0]!.posts.find((p) => p.itemId === '5')!.verdicts, [
+    { ruleId: 3, ruleName: '微博预告', pass: true, evidence: '是预告', source: 'llm' },
+  ]);
+
+  const bi = (await api(base, '/api/bili/accounts')).json.accounts as Array<{ posts: PostView[] }>;
+  assert.deepEqual(bi[0]!.posts.find((p) => p.itemId === '9')!.verdicts, [], '无判定行 = 空数组');
+});
+
 // ---- 微博（图文分页第二个来源）：状态快照 + 独立名单 CRUD ----
 
 /** 生产装配形状的 weibo dep：GET 只读快照，名单变化回调热生效（计数验证） */

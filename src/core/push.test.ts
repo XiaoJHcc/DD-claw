@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Db } from './db.js';
 import {
-  isPushEnabled, liveVerdictSubjectId, setPushEnabled, splitPushRuleChannel,
+  isPushEnabled, liveVerdictSubjectId, postVerdictSubjectId, setPushEnabled, splitPushRuleChannel,
   type NewCategory, type NewPushChannel, type NewPushRule, type NewVerdict,
 } from './push.js';
 
@@ -235,6 +235,7 @@ test('splitPushRuleChannel：单渠道就地不拆；本渠道不在规则里则
 test('verdicts：插入 / UNIQUE(subject_type, subject_id, category_id, rule_id) 去重 / 按主体查询', (t) => {
   const db = memDb(t);
   assert.equal(liveVerdictSubjectId('r1', 1_785_310_737), 'r1:1785310737', 'live 身份键 = room_id:live_time');
+  assert.equal(postVerdictSubjectId('twitter', '9001'), 'twitter:9001', 'post 身份键 = platform:item_id');
   db.insertVerdict(verdict());
   db.insertVerdict(verdict({ categoryId: 2, categoryName: '游戏', source: 'llm', confidence: 0.9, evidence: '在打 APEX' }));
   db.insertVerdict(verdict({ evidence: '重复插入' }));
