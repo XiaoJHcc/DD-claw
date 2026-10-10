@@ -6,6 +6,7 @@
  * X 是独立于 B站/微博的一条路径，它的设置不该混进开播那套面板。
  */
 import type { Db } from './db.js';
+import { splitCsvText } from './csv.js';
 
 export const X_PROXY_DEFAULT = 'http://127.0.0.1:7890';
 /** 2026-09-16 实测可用的两个实例；实例会死，所以这是可编辑的默认值而非硬编码 */
@@ -123,7 +124,7 @@ export function isSavedConfigTest(
 ): boolean {
   const proxySame = input.proxyUrl === undefined || input.proxyUrl.trim() === cfg.proxyUrl.trim();
   const instSame = input.instances === undefined
-    || input.instances.split(',').map((s) => s.trim()).filter(Boolean).join(',') === cfg.instances.join(',');
+    || splitCsvText(input.instances).join(',') === cfg.instances.join(',');
   return proxySame && instSame;
 }
 

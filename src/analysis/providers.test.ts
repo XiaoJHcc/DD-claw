@@ -466,6 +466,8 @@ test('dbKeysOf：面板填写（逗号分隔多 key）是唯一来源', () => {
     assert.deepEqual(keysOf(spec({ name: 'p' })), [], '未填 = 无 key');
     db.setSetting('llm_key:p', 'sk-1, sk-2');
     assert.deepEqual(keysOf(spec({ name: 'p' })), ['sk-1', 'sk-2'], '拆分多 key');
+    db.setSetting('llm_key:p', 'sk-1，sk-2');
+    assert.deepEqual(keysOf(spec({ name: 'p' })), ['sk-1', 'sk-2'], '存量中文逗号值也能拆开');
     db.setSetting('llm_key:p', '  ');
     assert.deepEqual(keysOf(spec({ name: 'p' })), [], '空白 = 未填');
   } finally {

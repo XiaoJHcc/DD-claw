@@ -7,6 +7,7 @@
 // + mock-data.js 手写设置卡片。夹具带 meta.exportedAt——demo 把页面时间冻结在导出
 // 时刻渲染（freezeTime），哪天打开看到的都是导出瞬间的样子。
 import * as M from './mock-data.js';
+import { splitCsv } from '../js/core.js';
 
 function clone(x) { return structuredClone(x); }
 
@@ -409,7 +410,7 @@ for (const p of store.twitterPosts) {
     const prev = JSON.stringify(store.x.config);
     if (typeof b.proxyUrl === 'string') store.x.config.proxyUrl = b.proxyUrl;
     if (typeof b.instances === 'string') {
-      store.x.config.instances = b.instances.split(',').map((s) => s.trim()).filter(Boolean);
+      store.x.config.instances = splitCsv(b.instances);
     }
     if (Number.isInteger(b.intervalSec)) store.x.config.intervalSec = b.intervalSec;
     if (typeof b.fallbackHtml === 'boolean') store.x.config.fallbackHtml = b.fallbackHtml;
@@ -598,7 +599,7 @@ for (const p of store.twitterPosts) {
     const target = b.target || 'all';
     const proxyUrl = typeof b.proxyUrl === 'string' && b.proxyUrl ? b.proxyUrl : store.x.config.proxyUrl;
     const hosts = typeof b.instances === 'string' && b.instances
-      ? b.instances.split(',').map((s) => s.trim()).filter(Boolean)
+      ? splitCsv(b.instances)
       : store.x.config.instances;
     const out = {};
     // 演示口径：代理与免登录恒通；实例按已知名单给「两通一限速」，未知实例按 404 不可用
@@ -626,7 +627,7 @@ for (const p of store.twitterPosts) {
     // 与真实后端 isSavedConfigTest 同构：测的是未保存的输入值 → 只回结果，不动卡片快照
     const proxySame = b.proxyUrl === undefined || String(b.proxyUrl).trim() === store.x.config.proxyUrl.trim();
     const instSame = b.instances === undefined
-      || String(b.instances).split(',').map((s) => s.trim()).filter(Boolean).join(',') === store.x.config.instances.join(',');
+      || splitCsv(String(b.instances)).join(',') === store.x.config.instances.join(',');
     if (!(proxySame && instSame)) return ok({ ...out, status: store.x.status });
     if (out.proxy) store.x.status.proxy = { ok: out.proxy.ok, message: out.proxy.message, checkedAt: now };
     if (out.instances) {

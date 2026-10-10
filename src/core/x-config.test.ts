@@ -107,6 +107,7 @@ test('isSavedConfigTest：只有「测的就是已保存配置」才算，未保
   assert.equal(isSavedConfigTest({ proxyUrl: 'http://127.0.0.1:7890' }, cfg), true, '值相同（含空白差异）');
   assert.equal(isSavedConfigTest({ proxyUrl: ' socks5://127.0.0.1:1080 ' }, cfg), false, '试了未保存的坏代理');
   assert.equal(isSavedConfigTest({ instances: 'a.example,b.example' }, cfg), true, '分隔符归一后相同');
+  assert.equal(isSavedConfigTest({ instances: 'a.example，b.example' }, cfg), true, '中文逗号同样归一');
   assert.equal(isSavedConfigTest({ instances: 'a.example' }, cfg), false, '实例名单不同');
   assert.equal(isSavedConfigTest({ proxyUrl: 'http://127.0.0.1:7890', instances: 'a.example' }, cfg), false, '任一不同即不同');
 });

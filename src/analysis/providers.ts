@@ -1,5 +1,6 @@
 import { makeLogger } from '../logger.js';
 import type { AppConfig, LlmProviderConfig } from '../config/index.js';
+import { splitCsvText } from '../core/csv.js';
 import type { Db } from '../core/db.js';
 
 const log = makeLogger('llm');
@@ -45,14 +46,9 @@ export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 /** key 解析器：按 provider 定义给出 key 池 */
 export type SpecKeysOf = (spec: LlmProviderConfig) => string[];
 
-/** 生产解析：面板填写的 key（settings 表 `llm_key:<providerName>`，逗号分隔多 key），唯一来源 */
+/** 生产解析：面板填写的 key（settings 表 `llm_key:<providerName>`，逗号分隔多 key，中英文逗号均可），唯一来源 */
 export function dbKeysOf(db: Db): SpecKeysOf {
-  return (spec) => {
-    const panel = db.getSetting(`llm_key:${spec.name}`);
-    return panel && panel.trim()
-      ? panel.split(',').map((s) => s.trim()).filter(Boolean)
-      : [];
-  };
+  return (spec) => splitCsvText(db.getSetting(`llm_key:${spec.name}`));
 }
 
 /**

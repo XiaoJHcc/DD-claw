@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { initFileSink, makeLogger } from './logger.js';
 import { Db } from './core/db.js';
+import { splitCsvText } from './core/csv.js';
 import { Bus } from './core/bus.js';
 import { Pipeline } from './core/pipeline.js';
 import { toLiveEvent } from './core/types.js';
@@ -87,7 +88,7 @@ function parseArgs(argv: string[]): Args {
     } else if (a === '--napcat-setup') args.napcatSetup = true;
     else if (a === '--force-uid') {
       const v = argv[++i];
-      if (v) args.forceUids.push(...v.split(',').map((s) => s.trim()).filter(Boolean));
+      if (v) args.forceUids.push(...splitCsvText(v));
     }
   }
   return args;

@@ -2,15 +2,11 @@
 // + 底部新增按钮。分类 = LLM 提示词 + 确定性条件（关键词/分区，且/或），归类结果供推送规则引用。
 // 新增/编辑走一级 sheet，保存报错内联在按钮行；删除分类会级联停用引用它的推送规则（先 confirm 告知）。
 // 视觉 = v2（行内嵌形态 + tag-purple/blue/mint 摘要标签 + .inp 表单控件），行为与接口不变。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, makeSortable, openSheet, closeSheet } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, makeSortable, openSheet, closeSheet, splitCsv } from './core.js';
 import { loadPush } from './push.js';
 import { loadStreamers } from './streamers.js';
 
 let catCache = [];
-
-function splitCsv(v) {
-  return v.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-}
 
 function catById(id) {
   for (let i = 0; i < catCache.length; i++) if (catCache[i].id === id) return catCache[i];
@@ -89,11 +85,11 @@ function openCategorySheet(id) {
       (c && c.llmPrompt ? esc(c.llmPrompt) : '') + '</textarea>') +
     // 关键词/分区并排，中间小方钮切换两组条件的关系（且/或）；当前值在按钮 data-mode 上
     field('确定性条件', '<div class="cond-row">' +
-      `<input class="inp" id="cg-kw" placeholder="关键词，逗号分隔" value="` +
+      `<input class="inp" id="cg-kw" placeholder="关键词，中英文逗号分隔" value="` +
         (c ? esc(c.keywords.join(', ')) : '') + '">' +
       `<button class="cond-toggle" id="cg-cond" data-action="toggle-cond" data-mode="${cond}"` +
         ' title="关键词与分区两组条件的关系，点击切换 且/或">' + (cond === 'or' ? '或' : '且') + '</button>' +
-      `<input class="inp" id="cg-area" placeholder="分区，逗号分隔" value="` +
+      `<input class="inp" id="cg-area" placeholder="分区，中英文逗号分隔" value="` +
         (c ? esc(c.areas.join(', ')) : '') + '">' +
       '</div>') +
     '<div class="sheet-foot"><span id="category-err" class="form-err"></span>' +

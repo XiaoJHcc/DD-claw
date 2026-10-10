@@ -9,6 +9,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
+import { normalizeCsvText, splitCsvText } from '../core/csv.js';
 import type { Streamer, StreamerInput } from '../core/streamers.js';
 import {
   HttpError, checkAccountRuleIds, checkCategoryConditions, checkChannelShape, checkRuleRefs, parseBiliAccountPatch,
@@ -1396,7 +1397,7 @@ function llmKeySource(
   const panel = db.getSetting(`llm_key:${p.name}`);
   if (panel && panel.trim()) {
     const v = panel.trim();
-    return { source: 'panel', count: v.split(',').map((s) => s.trim()).filter(Boolean).length, value: v };
+    return { source: 'panel', count: splitCsvText(v).length, value: v };
   }
   return { source: 'unset', count: 0, value: null };
 }
@@ -1463,7 +1464,7 @@ function putLlmProvider(deps: PanelDeps, name: string | null, body: unknown): un
   }
   // 表单可一并提交 key（弹窗编辑体验：一个表单存所有）；空串 = 清除面板填写
   if (typeof b.key === 'string') {
-    deps.db.setSetting(`llm_key:${provider.name}`, b.key.trim());
+    deps.db.setSetting(`llm_key:${provider.name}`, normalizeCsvText(b.key.trim()));
   }
   deps.llm!.onProvidersChanged?.();
   return { ok: true, name: provider.name };
@@ -1489,16 +1490,16 @@ function putLlmProviderOrder(deps: PanelDeps, body: unknown): unknown {
   return { ok: true };
 }
 
-/** 保存/清除 key：按 provider 存 settings 表；空 value = 清除已填 key */
+/** 保存/清除 key：按 provider 存 settings 表；空 value = 清除已填 key。中文逗号归一成英文逗号落库 */
 function putLlmKey(deps: PanelDeps, body: unknown): unknown {
   const b = (body ?? {}) as Record<string, unknown>;
   const name = typeof b.provider === 'string' ? b.provider.trim() : '';
-  const value = typeof b.value === 'string' ? b.value.trim() : '';
+  const value = typeof b.value === 'string' ? normalizeCsvText(b.value.trim()) : '';
   const list = deps.llm!.store?.list() ?? [];
   const provider = list.find((p) => p.name === name);
   if (!provider) throw new HttpError(404, `provider 不存在: ${name}`);
   if (value && !/^[^\s,]+(\s*,\s*[^\s,]+)*$/.test(value)) {
-    throw new HttpError(400, '多个 key 用英文逗号分隔，key 内不能有空格');
+    throw new HttpError(400, '多个 key 用逗号分隔（中英文逗号均可），key 内不能有空格');
   }
   deps.db.setSetting(`llm_key:${name}`, value);
   deps.llm!.router?.refreshKeys();

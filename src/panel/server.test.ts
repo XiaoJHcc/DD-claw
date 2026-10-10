@@ -1172,10 +1172,13 @@ test('PUT /api/llm/keys：保存 → source=panel + router 热更新 + GET 回�
   assert.match(llmRouter!.describe()[0]!.status, /缺 key/);
 });
 
-test('PUT /api/llm/keys：provider 不存在 404；非法 value 400', async (t) => {
+test('PUT /api/llm/keys：provider 不存在 404；非法 value 400；中文逗号归一成英文落库', async (t) => {
   const { base } = await setup(t, { llm: { config: LLM_CFG } });
   assert.equal((await api(base, '/api/llm/keys', 'PUT', { provider: 'nope', value: 'x' })).status, 404);
   assert.equal((await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'has space' })).status, 400);
+  const cn = await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-a，sk-b' });
+  assert.equal(cn.status, 200, '中文逗号分隔的多 key 可保存');
+  assert.deepEqual(cn.json.key, { source: 'panel', count: 2, value: 'sk-a,sk-b' }, '落库归一成英文逗号');
 });
 
 test('POST /api/llm/providers/:name/test：真实 ping 判断能不能用', async (t) => {

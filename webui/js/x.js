@@ -16,7 +16,7 @@
 // 行可点开进规则编辑二级浮窗。
 // 纪律：GET 只读后端快照（后端绝不在读取路径打网络），探测一律由弹窗里的测试 icon 显式触发；
 // 测试允许用输入框里还没保存的值（先测后存），未保存值的结果只动按钮、不污染卡片状态。
-import { api, toast, ACTIONS, CHANGES, INPUTS, esc, field, checkRowHtml, dropdownHtml, openSheet, closeSheet, sheetCleanups, switchHtml, iconBtn, checkDotHtml, gripHtml, makeSortable, avatarHtml, relTime, ruleDeadReason, segnavHtml, layoutSegnav, segnavSelect } from './core.js';
+import { api, toast, ACTIONS, CHANGES, INPUTS, esc, field, checkRowHtml, dropdownHtml, openSheet, closeSheet, sheetCleanups, switchHtml, iconBtn, checkDotHtml, gripHtml, makeSortable, avatarHtml, relTime, ruleDeadReason, segnavHtml, layoutSegnav, segnavSelect, splitCsv } from './core.js';
 import { icon } from './icons.js';
 import { openPlatformLogin, PLAT_STATE, setLoginConfirmedHook } from './listen.js';
 
@@ -276,7 +276,7 @@ ACTIONS['open-x-settings'] = function () {
     field('HTTP 代理', '<div class="field-inline">' +
       `<input class="inp" id="xs-proxy" data-input="x-test-dirty" placeholder="http://127.0.0.1:7890（留空 = 不用代理）" value="${esc(cfg.proxyUrl || '')}">` +
       iconBtn('test-x-proxy', 'bolt', '测试代理') + '</div>') +
-    field('Nitter 实例（逗号分隔）', '<div class="field-inline">' +
+    field('Nitter 实例（中英文逗号分隔）', '<div class="field-inline">' +
       `<input class="inp" id="xs-inst" data-input="x-test-dirty" placeholder="nitter.jaydenha.uk,x.n0g.xyz" value="${esc((cfg.instances || []).join(','))}">` +
       iconBtn('test-x-instances', 'bolt', '测试实例') + '</div>') +
     field('抓取间隔（秒，120~86400）', `<input class="inp" type="number" id="xs-interval" value="${esc(String(cfg.intervalSec || 300))}">`) +
@@ -1029,7 +1029,7 @@ function openPostRuleSheet(r) {
     '<div class="field"><label class="field-label">LLM</label><div class="chips" id="pr-llm"></div></div>' +
     `<div class="field" id="pr-judge-field"><label class="field-label">LLM 提示词</label>` +
       `<input class="inp" id="pr-judge" placeholder="${RULE_JUDGE_PH}" value="${r && r.judgePrompt ? esc(r.judgePrompt) : ''}"></div>` +
-    field('判定关键词', `<input class="inp" id="pr-kw" placeholder="逗号分隔，留空 = 不限" value="${r && r.filters.keywords.length ? esc(r.filters.keywords.join(',')) : ''}">`) +
+    field('判定关键词', `<input class="inp" id="pr-kw" placeholder="中英文逗号分隔，留空 = 不限" value="${r && r.filters.keywords.length ? esc(r.filters.keywords.join(',')) : ''}">`) +
     field('推送词', `<input class="inp" id="pr-tpl" placeholder="留空 = 默认（${RULE_TPL}）" value="${r && r.messageTemplate ? esc(r.messageTemplate) : ''}">` +
       '<span class="row-sub">可用变量：{author} {text} {url} {liver}</span>') +
     '<div class="field"><label class="field-label">推送渠道</label><div class="chips" id="pr-chs"></div></div>',
@@ -1064,7 +1064,7 @@ ACTIONS['rule-ch-toggle'] = function (el) {
 ACTIONS['save-post-rule'] = function (el) {
   const err = document.getElementById('pr-err');
   if (err) err.textContent = '';
-  const kw = document.getElementById('pr-kw').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  const kw = splitCsv(document.getElementById('pr-kw').value);
   const judgePrompt = document.getElementById('pr-judge').value.trim();
   const body = {
     channels: ruleDraft.channels,

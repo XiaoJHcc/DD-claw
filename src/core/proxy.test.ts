@@ -29,8 +29,9 @@ test('parseProxyUrl：空值 = 不用代理；socks 与坏形状给配置错误'
     e instanceof TunnelError && e.kind === 'bad-proxy-url');
 });
 
-test('parseInstanceList：逗号/空白分隔、去协议与尾斜杠、去重保序', () => {
+test('parseInstanceList：逗号（中英文）/空白分隔、去协议与尾斜杠、去重保序', () => {
   assert.deepEqual(parseInstanceList('a.com, b.com'), ['a.com', 'b.com']);
+  assert.deepEqual(parseInstanceList('a.com，b.com'), ['a.com', 'b.com'], '中文逗号同样分隔');
   assert.deepEqual(parseInstanceList('https://a.com/  b.com\nc.com'), ['a.com', 'b.com', 'c.com']);
   assert.deepEqual(parseInstanceList('a.com,a.com'), ['a.com']);
   assert.deepEqual(parseInstanceList(''), []);

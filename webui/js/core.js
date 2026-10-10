@@ -9,6 +9,11 @@ export function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+// ---- 逗号分隔列表输入的唯一拆分口径：中英文逗号均可，去空白去空项 ----
+// ---- （关键词/分区/实例等输入框统一走这里，别在卡片模块里再写 split(',')）----
+export function splitCsv(v) {
+  return String(v == null ? '' : v).split(/[,，]/).map(function (s) { return s.trim(); }).filter(Boolean);
+}
 export function api(path, method, body) {
   return fetch(path, {
     method: method || 'GET',

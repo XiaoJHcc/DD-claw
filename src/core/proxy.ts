@@ -15,6 +15,7 @@
  */
 import net from 'node:net';
 import tls from 'node:tls';
+import { splitCsvText } from './csv.js';
 
 export interface ProxyEndpoint {
   host: string;
@@ -68,12 +69,15 @@ export function parseProxyUrl(raw: string | null | undefined): ProxyEndpoint | n
   return { host: u.hostname, port };
 }
 
-/** 实例列表文本（逗号/空白分隔）→ 去空、去重、去协议前缀的 host 数组 */
+/** 实例列表文本（中英文逗号/空白分隔）→ 去空、去重、去协议前缀的 host 数组 */
 export function parseInstanceList(raw: string | null | undefined): string[] {
   const out: string[] = [];
-  for (const part of (raw ?? '').split(/[,\s]+/)) {
-    const s = part.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-    if (s && !out.includes(s)) out.push(s);
+  // 逗号口径统一走 splitCsvText；实例还额外允许空白分隔
+  for (const chunk of splitCsvText(raw)) {
+    for (const part of chunk.split(/\s+/)) {
+      const s = part.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+      if (s && !out.includes(s)) out.push(s);
+    }
   }
   return out;
 }

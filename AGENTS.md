@@ -89,6 +89,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/onboarding.ts` — 首启默认值种入（一次性闸门）
 - `src/core/onboarding-defaults.gen.ts` — 构建期生成物（勿手改）
 - `src/core/concurrency.ts` — `mapLimit` 有界并发
+- `src/core/csv.ts` — 「逗号分隔列表」输入唯一解析口径（`splitCsvText` 拆分 / `normalizeCsvText` 写库归一，中英文逗号均可；面板、MCP、CLI 统一走这里，别处不得再手写 `split(',')`）
 - `src/core/proxy.ts` — **隧道 fetch**（HTTP 代理 CONNECT；Node 22 原生 fetch 不认代理），X 链路唯一出网通道；`TunnelError.stage` 区分代理责任（connect）与目标责任（established），告警分型的依据
 - `src/core/x-config.ts` — X/推特连接配置 + 探测状态快照（settings 唯一信源）
 - `src/core/x-accounts.ts` — X 独立关注名单（行类型/映射/归一化 + 账号级故障列 `fetch_fail_since`/`fetch_error`；表在 db.ts，独立于 streamers）

@@ -24,6 +24,7 @@ import {
 } from '../panel/http-util.js';
 import { scheduleInfo } from '../panel/schedule.js';
 import { setPushEnabled } from '../core/push.js';
+import { normalizeCsvText, splitCsvText } from '../core/csv.js';
 import { setListen, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
 import { X_INTERVAL_MAX, X_INTERVAL_MIN } from '../core/x-config.js';
 import { getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS } from '../core/runtime-config.js';
@@ -366,7 +367,7 @@ const adminTools: McpToolDef[] = [
     description: '更新 X/推特 连接配置（代理地址 / Nitter 实例 / 抓取间隔 / 免登录回退）。只传要改的字段；保存即热生效',
     schema: {
       proxyUrl: z.string().optional().describe('HTTP 代理，如 http://127.0.0.1:7890；空串 = 不用代理'),
-      instances: z.string().optional().describe('Nitter 实例 host，逗号分隔'),
+      instances: z.string().optional().describe('Nitter 实例 host，中英文逗号分隔'),
       intervalSec: z.number().int().min(X_INTERVAL_MIN).max(X_INTERVAL_MAX).optional(),
       fallbackHtml: z.boolean().optional().describe('Nitter 全挂时回退到免登录 x.com HTML'),
     },
@@ -751,8 +752,7 @@ const adminTools: McpToolDef[] = [
       enabled: isLlmEnabled(deps.db),
       providers: (deps.llm?.store?.list() ?? []).map((p) => ({
         ...p,
-        keyCount: (deps.db.getSetting(`llm_key:${p.name}`) ?? '').split(',')
-          .map((s) => s.trim()).filter(Boolean).length,
+        keyCount: splitCsvText(deps.db.getSetting(`llm_key:${p.name}`)).length,
       })),
     }),
   },
@@ -767,7 +767,7 @@ const adminTools: McpToolDef[] = [
       enabled: z.boolean().optional(),
       structuredOutput: z.enum(['schema', 'object', 'none']).optional(),
       api: z.enum(['chat-completions', 'responses']).optional(),
-      key: z.string().optional().describe('API key（多个用英文逗号分隔）；空串 = 清除'),
+      key: z.string().optional().describe('API key（多个用逗号分隔，中英文逗号均可）；空串 = 清除'),
     },
     role: 'admin',
     write: true,
@@ -788,9 +788,9 @@ const adminTools: McpToolDef[] = [
       store.save(prev
         ? list.map((p) => (p.name === provider.name ? provider : p))
         : [...list, provider]);
-      // key 可随表单一并提交（同面板弹窗体验）；空串 = 清除
+      // key 可随表单一并提交（同面板弹窗体验）；空串 = 清除；中文逗号归一成英文逗号落库
       if (typeof args.key === 'string') {
-        deps.db.setSetting(`llm_key:${provider.name}`, args.key.trim());
+        deps.db.setSetting(`llm_key:${provider.name}`, normalizeCsvText(args.key.trim()));
         deps.llm?.router?.refreshKeys();
       }
       deps.llm?.onProvidersChanged?.();
@@ -815,7 +815,7 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'set_llm_key',
-    description: '设置/清除某 provider 的 API key（多个用英文逗号分隔；空串 = 清除）。保存即热更新',
+    description: '设置/清除某 provider 的 API key（多个用逗号分隔，中英文逗号均可；空串 = 清除）。保存即热更新',
     schema: {
       name: z.string().min(1),
       value: z.string().describe('key 值；空串 = 清除'),
@@ -824,11 +824,11 @@ const adminTools: McpToolDef[] = [
     write: true,
     handler: (deps, args) => {
       const name = args.name as string;
-      const value = (args.value as string).trim();
+      const value = normalizeCsvText((args.value as string).trim());
       const list = deps.llm?.store?.list() ?? [];
       if (!list.some((p) => p.name === name)) throw new HttpError(404, `provider 不存在: ${name}`);
       if (value && !/^[^\s,]+(\s*,\s*[^\s,]+)*$/.test(value)) {
-        throw new HttpError(400, '多个 key 用英文逗号分隔，key 内不能有空格');
+        throw new HttpError(400, '多个 key 用逗号分隔（中英文逗号均可），key 内不能有空格');
       }
       deps.db.setSetting(`llm_key:${name}`, value);
       deps.llm?.router?.refreshKeys();
