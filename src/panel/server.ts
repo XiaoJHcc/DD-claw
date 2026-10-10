@@ -817,14 +817,16 @@ async function handle(
     return;
   }
 
-  // ---- 推送规则 v2（全局：分类引用 + 生效主播集合 + 渠道）----
+  // ---- 推送规则（统一规则：开播 + 图文两类，全局 sort 序）----
   if (method === 'GET' && path === '/api/rules') {
     const uidParam = url.searchParams.get('uid');
     const uid = uidParam === null ? null : parseUid(uidParam);
     const rules = db.listPushRules();
-    // ?uid= 语义：对该主播生效的规则（uids 空 = 全部主播，含未来新增）
+    // ?uid= 语义：对该主播生效的**开播**规则（scope 空 = 全部主播，含未来新增；图文规则不进主播卡）
     sendJson(res, 200, {
-      rules: uid === null ? rules : rules.filter((r) => r.uids.length === 0 || r.uids.includes(uid)),
+      rules: uid === null
+        ? rules
+        : rules.filter((r) => r.subjectKind === 'live' && (r.scope.length === 0 || r.scope.includes(uid))),
     });
     return;
   }
@@ -837,23 +839,6 @@ async function handle(
   // 规则拖拽排序：ids 是全部规则的全排列（在 :id 通配之前匹配）
   if (method === 'PUT' && path === '/api/rules/order') {
     await callTool(deps, res, 'reorder_push_rules', asBodyObject(await readJsonBody(req)));
-    return;
-  }
-
-  // ---- 图文帖规则（X/推特；与推送规则平行的一张表，渠道共用设置页那份）----
-  if (method === 'GET' && path === '/api/post-rules') {
-    sendJson(res, 200, { rules: db.listPostRules() });
-    return;
-  }
-  if (method === 'POST' && path === '/api/post-rules') {
-    await callTool(deps, res, 'upsert_post_rule', asBodyObject(await readJsonBody(req)), {
-      status: 201, rejectUnknown: true,
-    });
-    return;
-  }
-  // 拖拽排序（在 :id 通配之前匹配）
-  if (method === 'PUT' && path === '/api/post-rules/order') {
-    await callTool(deps, res, 'reorder_post_rules', asBodyObject(await readJsonBody(req)));
     return;
   }
 
@@ -936,7 +921,7 @@ async function handle(
   if (rm) {
     const id = Number(parseUid(rm[1], 'id'));
     if (method === 'PUT') {
-      // 存在性校验在工具 handler 里对合并后形状做（只改 uids 时 categoryId/channels 沿用旧值）
+      // 存在性校验在工具 handler 里对合并后形状做（只改 scope 时 categoryId/channels 沿用旧值）
       await callTool(deps, res, 'upsert_push_rule', asBodyObject(await readJsonBody(req)), {
         pathArgs: { id }, rejectUnknown: true,
       });
@@ -944,26 +929,6 @@ async function handle(
     }
     if (method === 'DELETE') {
       await callTool(deps, res, 'delete_push_rule', {}, { pathArgs: { id } });
-      return;
-    }
-  }
-
-  const prm = path.match(/^\/api\/post-rules\/([^/]+)$/);
-  if (prm) {
-    const id = Number(parseUid(prm[1], 'id'));
-    if (method === 'PUT') {
-      // 校验（渠道引用 / 死规则 / LLM 判定须带标准）在工具 handler 里对合并后形状做
-      await callTool(deps, res, 'upsert_post_rule', asBodyObject(await readJsonBody(req)), {
-        pathArgs: { id },
-        rejectUnknown: true,
-        // 老契约：PUT 回 { ok: true }（工具返回 { id }，MCP 契约不动）
-        map: () => ({ ok: true }),
-      });
-      return;
-    }
-    if (method === 'DELETE') {
-      // 连带清扫三份账号名单里选用了这条规则的 ruleIds（与 webui mock 同构）——在工具 handler 里
-      await callTool(deps, res, 'delete_post_rule', {}, { pathArgs: { id } });
       return;
     }
   }
@@ -1248,7 +1213,7 @@ function enrichedStreamers(db: Db): unknown[] {
   const streamers = db.listStreamers();
   const roomStates = db.listRoomStatesFull();
   // 每个 uid 的生效规则名（listPushRules 已按全局 sort 排序，含 disabled；
-  // uids 空 = 对全部主播生效，含未来新增）
+  // scope 空 = 对全部主播生效，含未来新增；只看开播规则——图文规则不进主播卡）
   const allRules = db.listPushRules();
   // 一次分组查询：每个 uid 最近 5 条（B站动态 + 关联微博账号的微博，按 pub_ts 混排），raw 不下发
   const recentPosts = db.listRecentPostsMixed(streamers.map((s) => s.uid), 5);
@@ -1268,7 +1233,7 @@ function enrichedStreamers(db: Db): unknown[] {
         : null,
       rules: {
         names: allRules
-          .filter((r) => r.uids.length === 0 || r.uids.includes(s.uid))
+          .filter((r) => r.subjectKind === 'live' && (r.scope.length === 0 || r.scope.includes(s.uid)))
           .map((r) => r.name),
       },
       posts: (recentPosts.get(s.uid) ?? []).map((p) => ({

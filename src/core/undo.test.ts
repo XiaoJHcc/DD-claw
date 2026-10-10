@@ -20,8 +20,10 @@ const DDL = `
     keywords TEXT NOT NULL DEFAULT '[]', sort INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   CREATE TABLE push_rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '', category_id INTEGER,
-    uids TEXT NOT NULL DEFAULT '[]', channels TEXT NOT NULL DEFAULT '[]',
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '',
+    subject_kind TEXT NOT NULL DEFAULT 'live', category_id INTEGER,
+    scope TEXT NOT NULL DEFAULT '[]', channels TEXT NOT NULL DEFAULT '[]',
+    llm_translate INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   CREATE TABLE archive_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT);
@@ -32,20 +34,21 @@ const DDL = `
     analyze INTEGER NOT NULL DEFAULT 0, notify INTEGER NOT NULL DEFAULT 1, profile_note TEXT,
     face TEXT, source TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('follows','manual')),
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-  -- 三张「配置 + 归档」混合表（列名照抄 core/db.ts，silent_next 由 ensureColumn 补）
+  -- 三张「配置 + 归档」混合表（列名照抄 core/db.ts，silent_next 由 ensureColumn 补；
+  -- P2 起 rule_ids 列已删——生效范围在规则侧 scope）
   CREATE TABLE x_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, screen_name TEXT NOT NULL UNIQUE, nickname TEXT,
-    display_name TEXT, bili_uid TEXT, enabled INTEGER NOT NULL DEFAULT 1, rule_ids TEXT NOT NULL DEFAULT '[]',
+    display_name TEXT, bili_uid TEXT, enabled INTEGER NOT NULL DEFAULT 1,
     last_tweet_id TEXT, last_tweet_at INTEGER, last_ok_at INTEGER, avatar TEXT,
     silent_next INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   CREATE TABLE weibo_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE, nickname TEXT,
-    display_name TEXT, bili_uid TEXT, enabled INTEGER NOT NULL DEFAULT 1, rule_ids TEXT NOT NULL DEFAULT '[]',
+    display_name TEXT, bili_uid TEXT, enabled INTEGER NOT NULL DEFAULT 1,
     last_post_id TEXT, last_post_at INTEGER, last_ok_at INTEGER, avatar TEXT,
     silent_next INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
   CREATE TABLE bili_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE, uname TEXT,
-    display_name TEXT, enabled INTEGER NOT NULL DEFAULT 1, rule_ids TEXT NOT NULL DEFAULT '[]',
+    display_name TEXT, enabled INTEGER NOT NULL DEFAULT 1,
     last_ok_at INTEGER, avatar TEXT,
     silent_next INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 `;
@@ -64,7 +67,7 @@ const META = { scope: adminScope(), actor: 'panel', entry: 'panel' };
 
 function seedRule(db: Database.Database, name: string, sort: number, at = 100): number {
   const info = db
-    .prepare(`INSERT INTO push_rules (name, uids, channels, enabled, sort, created_at, updated_at) VALUES (?, '[]', '[]', 1, ?, ?, ?)`)
+    .prepare(`INSERT INTO push_rules (name, scope, channels, enabled, sort, created_at, updated_at) VALUES (?, '[]', '[]', 1, ?, ?, ?)`)
     .run(name, sort, at, at);
   return Number(info.lastInsertRowid);
 }
@@ -404,8 +407,8 @@ const ACCOUNT_SHAPES = [
 function seedAccount(db: Database.Database, s: (typeof ACCOUNT_SHAPES)[number]): number {
   const info = db
     .prepare(
-      `INSERT INTO ${s.table} (${s.keyCol}, display_name, enabled, rule_ids, ${s.cursorCol}, last_ok_at, created_at, updated_at)
-       VALUES (?, NULL, 1, '[]', 500, 500, 500, 500)`,
+      `INSERT INTO ${s.table} (${s.keyCol}, display_name, enabled, ${s.cursorCol}, last_ok_at, created_at, updated_at)
+       VALUES (?, NULL, 1, 500, 500, 500, 500)`,
     )
     .run(s.keyVal);
   return Number(info.lastInsertRowid);
@@ -436,9 +439,9 @@ test('混合表列过滤：轮询回写不落记录、不污染撤销，撤销�
     const only = store.capture(META, () => pollTouch(db, s, id, 700));
     assert.equal(only.changeId, null, `${s.table}: 轮询回写不落变更记录`);
 
-    // ② 配置写（停用 + 选规则）+ 同一窗口里的轮询回写 → 记录只记这一行
+    // ② 配置写（停用 + 改显示名）+ 同一窗口里的轮询回写 → 记录只记这一行
     const { changeId } = store.capture({ ...META, tool: 'upsert_account' }, () => {
-      db.prepare(`UPDATE ${s.table} SET enabled = 0, rule_ids = '[3]' WHERE id = ?`).run(id);
+      db.prepare(`UPDATE ${s.table} SET enabled = 0, display_name = '改名' WHERE id = ?`).run(id);
       pollTouch(db, s, id, 800);
     });
     assert.ok(changeId, `${s.table}: 配置写要落记录`);
@@ -453,7 +456,7 @@ test('混合表列过滤：轮询回写不落记录、不污染撤销，撤销�
     assert.deepEqual(u.tables, [s.table]);
     const row = db.prepare(`SELECT * FROM ${s.table} WHERE id = ?`).get(id) as Record<string, unknown>;
     assert.equal(row.enabled, 1, `${s.table}: 配置列还原`);
-    assert.equal(row.rule_ids, '[]', `${s.table}: 配置列还原`);
+    assert.equal(row.display_name, null, `${s.table}: 配置列还原`);
     assert.equal(row.last_ok_at, 900, `${s.table}: 游标列保持撤销前的值（不把轮询数据回滚）`);
     assert.equal(row.updated_at, 900, `${s.table}: updated_at 同属轮询列`);
   }
@@ -469,14 +472,14 @@ test('列过滤不削弱冲突检测：配置列被第三方改过仍然中止�
     pollTouch(db, s, id, 800);
   });
   // 第三方（另一个入口）把配置列改成别的值：后像 ≠ 当前值 → 中止
-  db.prepare(`UPDATE ${s.table} SET enabled = 1, rule_ids = '[9]' WHERE id = ?`).run(id);
+  db.prepare(`UPDATE ${s.table} SET enabled = 1, display_name = '别人改的' WHERE id = ?`).run(id);
 
   const r = store.undo(adminScope());
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'conflict');
   assert.match(r.detail!, new RegExp(`${s.table} \\(id=${id}\\)`));
   const row = db.prepare(`SELECT * FROM ${s.table} WHERE id = ?`).get(id) as Record<string, unknown>;
-  assert.equal(row.rule_ids, '[9]', '冲突中止时第三方写的值必须原样留着');
+  assert.equal(row.display_name, '别人改的', '冲突中止时第三方写的值必须原样留着');
 });
 
 // ---- streamers 纳入快照（2026-09-21：从「整表不纳入」改为按列过滤；P1 真机冒烟的缺口）----

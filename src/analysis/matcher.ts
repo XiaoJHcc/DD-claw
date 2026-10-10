@@ -1,6 +1,6 @@
 import type { LiveEvent } from '../core/types.js';
-import type { Category, CondMode, PushRule } from '../core/push.js';
-import type { PostFilters, PostPlatform, PostRule } from '../core/post-rules.js';
+import type { Category, CondMode, SubjectKind } from '../core/push.js';
+import type { PostPlatform } from '../core/post-rules.js';
 import { fromLiveEvent, type ContentItem } from './content.js';
 
 export interface CategoryMatch {
@@ -41,10 +41,41 @@ const areaOperator: ConditionOperator = {
   },
 };
 
-/** 条件算子注册表（首批：keyword / area；postType、media 等 P2b 随 filters 上移进分类时注册） */
+/** postType：仅 post，tags.type（投影时已折叠成 original/retweet）∈ 条件集合 */
+const postTypeOperator: ConditionOperator = {
+  id: 'postType',
+  appliesTo: ['post'],
+  test(condValue, item) {
+    const t = item.tags.type ?? '';
+    return condValue.includes(t) ? `类型「${t === 'retweet' ? '转发' : '原创'}」` : null;
+  },
+};
+
+/** quote：仅 post，必须是引用帖（tags.isQuote==='true'；unknown 按未命中——沿用旧 quote 语义） */
+const quoteOperator: ConditionOperator = {
+  id: 'quote',
+  appliesTo: ['post'],
+  test(_condValue, item) {
+    return item.tags.isQuote === 'true' ? '引用帖' : null;
+  },
+};
+
+/** media：仅 post，必须带图（tags.hasMedia==='true'） */
+const mediaOperator: ConditionOperator = {
+  id: 'media',
+  appliesTo: ['post'],
+  test(_condValue, item) {
+    return item.tags.hasMedia === 'true' ? '带图' : null;
+  },
+};
+
+/** 条件算子注册表（分类条件组的确定性判定按算子注册；live 用 keyword/area，post 用 keyword/postType/quote/media） */
 export const CONDITION_OPERATORS: Readonly<Record<string, ConditionOperator>> = {
   keyword: keywordOperator,
   area: areaOperator,
+  postType: postTypeOperator,
+  quote: quoteOperator,
+  media: mediaOperator,
 };
 
 function testOperator(op: ConditionOperator, condValue: string[], item: ContentItem): string | null {
@@ -52,7 +83,7 @@ function testOperator(op: ConditionOperator, condValue: string[], item: ContentI
 }
 
 /**
- * 条件组判定（算子注册表版，分类与未来的图文 filters 共用）：
+ * 条件组判定（算子注册表版，分类条件组共用）：
  * - 每组 = 算子 + 条件串列表；空组忽略（只剩一组按该组判）
  * - condMode 控制组间关系：'and' 都中 / 'or' 任一中
  * - 无有效组 → 不命中（纯 LLM 分类不该被确定性路径误判为恒中）
@@ -72,12 +103,16 @@ function matchByGroups(
   return { matched, evidence: hits.length > 0 ? `命中${hits.join('、')}` : '' };
 }
 
-/** 分类判定的内容项入口（matchCategory 的 ContentItem 形态） */
+/** 分类判定的内容项入口（matchCategory 的 ContentItem 形态）：keywords/areas/post_types/require_quote/require_media 五组 */
 export function matchCategoryItem(cat: Category, item: ContentItem): CategoryMatch {
   return matchByGroups(
     [
       { op: keywordOperator, values: cat.keywords },
       { op: areaOperator, values: cat.areas },
+      { op: postTypeOperator, values: cat.postTypes },
+      // require_quote / require_media 是开关型条件组：置位即该组参与（算子只看内容标签，值仅占位）
+      { op: quoteOperator, values: cat.requireQuote ? ['1'] : [] },
+      { op: mediaOperator, values: cat.requireMedia ? ['1'] : [] },
     ],
     item,
     cat.condMode,
@@ -87,36 +122,39 @@ export function matchCategoryItem(cat: Category, item: ContentItem): CategoryMat
 /**
  * 分类规则的确定性判定（零 LLM 依赖）：投影 ContentItem 后走条件算子注册表。
  * - keywords 组 → keyword 算子（text 子串）；areas 组 → area 算子（分区标签）
- * - condMode / 空组忽略 / 两组皆空不命中 / evidence 格式与旧实现逐字一致
+ * - postTypes 组 → postType 算子；requireQuote / requireMedia → quote / media 算子（开关型）
+ * - condMode / 空组忽略 / 无有效组不命中 / evidence 格式与旧实现逐字一致
  */
 export function matchCategory(cat: Category, event: LiveEvent): CategoryMatch {
   return matchCategoryItem(cat, fromLiveEvent(event));
 }
 
 /**
- * 推送规则的命中判定（确定性，无 LLM）：
- * 命中 =（categoryId 为空 = 任意开播，或 ∈ matchedCategoryIds）
- *      且（uids 为空 = 全部主播，或含 event.uid）
+ * 推送规则的命中判定（确定性，无 LLM；两形态统一的 matchRules）：
+ * 命中 =（subjectKind 与内容形态一致）
+ *      ∧（categoryId 为空 = 任意内容，或 ∈ matchedCategoryIds）
+ *      ∧（scope 为空 = 全部生效，或含 subjectRef——live=uid / post=`平台:账号键`）
  * 返回全部命中规则（保持传入的 sort 顺序）：所有命中规则独立生效，
  * 由调用方对渠道取并集去重、推送词取首个非空。
  */
-export function matchPushRules(
-  rules: PushRule[],
-  event: LiveEvent,
+export function matchRules<T extends { subjectKind: SubjectKind; categoryId: number | null; scope: string[] }>(
+  rules: T[],
+  item: { subjectType: SubjectKind },
   matchedCategoryIds: Set<number>,
-): PushRule[] {
-  const hits: PushRule[] = [];
+  subjectRef: string,
+): T[] {
+  const hits: T[] = [];
   for (const r of rules) {
+    if (r.subjectKind !== item.subjectType) continue;
     if (r.categoryId !== null && !matchedCategoryIds.has(r.categoryId)) continue;
-    if (r.uids.length > 0 && !r.uids.includes(event.uid)) continue;
+    if (r.scope.length > 0 && !r.scope.includes(subjectRef)) continue;
     hits.push(r);
   }
   return hits;
 }
 
 /**
- * 命中规则的聚合形态（结构化约束）：直播 PushRule / 图文 PostRule 的公共子集，
- * 聚合只看这两字段。
+ * 命中规则的聚合形态（结构化约束）：PushRule 两形态的公共子集，聚合只看这两字段。
  */
 export interface RuleHit {
   channels: number[];
@@ -171,26 +209,25 @@ export function renderTemplate(tpl: string, event: LiveEvent): string {
   return renderByVars(tpl, LIVE_TEMPLATE_VARS, event);
 }
 
-// ---- 图文帖（X/推特 + 微博 + B站动态共用一套平台无关规则）：与开播规则平行的一套确定性判定 ----
+// ---- 图文帖（X/推特 + 微博 + B站动态）：PostCandidate 投影 + 推送词渲染 ----
+// 判定与规则命中已统一走分类条件组（matchCategoryItem）与 matchRules（subject_kind='post'），
+// 这里只剩「一条帖子」的载体与文案渲染。
 
 /** matcher 眼里的「一条帖子」——不依赖 Post 行，由 pipeline 从 feed_post 载荷组装 */
 export interface PostCandidate {
-  /** 帖子来源平台：决定文案措辞（{author}/「推文/微博/动态」）、quote 语义与 LLM 翻译门控；
-   *  规则不再按平台分流，命中只看账号侧 ruleIds + 机械筛选 */
+  /** 帖子来源平台：决定文案措辞（{author}/「推文/微博/动态」）、quote 语义与 LLM 翻译门控 */
   platform: PostPlatform;
   /** 帖子平台内唯一 id（posts.item_id / feed_post 载荷）；ContentItem.subjectId 用它拼 `platform:itemId` */
   itemId?: string;
   /** 对应平台名单的行 id（x_accounts / weibo_accounts / bili_accounts） */
   accountId: number;
-  /** 该账号选用的图文帖规则（账号行的 ruleIds）；空 = 一律不推 */
-  ruleIds: number[];
-  /** 账号标识：X = screen name（不含 @）；微博 / B站动态 = 数字 uid */
+  /** 账号标识：X = screen name（不含 @）；微博 / B站动态 = 数字 uid。规则 scope 引用也用它（postSubjectRef） */
   screenName: string;
   /** 展示名：自定义显示名 → 平台昵称/用户名（再缺省回退标识本身，由渲染层兜底） */
   displayName?: string | null;
   /** 'tweet'/'retweet'（X）、'mblog'/'retweet'（微博）、B站动态 DYNAMIC_TYPE_*
    *  （FORWARD 已在 source 归一成 'retweet'，LIVE_RCMD 不再产出）——'retweet' 是
-   *  三平台共用的转发语义，matcher 只认它判转发，其余一律按原创 */
+   *  三平台共用的转发语义，投影时折叠成 original/retweet（见 fromPostCandidate） */
   type: string;
   text: string | null;
   pics: string[];
@@ -200,40 +237,6 @@ export interface PostCandidate {
   isQuote?: boolean;
   /** 可选关联主播的展示名（模板变量 {liver} 用；B站动态按 uid 直接反查 streamers） */
   biliName?: string | null;
-}
-
-/**
- * 机械筛选（纯确定性，零 LLM）：
- *  · 原创 / 转发 二选一（都不勾 = 死规则，保存时已拒绝）
- *  · 必须带图：勾上则 pics 非空
- *  · 关键词：非空则正文需命中任一（大小写不敏感子串）
- *  · quote：勾上则要求 isQuote === true —— 目前只有回退路线可能给出，RSS 帖永不命中
- */
-export function matchPostFilters(f: PostFilters, post: PostCandidate): boolean {
-  const kindOk = post.type === 'retweet' ? f.retweet : f.original;
-  if (!kindOk) return false;
-  if (f.quote && post.isQuote !== true) return false;
-  if (f.media && post.pics.length === 0) return false;
-  if (f.keywords.length > 0) {
-    const text = (post.text ?? '').toLowerCase();
-    if (!f.keywords.some((k) => text.includes(k.toLowerCase()))) return false;
-  }
-  return true;
-}
-
-/**
- * 图文帖规则命中判定（规则平台无关）：命中 = 账号侧 ruleIds 选用了该规则
- * 且通过机械筛选。返回全部命中规则（保持 sort 顺序）——
- * 所有命中规则独立生效，渠道取并集、推送词取首个非空。
- */
-export function matchPostRules(rules: PostRule[], post: PostCandidate): PostRule[] {
-  const hits: PostRule[] = [];
-  for (const r of rules) {
-    if (!post.ruleIds.includes(r.id)) continue;
-    if (!matchPostFilters(r.filters, post)) continue;
-    hits.push(r);
-  }
-  return hits;
 }
 
 /** 推送文案里的作者名：X 带 @，其余平台用展示名（uid 对人没有意义，只作兜底） */

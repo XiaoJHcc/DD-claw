@@ -7,12 +7,11 @@ import { OncePerSessionRule } from '../rules/once-per-session.js';
 import type { AnalysisContext, Classification, Classifier } from '../analysis/types.js';
 import type { PushMessage, Signal } from './types.js';
 import type { NewVerdict, PushChannel, PushRule } from './push.js';
-import { defaultPostFilters, type PostRule } from './post-rules.js';
 import type { XAccount } from './x-accounts.js';
 import type { WeiboAccount } from './weibo-accounts.js';
 import type { BiliAccount } from './bili-accounts.js';
 import type { PostCandidate } from '../analysis/matcher.js';
-import type { PostAnalysis } from '../analysis/post-analyzer.js';
+import type { PostTranslation } from '../analysis/post-analyzer.js';
 import type { RoomStatus } from '../sources/bili/types.js';
 import type { AppConfig } from '../config/schema.js';
 
@@ -40,6 +39,18 @@ class StubClassifier implements Classifier {
   async classify(ctx: AnalysisContext): Promise<Classification[]> {
     this.calls.push(ctx);
     return this.result;
+  }
+}
+
+/** 慢分类器：判定挂起直到手动放行（验证「推送等不等判定」的时序，A.4 规则级化） */
+class SlowClassifier implements Classifier {
+  readonly name = 'slow';
+  calls: AnalysisContext[] = [];
+  resolve!: (v: Classification[]) => void;
+  constructor(private readonly result: Classification[] = []) {}
+  classify(ctx: AnalysisContext): Promise<Classification[]> {
+    this.calls.push(ctx);
+    return new Promise((r) => { this.resolve = () => r(this.result); });
   }
 }
 
@@ -73,14 +84,10 @@ class FakeDb {
   listPushChannels() { return this.channels; }
   getSetting(key: string) { return this.settings.get(key) ?? null; }
 
-  // ---- X / 图文帖（P2 起 pipeline 的 feed_post 分支要用；微博/B站动态同分支，按平台分名单）----
-  postRules: PostRule[] = [];
+  // ---- X / 图文帖（pipeline 的 feed_post 分支：账号解析按平台分名单；规则统一在 push_rules）----
   xAccounts = new Map<string, XAccount>();
   weiboAccounts = new Map<string, WeiboAccount>();
   biliAccounts = new Map<string, BiliAccount>();
-  listEnabledPostRules() {
-    return this.postRules.filter((r) => r.enabled).sort((a, b) => a.sort - b.sort || a.id - b.id);
-  }
   getXAccountByScreenName(screenName: string) {
     return this.xAccounts.get(screenName);
   }
@@ -91,17 +98,23 @@ class FakeDb {
     return this.biliAccounts.get(uid);
   }
 
-  // ---- verdicts：判定归档（P1b 图文判定落库，只记形状不碰 SQL）----
+  // ---- verdicts：判定归档（现在由分类器落；pipeline 不再直写，保留桩面以防回归）----
   verdicts: NewVerdict[] = [];
   insertVerdict(v: NewVerdict) { this.verdicts.push(v); }
 }
 
 function rule(over: Partial<PushRule> = {}): PushRule {
   return {
-    id: 1, name: '规则 1', categoryId: null, uids: [], channels: [1],
-    messageTemplate: null, enabled: true, createdAt: 0, updatedAt: 0,
+    id: 1, name: '规则 1', subjectKind: 'live', categoryId: null, scope: [], channels: [1],
+    messageTemplate: null, llmTranslate: false, enabled: true, createdBy: null,
+    createdAt: 0, updatedAt: 0,
     ...over,
   };
+}
+
+/** 图文规则（subject_kind='post'；scope = 账号引用，空 = 全部账号） */
+function postRule(over: Partial<PushRule> = {}): PushRule {
+  return rule({ id: 10, name: '图文规则 1', subjectKind: 'post', ...over });
 }
 
 function classification(categoryId: number): Classification {
@@ -113,38 +126,27 @@ function classification(categoryId: number): Classification {
 function xAccount(over: Partial<XAccount> = {}): XAccount {
   return {
     id: 1, screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true,
-    ruleIds: [1, 2],
+    silentNext: false,
     lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null, createdAt: 0, updatedAt: 0,
     ...over,
-  };
+  } as XAccount;
 }
 
 function weiboAccount(over: Partial<WeiboAccount> = {}): WeiboAccount {
   return {
     id: 1, uid: '2203177060', nickname: '渡瀬結月', biliUid: null, enabled: true,
-    ruleIds: [1, 2],
+    silentNext: false,
     lastPostId: null, lastPostAt: null, lastOkAt: null, avatar: null, createdAt: 0, updatedAt: 0,
     ...over,
-  };
+  } as WeiboAccount;
 }
 
 function biliAccount(over: Partial<BiliAccount> = {}): BiliAccount {
   return {
     id: 1, uid: '80397', uname: '阿梓从小就很可爱', displayName: null, enabled: true,
-    ruleIds: [1, 2], lastOkAt: null, avatar: null, createdAt: 0, updatedAt: 0,
+    silentNext: false, lastOkAt: null, avatar: null, createdAt: 0, updatedAt: 0,
     ...over,
-  };
-}
-
-function postRule(over: Partial<PostRule> = {}): PostRule {
-  return {
-    id: 1, name: '图文帖规则 1', channels: [1],
-    filters: defaultPostFilters(), messageTemplate: null,
-    llmJudge: false, judgePrompt: null, llmTranslate: false,
-    enabled: true, sort: 0,
-    createdAt: 0, updatedAt: 0,
-    ...over,
-  };
+  } as BiliAccount;
 }
 
 /** feed_post 信号（X 源产出）：无 status，载荷是推文快照 */
@@ -190,49 +192,50 @@ function biliDynSig(over: {
   };
 }
 
-/** 装好 X 名单与图文帖规则的 harness（feed_post 分支专用） */
+/** 装好 X 名单与图文规则的 harness（feed_post 分支专用；规则统一在 push_rules） */
 function feedHarness(
-  rules: PostRule[],
+  rules: PushRule[],
   accounts: XAccount[] = [xAccount()],
-  analyzer?: FakePostAnalyzer,
+  analyzer?: FakeTranslator,
   weiboAccounts: WeiboAccount[] = [],
+  classifications: Classification[] = [],
 ) {
-  const h = harness({}, 0, [], analyzer);
+  const h = harness({}, 0, classifications, analyzer);
   for (const a of accounts) h.db.xAccounts.set(a.screenName, a);
   for (const a of weiboAccounts) h.db.weiboAccounts.set(a.uid, a);
-  h.db.postRules = rules;
+  h.db.rules = rules;
   return h;
 }
 
 /** 微博侧的 harness（默认名单里放一个微博账号） */
 function weiboHarness(
-  rules: PostRule[],
+  rules: PushRule[],
   accounts: WeiboAccount[] = [weiboAccount()],
-  analyzer?: FakePostAnalyzer,
+  analyzer?: FakeTranslator,
+  classifications: Classification[] = [],
 ) {
-  return feedHarness(rules, [], analyzer, accounts);
+  return feedHarness(rules, [], analyzer, accounts, classifications);
 }
 
 /** B站动态侧的 harness（默认名单里放一个动态账号） */
-function biliDynHarness(rules: PostRule[], accounts: BiliAccount[] = [biliAccount()]) {
+function biliDynHarness(rules: PushRule[], accounts: BiliAccount[] = [biliAccount()]) {
   const h = feedHarness(rules, []);
   for (const a of accounts) h.db.biliAccounts.set(a.uid, a);
   return h;
 }
 
-/** 假图文帖分析器：记录调用，按注入的策略给结论 */
-class FakePostAnalyzer {
-  calls: Array<{ ruleId: number; text: string | null }> = [];
-  constructor(private readonly decide: (post: PostCandidate, rule: PostRule) => PostAnalysis) {}
-  async analyze(post: PostCandidate, rule: PostRule): Promise<PostAnalysis> {
-    this.calls.push({ ruleId: rule.id, text: post.text });
-    return this.decide(post, rule);
+/** 假翻译器：记录调用，按注入的策略给译文（判定已挪进分类判决链，这里只剩附加动作） */
+class FakeTranslator {
+  calls: Array<{ text: string | null }> = [];
+  constructor(private readonly decide: (post: PostCandidate) => PostTranslation) {}
+  async translate(post: PostCandidate): Promise<PostTranslation> {
+    this.calls.push({ text: post.text });
+    return this.decide(post);
   }
 }
 
-const judgeRule = (over: Partial<PostRule> = {}) => postRule({
-  llmJudge: true, judgePrompt: '只推直播预告', ...over,
-});
+const translator = (translation: string | null) =>
+  new FakeTranslator(() => ({ source: translation ? 'llm' : 'fallback', translation }));
 
 class FakeDispatcher {
   sent: PushMessage[] = [];
@@ -429,7 +432,7 @@ test('「任意开播 × 全部主播」规则 = 旧全局默认的等价物：�
     { id: 3, name: '停用的', notifier: 'onebot', targetType: 'group', targetId: '222',
       enabled: false, createdAt: 0, updatedAt: 0 },
   );
-  h.db.rules.push(rule({ categoryId: null, uids: [], channels: [1, 2] }));
+  h.db.rules.push(rule({ categoryId: null, scope: [], channels: [1, 2] }));
   h.bus.emit(sig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
@@ -457,7 +460,7 @@ test('分类规则不命中（无其他规则）= 不推', async () => {
 
 test('生效主播集合限定：uid 不在名单内的规则不命中（无其他规则 = 不推）', async () => {
   const h = harness();
-  h.db.rules.push(rule({ categoryId: null, uids: ['别人'], channels: [2] }));
+  h.db.rules.push(rule({ categoryId: null, scope: ['别人'], channels: [2] }));
   h.bus.emit(sig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 0, '唯一规则不命中 = 不推');
@@ -534,6 +537,68 @@ test('「任意开播」规则与分类规则同时命中：渠道并集；分�
   assert.equal(h2.disp.sent[0]!.title, '主播1 开播了', '规则无覆盖推送词 → 内置默认模板');
 });
 
+// ---- 推送等不等判定（A.4 规则级化，白名单行为变化）----
+// 仅当存在「引用了分类的启用规则且 scope 覆盖本内容」时推送才等判定；
+// 纯「任意内容」规则的推送不再排在 LLM 后面。判定本身照跑（verdicts/时间线面不变），不产生双推。
+
+function slowHarness(rules: PushRule[], result: Classification[] = []) {
+  const bus = new Bus();
+  const db = new FakeDb();
+  db.rules = rules;
+  const disp = new FakeDispatcher();
+  const cls = new SlowClassifier(result);
+  const pipeline = new Pipeline({
+    bus, db: db as never, config: config({}),
+    queue: new AnalysisQueue(cls),
+    rule: new OncePerSessionRule(db),
+    dispatcher: disp as never,
+  });
+  pipeline.attach();
+  return { bus, db, disp, cls, pipeline };
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 10));
+
+test('纯「任意内容」规则：推送不排在 LLM 后面（判定照跑，只是不挡推送）', async () => {
+  const h = slowHarness([rule({ categoryId: null, channels: [1] })]);
+  h.bus.emit(sig());
+  await tick();
+  assert.equal(h.disp.sent.length, 1, '推送已发出，没等分类判定');
+  assert.equal(h.cls.calls.length, 1, '判定照跑（verdicts/时间线的回看面不变）');
+  h.cls.resolve([]);
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '判定回来也不产生双推');
+});
+
+test('覆盖本主播的分类规则：推送等判定结果再发（单次推送）', async () => {
+  const h = slowHarness([rule({ categoryId: 7, channels: [1] })], [classification(7)]);
+  h.bus.emit(sig());
+  await tick();
+  assert.equal(h.disp.sent.length, 0, '分类规则覆盖 → 推送等判定');
+  h.cls.resolve([classification(7)]);
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1, '判定命中后推送');
+});
+
+test('图文侧同一条判据：任意内容规则不等判定；分类规则等判定', async () => {
+  const anyRule = slowHarness([postRule({ id: 10, channels: [1] })]);
+  anyRule.db.xAccounts.set('watase_yuzuki', xAccount());
+  anyRule.bus.emit(feedSig());
+  await tick();
+  assert.equal(anyRule.disp.sent.length, 1, '任意内容规则不等判定');
+  anyRule.cls.resolve([]);
+  await anyRule.pipeline.whenIdle();
+
+  const catRule = slowHarness([postRule({ id: 10, channels: [1], categoryId: 7 })], [classification(7)]);
+  catRule.db.xAccounts.set('watase_yuzuki', xAccount());
+  catRule.bus.emit(feedSig());
+  await tick();
+  assert.equal(catRule.disp.sent.length, 0, '分类规则等判定');
+  catRule.cls.resolve([classification(7)]);
+  await catRule.pipeline.whenIdle();
+  assert.equal(catRule.disp.sent.length, 1);
+});
+
 // ---- 健康告警 ----
 
 test('health_alert 转 alertAll，文案带失败次数/订阅数/最后错误', async () => {
@@ -596,7 +661,7 @@ test('信号处理并发但上限 4', async () => {
 
 // ---- feed_post 分支（X/推特图文帖）：与开播路径完全平行 ----
 
-test('feed_post 命中图文帖规则 → 推送到规则渠道（默认只推原创）', async () => {
+test('feed_post 命中图文规则 → 推送到规则渠道（筛选条件已上移进分类，规则本身不再内嵌 filters）', async () => {
   const h = feedHarness([postRule({ channels: [1] })]);
   h.bus.emit(feedSig());
   await h.pipeline.whenIdle();
@@ -612,59 +677,40 @@ test('feed_post 命中图文帖规则 → 推送到规则渠道（默认只推�
   assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
 });
 
-test('机械筛选：默认只命中原创；转发帖要靠规则显式勾「转发」', async () => {
-  // 只推原创（默认 filters）
-  const h1 = feedHarness([postRule()]);
-  h1.bus.emit(feedSig({ payload: { type: 'retweet' } }));
-  await h1.pipeline.whenIdle();
-  assert.equal(h1.disp.sent.length, 0, '转发帖不命中「只推原创」');
+test('分类规则只在判定命中时生效：判否 = 引用它的规则不命中（「只推原创」等筛选已上移进分类）', async () => {
+  // 分类规则 + 判定命中 → 推
+  const catRule = postRule({ categoryId: 7, channels: [1] });
+  const hit = feedHarness([catRule], [xAccount()], undefined, [], [classification(7)]);
+  hit.bus.emit(feedSig());
+  await hit.pipeline.whenIdle();
+  assert.equal(hit.disp.sent.length, 1, '判定命中分类 → 引用它的规则生效');
 
-  // 只推转发
-  const h2 = feedHarness([postRule({ filters: { ...defaultPostFilters(), original: false, retweet: true } })]);
-  h2.bus.emit(feedSig({ payload: { type: 'retweet' } }));
-  await h2.pipeline.whenIdle();
-  assert.equal(h2.disp.sent.length, 1, '勾了转发才推');
+  // 同一条规则 + 判定未命中 → 不推
+  const miss = feedHarness([catRule], [xAccount()], undefined, [], []);
+  miss.bus.emit(feedSig());
+  await miss.pipeline.whenIdle();
+  assert.equal(miss.disp.sent.length, 0, '判定未命中 → 分类规则不生效');
 });
 
-test('机械筛选：必须带图 / 关键词', async () => {
-  const mediaRule = postRule({ filters: { ...defaultPostFilters(), media: true } });
-  const h1 = feedHarness([mediaRule]);
-  h1.bus.emit(feedSig({ payload: { pics: [] } }));
-  await h1.pipeline.whenIdle();
-  assert.equal(h1.disp.sent.length, 0, '无图不命中「必须带图」');
-
-  const h2 = feedHarness([mediaRule]);
-  h2.bus.emit(feedSig({ payload: { pics: ['https://pbs.twimg.com/media/a.jpg'] } }));
-  await h2.pipeline.whenIdle();
-  assert.equal(h2.disp.sent.length, 1, '有图命中');
-
-  const kwRule = postRule({ filters: { ...defaultPostFilters(), keywords: ['直播', '歌回'] } });
-  const h3 = feedHarness([kwRule]);
-  h3.bus.emit(feedSig({ payload: { text: '今天休息' } }));
-  await h3.pipeline.whenIdle();
-  assert.equal(h3.disp.sent.length, 0, '关键词都不中');
-
-  const h4 = feedHarness([kwRule]);
-  h4.bus.emit(feedSig({ payload: { text: '今晚有歌回！' } }));
-  await h4.pipeline.whenIdle();
-  assert.equal(h4.disp.sent.length, 1, '命中任一关键词即推');
-});
-
-test('规则按账号生效：账号侧 ruleIds 没选用的规则不推', async () => {
+test('规则按账号生效（scope）：空 = 全部账号；非空 = 只对列出的账号引用生效', async () => {
+  const scoped = postRule({ id: 2, scope: ['twitter:d4dj_pj'] });
   const h = feedHarness(
-    [postRule({ id: 2 })],
-    [
-      xAccount({ id: 1, screenName: 'watase_yuzuki', ruleIds: [] }),
-      xAccount({ id: 2, screenName: 'd4dj_pj', ruleIds: [2] }),
-    ],
+    [scoped],
+    [xAccount({ id: 1, screenName: 'watase_yuzuki' }), xAccount({ id: 2, screenName: 'd4dj_pj' })],
   );
   h.bus.emit(feedSig({ uid: 'watase_yuzuki' }));
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 0, '账号 1 没选用规则 2');
+  assert.equal(h.disp.sent.length, 0, 'scope 不含该账号 = 不生效');
 
   h.bus.emit(feedSig({ uid: 'd4dj_pj' }));
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1, '账号 2 选用了规则 2');
+  assert.equal(h.disp.sent.length, 1, 'scope 含该账号 = 生效');
+
+  // 空 scope = 全部账号（D1：空即全部生效）
+  const all = feedHarness([postRule({ scope: [] })]);
+  all.bus.emit(feedSig());
+  await all.pipeline.whenIdle();
+  assert.equal(all.disp.sent.length, 1, '空 scope = 全部账号生效');
 });
 
 test('无命中规则 / 规则未勾渠道 / 账号不在名单 / 平台不匹配 → 都不推且不炸', async () => {
@@ -729,19 +775,19 @@ test('规则平台无关：同一条规则被 X 与微博账号同时选用，�
   assert.equal(h.disp.sent[1]!.title, '渡瀬結月 发布新微博', '文案措辞按帖子平台走');
 });
 
-test('微博规则按账号生效：账号侧 ruleIds 选用规则', async () => {
-  const rules = [postRule({ id: 2, channels: [1] })];
+test('微博规则按账号生效（scope）：账号引用决定生效范围', async () => {
+  const rules = [postRule({ id: 2, channels: [1], scope: ['weibo:111'] })];
   const h = weiboHarness(rules, [
-    weiboAccount({ id: 1, uid: '2203177060', ruleIds: [] }),
-    weiboAccount({ id: 2, uid: '111', ruleIds: [2] }),
+    weiboAccount({ id: 1, uid: '2203177060' }),
+    weiboAccount({ id: 2, uid: '111' }),
   ]);
   h.bus.emit(weiboSig());
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 0, '账号 1 没选用规则 2');
+  assert.equal(h.disp.sent.length, 0, 'scope 不含账号 1');
 
   h.bus.emit(weiboSig({ uid: '111' }));
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1, '账号 2 选用了规则 2');
+  assert.equal(h.disp.sent.length, 1, 'scope 含账号 2');
 });
 
 test('微博帖的推送词模板：{author} 渲染成昵称（不是 uid）', async () => {
@@ -758,17 +804,17 @@ test('微博帖的推送词模板：{author} 渲染成昵称（不是 uid）', a
   assert.equal(h2.disp.sent[0]!.title, '2203177060');
 });
 
-test('微博帖走同一条 LLM 判定：拦下则不推（判定平台无关；翻译运行时只对 X 帖生效）', async () => {
-  const analyzer = new FakePostAnalyzer({ source: 'llm', pass: false, reason: '不是直播相关' });
+test('微博帖走同一条分类判定：判否拦下（判定平台无关；翻译运行时只对 X 帖生效）', async () => {
   const h = weiboHarness(
-    [postRule({ llmJudge: true, judgePrompt: '只推直播预告' })],
+    [postRule({ categoryId: 7, channels: [1] })],
     [weiboAccount()],
-    analyzer,
+    undefined,
+    [], // 分类判定判否
   );
   h.bus.emit(weiboSig());
   await h.pipeline.whenIdle();
-  assert.equal(analyzer.calls.length, 1, '确实问过模型');
-  assert.equal(h.disp.sent.length, 0, '判定不推 → 不推');
+  assert.equal(h.classifier.calls.length, 1, '确实做过一次分类判定');
+  assert.equal(h.disp.sent.length, 0, '判否 → 引用分类的规则不命中，不推');
 });
 
 test('推送总开关关闭 → feed_post 也不推（与开播同一条总闸）', async () => {
@@ -812,161 +858,99 @@ test('多条命中规则：渠道取并集、推送词取首个非空（与开�
   assert.equal(h.disp.sent[0]!.title, '@watase_yuzuki 更新了', '首个非空模板生效');
 });
 
-// ---- 图文帖的 LLM 判定 / 翻译（规则级开关，默认关；失败一律回退机械筛选）----
+// ---- 图文帖的分类判定 / 翻译（判定分类制 + 翻译独立，A.4）----
 
-test('LLM 判定拦下 → 不推；判定通过 → 照推', async () => {
-  const deny = new FakePostAnalyzer(() => ({ source: 'llm', pass: false, reason: '只是闲聊', translation: null }));
-  const h1 = feedHarness([judgeRule()], [xAccount()], deny);
-  h1.bus.emit(feedSig());
-  await h1.pipeline.whenIdle();
-  assert.equal(h1.disp.sent.length, 0, '模型说不推就不推');
-  assert.equal(deny.calls.length, 1, '确实问过模型');
+test('分类判定拦下 → 引用分类的规则不推；判定通过 → 照推', async () => {
+  const deny = feedHarness([postRule({ categoryId: 7 })], [xAccount()], undefined, [], []);
+  deny.bus.emit(feedSig());
+  await deny.pipeline.whenIdle();
+  assert.equal(deny.disp.sent.length, 0, '判否不推');
+  assert.equal(deny.classifier.calls.length, 1, '确实做过一次分类判定');
 
-  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '是预告', translation: null }));
-  const h2 = feedHarness([judgeRule()], [xAccount()], allow);
-  h2.bus.emit(feedSig());
-  await h2.pipeline.whenIdle();
-  assert.equal(h2.disp.sent.length, 1);
+  const allow = feedHarness([postRule({ categoryId: 7 })], [xAccount()], undefined, [], [classification(7)]);
+  allow.bus.emit(feedSig());
+  await allow.pipeline.whenIdle();
+  assert.equal(allow.disp.sent.length, 1);
 });
 
-test('LLM 不可用/失败回退 → 判定视为通过，推文照发（不能因为模型抖动让它消失）', async () => {
-  const fallback = new FakePostAnalyzer(() => ({
-    source: 'fallback', pass: true, reason: 'LLM 未启用', translation: null,
-  }));
-  const h = feedHarness([judgeRule()], [xAccount()], fallback);
+test('翻译失败不挡推送（生成类任务的任何抖动都不该让推文消失）', async () => {
+  const fallback = new FakeTranslator(() => ({ source: 'fallback', translation: null }));
+  const h = feedHarness([postRule({ llmTranslate: true })], [xAccount()], fallback);
   h.bus.emit(feedSig());
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1, '回退机械筛选：照推');
+  assert.equal(h.disp.sent.length, 1, '翻译失败照推');
+  assert.equal(h.disp.sent[0]!.body, '今晚有直播', '不附译文');
 });
 
-test('未装配分析器时规则里的 LLM 开关一律当关（老装配/测试桩不会因此丢推文）', async () => {
-  const h = feedHarness([judgeRule()]);
+test('未装配翻译器时 llm_translate 一律当关（老装配/测试桩不会因此丢推文）', async () => {
+  const h = feedHarness([postRule({ llmTranslate: true })]);
   h.bus.emit(feedSig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1);
 });
 
-test('翻译：开了翻译且模型给了译文 → 正文下方带【译】', async () => {
-  const tr = new FakePostAnalyzer(() => ({
-    source: 'llm', pass: true, reason: '', translation: '今晚有直播',
-  }));
+test('翻译：命中规则任一开 llm_translate 且是 X 帖 → 调一次生成，正文下方带【译】', async () => {
+  const tr = translator('今晚有直播');
   const h = feedHarness([postRule({ llmTranslate: true })], [xAccount()], tr);
   h.bus.emit(feedSig());
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent[0]!.body, '今晚有直播\n\n【译】今晚有直播');
+  assert.equal(tr.calls.length, 1);
 });
 
-test('多条命中：一条被判定拦下、另一条没开判定 → 仍推，且渠道只来自没被拦的那条', async () => {
-  const deny = new FakePostAnalyzer(() => ({ source: 'llm', pass: false, reason: '不行', translation: null }));
-  const h = feedHarness([
-    judgeRule({ id: 1, sort: 0, channels: [1] }),
-    postRule({ id: 2, sort: 1, channels: [2] }),
-  ], [xAccount()], deny);
-  h.db.channels.push({
-    id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001',
-    enabled: true, createdAt: 0, updatedAt: 0,
-  });
-  h.bus.emit(feedSig());
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1, '无判定的规则照常生效');
-  assert.deepEqual(h.disp.sent[0]!.channels, ['2'], '被判定拦下的规则不贡献渠道');
-  assert.equal(deny.calls.length, 1);
-});
-
-test('同一（判定标准 + 翻译开关）只问模型一次：两条同配置规则共用一次调用', async () => {
-  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '', translation: null }));
-  const h = feedHarness([
-    judgeRule({ id: 1, sort: 0, channels: [1] }),
-    judgeRule({ id: 2, sort: 1, channels: [1] }),
-  ], [xAccount()], allow);
-  h.bus.emit(feedSig());
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1);
-  assert.equal(allow.calls.length, 1, '同配置合并成一次调用（省额度与延迟）');
-});
-
-// ---- 判定归档（P1b）：跑了 analyze 的规则各落一行 verdicts，在聚合推送之前、无论推不推 ----
-
-test('判定落 verdicts：llm 判定通过/判否都留痕（判否 = 0 落库，「为什么没推」可回看）', async () => {
-  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '是直播预告', translation: null }));
-  const h = feedHarness([judgeRule()], [xAccount()], allow);
-  h.bus.emit(feedSig());
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1);
-  assert.equal(h.db.verdicts.length, 1);
-  const v = h.db.verdicts[0]!;
-  assert.equal(v.subjectType, 'post');
-  assert.equal(v.subjectId, 'twitter:9001', '身份键 = platform:item_id');
-  assert.equal(v.uid, '1', '账号行 id');
-  assert.equal(v.categoryId, 0, '哨兵：规则级判定不填分类');
-  assert.equal(v.ruleId, 1);
-  assert.equal(v.categoryName, '图文帖规则 1', '规则名冗余，规则删除后仍可读');
-  assert.equal(v.source, 'llm');
-  assert.equal(v.pass, true);
-  assert.equal(v.confidence, null);
-  assert.equal(v.evidence, '是直播预告');
-
-  const deny = new FakePostAnalyzer(() => ({ source: 'llm', pass: false, reason: '只是闲聊', translation: null }));
-  const h2 = feedHarness([judgeRule()], [xAccount()], deny);
-  h2.bus.emit(feedSig());
-  await h2.pipeline.whenIdle();
-  assert.equal(h2.disp.sent.length, 0, '判否不推');
-  assert.equal(h2.db.verdicts.length, 1, '判否也落库');
-  assert.equal(h2.db.verdicts[0]!.pass, false, '判否 = 0 落库');
-  assert.equal(h2.db.verdicts[0]!.evidence, '只是闲聊');
-});
-
-test('判定落 verdicts：LLM 不可用/失败回退 = source rule 放行（evidence 注明回退并保留原 reason）', async () => {
-  const fallback = new FakePostAnalyzer(() => ({
-    source: 'fallback', pass: true, reason: 'LLM 未启用', translation: null,
-  }));
-  const h = feedHarness([judgeRule()], [xAccount()], fallback);
-  h.bus.emit(feedSig());
-  await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 1, '回退照推');
-  assert.equal(h.db.verdicts.length, 1);
-  const v = h.db.verdicts[0]!;
-  assert.equal(v.source, 'rule');
-  assert.equal(v.pass, true);
-  assert.ok(v.evidence.includes('回退机械筛选放行'), v.evidence);
-  assert.ok(v.evidence.includes('LLM 未启用'), '保留原 reason 信息');
-});
-
-test('判定落 verdicts：source=off（没配判定口径）不写', async () => {
-  // 只开翻译的规则在微博帖上被平台门控掉 → analyze 返回 off，无判定可记（照机械筛选推）
-  const off = new FakePostAnalyzer(() => ({ source: 'off', pass: true, reason: '', translation: null }));
-  const h = weiboHarness([postRule({ llmTranslate: true })], [weiboAccount()], off);
+test('翻译运行时门控：非 X 帖不请求翻译（微博/B站本就中文）', async () => {
+  const tr = translator('译文不该出现');
+  const h = weiboHarness([postRule({ llmTranslate: true })], [weiboAccount()], tr);
   h.bus.emit(weiboSig());
   await h.pipeline.whenIdle();
-  assert.equal(off.calls.length, 1, '跑了 analyze');
-  assert.equal(h.disp.sent.length, 1, 'off = 没判定口径，照推');
-  assert.equal(h.db.verdicts.length, 0, 'off 不写 verdicts');
+  assert.equal(h.disp.sent.length, 1, '照推');
+  assert.equal(h.disp.sent[0]!.body, '今晚九点直播！');
+  assert.equal(tr.calls.length, 0, '非 X 帖根本不请求翻译');
 });
 
-test('判定落 verdicts：memo 共享同一次分析的多条规则各落一行（ruleId 不同）', async () => {
-  const allow = new FakePostAnalyzer(() => ({ source: 'llm', pass: true, reason: '是预告', translation: null }));
+test('多条命中：一条引用分类被判定拦下、另一条任意内容 → 仍推，且渠道只来自没被拦的那条', async () => {
   const h = feedHarness([
-    judgeRule({ id: 1, sort: 0, channels: [1] }),
-    judgeRule({ id: 2, name: '图文帖规则 2', sort: 1, channels: [2] }),
-  ], [xAccount()], allow);
+    postRule({ id: 1, sort: 0, channels: [1], categoryId: 7 }),
+    postRule({ id: 2, sort: 1, channels: [2] }),
+  ], [xAccount()], undefined, [], []); // 判否
   h.db.channels.push({
     id: 2, name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001',
     enabled: true, createdAt: 0, updatedAt: 0,
   });
   h.bus.emit(feedSig());
   await h.pipeline.whenIdle();
-  assert.equal(allow.calls.length, 1, '同配置只调一次');
-  assert.equal(h.disp.sent.length, 1);
-  assert.deepEqual(h.disp.sent[0]!.channels, ['1', '2']);
-  assert.equal(h.db.verdicts.length, 2, 'memo 共享也各落一行');
-  assert.deepEqual(h.db.verdicts.map((v) => v.ruleId).sort(), [1, 2]);
-  assert.deepEqual(h.db.verdicts.map((v) => v.subjectId), ['twitter:9001', 'twitter:9001'], '同一帖同一身份键');
-  assert.deepEqual(
-    h.db.verdicts.map((v) => v.categoryName),
-    ['图文帖规则 1', '图文帖规则 2'],
-    '规则名各自冗余',
-  );
+  assert.equal(h.disp.sent.length, 1, '任意内容规则照常生效');
+  assert.deepEqual(h.disp.sent[0]!.channels, ['2'], '被判定拦下的规则不贡献渠道');
 });
+
+test('多条规则都开翻译也只问模型一次（命中规则聚合后调一次生成）', async () => {
+  const tr = translator('译文');
+  const h = feedHarness([
+    postRule({ id: 1, sort: 0, channels: [1], llmTranslate: true }),
+    postRule({ id: 2, name: '图文帖规则 2', sort: 1, channels: [1], llmTranslate: true }),
+  ], [xAccount()], tr);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(tr.calls.length, 1, '聚合后只调一次（省额度与延迟）');
+  assert.equal(h.disp.sent.length, 1);
+  assert.deepEqual(h.disp.sent[0]!.channels, ['1']);
+});
+
+test('分类判定每帖单次（verdicts 由分类器落；按帖单次判定，不产生双推）', async () => {
+  const h = feedHarness([
+    postRule({ id: 1, sort: 0, channels: [1], categoryId: 7 }),
+    postRule({ id: 2, sort: 1, channels: [1], categoryId: 8 }),
+  ], [xAccount()], undefined, [], [classification(7), classification(8)]);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.classifier.calls.length, 1, '两条规则共用一次判定');
+  assert.equal(h.disp.sent.length, 1, '单次推送，不双推');
+  assert.equal(h.classifier.calls[0]!.post?.post.screenName, 'watase_yuzuki', '判定入口带帖子投影');
+});
+
+// 判定归档（verdicts）随 P2「判定分类制」移进分类器（RulesClassifier）：
+// 真实 categoryId、ruleId=0 哨兵、post 侧 LLM 判否也落 pass=0——行为用例见
+// src/analysis/classify.test.ts（post 判定归档段）。pipeline 只负责按需触发判定。
 
 // ---- feed_post 分支（B站动态）：与 X/微博同一条路径，账号是 bili_accounts ----
 
@@ -984,18 +968,21 @@ test('B站动态 feed_post 命中规则 → 推送；文案「发布新动态」
   assert.equal(h.db.notified.size, 0, '帖子没有场次概念，不该 markNotified');
 });
 
-test('B站动态：转发（source 已归一成 retweet）默认「只推原创」不命中', async () => {
-  const h1 = biliDynHarness([postRule()]);
+test('B站动态：转发帖的筛选由分类条件承担（判定 → 引用分类的规则只在命中时生效）', async () => {
+  const catRule = postRule({ categoryId: 7 });
+  // 判定未命中（转发帖被「只推原创」分类筛掉）→ 不推
+  const h1 = feedHarness([catRule], [], undefined, [], []);
+  h1.db.biliAccounts.set('80397', biliAccount());
   h1.bus.emit(biliDynSig({ payload: { type: 'retweet' } }));
   await h1.pipeline.whenIdle();
-  assert.equal(h1.disp.sent.length, 0, '转发动态不命中「只推原创」');
+  assert.equal(h1.disp.sent.length, 0, '判否 = 不推');
 
-  const h2 = biliDynHarness([postRule({
-    filters: { ...defaultPostFilters(), original: false, retweet: true },
-  })]);
+  // 判定命中 → 推
+  const h2 = feedHarness([catRule], [], undefined, [], [classification(7)]);
+  h2.db.biliAccounts.set('80397', biliAccount());
   h2.bus.emit(biliDynSig({ payload: { type: 'retweet' } }));
   await h2.pipeline.whenIdle();
-  assert.equal(h2.disp.sent.length, 1, '勾了转发才推');
+  assert.equal(h2.disp.sent.length, 1, '命中才推');
 });
 
 test('B站动态：不在 bili_accounts 名单的 uid 静默丢弃（防御分支——源只对名单账号发信号）', async () => {
@@ -1015,12 +1002,12 @@ test('B站动态：{liver} 直接按 uid 反查 streamers（动态账号本身�
   assert.equal(h.disp.sent[0]!.title, '阿梓 发动态了', 'streamers 里 uid=1 的简称是阿梓');
 });
 
-test('B站动态：账号侧 ruleIds 没选用规则 = 不推', async () => {
+test('B站动态：规则 scope 用 `bili:uid` 账号引用（不勾 = 全部生效，勾了才限定）', async () => {
   const h = biliDynHarness(
-    [postRule({ channels: [1] })],
-    [biliAccount({ ruleIds: [] })],
+    [postRule({ channels: [1], scope: ['bili:99999'] })],
+    [biliAccount()],
   );
   h.bus.emit(biliDynSig());
   await h.pipeline.whenIdle();
-  assert.equal(h.disp.sent.length, 0, 'ruleIds 空 = 一律不推');
+  assert.equal(h.disp.sent.length, 0, 'scope 不含该账号 = 不推');
 });

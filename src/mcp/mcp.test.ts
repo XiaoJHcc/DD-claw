@@ -255,7 +255,7 @@ test('add_group_push_rule：渠道由 scope 注入（参数里没有渠道）；
   const rule = f.db.listPushRules().find((r) => r.id === ok.id)!;
   assert.equal(rule.createdBy, 'mcp');
   assert.deepEqual(rule.channels, [groupChannelId], '渠道 = 令牌绑定的那条');
-  assert.deepEqual(rule.uids, ['7706705']);
+  assert.deepEqual(rule.scope, ['7706705']);
 
   // 身份字段不进 schema：tools/list 里看不到，参数里塞了也会被 zod 剥离
   const schema = (await gw.listTools()).tools.find((x) => x.name === 'add_group_push_rule')!.inputSchema;
@@ -312,7 +312,7 @@ test('remove_group_push_rule：非 mcp 单渠道规则也移出本渠道（chann
 
   // 面板规则（createdBy=null）且只推本渠道：只允许渠道级操作 → channels 置空，不整条删
   const panelRuleId = f.db.upsertPushRule({
-    name: '面板规则', categoryId: null, uids: ['7706705'], channels: [groupChannelId],
+    name: '面板规则', categoryId: null, scope: ['7706705'], channels: [groupChannelId],
     messageTemplate: '{liver} 来了', enabled: true,
   });
   const r = (await call(gw, 'remove_group_push_rule', { id: panelRuleId })) as {
@@ -326,7 +326,7 @@ test('remove_group_push_rule：非 mcp 单渠道规则也移出本渠道（chann
   assert.equal(kept.createdBy, null, 'createdBy 保持原值（不是自助规则）');
   assert.equal(kept.name, '面板规则', '行与内容全留（主人可在面板删除）');
   assert.equal(kept.messageTemplate, '{liver} 来了');
-  assert.deepEqual(kept.uids, ['7706705']);
+  assert.deepEqual(kept.scope, ['7706705']);
   assert.equal(kept.categoryId, null);
   assert.equal(kept.enabled, true);
 
@@ -368,7 +368,7 @@ test('remove_group_push_rule：多渠道规则走 copy-on-write（原规则保�
 
   // 面板规则推 A+B（本渠道是其中一条）
   const sharedId = f.db.upsertPushRule({
-    name: '双群规则', categoryId: null, uids: ['7706705'], channels: [a, b],
+    name: '双群规则', categoryId: null, scope: ['7706705'], channels: [a, b],
     messageTemplate: '{liver} 来了', enabled: true,
   });
   const r = (await call(gwA, 'remove_group_push_rule', { id: sharedId })) as {
@@ -384,7 +384,7 @@ test('remove_group_push_rule：多渠道规则走 copy-on-write（原规则保�
   assert.equal(kept.createdBy, null, '原规则 createdBy 原样，没被标成 mcp 规则');
   assert.equal(kept.name, '双群规则', '内容一行不动');
   assert.equal(kept.messageTemplate, '{liver} 来了');
-  assert.deepEqual(kept.uids, ['7706705']);
+  assert.deepEqual(kept.scope, ['7706705']);
 
   // 自助的多渠道规则同理（admin 给它加了别的渠道后，本渠道只能把自己移出）
   const mcpId = (await call(gwA, 'add_group_push_rule', { uid: '7706705' })) as { id: number };
@@ -437,9 +437,9 @@ test('读侧服务端裁剪：gateway 只看到本渠道规则与渠道；admin 
   const gwA = await gwClient(f, 'gwA', a);
   const adm = await mcpClient(f, ADMIN_TOKEN);
 
-  const rA = f.db.upsertPushRule({ name: 'A 规则', categoryId: null, uids: [], channels: [a], messageTemplate: null, enabled: true });
-  const rB = f.db.upsertPushRule({ name: 'B 规则', categoryId: null, uids: [], channels: [b], messageTemplate: null, enabled: true });
-  const rShared = f.db.upsertPushRule({ name: 'A+B 共享', categoryId: null, uids: [], channels: [a, b], messageTemplate: null, enabled: true });
+  const rA = f.db.upsertPushRule({ name: 'A 规则', categoryId: null, scope: [], channels: [a], messageTemplate: null, enabled: true });
+  const rB = f.db.upsertPushRule({ name: 'B 规则', categoryId: null, scope: [], channels: [b], messageTemplate: null, enabled: true });
+  const rShared = f.db.upsertPushRule({ name: 'A+B 共享', categoryId: null, scope: [], channels: [a, b], messageTemplate: null, enabled: true });
 
   const mine = (await call(gwA, 'list_push_rules')) as Array<{ id: number; sharedWithOtherChannels: boolean }>;
   assert.deepEqual(mine.map((r) => r.id), [rA, rShared], '只回本渠道的规则（含与其他渠道共享的多渠道规则）');
@@ -678,23 +678,31 @@ test('微博工具：gateway 只读可见；set_streamer 填微博昵称会建/�
   assert.equal(f.db.getWeiboAccountByUid('2203177060')!.biliUid, null, '清空 → 解关联但保留行');
 });
 
-test('upsert_post_rule：规则平台无关——「引用」/「翻译」不再拒绝，规则对象不再带 platform', async (t) => {
+test('upsert_push_rule：subject_kind=post 的规则——引用/翻译按新模型保存（图片筛选已上移进分类）', async (t) => {
   const f = await setup(t);
   const adm = await mcpClient(f, ADMIN_TOKEN);
   const { groupChannelId } = seedBase(f.db);
 
-  const wbRule = (await call(adm, 'upsert_post_rule', {
-    name: '通用规则', channels: [groupChannelId],
+  const wbRule = (await call(adm, 'upsert_push_rule', {
+    name: '通用规则', subjectKind: 'post', channels: [groupChannelId],
   })) as { id: number };
-  const stored = f.db.listPostRules().find((r) => r.id === wbRule.id)!;
-  assert.ok(!('platform' in stored), '规则已平台无关，对象不再带 platform');
+  const stored = f.db.listPushRules().find((r) => r.id === wbRule.id)!;
+  assert.equal(stored.subjectKind, 'post');
+  assert.deepEqual(stored.scope, [], '空 scope = 全部账号生效（D1）');
 
-  // quote 对非 X 帖永不命中是语义（matcher 按帖子平台自然生效），不是保存校验错误；
-  // 翻译改为运行时门控（非 X 帖不译），任何规则都可开
-  const q = (await call(adm, 'upsert_post_rule', { name: '引用规则', filters: { quote: true } })) as { id: number };
-  assert.equal(f.db.listPostRules().find((r) => r.id === q.id)!.filters.quote, true);
-  const tr = (await call(adm, 'upsert_post_rule', { name: '翻译规则', llmTranslate: true })) as { id: number };
-  assert.equal(f.db.listPostRules().find((r) => r.id === tr.id)!.llmTranslate, true);
+  // require_quote 分类对非 X 帖永不命中是语义（matcher 按帖子平台自然生效），不是保存校验错误；
+  // 翻译是规则附加动作（D3），任何规则都可开
+  const cat = (await call(adm, 'upsert_category', {
+    name: '引用帖', appliesTo: 'post', requireQuote: true,
+  })) as { id: number };
+  const q = (await call(adm, 'upsert_push_rule', {
+    name: '引用规则', subjectKind: 'post', categoryId: cat.id,
+  })) as { id: number };
+  assert.equal(f.db.listPushRules().find((r) => r.id === q.id)!.categoryId, cat.id);
+  const tr = (await call(adm, 'upsert_push_rule', {
+    name: '翻译规则', subjectKind: 'post', llmTranslate: true,
+  })) as { id: number };
+  assert.equal(f.db.listPushRules().find((r) => r.id === tr.id)!.llmTranslate, true);
 });
 
 test('search_posts：platform=twitter 可检索 X 归档；set_listen 支持 twitter', async (t) => {
@@ -714,82 +722,93 @@ test('search_posts：platform=twitter 可检索 X 归档；set_listen 支持 twi
   assert.equal(f.db.getSetting('listen_twitter'), '0');
 });
 
-test('图文帖规则工具：list/upsert/delete + 引用校验 + 死规则拒绝 + 合并后校验', async (t) => {
+test('分类 + 图文规则工具：applies_to/post 条件组、引用校验、scope 账号引用校验、合并后校验', async (t) => {
   const f = await setup(t);
   const adm = await mcpClient(f, ADMIN_TOKEN);
   const { groupChannelId } = seedBase(f.db);
 
-  assert.deepEqual(((await call(adm, 'list_post_rules')) as { rules: unknown[] }).rules, []);
-
-  const created = (await call(adm, 'upsert_post_rule', {
-    name: '只推带图原创', channels: [groupChannelId], filters: { media: true },
+  // 分类：appliesTo=post + 条件组（原 filters 上移进分类）
+  const cat = (await call(adm, 'upsert_category', {
+    name: '只推带图原创', appliesTo: 'post', postTypes: ['original'], requireMedia: true,
   })) as { id: number };
-  const listed = (await call(adm, 'list_post_rules')) as {
-    rules: Array<{ filters: { original: boolean; media: boolean }; channels: number[] }>;
-  };
-  assert.equal(listed.rules[0]!.filters.original, true, '未提供的筛选回落默认');
-  assert.equal(listed.rules[0]!.filters.media, true);
-  assert.deepEqual(listed.rules[0]!.channels, [groupChannelId]);
-  assert.equal('accountIds' in listed.rules[0]!, false, '规则不再携带账号集合（生效范围在账号侧 ruleIds）');
-  assert.equal('platform' in listed.rules[0]!, false, '规则已平台无关，不再带 platform');
+  const cats = (await call(adm, 'list_categories')) as Array<{
+    name: string; appliesTo: string; postTypes: string[]; requireMedia: boolean;
+  }>;
+  const row = cats.find((c) => c.name === '只推带图原创')!;
+  assert.equal(row.appliesTo, 'post');
+  assert.deepEqual(row.postTypes, ['original']);
+  assert.equal(row.requireMedia, true);
 
+  // 死分类拒绝：所有条件组皆空且无 LLM 提示词
   await assert.rejects(
-    () => call(adm, 'upsert_post_rule', { filters: { original: false, retweet: false } }),
-    /至少要勾一个/,
+    () => call(adm, 'upsert_category', { name: '死分类', appliesTo: 'post' }),
+    /至少配置/,
   );
-  await assert.rejects(() => call(adm, 'upsert_post_rule', { channels: [9999] }), /渠道不存在/);
+
+  // 图文规则：引用该分类 + 渠道
+  const created = (await call(adm, 'upsert_push_rule', {
+    name: '带图原创规则', subjectKind: 'post', categoryId: cat.id, channels: [groupChannelId],
+  })) as { id: number };
+  const listed = (await call(adm, 'list_push_rules')) as Array<{
+    subjectKind: string; scope: string[]; channels: number[];
+  }>;
+  const ruleRow = listed.find((r) => r.subjectKind === 'post')!;
+  assert.deepEqual(ruleRow.scope, [], '空 scope = 全部生效');
+  assert.deepEqual(ruleRow.channels, [groupChannelId]);
+
+  await assert.rejects(() => call(adm, 'upsert_push_rule', { channels: [9999] }), /渠道不存在/);
+  await assert.rejects(
+    () => call(adm, 'upsert_push_rule', { subjectKind: 'post', scope: ['twitter:不存在'] }),
+    /账号引用不存在/,
+    'scope 账号引用必须在名单里',
+  );
 
   // 更新：只改推送词，渠道沿用旧值（合并后仍要校验通过）
-  await call(adm, 'upsert_post_rule', { id: created.id, messageTemplate: '{author} 更新了' });
-  assert.equal(f.db.listPostRules()[0]!.messageTemplate, '{author} 更新了');
+  await call(adm, 'upsert_push_rule', { id: created.id, messageTemplate: '{author} 更新了' });
+  assert.equal(f.db.listPushRules().find((r) => r.id === created.id)!.messageTemplate, '{author} 更新了');
 
-  // LLM 判定：开了就必须给标准（与面板同一条校验）
-  await assert.rejects(
-    () => call(adm, 'upsert_post_rule', { id: created.id, llmJudge: true }),
-    /必须填判定提示词/,
-  );
-  await call(adm, 'upsert_post_rule', {
-    id: created.id, llmJudge: true, judgePrompt: '只推直播预告', llmTranslate: true,
-  });
-  const withLlm = f.db.listPostRules()[0]!;
-  assert.equal(withLlm.llmJudge, true);
-  assert.equal(withLlm.judgePrompt, '只推直播预告');
-  assert.equal(withLlm.llmTranslate, true);
-
-  await call(adm, 'delete_post_rule', { id: created.id });
-  assert.equal(f.db.listPostRules().length, 0);
-  await assert.rejects(() => call(adm, 'delete_post_rule', { id: created.id }), /不存在/);
+  await call(adm, 'delete_push_rule', { id: created.id });
+  assert.equal(f.db.listPushRules().filter((r) => r.subjectKind === 'post').length, 0);
+  await assert.rejects(() => call(adm, 'delete_push_rule', { id: created.id }), /不存在/);
 });
 
-test('账号 ruleIds 选用规则：规则平台无关（存在即可选用）；delete_post_rule 连带清扫三份名单', async (t) => {
+test('账号工具的 ruleIds 入参退役：生效范围单一信源在规则 scope（双向视图写同一份数据）', async (t) => {
   const f = await setup(t);
   const adm = await mcpClient(f, ADMIN_TOKEN);
-  const rule1 = (await call(adm, 'upsert_post_rule', { name: 'r1' })) as { id: number };
-  const rule2 = (await call(adm, 'upsert_post_rule', { name: 'r2' })) as { id: number };
 
-  // X 账号：任何规则都可选用；不存在的拒
-  const x = (await call(adm, 'upsert_x_account', { screenName: 'watase_yuzuki', ruleIds: [rule1.id, rule2.id] })) as {
-    id: number; account: { ruleIds: number[] };
+  const x = (await call(adm, 'upsert_x_account', { screenName: 'watase_yuzuki' })) as {
+    id: number; account: Record<string, unknown>;
   };
-  assert.deepEqual(x.account.ruleIds, [rule1.id, rule2.id], '规则平台无关，任意选用');
+  assert.equal('ruleIds' in x.account, false, '账号对象不再带 ruleIds');
+
+  // 账号选用规则 = 写规则的 scope（A.2：账号卡勾选改写规则 scope）
+  const rule = (await call(adm, 'upsert_push_rule', {
+    name: 'r1', subjectKind: 'post', scope: ['twitter:watase_yuzuki'],
+  })) as { id: number };
+  assert.deepEqual(
+    f.db.listPushRules().find((r) => r.id === rule.id)!.scope,
+    ['twitter:watase_yuzuki'],
+    'scope 是生效范围的唯一数据',
+  );
+  // 传 ruleIds 会被 schema 剥离（入参退役）：与真字段同传时静默忽略，只传 ruleIds 时按「没有可更新的字段」拒绝
+  await call(adm, 'upsert_x_account', { id: x.id, displayName: '结月', ruleIds: [12345] });
+  assert.equal(f.db.getXAccount(x.id)!.displayName, '结月', '真字段生效');
   await assert.rejects(
-    () => call(adm, 'upsert_x_account', { id: x.id, ruleIds: [9999] }),
-    /图文帖规则不存在/,
+    () => call(adm, 'upsert_x_account', { id: x.id, ruleIds: [12345] }),
+    /没有可更新的字段/,
   );
 
-  // 微博 / B站账号同口径（同一条规则跨平台选用）
-  const wb = (await call(adm, 'upsert_weibo_account', { uid: '2203177060', ruleIds: [rule1.id] })) as { id: number };
-  assert.deepEqual(f.db.getWeiboAccount(wb.id)!.ruleIds, [rule1.id]);
-  const bi = (await call(adm, 'upsert_bili_account', { uid: '7706705', ruleIds: [rule2.id] })) as { id: number };
-  assert.deepEqual(f.db.getBiliAccount(bi.id)!.ruleIds, [rule2.id]);
-
-  // 删规则 → 三份名单的 ruleIds 不残留已删 id
-  await call(adm, 'delete_post_rule', { id: rule1.id });
-  assert.deepEqual(f.db.getXAccount(x.id)!.ruleIds, [rule2.id], 'X 名单清扫已删 id');
-  assert.deepEqual(f.db.getWeiboAccount(wb.id)!.ruleIds, [], '微博名单清扫');
-  await call(adm, 'delete_post_rule', { id: rule2.id });
-  assert.deepEqual(f.db.getXAccount(x.id)!.ruleIds, [], 'X 名单清扫');
-  assert.deepEqual(f.db.getBiliAccount(bi.id)!.ruleIds, [], 'B站名单清扫');
+  // 三平台账号引用都能进 scope
+  await call(adm, 'upsert_weibo_account', { uid: '2203177060' });
+  await call(adm, 'upsert_bili_account', { uid: '7706705' });
+  await call(adm, 'upsert_push_rule', {
+    id: rule.id,
+    scope: ['twitter:watase_yuzuki', 'weibo:2203177060', 'bili:7706705'],
+  });
+  assert.deepEqual(
+    f.db.listPushRules().find((r) => r.id === rule.id)!.scope,
+    ['twitter:watase_yuzuki', 'weibo:2203177060', 'bili:7706705'],
+  );
 });
 
 test('B站动态账号工具：list/upsert/delete；uid 链接归一化；gateway 只读可见', async (t) => {
@@ -833,13 +852,15 @@ test('B站动态账号工具：list/upsert/delete；uid 链接归一化；gatewa
   await assert.rejects(() => call(adm, 'delete_bili_account', { id: created.id }), /不存在/);
 });
 
-test('图文帖规则：gateway 能看不能改（list 共享、写是 admin 专属）', async (t) => {
+test('图文规则：gateway 只读可见（list_push_rules 共享）、写是 admin 专属', async (t) => {
   const f = await setup(t);
   const gw = await mcpClient(f, GATEWAY_TOKEN);
   const tools = (await gw.listTools()).tools.map((x) => x.name);
-  assert.equal(tools.includes('list_post_rules'), true, '只读对群友可见');
-  assert.equal(tools.includes('upsert_post_rule'), false, '写是 admin 专属');
-  assert.equal(tools.includes('delete_post_rule'), false);
+  assert.equal(tools.includes('list_push_rules'), true, '只读对群友可见（含 subject_kind=post 规则）');
+  assert.equal(tools.includes('upsert_push_rule'), false, '写是 admin 专属');
+  assert.equal(tools.includes('delete_push_rule'), false);
+  assert.equal(tools.includes('upsert_category'), false, '分类（判定口径）也是 admin 专属');
+  assert.equal(tools.includes('upsert_post_rule'), false, 'post_rule 工具已退役，两角色都不可见');
 });
 
 // ---- P0 补齐的排序/测试类工具（write-path-inventory 的 8 条 planned → exists）----
@@ -862,22 +883,16 @@ test('reorder_channels / reorder_categories：全排列校验 + 落库顺序', a
   await assert.rejects(call(adm, 'reorder_categories', { ids: [cat2, cat2] }), /一一对应/);
 });
 
-test('reorder_push_rules / reorder_post_rules：全排列校验 + 落库顺序', async (t) => {
+test('reorder_push_rules：全排列校验 + 落库顺序（live 与 post 规则共用一张全局序）', async (t) => {
   const f = await setup(t);
   const adm = await mcpClient(f, ADMIN_TOKEN);
   const { groupChannelId } = seedBase(f.db);
 
-  const r1 = f.db.upsertPushRule({ name: 'r1', categoryId: null, uids: [], channels: [groupChannelId], messageTemplate: null, enabled: true });
-  const r2 = f.db.upsertPushRule({ name: 'r2', categoryId: null, uids: [], channels: [], messageTemplate: null, enabled: true });
+  const r1 = f.db.upsertPushRule({ name: 'r1', categoryId: null, scope: [], channels: [groupChannelId], messageTemplate: null, enabled: true });
+  const r2 = f.db.upsertPushRule({ name: 'r2', subjectKind: 'post', categoryId: null, scope: [], channels: [], messageTemplate: null, enabled: true });
   await call(adm, 'reorder_push_rules', { ids: [r2, r1] });
-  assert.deepEqual(f.db.listPushRules().map((r) => r.id), [r2, r1]);
+  assert.deepEqual(f.db.listPushRules().map((r) => r.id), [r2, r1], '两形态同表同序');
   await assert.rejects(call(adm, 'reorder_push_rules', { ids: [r1] }), /必须与现有规则一一对应/);
-
-  const p1 = f.db.upsertPostRule({ name: 'p1' });
-  const p2 = f.db.upsertPostRule({ name: 'p2' });
-  await call(adm, 'reorder_post_rules', { ids: [p2, p1] });
-  assert.deepEqual(f.db.listPostRules().map((r) => r.id), [p2, p1]);
-  await assert.rejects(call(adm, 'reorder_post_rules', { ids: [p1, 999] }), /必须与现有图文帖规则一一对应/);
 });
 
 test('reorder_llm_providers：names 全排列，保存后名单顺序即路由优先级', async (t) => {
@@ -947,7 +962,7 @@ test('排序/测试类工具：admin 可见、gateway 不可见；schema 校验�
   const admTools = (await adm.listTools()).tools.map((x) => x.name);
   const gwTools = (await gw.listTools()).tools.map((x) => x.name);
   for (const name of [
-    'reorder_channels', 'reorder_categories', 'reorder_push_rules', 'reorder_post_rules',
+    'reorder_channels', 'reorder_categories', 'reorder_push_rules',
     'reorder_llm_providers', 'test_push', 'test_llm_provider', 'test_x_connection',
   ]) {
     assert.ok(admTools.includes(name), `admin 应可见 ${name}`);

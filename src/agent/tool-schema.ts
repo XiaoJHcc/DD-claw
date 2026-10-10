@@ -26,7 +26,6 @@ import type { McpToolDef } from '../mcp/tools.js';
  */
 export const AGENT_EXCLUDED_TOOLS: readonly string[] = [
   'reorder_push_rules',
-  'reorder_post_rules',
   'reorder_categories',
   'reorder_channels',
   'reorder_llm_providers',

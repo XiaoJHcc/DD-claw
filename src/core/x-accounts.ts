@@ -15,7 +15,6 @@ export interface XAccountRow {
   display_name: string | null;
   bili_uid: string | null;
   enabled: number;
-  rule_ids: string;
   silent_next: number;
   last_tweet_id: string | null;
   last_tweet_at: number | null;
@@ -39,8 +38,6 @@ export interface XAccount {
   /** 可选关联主播（引用 streamers.uid；仅展示与文案用，不参与抓取） */
   biliUid: string | null;
   enabled: boolean;
-  /** 选用的图文帖规则（post_rules.id）；空 = 这个账号的帖子一律不推 */
-  ruleIds: number[];
   /** 主动关闭恢复位：重新启用（或图文开关重开，见 setListen）时置位，恢复轮询的
    *  首轮静默归档不补推（「主动关闭意图：显然不推」），源消费后清位 */
   silentNext: boolean;
@@ -74,7 +71,6 @@ export interface XAccountInput {
   displayName?: string | null;
   biliUid?: string | null;
   enabled?: boolean;
-  ruleIds?: number[];
 }
 
 /** 抓取成功后的回写（可选字段：只更新拿到的部分） */
@@ -113,7 +109,6 @@ export function rowToXAccount(r: XAccountRow): XAccount {
     displayName: r.display_name,
     biliUid: r.bili_uid,
     enabled: r.enabled === 1,
-    ruleIds: JSON.parse(r.rule_ids) as number[],
     silentNext: r.silent_next === 1,
     lastTweetId: r.last_tweet_id,
     lastTweetAt: r.last_tweet_at,

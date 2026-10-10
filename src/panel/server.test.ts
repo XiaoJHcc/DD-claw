@@ -13,7 +13,6 @@ import type { LlmProviderConfig } from '../config/schema.js';
 import { saveNapcatConfig } from '../notify/napcat.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
-import { defaultPostFilters } from '../core/post-rules.js';
 import { UndoStore, adminScope, undoEffects, type UndoEffect, type UndoResult } from '../core/undo.js';
 import { ChatStore } from '../core/chat-store.js';
 
@@ -258,11 +257,11 @@ test('GET /api/streamers：enrich face / live=null / 生效规则名标签（含
   const { db, base } = await setup(t);
   db.upsertStreamer({ uid: '1001', uname: '阿梓', face: 'https://i0.hdslb.com/f1.jpg' });
   db.upsertStreamer({ uid: '1002', uname: '小可' });
-  db.upsertPushRule({ name: '全局规则', categoryId: null, uids: [], channels: [],
+  db.upsertPushRule({ name: '全局规则', categoryId: null, scope: [], channels: [],
     messageTemplate: null, enabled: true });
-  db.upsertPushRule({ name: '仅阿梓', categoryId: null, uids: ['1001'], channels: [],
+  db.upsertPushRule({ name: '仅阿梓', categoryId: null, scope: ['1001'], channels: [],
     messageTemplate: null, enabled: true });
-  db.upsertPushRule({ name: '停用的', categoryId: null, uids: ['1001'], channels: [],
+  db.upsertPushRule({ name: '停用的', categoryId: null, scope: ['1001'], channels: [],
     messageTemplate: null, enabled: false });
 
   const r = await api(base, '/api/streamers');
@@ -284,7 +283,7 @@ test('GET /api/streamers：enrich face / live=null / 生效规则名标签（含
   assert.equal(s1.live, null, '无 room_state 记录时 live=null');
   assert.deepEqual(s1.rules, { names: ['全局规则', '仅阿梓', '停用的'] },
     '生效规则按全局 sort 序，disabled 也带上');
-  assert.deepEqual(s2.rules, { names: ['全局规则'] }, 'uids 空 = 对全部主播生效（含未来新增）');
+  assert.deepEqual(s2.rules, { names: ['全局规则'] }, 'scope 空 = 对全部主播生效（含未来新增）');
 });
 
 test('GET /api/streamers：有 room_state 时 live 带实况字段与下播锚点', async (t) => {
@@ -674,7 +673,7 @@ test('category 校验：三条件皆空 400（POST 与 PUT 合并后）/ condMod
 
   const empty = await api(base, '/api/categories', 'POST', { name: '空的' });
   assert.equal(empty.status, 400, 'llmPrompt/keywords/areas 皆空 400');
-  assert.match(empty.json.error ?? '', /至少配置 LLM 提示词或关键词\/分区条件/);
+  assert.match(empty.json.error ?? '', /至少配置 LLM 提示词或一组确定性条件/);
 
   const badMode = await api(base, '/api/categories', 'POST', categoryBody({ condMode: 'xor' }));
   assert.equal(badMode.status, 400);
@@ -722,7 +721,7 @@ test('DELETE /api/categories/:id：级联停用引用它的推送规则并返回
   const mk = { llmPrompt: null, keywords: ['x'], areas: [], condMode: 'and' as const, enabled: true };
   const cat = db.upsertCategory({ ...mk, name: '歌回' });
   const other = db.upsertCategory({ ...mk, name: '游戏' });
-  const mkRule = { uids: [], channels: [], messageTemplate: null, enabled: true };
+  const mkRule = { scope: [], channels: [], messageTemplate: null, enabled: true };
   db.upsertPushRule({ ...mkRule, name: 'r1', categoryId: cat });
   db.upsertPushRule({ ...mkRule, name: 'r2', categoryId: cat });
   db.upsertPushRule({ ...mkRule, name: 'r3', categoryId: other });
@@ -736,11 +735,11 @@ test('DELETE /api/categories/:id：级联停用引用它的推送规则并返回
   assert.equal(db.listCategories().some((c) => c.id === cat), false, '分类已删除');
 });
 
-// ---- push_rules v2：推送规则（全局；分类引用 + 生效主播集合）----
+// ---- push_rules：推送规则（统一规则：分类引用 × 生效范围 × 渠道）----
 
 function ruleBody(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    categoryId: null, uids: [], channels: [],
+    categoryId: null, scope: [], channels: [],
     messageTemplate: '{liver} 开播了', enabled: true,
     ...over,
   };
@@ -770,25 +769,26 @@ test('rule CRUD：POST → GET → PUT → DELETE', async (t) => {
   const r = db.listPushRules().find((x) => x.id === id)!;
   assert.deepEqual(r.channels, []);
   assert.equal(r.messageTemplate, null);
-  assert.equal(r.categoryId, null, 'categoryId 可置空（任意开播）');
-  assert.deepEqual(r.uids, [], '未提供字段保留');
+  assert.equal(r.categoryId, null, 'categoryId 可置空（任意内容）');
+  assert.deepEqual(r.scope, [], '未提供字段保留');
 
   assert.equal((await api(base, `/api/rules/${id}`, 'DELETE')).status, 200);
   assert.equal((await api(base, `/api/rules/${id}`, 'DELETE')).status, 404, '重复删除 404');
 });
 
-test('GET /api/rules?uid= 新语义：空 uids 对任何主播生效，显式名单只对列出主播', async (t) => {
+test('GET /api/rules?uid= 语义：空 scope 对任何主播生效，显式名单只对列出主播（只看开播规则）', async (t) => {
   const { db, base } = await setup(t);
   db.upsertStreamer({ uid: '1001' });
   db.upsertStreamer({ uid: '1002' });
   const mk = { categoryId: null, channels: [], messageTemplate: null, enabled: true };
-  const a = db.upsertPushRule({ ...mk, name: '全局', uids: [] });
-  const b = db.upsertPushRule({ ...mk, name: '仅1001', uids: ['1001'] });
+  const a = db.upsertPushRule({ ...mk, name: '全局', scope: [] });
+  const b = db.upsertPushRule({ ...mk, name: '仅1001', scope: ['1001'] });
+  db.upsertPushRule({ ...mk, name: '图文规则', subjectKind: 'post', scope: [] });
 
   const for1 = (await api(base, '/api/rules?uid=1001')).json['rules'] as Array<{ id: number }>;
-  assert.deepEqual(for1.map((r) => r.id), [a, b], '名单内主播看到全局 + 专属');
+  assert.deepEqual(for1.map((r) => r.id), [a, b], '名单内主播看到全局 + 专属（图文规则不进主播卡）');
   const for2 = (await api(base, '/api/rules?uid=1002')).json['rules'] as Array<{ id: number }>;
-  assert.deepEqual(for2.map((r) => r.id), [a], '空 uids = 全部主播（含未来新增）');
+  assert.deepEqual(for2.map((r) => r.id), [a], '空 scope = 全部主播（含未来新增）');
   assert.equal((await api(base, '/api/rules?uid=abc')).status, 400);
 });
 
@@ -807,25 +807,27 @@ test('rule 校验：引用存在性（分类/渠道/主播）+ 字段类型 + �
   assert.equal(badChan.status, 400);
   assert.match(badChan.json.error ?? '', /渠道不存在/);
 
-  const badUid = await api(base, '/api/rules', 'POST', ruleBody({ uids: ['1001', '9999'] }));
+  const badUid = await api(base, '/api/rules', 'POST', ruleBody({ scope: ['1001', '9999'] }));
   assert.equal(badUid.status, 400);
   assert.match(badUid.json.error ?? '', /不在监听名单/);
 
-  assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ uids: ['abc'] }))).status, 400,
-    'uids 元素必须纯数字');
+  assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ scope: ['abc'] }))).status, 400,
+    'scope 元素必须是纯数字 uid 或平台账号引用');
   assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ categoryId: 'x' }))).status, 400);
   assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ channels: ['x'] }))).status, 400);
   assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ keywords: ['歌'] }))).status, 400,
     'keywords 已移除，属未知字段');
   assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ uid: '1001' }))).status, 400,
     'uid 字段已移除，属未知字段');
+  assert.equal((await api(base, '/api/rules', 'POST', ruleBody({ uids: ['1001'] }))).status, 400,
+    'uids 已更名 scope，属未知字段');
 
   // PUT 对合并后形状做存在性校验
   const ok = await api(base, '/api/rules', 'POST', ruleBody({ channels: [chId] }));
   const id = (ok.json as { id: number }).id;
   assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { channels: [999] })).status, 400,
     'PUT 改成不存在的渠道 400');
-  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { uids: ['1001'] })).status, 200,
+  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', { scope: ['1001'] })).status, 200,
     'PUT 合并校验放行合法引用');
   assert.equal((await api(base, '/api/rules/xyz', 'PUT', { enabled: false })).status, 400);
   assert.equal((await api(base, '/api/rules/999', 'PUT', { enabled: false })).status, 404);
@@ -1992,107 +1994,53 @@ test('/api/listen：推特开关的 auto 判据是「代理已配置」，PUT �
   assert.equal((info.json.rows as Record<string, { enabled: boolean }>).twitter!.enabled, true);
 });
 
-// ---- 图文帖规则（X/推特；与推送规则平行的另一张表）----
+// ---- 图文规则（P2 起统一进 push_rules，post_rules 端点退役）----
 
-test('/api/post-rules：CRUD + 引用校验 + 死规则拒绝 + 排序', async (t) => {
+test('/api/post-rules* 端点已退役（规则统一进 /api/rules 的 subjectKind=post）', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/post-rules')).status, 404);
+  assert.equal((await api(base, '/api/post-rules', 'POST', { name: 'x' })).status, 404);
+  assert.equal((await api(base, '/api/post-rules/order', 'PUT', { ids: [1] })).status, 404);
+  assert.equal((await api(base, '/api/post-rules/1', 'PUT', { enabled: true })).status, 404);
+  assert.equal((await api(base, '/api/post-rules/1', 'DELETE')).status, 404);
+});
+
+test('图文规则走 /api/rules：subjectKind=post × 分类引用 × scope × llmTranslate', async (t) => {
   const db = new Db(':memory:');
   const { base } = await setup(t, { db, x: makeXDep(db, []) });
   const channelId = db.upsertPushChannel({
     name: '粉丝群', notifier: 'onebot', targetType: 'group', targetId: '10001', enabled: true,
   });
+  await api(base, '/api/x/accounts', 'POST', { screenName: 'watase_yuzuki' });
+  const cat = db.upsertCategory({
+    name: '带图原创', appliesTo: 'post', postTypes: ['original'], requireMedia: true,
+    keywords: [], areas: [], llmPrompt: null, condMode: 'and', enabled: true,
+  });
 
-  assert.deepEqual(((await api(base, '/api/post-rules')).json.rules as unknown[]).length, 0, '初始无规则');
-
-  const created = await api(base, '/api/post-rules', 'POST', {
-    name: '只推带图原创', channels: [channelId], filters: { media: true },
+  const created = await api(base, '/api/rules', 'POST', {
+    name: '只推带图原创', subjectKind: 'post', categoryId: cat, channels: [channelId],
+    scope: ['twitter:watase_yuzuki'], llmTranslate: true,
   });
   assert.equal(created.status, 201);
   const id = (created.json as { id: number }).id;
-  const list = (await api(base, '/api/post-rules')).json.rules as Array<{
-    filters: { original: boolean; retweet: boolean; media: boolean };
-  }>;
-  assert.equal(list[0]!.filters.original, true, '未提供的筛选回落默认（只推原创）');
-  assert.equal(list[0]!.filters.media, true);
-  assert.equal('accountIds' in list[0]!, false, '规则不再携带账号集合（生效范围在账号侧 ruleIds）');
-  assert.equal('platform' in list[0]!, false, '规则已平台无关，响应不再带 platform');
-
-  // platform 已退役：按未知字段 400（与 accountIds 退役同口径）
-  assert.equal(
-    (await api(base, '/api/post-rules', 'POST', { platform: 'weibo' })).status, 400,
-    'platform 已退役，按未知字段拒',
-  );
-
-  // 「原创/转发都不勾」= 永不命中的死规则，当场拒绝
-  assert.equal(
-    (await api(base, '/api/post-rules', 'POST', { filters: { original: false, retweet: false } })).status,
-    400,
-    '死规则拒绝',
-  );
-  assert.equal((await api(base, '/api/post-rules', 'POST', { channels: [999] })).status, 400, '渠道不存在');
-  assert.equal(
-    (await api(base, '/api/post-rules', 'POST', { accountIds: [1] })).status, 400,
-    'accountIds 已退役，按未知字段拒',
-  );
-  assert.equal((await api(base, '/api/post-rules', 'POST', { filters: { nope: true } })).status, 400, '未知筛选字段');
-  assert.equal((await api(base, '/api/post-rules', 'POST', { filters: { media: 'yes' } })).status, 400, '筛选类型错');
-
-  // PUT：只改 filters 时渠道沿用旧值 → 合并后仍要可用
-  assert.equal(
-    (await api(base, `/api/post-rules/${id}`, 'PUT', { filters: { original: false, retweet: false } })).status,
-    400,
-    '合并后成了死规则也要拒',
-  );
-  assert.equal((await api(base, `/api/post-rules/${id}`, 'PUT', { enabled: false })).status, 200);
-  assert.equal(db.listPostRules()[0]!.enabled, false);
-  assert.equal((await api(base, `/api/post-rules/${id}`, 'PUT', {})).status, 400, '空 patch');
-  assert.equal(
-    (await api(base, `/api/post-rules/${id}`, 'PUT', { platform: 'twitter' })).status, 400,
-    'PUT 传 platform 同样按未知字段拒',
-  );
-
-  // 排序：ids 必须是全排列
-  const id2 = db.upsertPostRule({
-    name: 'r2', channels: [], filters: defaultPostFilters(),
-    messageTemplate: null, enabled: true,
-  });
-  assert.equal((await api(base, '/api/post-rules/order', 'PUT', { ids: [id2, id] })).status, 200);
-  assert.deepEqual(db.listPostRules().map((r) => r.id), [id2, id], '顺序按传入重写');
-  assert.equal((await api(base, '/api/post-rules/order', 'PUT', { ids: [id] })).status, 400, '必须全排列');
-
-  assert.equal((await api(base, `/api/post-rules/${id}`, 'DELETE')).status, 200);
-  assert.equal((await api(base, `/api/post-rules/${id}`, 'DELETE')).status, 404, '再删一次 404');
-});
-
-test('/api/post-rules：开了 LLM 判定就必须填判定标准（口径由人填）', async (t) => {
-  const db = new Db(':memory:');
-  const { base } = await setup(t, { db, x: makeXDep(db, []) });
-
-  assert.equal(
-    (await api(base, '/api/post-rules', 'POST', { llmJudge: true })).status, 400,
-    '开了判定却没标准 → 拒绝（不让模型自由发挥）',
-  );
-  assert.equal(
-    (await api(base, '/api/post-rules', 'POST', { llmJudge: true, judgePrompt: '   ' })).status, 400,
-    '全空白不算填了',
-  );
-
-  const created = await api(base, '/api/post-rules', 'POST', {
-    name: 'LLM 判定规则', llmJudge: true, judgePrompt: '只推与直播预告相关的推文', llmTranslate: true,
-  });
-  assert.equal(created.status, 201);
-  const r = db.listPostRules()[0]!;
-  assert.equal(r.llmJudge, true);
-  assert.equal(r.judgePrompt, '只推与直播预告相关的推文');
+  const r = db.listPushRules().find((x) => x.id === id)!;
+  assert.equal(r.subjectKind, 'post');
+  assert.equal(r.categoryId, cat, '筛选口径在分类上，规则只引用');
+  assert.deepEqual(r.scope, ['twitter:watase_yuzuki']);
   assert.equal(r.llmTranslate, true, '翻译开关落库');
 
-  // PUT 对「合并后」的形状校验：只清标准、判定仍开 → 400
-  assert.equal((await api(base, `/api/post-rules/${r.id}`, 'PUT', { judgePrompt: null })).status, 400);
-  // 同时关掉判定就可以清空标准
+  // 引用校验（与开播规则同一条通道）：渠道/分类/账号引用不存在都拒
+  assert.equal((await api(base, '/api/rules', 'POST', { subjectKind: 'post', channels: [999] })).status, 400, '渠道不存在');
+  assert.equal((await api(base, '/api/rules', 'POST', { subjectKind: 'post', categoryId: 999 })).status, 400, '分类不存在');
   assert.equal(
-    (await api(base, `/api/post-rules/${r.id}`, 'PUT', { llmJudge: false, judgePrompt: null })).status, 200,
+    (await api(base, '/api/rules', 'POST', { subjectKind: 'post', scope: ['twitter:不存在'] })).status, 400,
+    '账号引用不存在',
   );
-  assert.equal(db.listPostRules()[0]!.judgePrompt, null);
-  assert.equal(db.listPostRules()[0]!.llmTranslate, true, '没动的字段保留');
+
+  // 空 patch 拒；删除直删（账号侧不再有 ruleIds，无连带清扫）
+  assert.equal((await api(base, `/api/rules/${id}`, 'PUT', {})).status, 400, '空 patch');
+  assert.equal((await api(base, `/api/rules/${id}`, 'DELETE')).status, 200);
+  assert.equal((await api(base, `/api/rules/${id}`, 'DELETE')).status, 404);
 });
 
 test('/api/x/accounts：名单行携带最近 3 条推文（不含 raw）+ 关联主播展示名', async (t) => {
@@ -2361,92 +2309,63 @@ test('添加微博 / X 账号同样即时首拉（deps.weibo / deps.x 的 kickAc
   assert.deepEqual(kickedX, ['hosi_tiri'], 'X 添加后应立即首拉新账号');
 });
 
-test('/api/post-rules：规则平台无关——「引用」与「翻译」不再按平台拒绝保存', async (t) => {
+test('/api/categories：appliesTo=post 的条件组（require_quote 对非 X 帖永不命中是语义，不是保存错误）', async (t) => {
   const db = new Db(':memory:');
   const { base } = await setup(t, { db, x: makeXDep(db, []) });
 
-  // quote 对非 X 帖永不命中是**语义**（matcher 按帖子平台自然生效），不是保存校验错误
+  // require_quote 分类对非 X 帖永不命中是**语义**（matcher 按帖子平台自然生效），不是保存校验错误
   assert.equal(
-    (await api(base, '/api/post-rules', 'POST', { name: 'quote', filters: { quote: true } })).status, 201,
-    '勾「引用」不再拒绝保存',
+    (await api(base, '/api/categories', 'POST', {
+      name: 'quote', appliesTo: 'post', requireQuote: true,
+    })).status, 201,
+    '勾「引用」保存无碍',
   );
-  // 翻译从保存时校验改为运行时门控（非 X 帖不译）：任何规则都可开
+  // 翻译是规则附加动作（D3）：任何规则都可开
   assert.equal(
-    (await api(base, '/api/post-rules', 'POST', { name: 'tr', llmTranslate: true })).status, 201,
-    '开「LLM 翻译」不再拒绝保存',
+    (await api(base, '/api/rules', 'POST', { name: 'tr', subjectKind: 'post', llmTranslate: true })).status, 201,
+    '开「LLM 翻译」保存无碍',
   );
+  // 判定口径上移进分类的 llm_prompt（人填口径）
   assert.equal(
-    (await api(base, '/api/post-rules', 'POST', { name: 'judge', llmJudge: true, judgePrompt: '只推直播预告' })).status,
-    201,
-    'LLM 判定照常可用',
+    (await api(base, '/api/categories', 'POST', {
+      name: 'judge', appliesTo: 'post', llmPrompt: '只推直播预告',
+    })).status, 201,
+    'LLM 判定口径在分类上',
   );
 });
 
-// ---- 账号侧 ruleIds：规则存在即可选用（规则平台无关，三份名单同口径）----
+// ---- 账号工具的 ruleIds 入参退役（A.2）：生效范围单一信源 = 规则 scope，账号侧无连带清扫 ----
 
-test('账号 ruleIds：任何规则都可被任何平台账号选用；不存在的规则 400；GET 视图携带 ruleIds', async (t) => {
+test('账号端点：ruleIds 属未知字段（REST rejectUnknown → 400）；生效范围改写规则 scope', async (t) => {
   const db = new Db(':memory:');
   const { base } = await setup(t, { db, x: makeXDep(db, []), weibo: makeWeiboDep(db, []) });
-  const newRule = (name: string) => db.upsertPostRule({
-    name, channels: [], filters: defaultPostFilters(),
-    messageTemplate: null, llmJudge: false, judgePrompt: null, llmTranslate: false, enabled: true,
+
+  const rule1 = db.upsertPushRule({
+    name: 'r1', subjectKind: 'post', scope: [], channels: [],
+    messageTemplate: null, enabled: true,
   });
-  const rule1 = newRule('r1');
-  const rule2 = newRule('r2');
 
-  // X 账号：任意规则都收；不存在的拒
-  const x = await api(base, '/api/x/accounts', 'POST', { screenName: 'watase_yuzuki', ruleIds: [rule1, rule2] });
-  assert.equal(x.status, 200, 'X 账号可选用任何规则（规则平台无关）');
-  assert.deepEqual((x.json.account as { ruleIds: number[] }).ruleIds, [rule1, rule2]);
+  // ruleIds 入参退役：REST 是 rejectUnknown 口径，直接 400（不静默吞）
   assert.equal(
-    (await api(base, '/api/x/accounts', 'POST', { screenName: 'd4dj_pj', ruleIds: [9999] })).status, 400,
-    '规则不存在 400',
+    (await api(base, '/api/x/accounts', 'POST', { screenName: 'watase_yuzuki', ruleIds: [rule1] })).status, 400,
+    'ruleIds 已退役，按未知字段拒',
   );
-  const xId = (x.json.account as { id: number }).id;
-  assert.equal((await api(base, `/api/x/accounts/${xId}`, 'PUT', { ruleIds: [] })).status, 200, '清空选用');
-  assert.equal((await api(base, `/api/x/accounts/${xId}`, 'PUT', { ruleIds: [rule2] })).status, 200, 'PUT 任意规则也收');
+  assert.equal((await api(base, '/api/weibo/accounts', 'POST', { uid: '2203177060', ruleIds: [rule1] })).status, 400);
+  assert.equal((await api(base, '/api/bili/accounts', 'POST', { uid: '7706705', ruleIds: [rule1] })).status, 400);
 
-  // 微博账号：同一条规则跨平台选用
-  const w = await api(base, '/api/weibo/accounts', 'POST', { uid: '2203177060', ruleIds: [rule1] });
-  assert.equal(w.status, 200);
-  assert.deepEqual((w.json.account as { ruleIds: number[] }).ruleIds, [rule1]);
+  // 账号选用规则 = 改写规则的 scope（账号卡勾选与规则弹窗写同一份数据）
+  const x = await api(base, '/api/x/accounts', 'POST', { screenName: 'watase_yuzuki' });
+  const xRef = 'twitter:watase_yuzuki';
+  assert.equal((await api(base, `/api/rules/${rule1}`, 'PUT', { scope: [xRef] })).status, 200);
+  assert.deepEqual(db.listPushRules().find((r) => r.id === rule1)!.scope, [xRef]);
+  // 账号视图不再携带 ruleIds
+  const list = (await api(base, '/api/x/accounts')).json.accounts as Array<{ ruleIds?: unknown }>;
+  assert.equal('ruleIds' in list[0]!, false);
+  assert.equal(x.status, 200);
 
-  // B站动态账号：混选多条规则也收
-  const b = await api(base, '/api/bili/accounts', 'POST', { uid: '7706705', ruleIds: [rule1, rule2] });
-  assert.equal(b.status, 200);
-  assert.deepEqual((b.json.account as { ruleIds: number[] }).ruleIds, [rule1, rule2]);
-  const bId = (b.json.account as { id: number }).id;
-  assert.equal(
-    (await api(base, `/api/bili/accounts/${bId}`, 'PUT', { ruleIds: [rule1, 9999] })).status, 400,
-    '混入一条不存在的规则整体拒',
-  );
-
-  // GET 视图带 ruleIds
-  const list = (await api(base, '/api/bili/accounts')).json.accounts as Array<{ ruleIds: number[] }>;
-  assert.deepEqual(list[0]!.ruleIds, [rule1, rule2]);
-});
-
-test('DELETE /api/post-rules/:id 连带清扫三份账号名单里的 ruleIds（与 webui mock 同构）', async (t) => {
-  const db = new Db(':memory:');
-  const { base } = await setup(t, { db, x: makeXDep(db, []), weibo: makeWeiboDep(db, []) });
-  const newRule = () => db.upsertPostRule({
-    name: '', channels: [], filters: defaultPostFilters(),
-    messageTemplate: null, llmJudge: false, judgePrompt: null, llmTranslate: false, enabled: true,
-  });
-  const xRule = newRule();
-  const wbRule = newRule();
-  const biRule = newRule();
-  const xId = db.upsertXAccount({ screenName: 'watase_yuzuki', displayName: null, biliUid: null, enabled: true, ruleIds: [xRule] });
-  const wbId = db.upsertWeiboAccount({ uid: '2203177060', nickname: null, biliUid: null, enabled: true, ruleIds: [wbRule] });
-  const biId = db.upsertBiliAccount({ uid: '7706705', ruleIds: [biRule] });
-
-  assert.equal((await api(base, `/api/post-rules/${xRule}`, 'DELETE')).status, 200);
-  assert.deepEqual(db.getXAccount(xId)!.ruleIds, [], 'X 名单清扫');
-  assert.deepEqual(db.getWeiboAccount(wbId)!.ruleIds, [wbRule], '其它名单不受影响');
-  assert.equal((await api(base, `/api/post-rules/${wbRule}`, 'DELETE')).status, 200);
-  assert.deepEqual(db.getWeiboAccount(wbId)!.ruleIds, [], '微博名单清扫');
-  assert.equal((await api(base, `/api/post-rules/${biRule}`, 'DELETE')).status, 200);
-  assert.deepEqual(db.getBiliAccount(biId)!.ruleIds, [], 'B站名单清扫');
+  // 删规则直删：账号侧没有 ruleIds，无连带清扫面
+  assert.equal((await api(base, `/api/rules/${rule1}`, 'DELETE')).status, 200);
+  assert.equal(db.listPushRules().length, 0);
 });
 
 // ---- B站动态账号（图文分页第三个来源）：独立名单 CRUD，恒挂载无 dep 门 ----
@@ -2461,10 +2380,9 @@ test('/api/bili/accounts：CRUD + uid 链接归一化 + 重名 409 + 视图带�
     uid: 'https://space.bilibili.com/7706705/dynamic', displayName: '阿梓',
   });
   assert.equal(created.status, 200);
-  const acc = created.json.account as { id: number; uid: string; enabled: boolean; ruleIds: number[] };
+  const acc = created.json.account as { id: number; uid: string; enabled: boolean };
   assert.equal(acc.uid, '7706705', 'space.bilibili.com 链接归一化成纯数字 uid');
   assert.equal(acc.enabled, true, '新增默认启用');
-  assert.deepEqual(acc.ruleIds, []);
 
   assert.equal((await api(base, '/api/bili/accounts', 'POST', { uid: '7706705' })).status, 409, '重复 uid 409');
   assert.equal((await api(base, '/api/bili/accounts', 'POST', { uid: 'abc' })).status, 400, '非数字 uid');

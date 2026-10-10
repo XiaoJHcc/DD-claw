@@ -26,9 +26,9 @@
 │   机械去重防抖始终生效：每场一次 + 场景切换去重 + 冷却（用户不可配）
 │        ↓
 ├─ 偏好执行  matcher（纯确定性）  人填推送规则 × 判定 → PushMessage
-│   push_rules v2：分类引用〔空=任意开播〕× 生效主播〔空=全部〕→ 渠道 + 推送词
-│   post_rules（图文帖，平台无关的通用规则）：筛选 → 渠道 + 推送词
-│   （生效范围在账号侧：x/weibo/bili_accounts 行的 rule_ids 选用规则）
+│   push_rules（统一规则，P2 起 live/post 同表）：内容形态 × 分类引用〔空=任意内容〕
+│   × 生效范围 scope〔空=全部生效〕→ 渠道 + 推送词 + 附加动作（llm_translate，仅 X 帖）
+│   图文筛选条件（帖子类型/引用/带图/关键词）已上移进分类（applies_to=post 的条件组）
 │        ↓ PushMessage
 └─ 通知  src/notify/   dispatcher 按 channels 路由 + 通道执行
      onebot(NapCat) [已实测] / toast [已实现]（ntfy 已放弃）
@@ -36,7 +36,7 @@
 
 **解耦点（改代码不要破坏）：** ① **Signal 总线**（抓取→分析）：source 不知道有 LLM。② **任务化 LLM 接口**（分析内部）：schema 进 JSON 出，换模型只动 providers。③ **PushMessage**（决策→推送）：推送层不解释语义（无 `PushDirective` 中间态）。④ **能力面注册表**（轴 B）：`tools.ts` 是唯一能力信源，传输层只是适配器。
 
-**偏好归属（已决策，2026-08-09 修订）**：人类需求是唯一锚点信源——用户面板直填**推送规则**（push_rules v2），matcher 确定性执行；LLM 只做**内容分类**（本场属于哪些分类，入 verdicts）。分类口径也由人填（categories：LLM 提示词 + 确定性关键词/分区条件）——有提示词且 LLM 可用以 LLM 为准，LLM 关/熔断/失败回退确定性条件，无提示词永远确定性。不做 NL→结构化编译，运行管线无人工环节。**不做静音名单/静默时段/定时推/「不推」偏好**；未来只有增加式可选推送时机（见 `docs/design.md` §11）。
+**偏好归属（已决策，2026-08-09 修订；2026-10-10 统一计划 P2 落地）**：人类需求是唯一锚点信源——用户面板直填**推送规则**（push_rules，live/post 同表），matcher 确定性执行；LLM 只做**内容分类**（本内容属于哪些分类，入 verdicts；图文侧判否也落 pass=0）。分类口径也由人填（categories：LLM 提示词 + 确定性条件组〔关键词/分区/帖子类型/引用/带图〕，`applies_to` 区分 live/post）——有提示词且 LLM 可用以 LLM 为准，LLM 关/熔断/失败回退确定性条件，无提示词永远确定性。不做 NL→结构化编译，运行管线无人工环节。**不做静音名单/静默时段/定时推/「不推」偏好**；未来只有增加式可选推送时机（见 `docs/design.md` §11）。
 
 **高峰并发原则**：轮询循环只做「拉批量状态 + diff 产信号」两件便宜事；所有 LLM 调用进 `analysis/queue`，通知不等分析结果。
 
@@ -81,7 +81,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/state.ts` — `diffRoom → Signal`；轮播=未开播；title_change=标题/分区变更
 - `src/core/scheduler.ts` — `PeriodicTask` 通用周期任务器
 - `src/core/pipeline.ts` — **信号编排唯一装配点**（归档→抑制→分析触发→机械去重→规则匹配→推送；`feed_post` 是与之平行的图文帖分支，X / 微博 / B站动态同分支）
-- `src/core/db.ts` — SQLite 表群 + 仓储；`ensureColumn` 在线补列；`raw` 只读句柄与 `transaction` 同步事务包装（供 UndoStore / 级联写）；`migrateWeiboAccounts` / `migratePostRuleScopes` / `dropLiveRcmdPosts` 一次性数据搬家与清理
+- `src/core/db.ts` — SQLite 表群 + 仓储；`ensureColumn` 在线补列；`raw` 只读句柄与 `transaction` 同步事务包装（供 UndoStore / 级联写）；`migrateWeiboAccounts` / `migratePostRuleScopes` / `dropLiveRcmdPosts` / `migrateVerdictsSubjectKeys` / `migratePushRuleScopeShape`（uids→scope 重建）/ `migratePostRulesToCategories`（post_rules 一次性搬家，搬完 DROP）/ `migrateAccountRuleIdsDrop`（三账号表 rule_ids 删列）一次性数据搬家与清理
 - `src/core/undo.ts` — 写操作快照与撤销：`capture`（同步事务版）/ `track`（异步段串行版，写工具的实际记录点）；逐行比对撤销、每渠道一栈、LLM key 不落明文；`DEFAULT_IGNORE_COLUMNS`（四张「配置+归档」混合表——`streamers` + 三张图文账号名单——的轮询/同步回写列不参与差分、比对与还原；`streamers` 已纳入快照表，2026-09-21）、`undoEffects`（撤销后热生效分类，纯函数不持回调；`streamers` 无标签——名单每轮直读 DB）
 - `src/core/streamers.ts` — streamers / follows 行类型与映射
 - `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
@@ -99,7 +99,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/chat-store.ts` — agent 会话存储（chat_sessions / chat_messages；会话键 = 来源渠道，与撤销栈同 scope）
 - `src/core/weibo-accounts.ts` — 微博独立关注名单（行/映射/uid 归一化 + 源运行状态快照；表在 db.ts）
 - `src/core/bili-accounts.ts` — B站动态独立账号名单（行/映射/uid 归一化；表在 db.ts，独立于 streamers）
-- `src/core/post-rules.ts` — 图文帖规则（平台无关的通用规则：只定义筛选+渠道+推送词，生效范围在账号侧 rule_ids；quote/翻译按帖子平台运行时生效）
+- `src/core/post-rules.ts` — 图文帖的**平台语义**（PostPlatform / 文案措辞 / quote 与翻译门控）+ 旧 post_rules.filters 的迁移解析口径（`parseFilters`，仅 `migratePostRulesToCategories` 用）；规则行类型已随 post_rules 表 DROP（P2 统一进 push_rules）
 - `src/config/index.ts` — 读 `.env` + `config.json`（只有 panel 段生效）
 - `src/config/schema.ts` — panel 校验 + provider schema + 默认配置
 - `src/logger.ts` — 极简结构化日志（console + 文件 sink：`data/logs/dd-claw-YYYY-MM-DD.log` 按天滚动、保留 7 天，`initFileSink` 在 index.ts 装配，写盘失败静默）
@@ -137,9 +137,9 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/analysis/queue.ts` — 分析队列（限流并发 2；`run()` 是图文帖等非分类任务的通用入口）
 - `src/analysis/providers.ts` — LLM provider（路由/可重试失败就地重试/熔断/多 key/双协议）
 - `src/analysis/tasks/classify.ts` — 单次批量 LLM 分类任务
-- `src/analysis/tasks/post-analysis.ts` — 图文帖任务：判定 + 翻译合并成一次调用（平台措辞；翻译只对 X；附图走 vision 路由）
-- `src/analysis/post-analyzer.ts` — 图文帖分析编排（LLM 不可用/失败一律回退机械筛选；有图且 vision 路由可用才附图，否则纯文本降级）
-- `src/analysis/matcher.ts` — 确定性匹配（`matchCategory` / `matchPushRules` / `matchPostRules` / `renderTemplate` / `renderPostTemplate`）
+- `src/analysis/tasks/post-analysis.ts` — 图文帖翻译任务（判定已挪进分类判决链，这里只剩生成译文；只对 X 帖请求，纯文本）
+- `src/analysis/post-analyzer.ts` — 图文翻译编排（规则层附加动作 llm_translate；LLM 不可用/失败一律不附译文、绝不挡推送）
+- `src/analysis/matcher.ts` — 确定性匹配（`matchCategory`/`matchCategoryItem` 条件算子注册表〔keyword/area/postType/quote/media〕/ `matchRules` 两形态统一命中 / `aggregateRuleHits` / `renderTemplate` / `renderPostTemplate`）
 - `src/rules/types.ts` — `DecisionRule` / `NotifyDecision`
 - `src/rules/once-per-session.ts` — 每场直播推一次
 
@@ -228,6 +228,7 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - **图文补推语义（三平台统一，2026-09-21 拍板）**：主动关闭（账号停用→重新启用 / 图文开关手动关→重开）恢复轮**一律静默不补推**（账号表 `silent_next` 恢复位）；服务未运行期间（重启/崩溃/登录态丢失）与添加账号之前默认不推，推送设置开 `backlog_push_enabled`（「补推未运行期间的图文」）后按**时间窗（默认 6h）+ 每账号条数上限（默认 3、取最新）**双重封顶补推；三种轮次归档永不受影响，正常轮新帖全推。语义唯一权威在 `src/core/backlog.ts`
 - **能力面 P0 地基（全部落地）**：后端（切片 A–C）=`runTool` 共享执行器 + 写快照与撤销（`UndoStore` 差分前像 / 逐行比对中止 / 每渠道一栈 / 四张混合表按列过滤——`streamers` + 三张图文账号名单）+ 撤销执行器（`PanelDeps.undoLast` + `undoEffects` 热生效映射 + `POST /api/undo` / `GET /api/undo/history` + 内部工具 `undo_last_change`）+ 面板配置写 REST 全部收敛到注册表 + 鉴权口径启动日志；面板侧（P0b）= 设置页底部「变更历史」卡（`webui/js/undo.js`，栈顶撤销 + 冲突标注）。切片记录见 `docs/plan/agent-access.md`
 - **能力面 P1–P3（QQ 入口已全落地）**：P1 = WebUI Agent（`src/agent/loop.ts` + 第五个视图「Agent」聊天面板 + 写模式开关）；P2 = MaiBot 插件（独立目录 `d:\Git\dd-claw-maibot-plugin`，3 个动作 + 渠道绑定令牌，本机 MaiBot 1.1.4 + SDK 2.7.1 实测 146 用例全过）；P3 = NapCat 直连（`src/qqbot/`：OneBot 上报接收 + 触发纪律 + 按渠道限流 + 回执裁剪）。共用前提 = **gateway 渠道隔离收敛**（`channelId` 移出 schema 改 scope 注入、读侧服务端裁剪、copy-on-write 拆分、删除渠道归属校验、限流按渠道分桶、群/私聊一视同仁）。切片记录见 `docs/plan/agent-access.md`
+- **统一计划 P2（附录 A.1–A.5，2026-10-10 拍板）已落地**：categories 扩展（`applies_to`/`post_types`/`require_quote`/`require_media` + 条件算子 postType/quote/media）/ push_rules 统一（`subject_kind`/`scope`〔uids 更名，空=全部生效〕/`llm_translate`，表重建）/ 三账号表 `rule_ids` 删列 / post_rules 一次性搬家成「分类+规则」后 DROP（无账号选用的规则 enabled=0 行为保持闸；迁移测试见 `src/core/db.test.ts`）/ 判定分类制（feed_post 与 live 同走判决链，verdicts 落真实 categoryId，post 侧 LLM 判否落 pass=0）/ `matchRules` 两形态统一命中 / 翻译独立成规则附加动作 / **推送等不等判定规则级化**（仅覆盖本内容的分类规则让推送等 LLM；任意内容规则即时推，不产生双推）/ post_rule 工具与 `/api/post-rules*` 端点退役、账号工具 ruleIds 入参退役。webui 最小可用适配（分类弹窗按 applies_to 渲染、规则弹窗带 subject_kind、账号卡勾选改写规则 scope、demo mock 同构）；体验精修在 P3。行为变化仅限附录 A.4 白名单
 - **目标态待做**：LLM 分类真机验收与调优、分析触发（任意时机进 LLM）、M3 预告（schedule-extract + schedules + 预告条 / 到点推）、可选推送时机、**决策模型通道（类 Jev / System One，`/v1/systemone` 为主端点、识图为默认要求，仅覆盖枚举类判断；调研见 `docs/research/decision-models.md`）**、WebUI Agent / QQ 入口真机验收（P1 验收口径的实操项）、弹幕抓取
 - **已放弃 / 不采用**：见 `docs/design.md` §11（PushDirective、preference 护栏、ntfy、signals 表等）
 - 逐项明细与未建占位见 `docs/status.md` 
@@ -243,5 +244,5 @@ npm run demo:fixtures # 真实库 → webui/demo/fixtures.json（已存在须 --
 - `docs/plan/twitter-source.md` — X/推特图文来源计划：独立分页 + 独立账号名单 + 图文帖规则，P0–P3 全部落地
 - `docs/plan/weibo-source.md` — 微博图文来源计划：把微博从「主播附属数据源」升级为独立来源（独立名单 / platform 分流 / 单墙混排），已落地
 - `docs/plan/bili-dynamic-posts.md` — B站动态图文来源 + 图文规则「规则卡 + 每账号选用」重构，已落地
-- `docs/plan/unify-classify-push.md` — 直播/图文「分类 + 推送」统一总计划（产品模型 + 底层抽象 + 分期 P0–P4 + 决策模型通道预留），**dev 分支承载**
+- `docs/plan/unify-classify-push.md` — 直播/图文「分类 + 推送」统一总计划（产品模型 + 底层抽象 + 分期 P0–P4 + 决策模型通道预留；**附录 A = P2 逐条执行规格，已落地**），**dev 分支承载**
 - `docs/research/` — 分模块调研归档（live-status、danmaku、feeds、**twitter**、llm、notify、media-capture、auth-cookie、ts-stack、**decision-models**）

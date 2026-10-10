@@ -17,7 +17,6 @@ export interface WeiboAccountRow {
   display_name: string | null;
   bili_uid: string | null;
   enabled: number;
-  rule_ids: string;
   silent_next: number;
   last_post_id: string | null;
   last_post_at: number | null;
@@ -40,8 +39,6 @@ export interface WeiboAccount {
   /** 可选关联主播（引用 streamers.uid；仅展示、文案与主播卡第三栏混排用） */
   biliUid: string | null;
   enabled: boolean;
-  /** 选用的图文帖规则（post_rules.id）；空 = 这个账号的帖子一律不推 */
-  ruleIds: number[];
   /** 主动关闭恢复位：重新启用（或图文开关重开，见 setListen）时置位，恢复轮询的
    *  首轮静默归档不补推（「主动关闭意图：显然不推」），源消费后清位 */
   silentNext: boolean;
@@ -74,7 +71,6 @@ export interface WeiboAccountInput {
   displayName?: string | null;
   biliUid?: string | null;
   enabled?: boolean;
-  ruleIds?: number[];
 }
 
 /** 抓取成功后的回写（可选字段：只更新拿到的部分） */
@@ -118,7 +114,6 @@ export function rowToWeiboAccount(r: WeiboAccountRow): WeiboAccount {
     displayName: r.display_name,
     biliUid: r.bili_uid,
     enabled: r.enabled === 1,
-    ruleIds: JSON.parse(r.rule_ids) as number[],
     silentNext: r.silent_next === 1,
     lastPostId: r.last_post_id,
     lastPostAt: r.last_post_at,

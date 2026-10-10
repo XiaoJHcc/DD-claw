@@ -35,19 +35,18 @@ test('isValidBiliUid：数字串 1~20 位', () => {
   assert.equal(isValidBiliUid('1'.repeat(21)), false, '超长拒绝');
 });
 
-test('rowToBiliAccount：JSON 列与布尔列还原', () => {
+test('rowToBiliAccount：布尔列与平台事实列还原', () => {
   const row: BiliAccountRow = {
     id: 7, uid: '80397', uname: '阿梓从小就很可爱', display_name: null,
-    enabled: 0, rule_ids: '[1,2]', last_ok_at: 1800000000, avatar: 'a.jpg',
+    enabled: 0, silent_next: 0, last_ok_at: 1800000000, avatar: 'a.jpg',
     created_at: 100, updated_at: 200,
-  };
+  } as BiliAccountRow;
   const a = rowToBiliAccount(row);
   assert.equal(a.id, 7);
   assert.equal(a.uid, '80397');
   assert.equal(a.uname, '阿梓从小就很可爱');
   assert.equal(a.displayName, null);
   assert.equal(a.enabled, false);
-  assert.deepEqual(a.ruleIds, [1, 2]);
   assert.equal(a.lastOkAt, 1800000000);
   assert.equal(a.avatar, 'a.jpg');
   assert.equal(a.createdAt, 100);

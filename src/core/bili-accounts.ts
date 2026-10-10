@@ -2,9 +2,8 @@
  * bili_accounts 表（B站动态独立账号名单）的行类型与「行 ↔ 对象」映射。
  *
  * B站动态的**抓取**名单仍是 streamers（动态源对监听主播每轮拉空间动态，见
- * sources/bili/dynamic.ts）；这份名单只管**推送**：post_rules 的生效范围从规则内嵌
- * account_ids 搬到账号侧 rule_ids 后，动态账号也需要自己的一份名单来挂规则——
- * 「这个账号的动态按哪些图文帖规则推」由这里的 rule_ids 决定，与 weibo_accounts 同构。
+ * sources/bili/dynamic.ts）；这份名单只管**推送**：图文规则的生效范围在规则侧
+ * scope（`bili:uid` 账号引用，空 = 全部生效），名单行是账号身份与抓取健康状态的载体。
  *
  * 与 x/weibo 名单的差异（有意保留，不是不一致）：
  *  · 身份就是 B站 uid，账号本身就是主播——推送文案的关联主播（{liver}）直接按 uid
@@ -18,7 +17,6 @@ export interface BiliAccountRow {
   uname: string | null;
   display_name: string | null;
   enabled: number;
-  rule_ids: string;
   silent_next: number;
   last_ok_at: number | null;
   avatar: string | null;
@@ -37,8 +35,6 @@ export interface BiliAccount {
   /** 自定义显示名（卡片优先展示；留空 = 用 uname，同 x/weibo 的 displayName 语义） */
   displayName: string | null;
   enabled: boolean;
-  /** 选用的图文帖规则（post_rules.id）；空 = 这个账号的动态一律不推 */
-  ruleIds: number[];
   /** 主动关闭恢复位：重新启用（或图文开关重开，见 setListen）时置位，恢复轮询的
    *  首轮静默归档不补推（「主动关闭意图：显然不推」），源消费后清位 */
   silentNext: boolean;
@@ -65,7 +61,6 @@ export interface BiliAccountInput {
   uid?: string;
   displayName?: string | null;
   enabled?: boolean;
-  ruleIds?: number[];
 }
 
 /** 抓取成功后的回写（可选字段：只更新拿到的部分） */
@@ -101,7 +96,6 @@ export function rowToBiliAccount(r: BiliAccountRow): BiliAccount {
     uname: r.uname,
     displayName: r.display_name,
     enabled: r.enabled === 1,
-    ruleIds: JSON.parse(r.rule_ids) as number[],
     silentNext: r.silent_next === 1,
     lastOkAt: r.last_ok_at,
     avatar: r.avatar,

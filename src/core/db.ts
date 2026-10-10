@@ -32,8 +32,7 @@ import {
   type BiliAccount, type BiliAccountFetchTouch, type BiliAccountInput, type BiliAccountRow,
 } from './bili-accounts.js';
 import {
-  defaultPostFilters, rowToPostRule,
-  type NewPostRule, type PostFilters, type PostRule, type PostRuleInput, type PostRuleRow,
+  parseFilters,
 } from './post-rules.js';
 
 const log = makeLogger('core/db');
@@ -58,6 +57,84 @@ CREATE TABLE IF NOT EXISTS ${name} (
   evidence      TEXT    NOT NULL DEFAULT '',
   created_at    INTEGER NOT NULL,
   UNIQUE(subject_type, subject_id, category_id, rule_id)
+)`;
+
+/**
+ * push_rules 建表 DDL（SCHEMA 首建与 uids→scope 形态迁移重建共用，表名参数化防两处漂移）。
+ * scope 语义：live = 主播 uid 列表 / post = 账号引用（`twitter:screenName`/`weibo:uid`/`bili:uid`）；空 = 全部生效。
+ */
+const pushRulesDdl = (name: string) => `
+CREATE TABLE IF NOT EXISTS ${name} (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  name             TEXT    NOT NULL DEFAULT '',
+  subject_kind     TEXT    NOT NULL DEFAULT 'live' CHECK(subject_kind IN ('live','post')),
+  category_id      INTEGER,
+  scope            TEXT    NOT NULL DEFAULT '[]',
+  channels         TEXT    NOT NULL DEFAULT '[]',
+  message_template TEXT,
+  llm_translate    INTEGER NOT NULL DEFAULT 0,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  created_by       TEXT,
+  sort             INTEGER NOT NULL DEFAULT 0,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
+)`;
+
+// 三张账号名单的建表 DDL（SCHEMA 首建与 rule_ids 列删除重建共用）。列集 = SCHEMA 基列
+// + ensureColumn 在线补列（silent_next / fetch_fail_* / avatar / nickname / display_name），
+// 重建迁移要拷全部列，缺一列就是丢数据。
+const xAccountsDdl = (name: string) => `
+CREATE TABLE IF NOT EXISTS ${name} (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  screen_name      TEXT    NOT NULL UNIQUE,
+  nickname         TEXT,
+  display_name     TEXT,
+  bili_uid         TEXT,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  last_tweet_id    TEXT,
+  last_tweet_at    INTEGER,
+  last_ok_at       INTEGER,
+  avatar           TEXT,
+  silent_next      INTEGER NOT NULL DEFAULT 0,
+  fetch_fail_since INTEGER,
+  fetch_error      TEXT,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
+)`;
+
+const weiboAccountsDdl = (name: string) => `
+CREATE TABLE IF NOT EXISTS ${name} (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid              TEXT    NOT NULL UNIQUE,
+  nickname         TEXT,
+  display_name     TEXT,
+  bili_uid         TEXT,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  last_post_id     TEXT,
+  last_post_at     INTEGER,
+  last_ok_at       INTEGER,
+  avatar           TEXT,
+  silent_next      INTEGER NOT NULL DEFAULT 0,
+  fetch_fail_since INTEGER,
+  fetch_error      TEXT,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
+)`;
+
+const biliAccountsDdl = (name: string) => `
+CREATE TABLE IF NOT EXISTS ${name} (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid              TEXT    NOT NULL UNIQUE,
+  uname            TEXT,
+  display_name     TEXT,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  last_ok_at       INTEGER,
+  avatar           TEXT,
+  silent_next      INTEGER NOT NULL DEFAULT 0,
+  fetch_fail_since INTEGER,
+  fetch_error      TEXT,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
 )`;
 
 const SCHEMA = `
@@ -125,30 +202,23 @@ CREATE TABLE IF NOT EXISTS push_channels (
   updated_at  INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS categories (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  name        TEXT    NOT NULL,
-  llm_prompt  TEXT,
-  keywords    TEXT    NOT NULL DEFAULT '[]',
-  areas       TEXT    NOT NULL DEFAULT '[]',
-  cond_mode   TEXT    NOT NULL DEFAULT 'and' CHECK(cond_mode IN ('and','or')),
-  enabled     INTEGER NOT NULL DEFAULT 1,
-  sort        INTEGER NOT NULL DEFAULT 0,
-  created_at  INTEGER NOT NULL,
-  updated_at  INTEGER NOT NULL
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT    NOT NULL,
+  llm_prompt    TEXT,
+  keywords      TEXT    NOT NULL DEFAULT '[]',
+  areas         TEXT    NOT NULL DEFAULT '[]',
+  applies_to    TEXT    NOT NULL DEFAULT 'live' CHECK(applies_to IN ('live','post')),
+  post_types    TEXT    NOT NULL DEFAULT '[]',
+  require_quote INTEGER NOT NULL DEFAULT 0,
+  require_media INTEGER NOT NULL DEFAULT 0,
+  cond_mode     TEXT    NOT NULL DEFAULT 'and' CHECK(cond_mode IN ('and','or')),
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  sort          INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
 );
 ${verdictsDdl('verdicts')};
-CREATE TABLE IF NOT EXISTS push_rules (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  name             TEXT    NOT NULL DEFAULT '',
-  category_id      INTEGER,
-  uids             TEXT    NOT NULL DEFAULT '[]',
-  channels         TEXT    NOT NULL DEFAULT '[]',
-  message_template TEXT,
-  enabled          INTEGER NOT NULL DEFAULT 1,
-  sort             INTEGER NOT NULL DEFAULT 0,
-  created_at       INTEGER NOT NULL,
-  updated_at       INTEGER NOT NULL
-);
+${pushRulesDdl('push_rules')};
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -168,64 +238,9 @@ CREATE TABLE IF NOT EXISTS posts (
   UNIQUE(platform, item_id)
 );
 CREATE INDEX IF NOT EXISTS idx_posts_uid_ts ON posts (uid, pub_ts);
-CREATE TABLE IF NOT EXISTS x_accounts (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  screen_name   TEXT    NOT NULL UNIQUE,
-  nickname      TEXT,
-  display_name  TEXT,
-  bili_uid      TEXT,
-  enabled       INTEGER NOT NULL DEFAULT 1,
-  rule_ids      TEXT    NOT NULL DEFAULT '[]',
-  last_tweet_id TEXT,
-  last_tweet_at INTEGER,
-  last_ok_at    INTEGER,
-  avatar        TEXT,
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS post_rules (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  name             TEXT    NOT NULL DEFAULT '',
-  platform         TEXT    NOT NULL DEFAULT 'twitter',
-  account_ids      TEXT    NOT NULL DEFAULT '[]',
-  channels         TEXT    NOT NULL DEFAULT '[]',
-  filters          TEXT    NOT NULL DEFAULT '{}',
-  message_template TEXT,
-  llm_judge        INTEGER NOT NULL DEFAULT 0,
-  judge_prompt     TEXT,
-  llm_translate    INTEGER NOT NULL DEFAULT 0,
-  enabled          INTEGER NOT NULL DEFAULT 1,
-  sort             INTEGER NOT NULL DEFAULT 0,
-  created_at       INTEGER NOT NULL,
-  updated_at       INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS weibo_accounts (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  uid           TEXT    NOT NULL UNIQUE,
-  nickname      TEXT,
-  display_name  TEXT,
-  bili_uid      TEXT,
-  enabled       INTEGER NOT NULL DEFAULT 1,
-  rule_ids      TEXT    NOT NULL DEFAULT '[]',
-  last_post_id  TEXT,
-  last_post_at  INTEGER,
-  last_ok_at    INTEGER,
-  avatar        TEXT,
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS bili_accounts (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  uid           TEXT    NOT NULL UNIQUE,
-  uname         TEXT,
-  display_name  TEXT,
-  enabled       INTEGER NOT NULL DEFAULT 1,
-  rule_ids      TEXT    NOT NULL DEFAULT '[]',
-  last_ok_at    INTEGER,
-  avatar        TEXT,
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
-);
+${xAccountsDdl('x_accounts')};
+${weiboAccountsDdl('weibo_accounts')};
+${biliAccountsDdl('bili_accounts')};
 CREATE TABLE IF NOT EXISTS live_segments (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id         TEXT    NOT NULL,
@@ -355,25 +370,22 @@ export class Db {
     this.ensureColumn('streamers', 'weibo_nick', 'weibo_nick TEXT');
     // push_channels 展示顺序（面板拖拽排序；旧库默认全 0 按 id 稳定）
     this.ensureColumn('push_channels', 'sort', 'sort INTEGER NOT NULL DEFAULT 0');
-    // push_rules 创建来源（MCP 群自助规则标记 'mcp'，权限隔离用；面板/人工规则为 NULL）
+    // push_rules 创建来源（MCP 群自助规则标记 'mcp'，权限隔离用；面板/人工规则为 NULL）。
+    // 旧库（uids 列）随后由 migratePushRuleScopeShape 整表重建成本形状，这里只是防中间态缺列
     this.ensureColumn('push_rules', 'created_by', 'created_by TEXT');
-    // post_rules 的 LLM 字段（P3）：判定 / 判定标准 / 翻译；旧库在线补列，默认关
-    this.ensureColumn('post_rules', 'llm_judge', 'llm_judge INTEGER NOT NULL DEFAULT 0');
-    this.ensureColumn('post_rules', 'judge_prompt', 'judge_prompt TEXT');
-    this.ensureColumn('post_rules', 'llm_translate', 'llm_translate INTEGER NOT NULL DEFAULT 0');
+    // categories 吸收图文 filters/judgePrompt（A.1）：适用内容类型 + 帖子类型/引用/带图条件组。
+    // 旧库在线补列（SQLite ALTER 加不了 CHECK，取值由输入层校验）；旧数据全是直播分类，默认即正确
+    this.ensureColumn('categories', 'applies_to', "applies_to TEXT NOT NULL DEFAULT 'live'");
+    this.ensureColumn('categories', 'post_types', "post_types TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('categories', 'require_quote', 'require_quote INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('categories', 'require_media', 'require_media INTEGER NOT NULL DEFAULT 0');
     // x_accounts 头像（抓取时顺手抠 X 头像 → 代理下载到 cache/x-avatars，存文件名；旧库在线补列）
     this.ensureColumn('x_accounts', 'avatar', 'avatar TEXT');
     // x_accounts 昵称（X 的 display name，与自定义显示名 display_name 分开；旧库的
     // display_name 全是人手填的自定义名——抓取从不写它——留在原列语义不变）
     this.ensureColumn('x_accounts', 'nickname', 'nickname TEXT');
-    // post_rules.platform（微博图文来源接入）：旧库只有 X 规则，默认 'twitter' 即正确
-    this.ensureColumn('post_rules', 'platform', "platform TEXT NOT NULL DEFAULT 'twitter'");
     // weibo_accounts 自定义显示名（卡片优先展示；留空 = 用昵称，同 x_accounts.display_name 语义）
     this.ensureColumn('weibo_accounts', 'display_name', 'display_name TEXT');
-    // 账号侧 rule_ids：图文帖规则的生效范围从 post_rules.account_ids 搬到账号选用规则
-    // （规则只定义筛选+渠道+推送词）；旧库在线补列，默认空 = 不选用任何规则
-    this.ensureColumn('x_accounts', 'rule_ids', "rule_ids TEXT NOT NULL DEFAULT '[]'");
-    this.ensureColumn('weibo_accounts', 'rule_ids', "rule_ids TEXT NOT NULL DEFAULT '[]'");
     // 主动关闭恢复位（图文补推语义见 core/backlog.ts）：重新启用/图文开关重开时置位，
     // 恢复轮询的首轮静默归档不补推；旧库在线补列，默认 0 = 没有待消费的静默轮
     this.ensureColumn('x_accounts', 'silent_next', 'silent_next INTEGER NOT NULL DEFAULT 0');
@@ -385,14 +397,29 @@ export class Db {
       this.ensureColumn(t, 'fetch_fail_since', 'fetch_fail_since INTEGER');
       this.ensureColumn(t, 'fetch_error', 'fetch_error TEXT');
     }
+    // 旧库残留的 post_rules 表（A.3 搬家在下面）：搬家要读 llm_judge/platform 等列，
+    // 老库可能没有——只在表还在时补列（表已 DROP 的库这里整段跳过）
+    if (this.tableExists('post_rules')) {
+      this.ensureColumn('post_rules', 'llm_judge', 'llm_judge INTEGER NOT NULL DEFAULT 0');
+      this.ensureColumn('post_rules', 'judge_prompt', 'judge_prompt TEXT');
+      this.ensureColumn('post_rules', 'llm_translate', 'llm_translate INTEGER NOT NULL DEFAULT 0');
+      this.ensureColumn('post_rules', 'platform', "platform TEXT NOT NULL DEFAULT 'twitter'");
+    }
     // 健康告警阈值 2026-11 从轮数口径改为时间口径（秒）：旧键一次性删除
     // （settings 只留 health_alert_toast_after_sec 一个键；旧值是轮数，语义不通不可继承）
     this.db.prepare("DELETE FROM settings WHERE key = 'health_alert_after_failures'").run();
-    // weibo_accounts 本身由 SCHEMA 的 CREATE TABLE IF NOT EXISTS 建出；这里只做数据搬家
+    // weibo_accounts 本身由 SCHEMA 的 CREATE TABLE IF NOT EXISTS 建出；这里只做数据搬家。
+    // 迁移次序有依赖（都幂等，详见各方法注释）：
+    //   weibo 名单种入 → post_rules 生效范围搬账号侧（老中途库）→ LIVE_RCMD 清理
+    //   → verdicts 身份键 → push_rules uids→scope 重建 → post_rules 搬家成分类+规则
+    //   → 账号表 rule_ids 列删除（须在搬家之后——搬家要反查 rule_ids）
     this.migrateWeiboAccounts();
     this.migratePostRuleScopes();
     this.dropLiveRcmdPosts();
     this.migrateVerdictsSubjectKeys();
+    this.migratePushRuleScopeShape();
+    this.migratePostRulesToCategories();
+    this.migrateAccountRuleIdsDrop();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -412,6 +439,17 @@ export class Db {
     if (!cols.some((c) => c.name === column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
     }
+  }
+
+  private tableExists(table: string): boolean {
+    return this.db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get(table) !== undefined;
+  }
+
+  private columnExists(table: string, column: string): boolean {
+    return (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+      .some((c) => c.name === column);
   }
 
   /**
@@ -457,10 +495,21 @@ export class Db {
    *  · account_ids 非空 → 把规则 id 追加到对应平台这些账号的 rule_ids（去重）；
    *  · account_ids 为空（旧语义 = 该平台全部账号）→ 追加到该平台全部现有账号。
    * bili_dynamic 无旧数据（该平台与本次改造一起引入），跳过。
-   * account_ids 列保留不删，但写入侧恒 '[]'（见 upsertPostRule）。
+   *
+   * 这是**更早一轮**的中途迁移（2026-09 图文规则重构）：post_rules 表已被 A.3 搬家 DROP、
+   * 账号 rule_ids 列已被 A.2 删除——两者任一不存在即视为本轮早已完成/无需做，直接落闸跳过。
    */
   private migratePostRuleScopes(): void {
     if (this.getSetting(POST_RULE_SCOPE_MIGRATION_KEY)) return;
+    if (!this.tableExists('post_rules')) {
+      this.setSetting(POST_RULE_SCOPE_MIGRATION_KEY, '1');
+      return;
+    }
+    // 中转列：本轮要把 account_ids 写进账号侧 rule_ids，极老的库可能还没有该列——
+    // 临时补上（后面的 migratePostRulesToCategories 从这里反查，migrateAccountRuleIdsDrop 会删掉）
+    for (const t of ['x_accounts', 'weibo_accounts']) {
+      this.ensureColumn(t, 'rule_ids', "rule_ids TEXT NOT NULL DEFAULT '[]'");
+    }
     const rules = this.db
       .prepare('SELECT id, platform, account_ids FROM post_rules')
       .all() as Array<{ id: number; platform: string; account_ids: string }>;
@@ -547,6 +596,179 @@ export class Db {
     });
     const moved = tx();
     log.info(`verdicts 身份键迁移：${moved} 行老判定搬迁为 subject_type='live'`);
+  }
+
+  /**
+   * push_rules 形态迁移（A.2）：`uids` 列更名泛化为 `scope` + 新增 `subject_kind`/`llm_translate`。
+   * SQLite 改不了列名语义与约束，走「建新表 + 拷数据 + 改名」重建（同 verdicts 身份键迁移的打法）：
+   * 老行一律搬成 subject_kind='live'、scope=原 uids、llm_translate=0；id/sort/created_by 原样保留。
+   *
+   * 幂等靠列存在性检测而不是 settings 闸门：重建后 uids 列消失，重跑是空操作。
+   * **必须先于 migratePostRulesToCategories**（A.3 要往新形状的 push_rules 里写图文规则）。
+   */
+  private migratePushRuleScopeShape(): void {
+    if (!this.columnExists('push_rules', 'uids')) return;
+    const tx = this.db.transaction(() => {
+      this.db.exec(`DROP TABLE IF EXISTS push_rules_v2; ${pushRulesDdl('push_rules_v2')}`);
+      const moved = this.db
+        .prepare(
+          `INSERT INTO push_rules_v2
+             (id, name, subject_kind, category_id, scope, channels, message_template,
+              llm_translate, enabled, created_by, sort, created_at, updated_at)
+           SELECT id, name, 'live', category_id, uids, channels, message_template,
+              0, enabled, created_by, sort, created_at, updated_at
+             FROM push_rules`,
+        )
+        .run();
+      this.db.exec('DROP TABLE push_rules; ALTER TABLE push_rules_v2 RENAME TO push_rules;');
+      return moved.changes;
+    });
+    const moved = tx();
+    log.info(`push_rules 形态迁移：${moved} 行规则的 uids 搬为 scope（subject_kind='live'）`);
+  }
+
+  /**
+   * post_rules 一次性搬家（A.3，D2 拍板；启动期内部迁移、不进撤销栈）：
+   * 每条 post_rule（含停用）→ 一条分类（filters/judgePrompt 上移进条件组/LLM 提示词）
+   * + 一条引用该分类的 push_rule（subject_kind='post'）。
+   *
+   *  · 分类：applies_to='post'；name=规则名；llm_prompt =（llmJudge 且 judgePrompt 非空）? judgePrompt : null；
+   *    keywords=filters.keywords；post_types 由 filters.original/retweet 勾选集合映射；
+   *    require_quote=filters.quote；require_media=filters.media；cond_mode='and'（旧 filters 各条件就是 AND）；
+   *    enabled/sort 随规则。
+   *  · 规则：category_id=新分类 id；scope=三账号表 rule_ids 反查出的选用账号引用
+   *    （`twitter:screenName`/`weibo:uid`/`bili:uid`）；channels/message_template 原样；
+   *    llm_translate=llmTranslate；sort 接现有全局序追加。
+   *  · **行为保持闸**：原语义「账号 rule_ids 空 = 该账号不推」，一条 post_rule 没有任何账号选用
+   *    = 永不生效；搬家后 scope 空按新语义 = 全部生效会翻转行为——故无账号选用的规则一律
+   *    enabled=0 落地并在迁移日志注明。
+   *
+   * 幂等：post_rules 表不存在即跳过；搬完 DROP TABLE post_rules（遗留列 platform/account_ids 一并消失）。
+   */
+  private migratePostRulesToCategories(): void {
+    if (!this.tableExists('post_rules')) return;
+    const rules = this.db
+      .prepare('SELECT * FROM post_rules ORDER BY sort, id')
+      .all() as Array<Record<string, unknown>>;
+    // 账号引用反查表：post_rules id → 选用了它的账号引用列表（三平台一起扫）
+    const refByRule = new Map<number, string[]>();
+    const accountTables: Array<{ table: string; ref: (row: Record<string, unknown>) => string }> = [
+      { table: 'x_accounts', ref: (a) => `twitter:${String(a.screen_name)}` },
+      { table: 'weibo_accounts', ref: (a) => `weibo:${String(a.uid)}` },
+      { table: 'bili_accounts', ref: (a) => `bili:${String(a.uid)}` },
+    ];
+    for (const { table, ref } of accountTables) {
+      if (!this.columnExists(table, 'rule_ids')) continue;
+      for (const a of this.db.prepare(`SELECT * FROM ${table}`).all() as Array<Record<string, unknown>>) {
+        let ids: number[];
+        try {
+          ids = JSON.parse(String(a.rule_ids ?? '[]')) as number[];
+        } catch {
+          ids = [];
+        }
+        for (const id of ids) {
+          const list = refByRule.get(id) ?? [];
+          list.push(ref(a));
+          refByRule.set(id, list);
+        }
+      }
+    }
+
+    let migrated = 0;
+    let disabled = 0;
+    const tx = this.db.transaction(() => {
+      const { m } = this.db
+        .prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS m FROM push_rules')
+        .get() as { m: number };
+      let nextSort = m;
+      for (const r of rules) {
+        const id = Number(r.id);
+        const filters = parseFilters(r.filters == null ? null : String(r.filters));
+        const llmJudge = Number(r.llm_judge ?? 0) === 1;
+        const judgePrompt = r.judge_prompt == null ? null : String(r.judge_prompt);
+        const postTypes: string[] = [];
+        if (filters.original) postTypes.push('original');
+        if (filters.retweet) postTypes.push('retweet');
+        const t = Number(r.created_at ?? now());
+        const categoryId = Number(this.db
+          .prepare(
+            `INSERT INTO categories (name, llm_prompt, keywords, areas, post_types,
+               require_quote, require_media, applies_to, cond_mode, enabled, sort, created_at, updated_at)
+             VALUES (?, ?, ?, '[]', ?, ?, ?, 'post', 'and', ?, ?, ?, ?)`,
+          )
+          .run(
+            String(r.name ?? ''), llmJudge && judgePrompt ? judgePrompt : null,
+            JSON.stringify(filters.keywords), JSON.stringify(postTypes),
+            filters.quote ? 1 : 0, filters.media ? 1 : 0,
+            Number(r.enabled ?? 1), Number(r.sort ?? 0), t, Number(r.updated_at ?? t),
+          ).lastInsertRowid);
+        const scope = refByRule.get(id) ?? [];
+        // 行为保持闸：无账号选用 = 原语义永不生效 → enabled=0（scope 空在新语义 = 全部生效）
+        const enabled = scope.length > 0 ? Number(r.enabled ?? 1) : 0;
+        if (scope.length === 0) disabled++;
+        this.db
+          .prepare(
+            `INSERT INTO push_rules (name, subject_kind, category_id, scope, channels,
+               message_template, llm_translate, enabled, created_by, sort, created_at, updated_at)
+             VALUES (?, 'post', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+          )
+          .run(
+            String(r.name ?? ''), categoryId, JSON.stringify(scope),
+            String(r.channels ?? '[]'), r.message_template == null ? null : String(r.message_template),
+            Number(r.llm_translate ?? 0), enabled, nextSort++, t, Number(r.updated_at ?? t),
+          );
+        migrated++;
+      }
+      this.db.exec('DROP TABLE post_rules');
+    });
+    tx();
+    log.info(
+      `图文规则搬家：${migrated} 条 post_rule → 分类 + 推送规则（subject_kind='post'）；`
+      + (disabled > 0 ? `其中 ${disabled} 条无账号选用，按行为保持闸 enabled=0 落地` : '全部有账号选用'),
+    );
+  }
+
+  /**
+   * 账号名单的 rule_ids 列删除（A.2）：生效范围已统一到规则侧 scope（A.3 搬家反查过 rule_ids，
+   * 故本迁移必须在搬家之后）。走「建新表 + 拷其余列 + 改名」重建（SQLite 删不了列）。
+   * 幂等靠列存在性检测：列没了重跑是空操作。
+   */
+  private migrateAccountRuleIdsDrop(): void {
+    const tables: Array<{ table: string; ddl: (name: string) => string; columns: string[] }> = [
+      {
+        table: 'x_accounts', ddl: xAccountsDdl,
+        columns: ['id', 'screen_name', 'nickname', 'display_name', 'bili_uid', 'enabled',
+          'last_tweet_id', 'last_tweet_at', 'last_ok_at', 'avatar', 'silent_next',
+          'fetch_fail_since', 'fetch_error', 'created_at', 'updated_at'],
+      },
+      {
+        table: 'weibo_accounts', ddl: weiboAccountsDdl,
+        columns: ['id', 'uid', 'nickname', 'display_name', 'bili_uid', 'enabled',
+          'last_post_id', 'last_post_at', 'last_ok_at', 'avatar', 'silent_next',
+          'fetch_fail_since', 'fetch_error', 'created_at', 'updated_at'],
+      },
+      {
+        table: 'bili_accounts', ddl: biliAccountsDdl,
+        columns: ['id', 'uid', 'uname', 'display_name', 'enabled',
+          'last_ok_at', 'avatar', 'silent_next', 'fetch_fail_since', 'fetch_error',
+          'created_at', 'updated_at'],
+      },
+    ];
+    for (const { table, ddl, columns } of tables) {
+      if (!this.columnExists(table, 'rule_ids')) continue;
+      // 极老的库可能缺个别 ensureColumn 都没覆盖到的列：只搬两边都有的列，缺的列由新表默认值兜住
+      const cols = columns.filter((c) => this.columnExists(table, c));
+      const tmp = `${table}_v2`;
+      const tx = this.db.transaction(() => {
+        this.db.exec(`DROP TABLE IF EXISTS ${tmp}; ${ddl(tmp)}`);
+        const moved = this.db
+          .prepare(`INSERT INTO ${tmp} (${cols.join(', ')}) SELECT ${cols.join(', ')} FROM ${table}`)
+          .run();
+        this.db.exec(`DROP TABLE ${table}; ALTER TABLE ${tmp} RENAME TO ${table};`);
+        return moved.changes;
+      });
+      log.info(`账号名单迁移：${table} 删除 rule_ids 列（${tx()} 行搬迁）`);
+    }
   }
 
   loadRoomStates(): Map<string, PrevState> {
@@ -1059,17 +1281,23 @@ export class Db {
       llmPrompt: input.llmPrompt !== undefined ? input.llmPrompt : prev?.llmPrompt ?? null,
       keywords: input.keywords ?? prev?.keywords ?? [],
       areas: input.areas ?? prev?.areas ?? [],
+      postTypes: input.postTypes ?? prev?.postTypes ?? [],
+      requireQuote: input.requireQuote ?? prev?.requireQuote ?? false,
+      requireMedia: input.requireMedia ?? prev?.requireMedia ?? false,
+      appliesTo: input.appliesTo ?? prev?.appliesTo ?? 'live',
       condMode: input.condMode ?? prev?.condMode ?? 'and',
       enabled: input.enabled ?? prev?.enabled ?? true,
     };
     if (prev) {
       this.db
         .prepare(
-          `UPDATE categories SET name=?, llm_prompt=?, keywords=?, areas=?, cond_mode=?, enabled=?, updated_at=?
+          `UPDATE categories SET name=?, llm_prompt=?, keywords=?, areas=?, post_types=?,
+             require_quote=?, require_media=?, applies_to=?, cond_mode=?, enabled=?, updated_at=?
            WHERE id=?`,
         )
         .run(c.name, c.llmPrompt, JSON.stringify(c.keywords), JSON.stringify(c.areas),
-          c.condMode, c.enabled ? 1 : 0, now(), prev.id);
+          JSON.stringify(c.postTypes), c.requireQuote ? 1 : 0, c.requireMedia ? 1 : 0,
+          c.appliesTo, c.condMode, c.enabled ? 1 : 0, now(), prev.id);
       return prev.id;
     }
     const t = now();
@@ -1079,11 +1307,13 @@ export class Db {
       .get() as { m: number };
     const info = this.db
       .prepare(
-        `INSERT INTO categories (name, llm_prompt, keywords, areas, cond_mode, enabled, sort, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO categories (name, llm_prompt, keywords, areas, post_types,
+           require_quote, require_media, applies_to, cond_mode, enabled, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(c.name, c.llmPrompt, JSON.stringify(c.keywords), JSON.stringify(c.areas),
-        c.condMode, c.enabled ? 1 : 0, m, t, t);
+        JSON.stringify(c.postTypes), c.requireQuote ? 1 : 0, c.requireMedia ? 1 : 0,
+        c.appliesTo, c.condMode, c.enabled ? 1 : 0, m, t, t);
     const id = Number(info.lastInsertRowid);
     if (!c.name) {
       this.db.prepare('UPDATE categories SET name = ?, updated_at = ? WHERE id = ?').run(`分类 ${id}`, t, id);
@@ -1137,22 +1367,25 @@ export class Db {
     const prev = input.id !== undefined ? this.getPushRule(input.id) : undefined;
     const r: NewPushRule = {
       name: input.name !== undefined ? input.name : prev?.name ?? '',
+      subjectKind: input.subjectKind ?? prev?.subjectKind ?? 'live',
       categoryId: input.categoryId !== undefined ? input.categoryId : prev?.categoryId ?? null,
-      uids: input.uids ?? prev?.uids ?? [],
+      scope: input.scope ?? prev?.scope ?? [],
       channels: input.channels ?? prev?.channels ?? [],
       messageTemplate: input.messageTemplate !== undefined
         ? input.messageTemplate : prev?.messageTemplate ?? null,
+      llmTranslate: input.llmTranslate ?? prev?.llmTranslate ?? false,
       enabled: input.enabled ?? prev?.enabled ?? true,
       createdBy: input.createdBy !== undefined ? input.createdBy : prev?.createdBy ?? null,
     };
     if (prev) {
       this.db
         .prepare(
-          `UPDATE push_rules SET name=?, category_id=?, uids=?, channels=?, message_template=?, enabled=?, created_by=?, updated_at=?
+          `UPDATE push_rules SET name=?, subject_kind=?, category_id=?, scope=?, channels=?,
+             message_template=?, llm_translate=?, enabled=?, created_by=?, updated_at=?
            WHERE id=?`,
         )
-        .run(r.name, r.categoryId, JSON.stringify(r.uids), JSON.stringify(r.channels),
-          r.messageTemplate, r.enabled ? 1 : 0, r.createdBy ?? null, now(), prev.id);
+        .run(r.name, r.subjectKind, r.categoryId, JSON.stringify(r.scope), JSON.stringify(r.channels),
+          r.messageTemplate, r.llmTranslate ? 1 : 0, r.enabled ? 1 : 0, r.createdBy ?? null, now(), prev.id);
       return prev.id;
     }
     const t = now();
@@ -1161,11 +1394,12 @@ export class Db {
       .get() as { m: number };
     const info = this.db
       .prepare(
-        `INSERT INTO push_rules (name, category_id, uids, channels, message_template, enabled, created_by, sort, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO push_rules (name, subject_kind, category_id, scope, channels,
+           message_template, llm_translate, enabled, created_by, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(r.name, r.categoryId, JSON.stringify(r.uids), JSON.stringify(r.channels),
-        r.messageTemplate, r.enabled ? 1 : 0, r.createdBy ?? null, m, t, t);
+      .run(r.name, r.subjectKind, r.categoryId, JSON.stringify(r.scope), JSON.stringify(r.channels),
+        r.messageTemplate, r.llmTranslate ? 1 : 0, r.enabled ? 1 : 0, r.createdBy ?? null, m, t, t);
     const id = Number(info.lastInsertRowid);
     if (!r.name) {
       this.db.prepare('UPDATE push_rules SET name = ?, updated_at = ? WHERE id = ?').run(`规则 ${id}`, t, id);
@@ -1177,93 +1411,6 @@ export class Db {
   reorderPushRules(ids: number[]): void {
     const tx = this.db.transaction(() => {
       const stmt = this.db.prepare('UPDATE push_rules SET sort = ?, updated_at = ? WHERE id = ?');
-      for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i]);
-    });
-    tx();
-  }
-
-  // ---- post_rules：图文帖规则（X/推特链路，与 push_rules 平行）----
-
-  /** 面板用：全量规则（含 disabled）。matcher 消费请用 listEnabledPostRules。 */
-  listPostRules(): PostRule[] {
-    const rows = this.db.prepare('SELECT * FROM post_rules ORDER BY sort, id').all() as PostRuleRow[];
-    return rows.map(rowToPostRule);
-  }
-
-  /** 全部启用规则，sort 升序（全部命中独立生效，渠道取并集） */
-  listEnabledPostRules(): PostRule[] {
-    const rows = this.db
-      .prepare('SELECT * FROM post_rules WHERE enabled = 1 ORDER BY sort, id')
-      .all() as PostRuleRow[];
-    return rows.map(rowToPostRule);
-  }
-
-  private getPostRule(id: number): PostRule | undefined {
-    const row = this.db.prepare('SELECT * FROM post_rules WHERE id = ?').get(id) as PostRuleRow | undefined;
-    return row ? rowToPostRule(row) : undefined;
-  }
-
-  /** 带 id 且存在 = 改行（未提供字段保留原值）；否则建行（空名补「图文帖规则 N」，排到末尾） */
-  upsertPostRule(input: PostRuleInput): number {
-    const prev = input.id !== undefined ? this.getPostRule(input.id) : undefined;
-    const filters: PostFilters = {
-      ...(prev?.filters ?? defaultPostFilters()),
-      ...(input.filters ?? {}),
-    };
-    const r: NewPostRule = {
-      name: input.name !== undefined ? input.name : prev?.name ?? '',
-      channels: input.channels ?? prev?.channels ?? [],
-      filters,
-      messageTemplate: input.messageTemplate !== undefined
-        ? input.messageTemplate : prev?.messageTemplate ?? null,
-      llmJudge: input.llmJudge ?? prev?.llmJudge ?? false,
-      judgePrompt: input.judgePrompt !== undefined ? input.judgePrompt : prev?.judgePrompt ?? null,
-      llmTranslate: input.llmTranslate ?? prev?.llmTranslate ?? false,
-      enabled: input.enabled ?? prev?.enabled ?? true,
-    };
-    // account_ids 是旧设计的遗留列（生效范围已搬到账号侧 rule_ids）：保留不删，写入侧恒 '[]'。
-    // platform 列同理（规则已平台无关）：UPDATE 不触碰，INSERT 靠列默认值 'twitter' 占位。
-    if (prev) {
-      this.db
-        .prepare(
-          `UPDATE post_rules SET name=?, account_ids='[]', channels=?, filters=?, message_template=?,
-             llm_judge=?, judge_prompt=?, llm_translate=?, enabled=?, updated_at=?
-           WHERE id=?`,
-        )
-        .run(r.name, JSON.stringify(r.channels), JSON.stringify(r.filters),
-          r.messageTemplate, r.llmJudge ? 1 : 0, r.judgePrompt, r.llmTranslate ? 1 : 0,
-          r.enabled ? 1 : 0, now(), prev.id);
-      return prev.id;
-    }
-    const t = now();
-    const { m } = this.db
-      .prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS m FROM post_rules')
-      .get() as { m: number };
-    const info = this.db
-      .prepare(
-        `INSERT INTO post_rules
-           (name, account_ids, channels, filters, message_template,
-            llm_judge, judge_prompt, llm_translate, enabled, sort, created_at, updated_at)
-         VALUES (?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(r.name, JSON.stringify(r.channels), JSON.stringify(r.filters),
-        r.messageTemplate, r.llmJudge ? 1 : 0, r.judgePrompt, r.llmTranslate ? 1 : 0,
-        r.enabled ? 1 : 0, m, t, t);
-    const id = Number(info.lastInsertRowid);
-    if (!r.name) {
-      this.db.prepare('UPDATE post_rules SET name = ?, updated_at = ? WHERE id = ?').run(`图文帖规则 ${id}`, t, id);
-    }
-    return id;
-  }
-
-  deletePostRule(id: number): boolean {
-    return this.db.prepare('DELETE FROM post_rules WHERE id = ?').run(id).changes > 0;
-  }
-
-  /** 拖拽排序：ids 是全部规则的全排列，按数组顺序重写 sort */
-  reorderPostRules(ids: number[]): void {
-    const tx = this.db.transaction(() => {
-      const stmt = this.db.prepare('UPDATE post_rules SET sort = ?, updated_at = ? WHERE id = ?');
       for (let i = 0; i < ids.length; i++) stmt.run(i, now(), ids[i]);
     });
     tx();
@@ -1437,7 +1584,7 @@ export class Db {
       const reEnabled = !prev.enabled && (input.enabled ?? prev.enabled);
       this.db
         .prepare(
-          `UPDATE x_accounts SET screen_name=?, nickname=?, display_name=?, bili_uid=?, enabled=?, rule_ids=?, silent_next=?, updated_at=? WHERE id=?`,
+          `UPDATE x_accounts SET screen_name=?, nickname=?, display_name=?, bili_uid=?, enabled=?, silent_next=?, updated_at=? WHERE id=?`,
         )
         .run(
           screenName,
@@ -1445,7 +1592,6 @@ export class Db {
           input.displayName !== undefined ? input.displayName : prev.displayName,
           input.biliUid !== undefined ? input.biliUid : prev.biliUid,
           (input.enabled ?? prev.enabled) ? 1 : 0,
-          JSON.stringify(input.ruleIds ?? prev.ruleIds),
           reEnabled || prev.silentNext ? 1 : 0,
           now(),
           prev.id,
@@ -1456,8 +1602,8 @@ export class Db {
     const info = this.db
       .prepare(
         `INSERT INTO x_accounts
-           (screen_name, nickname, display_name, bili_uid, enabled, rule_ids, last_tweet_id, last_tweet_at, last_ok_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+           (screen_name, nickname, display_name, bili_uid, enabled, last_tweet_id, last_tweet_at, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
       )
       .run(
         screenName,
@@ -1465,7 +1611,6 @@ export class Db {
         input.displayName ?? null,
         input.biliUid ?? null,
         (input.enabled ?? true) ? 1 : 0,
-        JSON.stringify(input.ruleIds ?? []),
         t,
         t,
       );
@@ -1530,14 +1675,13 @@ export class Db {
       // 重新启用 = 主动暂停结束：置恢复位，恢复轮询的首轮静默（停用期间的帖子不补推）
       const reEnabled = !prev.enabled && (input.enabled ?? prev.enabled);
       this.db
-        .prepare('UPDATE weibo_accounts SET uid=?, nickname=?, display_name=?, bili_uid=?, enabled=?, rule_ids=?, silent_next=?, updated_at=? WHERE id=?')
+        .prepare('UPDATE weibo_accounts SET uid=?, nickname=?, display_name=?, bili_uid=?, enabled=?, silent_next=?, updated_at=? WHERE id=?')
         .run(
           uid,
           input.nickname !== undefined ? input.nickname : prev.nickname,
           input.displayName !== undefined ? input.displayName : prev.displayName,
           input.biliUid !== undefined ? input.biliUid : prev.biliUid,
           (input.enabled ?? prev.enabled) ? 1 : 0,
-          JSON.stringify(input.ruleIds ?? prev.ruleIds),
           reEnabled || prev.silentNext ? 1 : 0,
           now(),
           prev.id,
@@ -1548,11 +1692,11 @@ export class Db {
     const info = this.db
       .prepare(
         `INSERT INTO weibo_accounts
-           (uid, nickname, display_name, bili_uid, enabled, rule_ids, last_post_id, last_post_at, last_ok_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+           (uid, nickname, display_name, bili_uid, enabled, last_post_id, last_post_at, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
       )
       .run(uid, input.nickname ?? null, input.displayName ?? null, input.biliUid ?? null,
-        (input.enabled ?? true) ? 1 : 0, JSON.stringify(input.ruleIds ?? []), t, t);
+        (input.enabled ?? true) ? 1 : 0, t, t);
     return Number(info.lastInsertRowid);
   }
 
@@ -1622,12 +1766,11 @@ export class Db {
       // 重新启用 = 主动暂停结束：置恢复位，恢复轮询的首轮静默（停用期间的帖子不补推）
       const reEnabled = !prev.enabled && (input.enabled ?? prev.enabled);
       this.db
-        .prepare('UPDATE bili_accounts SET uid=?, display_name=?, enabled=?, rule_ids=?, silent_next=?, updated_at=? WHERE id=?')
+        .prepare('UPDATE bili_accounts SET uid=?, display_name=?, enabled=?, silent_next=?, updated_at=? WHERE id=?')
         .run(
           uid,
           input.displayName !== undefined ? input.displayName : prev.displayName,
           (input.enabled ?? prev.enabled) ? 1 : 0,
-          JSON.stringify(input.ruleIds ?? prev.ruleIds),
           reEnabled || prev.silentNext ? 1 : 0,
           now(),
           prev.id,
@@ -1638,11 +1781,11 @@ export class Db {
     const info = this.db
       .prepare(
         `INSERT INTO bili_accounts
-           (uid, display_name, enabled, rule_ids, last_ok_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+           (uid, display_name, enabled, last_ok_at, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, ?, ?)`,
       )
       .run(uid, input.displayName ?? null,
-        (input.enabled ?? true) ? 1 : 0, JSON.stringify(input.ruleIds ?? []), t, t);
+        (input.enabled ?? true) ? 1 : 0, t, t);
     return Number(info.lastInsertRowid);
   }
 

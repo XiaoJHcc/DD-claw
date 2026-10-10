@@ -100,9 +100,10 @@ export type RedactPredicate = (table: string, column: string, row: Row) => boole
  * `set_streamer` 改别名后撤不掉（差分恒空 = 不落记录）。逐列核对写者后确认它的轮询列与配置列
  * 同样可分（轮询只写 uname/face/room_id/updated_at），故改为纳入 + 按列过滤。
  * 归档表（room_state/posts/verdicts/live_segments）一律不进来——计划明确「不把轮询数据回滚」。
+ * `post_rules` 已随 P2（统一计划附录 A.3）DROP——老变更记录里它的行只作历史展示，撤销不到。
  */
 export const DEFAULT_CONFIG_TABLES: readonly string[] = [
-  'settings', 'push_rules', 'categories', 'push_channels', 'post_rules',
+  'settings', 'push_rules', 'categories', 'push_channels',
   'streamers', 'x_accounts', 'weibo_accounts', 'bili_accounts',
 ];
 

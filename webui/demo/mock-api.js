@@ -32,18 +32,40 @@ const nowSec = Math.floor(Date.now() / 1000);
 // ---- defaults.json → 卡片行（补 id/时间戳；规则渠道 = 全部渠道，分类按名映射回 id）----
 const demoCategories = (defaults?.categories ?? []).map((c, i) => ({
   id: i + 1, name: c.name, llmPrompt: c.llmPrompt ?? null,
-  keywords: c.keywords ?? [], areas: c.areas ?? [], condMode: c.condMode ?? 'and',
+  keywords: c.keywords ?? [], areas: c.areas ?? [],
+  appliesTo: 'live', postTypes: [], requireQuote: false, requireMedia: false,
+  condMode: c.condMode ?? 'and',
   enabled: true, createdAt: nowSec, updatedAt: nowSec,
-}));
+})).concat([
+  // 图文分类（判定口径上移进分类：原图文规则的 filters/judgePrompt）
+  {
+    id: 101, name: '带图原创', llmPrompt: '只推与直播预告、新曲发布相关的推文',
+    keywords: [], areas: [], appliesTo: 'post', postTypes: ['original'],
+    requireQuote: false, requireMedia: true, condMode: 'and',
+    enabled: true, createdAt: nowSec, updatedAt: nowSec,
+  },
+  {
+    id: 102, name: '转发/live', llmPrompt: null,
+    keywords: ['live'], areas: [], appliesTo: 'post', postTypes: ['retweet'],
+    requireQuote: false, requireMedia: false, condMode: 'and',
+    enabled: true, createdAt: nowSec, updatedAt: nowSec,
+  },
+  {
+    id: 103, name: '预告词', llmPrompt: null,
+    keywords: ['预告', '直播'], areas: [], appliesTo: 'post', postTypes: ['original'],
+    requireQuote: false, requireMedia: false, condMode: 'and',
+    enabled: true, createdAt: nowSec, updatedAt: nowSec,
+  },
+]);
 const catIdByName = new Map(demoCategories.map((c) => [c.name, c.id]));
 const allChannelIds = M.mockChannels.map((c) => c.id);
 const demoRules = (defaults?.rules ?? []).map((r, i) => ({
-  id: i + 1, name: r.name,
+  id: i + 1, name: r.name, subjectKind: 'live',
   categoryId: r.category != null ? (catIdByName.get(r.category) ?? null) : null,
-  uids: [], channels: [...allChannelIds],
-  messageTemplate: r.messageTemplate ?? null,
+  scope: [], channels: [...allChannelIds],
+  messageTemplate: r.messageTemplate ?? null, llmTranslate: false,
   enabled: true, createdAt: nowSec, updatedAt: nowSec,
-}));
+})).concat(clone(M.mockPostRules));
 
 // ---- 内存库（深拷贝种子，本会话可改）----
 const store = {
@@ -66,8 +88,6 @@ const store = {
   biliAccounts: clone(fixtures?.biliAccounts ?? []),
   biliAccountSeq: (fixtures?.biliAccounts ?? []).length,
   biliPosts: clone(fixtures?.biliPosts ?? []),
-  postRules: clone(M.mockPostRules),
-  postRuleSeq: M.mockPostRules.length,
   twitterPosts: clone(M.mockTwitterPosts),
   postVerdicts: clone(M.mockPostVerdicts),
   pushEnabled: true,
@@ -256,7 +276,7 @@ const undoAt = () => Math.floor(Date.now() / 1000);
 
 // 参与快照的状态切片（与真实后端 DEFAULT_CONFIG_TABLES 对应的那几张表 + 开关）
 const SNAPSHOT_KEYS = [
-  'channels', 'categories', 'rules', 'postRules', 'streamers', 'xAccounts',
+  'channels', 'categories', 'rules', 'streamers', 'xAccounts',
   'weiboAccounts', 'biliAccounts', 'llmProviders', 'pushEnabled', 'llmEnabled',
   'listenSettings', 'napcat', 'x',
 ];
@@ -341,12 +361,11 @@ function writeMeta(method, path, b) {
     return { tool: 'set_listen', title: '监听开关', headline: b.enabled ? `开启了${plat}监听开关` : `关闭了${plat}监听开关`, tables: ['settings'],
       detail: [{ label: `${plat}监听开关`, ...upd, changes: [{ field: `${plat}监听开关`, from: b.enabled ? '关' : '开', to: b.enabled ? '开' : '关', bool: true }] }] };
   }
-  // 四类 CRUD 家族：渠道 / 分类 / 推送规则 / 图文规则 / 三张账号名单，形状一致
+  // 四类 CRUD 家族：渠道 / 分类 / 推送规则（含图文规则）/ 三张账号名单，形状一致
   const fam = [
     { re: /^\/api\/channels(?:\/(\d+))?$|^\/api\/channels\/order$/, table: 'push_channels', noun: '推送渠道', names: ['新增推送渠道', '保存推送渠道', '删除推送渠道'] },
     { re: /^\/api\/categories(?:\/(\d+))?$|^\/api\/categories\/order$/, table: 'categories', noun: '分类', names: ['保存分类', '保存分类', '删除分类'] },
     { re: /^\/api\/rules(?:\/(\d+))?$|^\/api\/rules\/order$/, table: 'push_rules', noun: '推送规则', names: ['保存推送规则', '保存推送规则', '删除推送规则'] },
-    { re: /^\/api\/post-rules(?:\/(\d+))?$|^\/api\/post-rules\/order$/, table: 'post_rules', noun: '图文规则', names: ['保存图文规则', '保存图文规则', '删除图文规则'] },
     { re: /^\/api\/x\/accounts(?:\/(\d+))?$/, table: 'x_accounts', noun: 'X 账号', names: ['保存 X 账号', '保存 X 账号', '删除 X 账号'] },
     { re: /^\/api\/weibo\/accounts(?:\/(\d+))?$/, table: 'weibo_accounts', noun: '微博账号', names: ['保存微博账号', '保存微博账号', '删除微博账号'] },
     { re: /^\/api\/bili\/accounts(?:\/(\d+))?$/, table: 'bili_accounts', noun: 'B站动态账号', names: ['保存B站动态账号', '保存B站动态账号', '删除B站动态账号'] },
@@ -408,7 +427,7 @@ function recordWrite(method, path, rawBody, snap) {
 // 注意 /api/chat 只列 mode / provider 两条真配置写（都进变更历史），聊天回合与 reset 不算。
 const MOCK_WRITE_PREFIXES = [
   '/api/llm', '/api/advanced', '/api/categories', '/api/rules', '/api/channels',
-  '/api/post-rules', '/api/streamers', '/api/follows', '/api/listen', '/api/push',
+  '/api/streamers', '/api/follows', '/api/listen', '/api/push',
   '/api/x', '/api/weibo', '/api/bili', '/api/napcat', '/api/chat/mode', '/api/chat/provider',
 ];
 function isMockConfigWrite(method, path) {
@@ -504,88 +523,8 @@ for (const p of store.twitterPosts) {
     }
   }
 
-  // ---- 图文帖规则（X/推特 + 微博 + B站动态共用；与推送规则平行的另一张表）----
-  // 规则平台无关（无 platform 字段，传入按未知字段 400）、不带账号 scope——
-  // 账号侧用 ruleIds 选用（账号 POST/PUT 只校验规则存在，任何账号可选用任何规则）。
-  const checkPostRule = (b, rule) => {
-    if (b.platform !== undefined) return { error: '未知字段: platform（图文规则已平台无关）' };
-    const filters = Object.assign(
-      { original: true, retweet: false, quote: false, media: false, keywords: [] },
-      rule ? rule.filters : {}, b.filters || {},
-    );
-    if (!filters.original && !filters.retweet) {
-      return { error: '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中' };
-    }
-    const judge = b.llmJudge !== undefined ? b.llmJudge === true : (rule ? rule.llmJudge : false);
-    const prompt = b.judgePrompt !== undefined ? b.judgePrompt : (rule ? rule.judgePrompt : null);
-    if (judge && !String(prompt || '').trim()) return { error: '开启「LLM 判定」必须填判定提示词' };
-    if (Array.isArray(b.channels) && b.channels.some((id) => !store.channels.some((c) => c.id === id))) {
-      return { error: '渠道不存在' };
-    }
-    return { filters };
-  };
-  // 账号 ruleIds 校验：只校验规则存在（规则平台无关，不再校验平台一致）
-  const checkRuleIds = (ids) =>
-    Array.isArray(ids) && ids.every((id) => store.postRules.some((r) => r.id === id));
-
-  if (path === '/api/post-rules' && method === 'GET') {
-    return ok({ rules: clone(store.postRules) });
-  }
-  if (path === '/api/post-rules' && method === 'POST') {
-    const b = body();
-    const c = checkPostRule(b, null);
-    if (c.error) return json(400, { error: c.error });
-    const rule = {
-      id: ++store.postRuleSeq,
-      name: b.name || `图文帖规则 ${store.postRuleSeq}`,
-      channels: b.channels || [], filters: c.filters,
-      messageTemplate: b.messageTemplate ?? null,
-      llmJudge: b.llmJudge === true,
-      judgePrompt: b.judgePrompt ?? null,
-      llmTranslate: b.llmTranslate === true,
-      enabled: b.enabled !== false,
-      sort: store.postRules.length, createdAt: nowSec, updatedAt: nowSec,
-    };
-    store.postRules.push(rule);
-    return ok({ id: rule.id });
-  }
-  if (path === '/api/post-rules/order' && method === 'PUT') {
-    const ids = body().ids || [];
-    if (ids.length !== store.postRules.length) return json(400, { error: 'ids 必须与现有图文帖规则一一对应' });
-    store.postRules.sort((a, b2) => ids.indexOf(a.id) - ids.indexOf(b2.id));
-    store.postRules.forEach((r, i) => { r.sort = i; });
-    return ok({ ok: true });
-  }
-  {
-    const prm = path.match(/^\/api\/post-rules\/(\d+)$/);
-    if (prm) {
-      const rule = store.postRules.find((r) => r.id === Number(prm[1]));
-      if (!rule) return json(404, { error: '图文帖规则不存在' });
-      if (method === 'PUT') {
-        const b = body();
-        const c = checkPostRule(b, rule);
-        if (c.error) return json(400, { error: c.error });
-        if (b.name !== undefined) rule.name = b.name;
-        if (b.channels !== undefined) rule.channels = b.channels;
-        rule.filters = c.filters;
-        if (b.llmJudge !== undefined) rule.llmJudge = b.llmJudge === true;
-        if (b.judgePrompt !== undefined) rule.judgePrompt = b.judgePrompt;
-        if (b.llmTranslate !== undefined) rule.llmTranslate = b.llmTranslate === true;
-        if (b.messageTemplate !== undefined) rule.messageTemplate = b.messageTemplate;
-        if (typeof b.enabled === 'boolean') rule.enabled = b.enabled;
-        rule.updatedAt = nowSec;
-        return ok({ ok: true });
-      }
-      if (method === 'DELETE') {
-        store.postRules = store.postRules.filter((r) => r.id !== rule.id);
-        // 选用关系一并去掉（账号 ruleIds 不残留已删规则的 id）
-        for (const list of [store.xAccounts, store.weiboAccounts, store.biliAccounts]) {
-          for (const a of list) a.ruleIds = (a.ruleIds || []).filter((id) => id !== rule.id);
-        }
-        return ok({ ok: true });
-      }
-    }
-  }
+  // 图文规则已统一进 /api/rules（subjectKind='post'）：post_rules 端点退役（与真实后端同构）。
+  // 命中 /api/post-rules* 落到末尾的 404。
 
   // ---- NapCat ----
   if (path === '/api/napcat' && method === 'GET') {
@@ -645,8 +584,8 @@ for (const p of store.twitterPosts) {
     if (b.biliUid != null && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
       return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
     }
-    if (b.ruleIds !== undefined && !checkRuleIds(b.ruleIds)) {
-      return json(400, { error: '规则不存在' });
+    if (b.ruleIds !== undefined) {
+      return json(400, { error: '未知字段: ruleIds（生效范围改在规则 scope 上）' });
     }
     // 演示的 verify 显示名（真实后端从 og:title 抠出，种进 nickname）
     const demoNames = { watase_yuzuki: '渡瀬 結月', hololive_en: 'hololive English', nhk_news: 'NHKニュース' };
@@ -654,7 +593,6 @@ for (const p of store.twitterPosts) {
       id: ++store.xAccountSeq, screenName, nickname: demoNames[screenName] || null,
       displayName: b.displayName ? String(b.displayName) : null,
       biliUid: b.biliUid ? String(b.biliUid) : null, enabled: b.enabled !== false,
-      ruleIds: (b.ruleIds || []).map(Number),
       lastTweetId: null, lastTweetAt: null, lastOkAt: null, avatar: null,
       fetchFailSince: null, fetchError: null, createdAt: nowSec, updatedAt: nowSec,
     };
@@ -677,10 +615,7 @@ for (const p of store.twitterPosts) {
       if (b.displayName !== undefined) row.displayName = b.displayName === null ? null : String(b.displayName);
       if (b.biliUid !== undefined) row.biliUid = b.biliUid === null ? null : String(b.biliUid);
       if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
-      if (b.ruleIds !== undefined) {
-        if (!checkRuleIds(b.ruleIds)) return json(400, { error: '规则不存在' });
-        row.ruleIds = b.ruleIds.map(Number);
-      }
+      if (b.ruleIds !== undefined) return json(400, { error: '未知字段: ruleIds（生效范围改在规则 scope 上）' });
       row.updatedAt = nowSec;
       return ok({ account: xAccountView(row) });
     }
@@ -775,13 +710,13 @@ for (const p of store.twitterPosts) {
     if (b.biliUid != null && !store.streamers.some((s) => String(s.uid) === String(b.biliUid))) {
       return json(400, { error: `关联主播不在监听名单: ${b.biliUid}` });
     }
-    if (b.ruleIds !== undefined && !checkRuleIds(b.ruleIds)) {
-      return json(400, { error: '规则不存在' });
+    if (b.ruleIds !== undefined) {
+      return json(400, { error: '未知字段: ruleIds（生效范围改在规则 scope 上）' });
     }
     const row = {
       id: ++store.weiboAccountSeq, uid, nickname, displayName: b.displayName ? String(b.displayName) : null,
       biliUid: b.biliUid ?? null,
-      enabled: b.enabled !== false, ruleIds: (b.ruleIds || []).map(Number),
+      enabled: b.enabled !== false,
       lastPostId: null, lastPostAt: null, lastOkAt: null,
       avatar: null, fetchFailSince: null, fetchError: null, createdAt: nowSec, updatedAt: nowSec,
     };
@@ -805,10 +740,7 @@ for (const p of store.twitterPosts) {
         if (b.displayName !== undefined) row.displayName = b.displayName;
         if (b.biliUid !== undefined) row.biliUid = b.biliUid;
         if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
-        if (b.ruleIds !== undefined) {
-          if (!checkRuleIds(b.ruleIds)) return json(400, { error: '规则不存在' });
-          row.ruleIds = b.ruleIds.map(Number);
-        }
+        if (b.ruleIds !== undefined) return json(400, { error: '未知字段: ruleIds（生效范围改在规则 scope 上）' });
         row.updatedAt = nowSec;
         return ok({ account: weiboAccountView(row) });
       }
@@ -842,13 +774,13 @@ for (const p of store.twitterPosts) {
     const uid = m ? m[1] : raw;
     if (!/^\d{1,20}$/.test(uid)) return json(400, { error: 'uid 必须是数字（可粘贴 space.bilibili.com/<uid> 链接）' });
     if (store.biliAccounts.some((a) => a.uid === uid)) return json(409, { error: `uid ${uid} 已在名单里` });
-    if (b.ruleIds !== undefined && !checkRuleIds(b.ruleIds)) {
-      return json(400, { error: '规则不存在' });
+    if (b.ruleIds !== undefined) {
+      return json(400, { error: '未知字段: ruleIds（生效范围改在规则 scope 上）' });
     }
     const row = {
       id: ++store.biliAccountSeq, uid, uname: null,
       displayName: b.displayName ? String(b.displayName) : null,
-      enabled: b.enabled !== false, ruleIds: (b.ruleIds || []).map(Number),
+      enabled: b.enabled !== false,
       lastOkAt: null, avatar: null, fetchFailSince: null, fetchError: null, createdAt: nowSec, updatedAt: nowSec,
     };
     store.biliAccounts.push(row);
@@ -866,10 +798,7 @@ for (const p of store.twitterPosts) {
         if (b.uname !== undefined) return json(400, { error: '未知字段: uname' });
         if (b.displayName !== undefined) row.displayName = b.displayName;
         if (typeof b.enabled === 'boolean') row.enabled = b.enabled;
-        if (b.ruleIds !== undefined) {
-          if (!checkRuleIds(b.ruleIds)) return json(400, { error: '规则不存在' });
-          row.ruleIds = b.ruleIds.map(Number);
-        }
+        if (b.ruleIds !== undefined) return json(400, { error: '未知字段: ruleIds（生效范围改在规则 scope 上）' });
         row.updatedAt = nowSec;
         return ok({ account: biliAccountView(row) });
       }
@@ -934,7 +863,7 @@ for (const p of store.twitterPosts) {
       ...s,
       rules: {
         names: store.rules
-          .filter((r) => r.uids.length === 0 || r.uids.includes(s.uid))
+          .filter((r) => r.subjectKind === 'live' && (r.scope.length === 0 || r.scope.includes(s.uid)))
           .map((r) => r.name),
       },
     }));
@@ -1037,6 +966,9 @@ for (const p of store.twitterPosts) {
       id, name: b.name || ('分类 ' + id),
       llmPrompt: b.llmPrompt ?? null,
       keywords: b.keywords || [], areas: b.areas || [],
+      appliesTo: b.appliesTo || 'live',
+      postTypes: b.postTypes || [],
+      requireQuote: !!b.requireQuote, requireMedia: !!b.requireMedia,
       condMode: b.condMode || 'and', enabled: true,
       createdAt: Date.now(), updatedAt: Date.now(),
     });
@@ -1055,7 +987,7 @@ for (const p of store.twitterPosts) {
       if (!c) return err(404, '分类不存在');
       if (method === 'PUT') {
         const b = body();
-        for (const k of ['name', 'llmPrompt', 'keywords', 'areas', 'condMode']) if (b[k] !== undefined) c[k] = b[k];
+        for (const k of ['name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia', 'condMode']) if (b[k] !== undefined) c[k] = b[k];
         if (typeof b.enabled === 'boolean') c.enabled = b.enabled;
         return ok({ ok: true });
       }
@@ -1068,20 +1000,29 @@ for (const p of store.twitterPosts) {
     }
   }
 
-  // ---- 推送规则 ----
+  // ---- 推送规则（统一规则：subjectKind × 分类引用 × scope × 渠道 × 附加动作）----
   if (path === '/api/rules' && method === 'GET') {
     const uid = q.get('uid');
-    const rules = uid ? store.rules.filter((r) => r.uids.length === 0 || r.uids.includes(uid)) : store.rules;
+    // ?uid= = 对该主播生效的开播规则（scope 空 = 全部主播；图文规则不进主播卡）
+    const rules = uid
+      ? store.rules.filter((r) => r.subjectKind === 'live' && (r.scope.length === 0 || r.scope.includes(uid)))
+      : store.rules;
     return ok({ rules });
   }
   if (path === '/api/rules' && method === 'POST') {
     const b = body();
     const id = store.rules.reduce((m, r) => Math.max(m, r.id), 0) + 1;
+    if (b.channels && b.channels.some((cid) => !store.channels.some((c) => c.id === cid))) {
+      return json(400, { error: '渠道不存在' });
+    }
     store.rules.push({
       id, name: b.name || ('规则 ' + id),
+      subjectKind: b.subjectKind === 'post' ? 'post' : 'live',
       categoryId: b.categoryId ?? null,
-      uids: b.uids || [], channels: b.channels || [],
-      messageTemplate: b.messageTemplate ?? null, enabled: true,
+      scope: b.scope || [], channels: b.channels || [],
+      messageTemplate: b.messageTemplate ?? null,
+      llmTranslate: b.llmTranslate === true,
+      enabled: true,
       createdAt: Date.now(), updatedAt: Date.now(),
     });
     return created({ id });
@@ -1099,7 +1040,12 @@ for (const p of store.twitterPosts) {
       if (!r) return err(404, '规则不存在');
       if (method === 'PUT') {
         const b = body();
-        for (const k of ['name', 'categoryId', 'uids', 'channels', 'messageTemplate']) if (b[k] !== undefined) r[k] = b[k];
+        if (b.channels && b.channels.some((cid) => !store.channels.some((c) => c.id === cid))) {
+          return json(400, { error: '渠道不存在' });
+        }
+        for (const k of ['name', 'subjectKind', 'categoryId', 'scope', 'channels', 'messageTemplate', 'llmTranslate']) {
+          if (b[k] !== undefined) r[k] = b[k];
+        }
         if (typeof b.enabled === 'boolean') r.enabled = b.enabled;
         return ok({ ok: true });
       }

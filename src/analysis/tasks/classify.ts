@@ -29,12 +29,17 @@ const resultSchema = z.object({
   })),
 });
 
-const SYSTEM_PROMPT =
+const LIVE_SYSTEM_PROMPT =
   '你是直播内容分类器。逐项判断当前直播是否属于用户给出的每个分类，' +
   '严格按 JSON schema 输出，不要输出任何多余内容。';
 
-export function buildClassifyRequest(item: ContentItem, categories: ClassifyCategory[]): LlmRequest {
-  const text = [
+const POST_SYSTEM_PROMPT =
+  '你是社交平台图文分类器。逐项判断这条帖子是否属于用户给出的每个分类，' +
+  '严格按 JSON schema 输出，不要输出任何多余内容。';
+
+/** live 场次的用户消息（逐字冻结：直播侧判定行为保持不变） */
+function liveUserText(item: ContentItem, categories: ClassifyCategory[]): string {
+  return [
     `主播：${item.authorName}`,
     `标题：${item.text}`,
     `分区：${item.tags.parentArea ?? ''} / ${item.tags.area ?? ''}`,
@@ -42,12 +47,34 @@ export function buildClassifyRequest(item: ContentItem, categories: ClassifyCate
     '分类清单（id、名称、判定提示词）：',
     ...categories.map((c) => `- id=${c.id} 「${c.name}」：${c.prompt}`),
   ].join('\n');
+}
+
+/** 图文帖的用户消息（判定分类制：同一条判决链，输入面换成帖子） */
+function postUserText(item: ContentItem, categories: ClassifyCategory[]): string {
+  const kind = item.tags.type === 'retweet' ? '转发' : '原创';
+  return [
+    `作者：${item.authorName}`,
+    `类型：${kind}`,
+    item.tags.platform ? `平台：${item.tags.platform}` : '',
+    item.tags.hasMedia === 'true' ? '配图：有（见下方附图）' : '配图：无',
+    '',
+    '帖子正文：',
+    item.text || '（无正文，仅图片）',
+    '',
+    '分类清单（id、名称、判定提示词）：',
+    ...categories.map((c) => `- id=${c.id} 「${c.name}」：${c.prompt}`),
+  ].filter(Boolean).join('\n');
+}
+
+export function buildClassifyRequest(item: ContentItem, categories: ClassifyCategory[]): LlmRequest {
+  const isPost = item.subjectType === 'post';
+  const text = isPost ? postUserText(item, categories) : liveUserText(item, categories);
   const content: ContentPart[] = [{ type: 'text', text }];
   // 开播瞬间常无关键帧，封面兜底（fromLiveEvent 已折叠）；带图自动走 vision 路由
   for (const image of item.imageUrls) content.push({ type: 'image_url', image_url: { url: image } });
   return {
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: isPost ? POST_SYSTEM_PROMPT : LIVE_SYSTEM_PROMPT },
       { role: 'user', content },
     ],
     jsonSchema: {
@@ -79,7 +106,8 @@ export function buildClassifyRequest(item: ContentItem, categories: ClassifyCate
 }
 
 /**
- * zod 校验 + 过滤：只采纳 match=true 且置信度达标的项；模型编造的未知 id 丢弃。
+ * zod 校验 + 判定标注：**逐项全部返回**（含判否，pass=false——post 侧判否落 verdicts
+ * 供「为什么没推」回看）；match=true 且置信度达标才 pass=true。模型编造的未知 id 丢弃。
  * parse 抛错（模型没按 schema 输出）由 providers 层计入熔断并触发调用方回退。
  */
 export function parseClassifyResults(raw: unknown, categories: ClassifyCategory[]): Classification[] {
@@ -89,10 +117,10 @@ export function parseClassifyResults(raw: unknown, categories: ClassifyCategory[
   for (const r of parsed.results) {
     const cat = byId.get(r.id);
     if (!cat) continue;
-    if (!r.match || r.confidence < MIN_CONFIDENCE) continue;
     out.push({
       categoryId: cat.id, name: cat.name, source: 'llm',
       confidence: r.confidence, evidence: r.evidence,
+      pass: r.match && r.confidence >= MIN_CONFIDENCE,
     });
   }
   return out;

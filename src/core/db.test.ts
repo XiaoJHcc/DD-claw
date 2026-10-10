@@ -99,6 +99,50 @@ test('全新库直接建出 v2 push_rules + categories + verdicts（身份键版
   assert.ok(!vcols.includes('room_id') && !vcols.includes('live_time'), '新库 verdicts 无 room_id/live_time 列');
 });
 
+test('categories A.1 列迁移：旧表补 applies_to/post_types/require_quote/require_media，旧行读出缺省值', (t) => {
+  let db: Db | undefined;
+  const dir = tmpdir_(t, () => db?.close());
+  const path = join(dir, 'old-cat.db');
+  // 「旧 schema」categories：只有 keywords/areas 两组条件（A.1 之前的形状）
+  {
+    const raw = new Database(path);
+    raw.exec(`
+      CREATE TABLE categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, llm_prompt TEXT,
+        keywords TEXT NOT NULL DEFAULT '[]', areas TEXT NOT NULL DEFAULT '[]',
+        cond_mode TEXT NOT NULL DEFAULT 'and' CHECK(cond_mode IN ('and','or')),
+        enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      INSERT INTO categories (name, llm_prompt, keywords, areas, cond_mode, enabled, sort, created_at, updated_at)
+        VALUES ('歌回', NULL, '["歌回"]', '[]', 'and', 1, 0, 1000, 1000);
+    `);
+    raw.close();
+  }
+
+  db = new Db(path);
+  for (const col of ['applies_to', 'post_types', 'require_quote', 'require_media']) {
+    assert.ok(columns(path, 'categories').includes(col), `categories 应补列 ${col}`);
+  }
+  const old = db.listCategories().find((c) => c.name === '歌回')!;
+  assert.equal(old.appliesTo, 'live', '旧行默认直播分类');
+  assert.deepEqual(old.postTypes, []);
+  assert.equal(old.requireQuote, false);
+  assert.equal(old.requireMedia, false);
+  assert.deepEqual(old.keywords, ['歌回'], '旧条件原样保留');
+
+  // 新列可写可读（含图文分类的条件组）
+  const id = db.upsertCategory({
+    name: '转发抽奖', appliesTo: 'post', postTypes: ['original', 'retweet'],
+    requireQuote: false, requireMedia: true, keywords: ['抽奖'], condMode: 'and', enabled: true,
+    llmPrompt: null, areas: [],
+  });
+  const created = db.listCategories().find((c) => c.id === id)!;
+  assert.equal(created.appliesTo, 'post');
+  assert.deepEqual(created.postTypes, ['original', 'retweet']);
+  assert.equal(created.requireMedia, true);
+});
+
 /** 手工建一个「旧身份键」的 verdicts 表：(room_id, live_time, category_id) 唯一 */
 function makeOldVerdictsDb(path: string): void {
   const raw = new Database(path);
@@ -631,10 +675,24 @@ test('listRecentPostsMixed：主播卡第三栏按「关联主播」反查混排
   assert.equal(db.listRecentPostsMixed([], 5).size, 0, '空名单不查库');
 });
 
-// ---- 图文帖规则生效范围迁移：post_rules.account_ids → 账号侧 rule_ids ----
+// ---- P2 迁移（附录 A.2/A.3）：push_rules 形态重建（uids→scope）+ post_rules 搬家成分类+规则 + 账号 rule_ids 删列 ----
 
-/** 迁移前的旧 schema：三张表都没有 rule_ids 列（post_rules 还带着 account_ids） */
-const PRE_SCOPE_SCHEMA = `
+/** 迁移前的「中途库」schema：push_rules 还带 uids、categories 无 A.1 列、post_rules 还在、三账号表带 rule_ids */
+const PRE_P2_SCHEMA = `
+  CREATE TABLE push_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '',
+    category_id INTEGER, uids TEXT NOT NULL DEFAULT '[]',
+    channels TEXT NOT NULL DEFAULT '[]', message_template TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, llm_prompt TEXT,
+    keywords TEXT NOT NULL DEFAULT '[]', areas TEXT NOT NULL DEFAULT '[]',
+    cond_mode TEXT NOT NULL DEFAULT 'and' CHECK(cond_mode IN ('and','or')),
+    enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  );
   CREATE TABLE post_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '',
     platform TEXT NOT NULL DEFAULT 'twitter', account_ids TEXT NOT NULL DEFAULT '[]',
@@ -646,88 +704,205 @@ const PRE_SCOPE_SCHEMA = `
   CREATE TABLE x_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, screen_name TEXT NOT NULL UNIQUE,
     nickname TEXT, display_name TEXT, bili_uid TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+    rule_ids TEXT NOT NULL DEFAULT '[]',
     last_tweet_id TEXT, last_tweet_at INTEGER, last_ok_at INTEGER, avatar TEXT,
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
   );
   CREATE TABLE weibo_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE,
     nickname TEXT, display_name TEXT, bili_uid TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+    rule_ids TEXT NOT NULL DEFAULT '[]',
     last_post_id TEXT, last_post_at INTEGER, last_ok_at INTEGER, avatar TEXT,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE bili_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE,
+    uname TEXT, display_name TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+    rule_ids TEXT NOT NULL DEFAULT '[]',
+    last_ok_at INTEGER, avatar TEXT,
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
   );
 `;
 
-test('规则生效范围迁移：account_ids 非空按名单搬、空 = 该平台全部账号；幂等', (t) => {
-  let db: Db | undefined;
-  const path = join(tmpdir_(t, () => db?.close()), 'scope.db');
+/**
+ * 种一个「中途库」：账号侧 rule_ids 已是生效范围的事实来源（account_ids 恒 '[]'），
+ * 且老迁移闸门已在（真实中途库跑过 migratePostRuleScopes——fixture 不落闸门的话
+ * 「account_ids 空 = 全平台」会把 rule_ids 污染成全账号）。
+ */
+function seedPreP2(path: string): void {
   const raw = new Database(path);
-  raw.exec(PRE_SCOPE_SCHEMA);
+  raw.exec(PRE_P2_SCHEMA);
   raw.exec(`
-    INSERT INTO x_accounts (screen_name, enabled, created_at, updated_at)
-      VALUES ('aaa', 1, 0, 0), ('bbb', 1, 0, 0);
-    INSERT INTO weibo_accounts (uid, enabled, created_at, updated_at) VALUES ('w1', 1, 0, 0);
-    INSERT INTO post_rules (name, platform, account_ids, created_at, updated_at) VALUES
-      ('r1', 'twitter', '[1]', 0, 0),
-      ('r2', 'twitter', '[]', 0, 0),
-      ('r3', 'weibo', '[1]', 0, 0),
-      ('r4', 'bili_dynamic', '[]', 0, 0);
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO settings VALUES ('migrated_post_rule_scopes_v1', '1');
+    INSERT INTO push_rules (name, uids, channels, message_template, enabled, sort, created_at, updated_at)
+      VALUES ('开播规则', '["1","2"]', '[1]', '{liver} 开播了', 1, 0, 100, 100);
+    INSERT INTO x_accounts (screen_name, enabled, rule_ids, created_at, updated_at)
+      VALUES ('aaa', 1, '[1]', 0, 0), ('bbb', 1, '[]', 0, 0);
+    INSERT INTO weibo_accounts (uid, nickname, enabled, rule_ids, created_at, updated_at)
+      VALUES ('w1', '微博昵称', 1, '[3]', 0, 0);
+    INSERT INTO bili_accounts (uid, uname, enabled, rule_ids, created_at, updated_at)
+      VALUES ('80397', '阿梓', 1, '[4]', 0, 0);
+    INSERT INTO post_rules (name, platform, account_ids, channels, filters, message_template,
+      llm_judge, judge_prompt, llm_translate, enabled, sort, created_at, updated_at) VALUES
+      ('r1 有选用', 'twitter', '[]', '[1]', '{"original":true,"retweet":false,"quote":false,"media":false,"keywords":["歌回"]}',
+       '转发了', 1, '只推直播预告', 1, 1, 5, 200, 200),
+      ('r2 无选用', 'twitter', '[]', '[1]', '{"original":false,"retweet":true,"quote":true,"media":true,"keywords":[]}',
+       NULL, 0, '有提示词但没开判定', 0, 1, 6, 300, 300),
+      ('r3 停用', 'weibo', '[]', '[2]', '{"original":true,"retweet":true,"quote":false,"media":false,"keywords":[]}',
+       NULL, 1, NULL, 0, 0, 7, 400, 400),
+      ('r4 bili', 'bili_dynamic', '[]', '[1]', '{}', NULL, 0, NULL, 0, 1, 8, 500, 500);
+  `);
+  raw.close();
+}
+
+test('A.2/A.3 搬家：uids→scope 重建、post_rules→分类+规则、账号 rule_ids 删列；filters 各组合映射正确', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'pre-p2.db');
+  seedPreP2(path);
+
+  db = new Db(path);
+  // ---- A.2 形态重建：列与表的去留 ----
+  const ruleCols = columns(path, 'push_rules');
+  assert.ok(!ruleCols.includes('uids'), 'uids 列随重建消失');
+  for (const col of ['scope', 'subject_kind', 'llm_translate']) {
+    assert.ok(ruleCols.includes(col), `push_rules 应有 ${col} 列`);
+  }
+  for (const tname of ['x_accounts', 'weibo_accounts', 'bili_accounts']) {
+    assert.ok(!columns(path, tname).includes('rule_ids'), `${tname} 的 rule_ids 列已删`);
+  }
+  assert.equal(
+    db.raw.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_rules'`).get(),
+    undefined,
+    'post_rules 表搬完即 DROP',
+  );
+
+  // ---- 老 push_rules 行：uids 搬成 scope（subject_kind='live'） ----
+  const live = db.listPushRules().find((r) => r.name === '开播规则')!;
+  assert.equal(live.subjectKind, 'live');
+  assert.deepEqual(live.scope, ['1', '2'], 'uids 原样搬成 scope');
+  assert.equal(live.llmTranslate, false);
+  assert.deepEqual(live.channels, [1]);
+
+  // ---- A.3：r1 = 有账号选用的主案例（llm_judge + judgePrompt 上移进分类）----
+  const r1 = db.listPushRules().find((r) => r.name === 'r1 有选用')!;
+  assert.equal(r1.subjectKind, 'post');
+  assert.deepEqual(r1.scope, ['twitter:aaa'], 'scope = rule_ids 反查出的账号引用');
+  assert.deepEqual(r1.channels, [1], 'channels 原样');
+  assert.equal(r1.messageTemplate, '转发了', 'message_template 原样');
+  assert.equal(r1.llmTranslate, true, 'llmTranslate 随规则');
+  assert.equal(r1.enabled, true, '有选用 → 随原启用态');
+  const c1 = db.listCategories().find((c) => c.id === r1.categoryId)!;
+  assert.equal(c1.appliesTo, 'post');
+  assert.equal(c1.name, 'r1 有选用', '分类名 = 规则名');
+  assert.equal(c1.llmPrompt, '只推直播预告', 'llmJudge 且 judgePrompt 非空 → 上移进 llm_prompt');
+  assert.deepEqual(c1.keywords, ['歌回'], 'filters.keywords 上移');
+  assert.deepEqual(c1.postTypes, ['original'], 'filters.original 勾选集合映射');
+  assert.equal(c1.requireQuote, false);
+  assert.equal(c1.requireMedia, false);
+  assert.equal(c1.condMode, 'and', '旧 filters 各条件是 AND，cond_mode 取 and');
+  assert.equal(c1.enabled, true);
+  // sort 不进 Category 行对象（面板拖拽序），直接看库
+  assert.equal(
+    (db.raw.prepare('SELECT sort FROM categories WHERE id = ?').get(c1.id) as { sort: number }).sort,
+    5,
+    '分类 sort 随规则',
+  );
+
+  // ---- A.3 行为保持闸：无账号选用的规则 enabled=0（原语义永不生效，scope 空翻转行为）----
+  const r2 = db.listPushRules().find((r) => r.name === 'r2 无选用')!;
+  assert.deepEqual(r2.scope, []);
+  assert.equal(r2.enabled, false, '无账号选用 → enabled=0 落地（行为保持闸）');
+  const c2 = db.listCategories().find((c) => c.id === r2.categoryId)!;
+  assert.deepEqual(c2.postTypes, ['retweet'], 'filters.retweet 映射');
+  assert.equal(c2.requireQuote, true, 'filters.quote 映射');
+  assert.equal(c2.requireMedia, true, 'filters.media 映射');
+  assert.deepEqual(c2.keywords, []);
+  assert.equal(c2.llmPrompt, null, 'llm_judge=0 → judgePrompt 不上移（留给判定的口径不存在）');
+
+  // ---- 停用规则随规则（enabled/sort 随规则）；llm_judge=1 但 judgePrompt 空 → llm_prompt null ----
+  const r3 = db.listPushRules().find((r) => r.name === 'r3 停用')!;
+  assert.equal(r3.enabled, false, '原 enabled=0 随规则');
+  assert.deepEqual(r3.scope, ['weibo:w1']);
+  const c3 = db.listCategories().find((c) => c.id === r3.categoryId)!;
+  assert.equal(c3.enabled, false);
+  assert.equal(c3.llmPrompt, null, 'judgePrompt 空 → 不上移');
+  assert.deepEqual(c3.postTypes, ['original', 'retweet'], '两勾选全映射');
+
+  // ---- 平台引用格式：bili_dynamic → `bili:uid`；空 filters 回落默认（只推原创） ----
+  const r4 = db.listPushRules().find((r) => r.name === 'r4 bili')!;
+  assert.deepEqual(r4.scope, ['bili:80397']);
+  const c4 = db.listCategories().find((c) => c.id === r4.categoryId)!;
+  assert.deepEqual(c4.postTypes, ['original'], '空 filters 回落默认（original=true）');
+
+  // ---- 搬家规则的 sort 接现有全局序追加（老 push_rules sort=0 → 新规则从 1 起），顺序按 post_rules sort ----
+  const migrated = db.listPushRules().filter((r) => r.subjectKind === 'post');
+  assert.deepEqual(migrated.map((r) => r.name), ['r1 有选用', 'r2 无选用', 'r3 停用', 'r4 bili'], '按 post_rules sort 序');
+  assert.equal(db.listPushRules().length, 5, '1 条老开播规则 + 4 条搬家规则');
+
+  // ---- 幂等：重开是空操作（post_rules 已 DROP、uids/rule_ids 已消失） ----
+  db.close();
+  db = new Db(path);
+  assert.equal(db.listPushRules().length, 5, '重跑不重复搬家');
+  assert.equal(db.listCategories().length, 4);
+  assert.deepEqual(
+    db.listPushRules().find((r) => r.name === 'r1 有选用')!.scope,
+    ['twitter:aaa'],
+  );
+});
+
+test('A.3 老库路径：account_ids（无 rule_ids 列）也能搬出 scope（中转列随 A.2 一并删除）', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'old-era.db');
+  const raw = new Database(path);
+  raw.exec(PRE_P2_SCHEMA);
+  // 老迁移未跑过（无闸门）、账号表没有 rule_ids 列、post_rules.account_ids 是真实生效范围
+  raw.exec(`
+    DROP TABLE x_accounts;
+    CREATE TABLE x_accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, screen_name TEXT NOT NULL UNIQUE,
+      nickname TEXT, display_name TEXT, bili_uid TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+      last_tweet_id TEXT, last_tweet_at INTEGER, last_ok_at INTEGER, avatar TEXT,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    INSERT INTO x_accounts (screen_name, enabled, created_at, updated_at) VALUES ('aaa', 1, 0, 0);
+    INSERT INTO post_rules (name, platform, account_ids, channels, filters, created_at, updated_at)
+      VALUES ('老规则', 'twitter', '[1]', '[1]', '{"original":true}', 100, 100),
+             ('全平台规则', 'twitter', '[]', '[1]', '{"original":true}', 100, 100);
   `);
   raw.close();
 
   db = new Db(path);
-  // 旧库在线补列
-  assert.ok(columns(path, 'x_accounts').includes('rule_ids'));
-  assert.ok(columns(path, 'weibo_accounts').includes('rule_ids'));
-  const xs = db.listXAccounts();
-  assert.deepEqual(xs.find((a) => a.screenName === 'aaa')!.ruleIds, [1, 2], '指定账号 1 + 空范围规则 2');
-  assert.deepEqual(xs.find((a) => a.screenName === 'bbb')!.ruleIds, [2], '只中「全部账号」的规则 2');
-  assert.deepEqual(db.listWeiboAccounts()[0]!.ruleIds, [3]);
-  // bili_dynamic 无旧数据，不参与搬家（也没有 bili_accounts 行可写）
-  assert.equal(db.listBiliAccounts().length, 0);
+  const named = db.listPushRules().find((r) => r.name === '老规则')!;
+  assert.deepEqual(named.scope, ['twitter:aaa'], 'account_ids 指定账号 → scope 该账号引用');
+  const all = db.listPushRules().find((r) => r.name === '全平台规则')!;
+  assert.deepEqual(all.scope, ['twitter:aaa'], 'account_ids 空 = 该平台全部账号（老语义）');
+  assert.ok(!columns(path, 'x_accounts').includes('rule_ids'), '中转列最终被删');
+  assert.equal(columns(path, 'post_rules').length, 0, 'post_rules 不存在（PRAGMA 空）');
+});
 
-  // 幂等：重开不重复追加（闸门 + includes 去重双保险）
-  db.close();
+test('无 post_rules 的库：搬家整体跳过（幂等闸门），push_rules 形态迁移照做', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'clean.db');
+  const raw = new Database(path);
+  raw.exec(`
+    CREATE TABLE push_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '',
+      category_id INTEGER, uids TEXT NOT NULL DEFAULT '[]',
+      channels TEXT NOT NULL DEFAULT '[]', message_template TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    INSERT INTO push_rules (name, uids, enabled, sort, created_at, updated_at)
+      VALUES ('只有开播', '[]', 1, 0, 1, 1);
+  `);
+  raw.close();
+
   db = new Db(path);
-  assert.deepEqual(db.listXAccounts().find((a) => a.screenName === 'aaa')!.ruleIds, [1, 2]);
-  assert.deepEqual(db.listWeiboAccounts()[0]!.ruleIds, [3]);
-});
-
-test('upsertPostRule 写入侧恒写空 account_ids、不写 platform（两列都是遗留列，保留不删）', (t) => {
-  const db = new Db(':memory:');
-  t.after(() => db.close());
-  const raw = (db as unknown as { db: Database.Database }).db;
-
-  const id = db.upsertPostRule({ channels: [1] });
-  const row = raw.prepare('SELECT account_ids, platform FROM post_rules WHERE id = ?').get(id) as {
-    account_ids: string; platform: string;
-  };
-  assert.equal(row.account_ids, '[]');
-  assert.equal(row.platform, 'twitter', 'platform 列靠默认值占位，写入侧不再触碰');
-  db.upsertPostRule({ id, name: '改名' });
-  assert.equal(
-    (raw.prepare('SELECT account_ids FROM post_rules WHERE id = ?').get(id) as { account_ids: string }).account_ids,
-    '[]',
-    '改行也恒写空',
-  );
-  assert.ok(!('accountIds' in db.listPostRules()[0]!), '规则对象不再有 accountIds');
-  assert.ok(!('platform' in db.listPostRules()[0]!), '规则对象不再有 platform');
-});
-
-test('x/weibo 账号的 ruleIds：upsert 给了才更新，读出解析 JSON', (t) => {
-  const db = new Db(':memory:');
-  t.after(() => db.close());
-
-  const xId = db.upsertXAccount({ screenName: 'aaa', ruleIds: [1, 2] });
-  assert.deepEqual(db.getXAccount(xId)!.ruleIds, [1, 2]);
-  db.upsertXAccount({ id: xId, displayName: '改名' });
-  assert.deepEqual(db.getXAccount(xId)!.ruleIds, [1, 2], '未传 ruleIds 保留原值');
-  db.upsertXAccount({ id: xId, ruleIds: [] });
-  assert.deepEqual(db.getXAccount(xId)!.ruleIds, [], '显式传空 = 清空');
-
-  const wId = db.upsertWeiboAccount({ uid: '2203177060' });
-  assert.deepEqual(db.getWeiboAccount(wId)!.ruleIds, [], '默认空');
-  db.upsertWeiboAccount({ id: wId, ruleIds: [3] });
-  assert.deepEqual(db.getWeiboAccount(wId)!.ruleIds, [3]);
+  assert.equal(db.listPushRules().length, 1);
+  assert.deepEqual(db.listPushRules()[0]!.scope, []);
+  assert.equal(db.listPushRules()[0]!.subjectKind, 'live');
+  assert.equal(db.listCategories().length, 0);
 });
 
 test('touchXAccount：昵称拿到非空才回写（X 的平台显示名，同 weibo nickname 纪律）', (t) => {
@@ -752,10 +927,9 @@ test('bili_accounts CRUD：uid 唯一、upsert 保留未传字段、touch 只动
   t.after(() => db.close());
 
   // uname 是平台事实（抓取回写）：upsert 输入面不收，测试里用 touch 模拟抓取种入
-  const id = db.upsertBiliAccount({ uid: '80397', ruleIds: [1] });
+  const id = db.upsertBiliAccount({ uid: '80397' });
   db.touchBiliAccount(id, { uname: '阿梓从小就很可爱' });
   assert.equal(db.getBiliAccountByUid('80397')!.id, id);
-  assert.deepEqual(db.getBiliAccount(id)!.ruleIds, [1]);
   assert.equal(db.getBiliAccount(id)!.enabled, true, '默认启用');
   assert.equal(db.getBiliAccount(id)!.uname, '阿梓从小就很可爱', 'touch 能种入 uname');
 
@@ -769,10 +943,10 @@ test('bili_accounts CRUD：uid 唯一、upsert 保留未传字段、touch 只动
   db.touchBiliAccount(id, { uname: null });
   assert.equal(db.getBiliAccount(id)!.uname, '阿梓从小就很可爱');
 
-  db.upsertBiliAccount({ id, enabled: false, ruleIds: [1, 2] });
+  db.upsertBiliAccount({ id, enabled: false, displayName: '改名' });
   const edited = db.getBiliAccount(id)!;
   assert.equal(edited.enabled, false);
-  assert.deepEqual(edited.ruleIds, [1, 2]);
+  assert.equal(edited.displayName, '改名');
   assert.equal(edited.uid, '80397', '未传 uid 保留原值');
 
   assert.deepEqual(db.listBiliAccounts().map((a) => a.uid), ['80397']);

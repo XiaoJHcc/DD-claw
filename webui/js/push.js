@@ -46,28 +46,40 @@ function channelRowHtml(c) {
 }
 
 function ruleCatName(categoryId) {
-  if (categoryId == null) return '任意开播';
+  if (categoryId == null) return '任意内容';
   for (let i = 0; i < ruleCats.length; i++) if (ruleCats[i].id === categoryId) return ruleCats[i].name;
   return '分类已删除';
 }
 
+// 规则行生效范围标签：live 规则的 scope 是主播 uid（名称用简称优先、回退原名）；
+// post 规则的 scope 是账号引用（`twitter:xxx` 等）——空 = 全部生效
+function ruleScopeTags(r) {
+  if ((r.scope || []).length === 0) {
+    return r.subjectKind === 'post'
+      ? '<span class="tag">全部账号</span>'
+      : '<span class="tag">全部主播</span>';
+  }
+  if (r.subjectKind === 'post') {
+    return r.scope.map(function (ref) { return `<span class="tag">${esc(ref)}</span>`; }).join('');
+  }
+  return r.scope.map(function (u) { return `<span class="tag">${esc(streamerName(u))}</span>`; }).join('');
+}
+
 // 规则整体不可达（ruleDeadReason：自身停用 / 分类停用或已删 / 渠道全不可用）时整行置灰、
-// 标题划线，且只保留不可达原因标签（分类/主播标签此时已无意义）；勾选状态不受影响，
-// 恢复引用对象即自动复原。生效主播标签用简称优先（空间受限，短名能留下更多枚），
-// uids 空 = 一枚「全部主播」标签；行宽不足时 fitRow 从尾部逐枚舍弃（标签须为 .row 直接子级）
+// 标题划线，且只保留不可达原因标签（分类/范围标签此时已无意义）；勾选状态不受影响，
+// 恢复引用对象即自动复原。行宽不足时 fitRow 从尾部逐枚舍弃（标签须为 .row 直接子级）
 function ruleRowHtml(r) {
   const dead = ruleDeadReason(r, ruleCats, chCache);
-  const uidsTags = r.uids.length === 0
-    ? '<span class="tag">全部主播</span>'
-    : r.uids.map(function (u) { return `<span class="tag">${esc(streamerName(u))}</span>`; }).join('');
-  const catTag = r.categoryId == null
-    ? '<span class="tag tag-mint">任意开播</span>'
-    : `<span class="tag tag-blue">${esc(ruleCatName(r.categoryId))}</span>`;
+  const scopeTags = ruleScopeTags(r);
+  const catTag = (r.categoryId == null
+    ? '<span class="tag tag-mint">任意内容</span>'
+    : `<span class="tag tag-blue">${esc(ruleCatName(r.categoryId))}</span>`) +
+    (r.subjectKind === 'post' ? '<span class="tag tag-purple">图文</span>' : '');
   return `<div class="row${dead ? ' rule-dead' : ''}" data-sid="${r.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-push-rule"', r.enabled) +
     `<span class="row-title">${esc(r.name)}</span>` +
-    (dead ? `<span class="tag">${esc(dead)}</span>` : catTag + uidsTags) +
+    (dead ? `<span class="tag">${esc(dead)}</span>` : catTag + scopeTags) +
     '<span class="row-end">' +
     iconBtn('edit-push-rule', 'pencil', '编辑') +
     iconBtn('del-push-rule', 'trash', '删除', true) +
@@ -277,12 +289,15 @@ function renderRuleUids() {
   }
 }
 
+let ruleDraftKind = 'live'; // 规则表单草稿：内容形态（live=开播 / post=图文）
+
 function openPushRuleSheet(id) {
   const r = id === null ? null : pushRuleById(id);
   if (id !== null && !r) { toast('规则数据未加载', true); return; }
-  ruleDraftUids = new Set((r ? r.uids : []).map(function (u) { return String(u); }));
-  const catOptions = [{ value: '', label: '任意开播' }].concat(ruleCats.map(function (c) {
-    return { value: c.id, label: c.name, off: c.enabled === false };
+  ruleDraftUids = new Set((r && r.subjectKind === 'live' ? (r.scope || []) : []).map(function (u) { return String(u); }));
+  ruleDraftKind = r ? (r.subjectKind || 'live') : 'live';
+  const catOptions = [{ value: '', label: '任意内容' }].concat(ruleCats.map(function (c) {
+    return { value: c.id, label: c.name + (c.appliesTo === 'post' ? '（图文）' : ''), off: c.enabled === false };
   }));
   // 渠道 = 胶囊并排多选（.chips）：已选 .on；停用渠道 .chip-dis（更浅灰 + 贯穿删除线，
   // 保留勾选状态仍可切换，title 提示勾上也不生效）
@@ -296,18 +311,44 @@ function openPushRuleSheet(id) {
           (dis ? ' title="该渠道已停用：勾选不会生效"' : '') +
           `><span class="chip-ic">${icon('check')}</span><span class="chip-txt">${esc(c.name)}</span></button>`;
       }).join('');
+  const postScopeText = r && r.subjectKind === 'post' && (r.scope || []).length
+    ? r.scope.join('、')
+    : '全部账号生效（可在「图文」页账号卡上勾选限定）';
   openSheet(r ? '编辑规则' : '添加规则',
+    field('内容形态', dropdownHtml('pr-kind', [
+      { value: 'live', label: '直播开播' },
+      { value: 'post', label: '图文帖' },
+    ], ruleDraftKind, 'pr-kind-change')) +
     field('名称', `<input class="inp" id="pr-name" placeholder="留空自动命名" value="${r ? esc(r.name) : ''}">`) +
     field('分类', dropdownHtml('pr-cat', catOptions, r ? r.categoryId : '')) +
-    field('生效主播', cylCardHtml()) +
+    `<div class="field" id="pr-live-fields"><label class="field-label">生效主播</label>${cylCardHtml()}</div>` +
+    `<div class="field hidden" id="pr-post-fields"><label class="field-label">生效范围</label>` +
+      `<div class="hint">${esc(postScopeText)}</div></div>` +
     '<div class="field"><label class="field-label">渠道</label>' +
       (chips ? `<div class="chips">${chips}</div>` : '<span class="hint">还没有渠道</span>') + '</div>' +
-    field('推送词', `<input class="inp" id="pr-tpl" placeholder="留空 = 默认推送词（{liver} 开播了）" value="` +
+    field('推送词', `<input class="inp" id="pr-tpl" placeholder="留空 = 默认推送词" value="` +
       (r ? esc(r.messageTemplate || '') : '') + '">') +
+    '<div class="field"><label class="field-label">附加动作</label><div class="chips">' +
+      `<button type="button" class="chip rule-llm-toggle${r && r.llmTranslate ? ' on' : ''}" data-action="rule-llm-toggle"` +
+      '><span class="chip-ic">' + icon('check') + '</span><span class="chip-txt">附译文（仅X帖）</span></button>' +
+      '</div></div>' +
     '<div class="sheet-foot"><span id="rule-err" class="form-err"></span>' +
     '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
     `<button class="btn btn-primary" data-action="save-push-rule" data-id="${r ? r.id : ''}">保存</button></div>`);
+  applyRuleKind(ruleDraftKind);
 }
+
+// 内容形态联动：live 显示生效主播挑选，post 显示范围提示（账号勾选在图文页账号卡）
+function applyRuleKind(kind) {
+  ruleDraftKind = kind;
+  const live = document.getElementById('pr-live-fields');
+  const post = document.getElementById('pr-post-fields');
+  if (live) live.classList.toggle('hidden', kind !== 'live');
+  if (post) post.classList.toggle('hidden', kind !== 'post');
+}
+
+CHANGES['pr-kind-change'] = function (el) { applyRuleKind(el.value); };
+ACTIONS['rule-llm-toggle'] = function (el) { el.classList.toggle('on'); };
 
 // 渠道胶囊可勾可取消；停用渠道（.chip-dis）勾了也置灰划线提示「勾上也没用」，但状态照常切换
 ACTIONS['rule-chip-toggle'] = function (el) { el.classList.toggle('on'); };
@@ -375,14 +416,20 @@ ACTIONS['save-push-rule'] = function (el) {
   if (err) err.textContent = '';
   const name = document.getElementById('pr-name').value.trim();
   const catVal = document.getElementById('pr-cat').value;
+  const existing = el.getAttribute('data-id') ? pushRuleById(Number(el.getAttribute('data-id'))) : null;
   // name 空则不提交该字段：POST 由后端自动补「规则 N」，PUT 保留原名（显式空串会 400）
   const body = {
+    subjectKind: ruleDraftKind,
     categoryId: catVal === '' ? null : Number(catVal),
-    uids: Array.from(ruleDraftUids),
+    // live：生效主播草稿；post：范围在图文页账号卡勾选（空 = 全部生效），这里原样保留
+    scope: ruleDraftKind === 'live'
+      ? Array.from(ruleDraftUids)
+      : (existing ? (existing.scope || []) : []),
     channels: Array.prototype.slice.call(document.querySelectorAll('#sheet-mask1 .pr-ch'))
       .filter(function (x) { return x.classList.contains('on'); })
       .map(function (x) { return Number(x.getAttribute('data-chid')); }),
     messageTemplate: document.getElementById('pr-tpl').value.trim() || null,
+    llmTranslate: !!document.querySelector('#sheet-mask1 .rule-llm-toggle.on'),
   };
   if (name) body.name = name;
   const idAttr = el.getAttribute('data-id');

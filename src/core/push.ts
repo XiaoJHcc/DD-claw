@@ -64,6 +64,12 @@ export function setPushEnabled(db: Db, enabled: boolean): void {
 
 export type CondMode = 'and' | 'or';
 
+/** 内容主体类型：分类 applies_to / 推送规则 subject_kind / verdicts subject_type 同域 */
+export type SubjectKind = 'live' | 'post';
+
+/** 帖子类型标签（分类 post_types 条件组的取值域；fromPostCandidate 折叠后的 type） */
+export type PostType = 'original' | 'retweet';
+
 export interface CategoryRow {
   id: number;
   name: string;
@@ -71,6 +77,14 @@ export interface CategoryRow {
   llm_prompt: string | null;
   keywords: string;
   areas: string;
+  /** 分类服务的内容类型（live=直播场次 / post=图文帖），UI 按此渲染可用算子 */
+  applies_to: SubjectKind;
+  /** JSON：'original'/'retweet' 子集，空 = 不限 */
+  post_types: string;
+  /** 必须是引用帖（仅 X 免登录回退路线产出 isQuote，其余平台永不命中） */
+  require_quote: number;
+  /** 必须带图 */
+  require_media: number;
   cond_mode: CondMode;
   enabled: number;
   /** 面板拖拽排序（展示顺序）；行对象不暴露 */
@@ -84,11 +98,19 @@ export interface Category {
   name: string;
   /** LLM 判定提示词；null = 无 LLM 判定，永远走确定性条件 */
   llmPrompt: string | null;
-  /** 标题子串，任一命中（大小写不敏感）；空 = 该组不参与 */
+  /** 标题/正文子串，任一命中（大小写不敏感）；空 = 该组不参与 */
   keywords: string[];
-  /** 分区子串（areaName / parentAreaName 都匹配），任一命中；空 = 该组不参与 */
+  /** 分区子串（areaName / parentAreaName 都匹配），任一命中；空 = 该组不参与（仅 live） */
   areas: string[];
-  /** 关键词组与分区组之间的关系（空组忽略；两组皆空 = 不命中） */
+  /** 帖子类型集合（原创/转发任一命中）；空 = 不限（仅 post） */
+  postTypes: PostType[];
+  /** 必须是引用帖（仅 post；沿用旧 quote 语义——只有 X 免登录回退路线可能命中） */
+  requireQuote: boolean;
+  /** 必须带图（仅 post） */
+  requireMedia: boolean;
+  /** 分类服务的内容类型（live / post） */
+  appliesTo: SubjectKind;
+  /** 各条件组之间的关系（空组忽略；全部条件组皆空且无 LLM 提示词 = 死分类） */
   condMode: CondMode;
   enabled: boolean;
   createdAt: number;
@@ -104,23 +126,35 @@ export function rowToCategory(r: CategoryRow): Category {
     id: r.id, name: r.name, llmPrompt: r.llm_prompt,
     keywords: JSON.parse(r.keywords) as string[],
     areas: JSON.parse(r.areas) as string[],
+    postTypes: JSON.parse(r.post_types) as PostType[],
+    requireQuote: r.require_quote === 1,
+    requireMedia: r.require_media === 1,
+    appliesTo: r.applies_to,
     condMode: r.cond_mode,
     enabled: r.enabled === 1,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
 
-// ---- push_rules v2：推送规则（全局；分类引用 + 生效主播集合，全部命中独立生效）----
+// ---- push_rules v2：推送规则（统一规则：分类引用 × 生效范围 × 渠道 × 推送词 × 附加动作）----
+//
+// subject_kind 区分内容形态（live=开播 / post=图文帖），字段完全一致；
+// scope 是**主体引用列表**：live = 主播 uid；post = 账号引用（`twitter:screenName` /
+// `weibo:uid` / `bili:uid`，见 postSubjectRef）。**空 = 全部生效**（D1，两形态统一）。
 
 export interface PushRuleRow {
   id: number;
   /** 规则名称（面板列表展示）；不传时补「规则 <id>」 */
   name: string;
-  /** 引用 categories.id；NULL = 任意开播 */
+  subject_kind: SubjectKind;
+  /** 引用 categories.id；NULL = 任意内容 */
   category_id: number | null;
-  uids: string;
+  /** 生效范围 JSON 数组（live=uid / post=账号引用）；'[]' = 全部生效 */
+  scope: string;
   channels: string;
   message_template: string | null;
+  /** 附加动作：推送时附 LLM 译文（仅 X 内容运行时生效） */
+  llm_translate: number;
   enabled: number;
   /** 创建来源：NULL = 面板/人工；'mcp' = MCP 群自助（gateway 只能动自己创建的） */
   created_by: string | null;
@@ -134,14 +168,18 @@ export interface PushRule {
   id: number;
   /** 规则名称（面板列表展示） */
   name: string;
-  /** null = 任意开播都命中；非空 = 该场直播须被判定属于此分类 */
+  /** 规则服务的内容形态：live=开播 / post=图文帖 */
+  subjectKind: SubjectKind;
+  /** null = 任意内容都命中；非空 = 该内容须被判定属于此分类 */
   categoryId: number | null;
-  /** 生效主播集合；空 = 全部主播（动态，含未来新增） */
-  uids: string[];
+  /** 生效主体集合（live=uid / post=账号引用）；空 = 全部生效（动态，含未来新增） */
+  scope: string[];
   /** 引用 push_channels.id */
   channels: number[];
-  /** null = 用内置默认模板（'{liver} 开播了'） */
+  /** null = 用内置默认模板（live '{liver} 开播了' / post 「作者 发布新xx」） */
   messageTemplate: string | null;
+  /** 附加动作：推送时附 LLM 译文（仅 X 内容运行时生效） */
+  llmTranslate: boolean;
   enabled: boolean;
   /** 创建来源：null = 面板/人工；'mcp' = MCP 群自助（gateway 角色只能增删自己创建的规则） */
   createdBy: string | null;
@@ -154,12 +192,23 @@ export type NewPushRule = Omit<PushRule, 'id' | 'createdAt' | 'updatedAt' | 'cre
 };
 export type PushRuleInput = Partial<NewPushRule> & { id?: number };
 
+/**
+ * 图文帖的规则 scope 引用（A.2 钉死的格式）：`twitter:screenName` / `weibo:uid` / `bili:uid`。
+ * 注意平台名折叠：PostCandidate.platform 的 'bili_dynamic' 在引用里写作 'bili'。
+ */
+export function postSubjectRef(platform: string, key: string): string {
+  const p = platform === 'bili_dynamic' ? 'bili' : platform;
+  return `${p}:${key}`;
+}
+
 export function rowToRule(r: PushRuleRow): PushRule {
   return {
-    id: r.id, name: r.name, categoryId: r.category_id,
-    uids: JSON.parse(r.uids) as string[],
+    id: r.id, name: r.name, subjectKind: r.subject_kind,
+    categoryId: r.category_id,
+    scope: JSON.parse(r.scope) as string[],
     channels: JSON.parse(r.channels) as number[],
     messageTemplate: r.message_template,
+    llmTranslate: r.llm_translate === 1,
     enabled: r.enabled === 1,
     createdBy: r.created_by ?? null,
     createdAt: r.created_at, updatedAt: r.updated_at,
@@ -196,10 +245,12 @@ export function splitPushRuleChannel(
       });
       return db.upsertPushRule({
         name: rule.name,
+        subjectKind: rule.subjectKind,
         categoryId: rule.categoryId,
-        uids: rule.uids,
+        scope: rule.scope,
         channels: [channelId],
         messageTemplate: rule.messageTemplate,
+        llmTranslate: rule.llmTranslate,
         enabled: rule.enabled,
         createdBy: 'mcp',
       });
@@ -210,7 +261,7 @@ export function splitPushRuleChannel(
 
 // ---- verdicts：内容判定归档（直播场次与图文帖同表，身份键 = subject_type + subject_id）----
 
-export type VerdictSubjectType = 'live' | 'post';
+export type VerdictSubjectType = SubjectKind;
 
 /** 直播场次的 subject_id（`room_id:live_time`）；图文帖用 `postVerdictSubjectId` */
 export function liveVerdictSubjectId(roomId: string, liveTime: number): string {

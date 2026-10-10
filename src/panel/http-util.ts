@@ -12,10 +12,6 @@ import { NUM_SPECS, BOOL_SPECS, type RuntimeConfig } from '../core/runtime-confi
 import {
   X_INTERVAL_MAX, X_INTERVAL_MIN, type XConfig,
 } from '../core/x-config.js';
-import {
-  defaultPostFilters, filtersAreUsable, judgeIsUsable,
-  type NewPostRule, type PostFilters, type PostRuleInput,
-} from '../core/post-rules.js';
 import { isValidScreenName, normalizeScreenName } from '../core/x-accounts.js';
 import { isValidWeiboUid, normalizeWeiboNick, normalizeWeiboUid } from '../core/weibo-accounts.js';
 import { isValidBiliUid, normalizeBiliUid } from '../core/bili-accounts.js';
@@ -191,8 +187,13 @@ export function parseChannelPatch(body: unknown): PushChannelInput {
 
 // ---- categories：分类规则 ----
 
-const CATEGORY_KEYS = ['name', 'llmPrompt', 'keywords', 'areas', 'condMode', 'enabled'] as const;
+const CATEGORY_KEYS = [
+  'name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia',
+  'condMode', 'enabled',
+] as const;
 const COND_MODES = ['and', 'or'] as const;
+const SUBJECT_KINDS = ['live', 'post'] as const;
+const POST_TYPES = ['original', 'retweet'] as const;
 
 function parseCategoryFields(o: Record<string, unknown>, p: CategoryInput): void {
   if ('name' in o) {
@@ -207,17 +208,38 @@ function parseCategoryFields(o: Record<string, unknown>, p: CategoryInput): void
   }
   if ('keywords' in o) p.keywords = asStringArray(o.keywords, 'keywords');
   if ('areas' in o) p.areas = asStringArray(o.areas, 'areas');
+  if ('appliesTo' in o) p.appliesTo = asEnum(o.appliesTo, 'appliesTo', SUBJECT_KINDS);
+  if ('postTypes' in o) {
+    const arr = asStringArray(o.postTypes, 'postTypes');
+    for (const t of arr) {
+      if (!(POST_TYPES as readonly string[]).includes(t)) {
+        throw new HttpError(400, 'postTypes 元素必须是 original / retweet');
+      }
+    }
+    p.postTypes = arr as Array<'original' | 'retweet'>;
+  }
+  if ('requireQuote' in o) p.requireQuote = asBoolean(o.requireQuote, 'requireQuote');
+  if ('requireMedia' in o) p.requireMedia = asBoolean(o.requireMedia, 'requireMedia');
   if ('condMode' in o) p.condMode = asEnum(o.condMode, 'condMode', COND_MODES);
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
 }
 
-/** LLM 提示词 / 关键词 / 分区至少一项非空。POST 对缺省合并后的形状调，PUT 对合并后形状调。 */
+/**
+ * 分类条件可用性：所有非 LLM 条件组皆空且无 LLM 提示词 = 死分类（确定性无从判定、LLM 也没口径）。
+ * POST 对缺省合并后的形状调，PUT 对合并后形状调。
+ */
 export function checkCategoryConditions(c: {
   llmPrompt?: string | null; keywords?: string[]; areas?: string[];
+  postTypes?: string[]; requireQuote?: boolean; requireMedia?: boolean;
 }): void {
   const prompt = c.llmPrompt?.trim() ?? '';
-  if (!prompt && (c.keywords ?? []).length === 0 && (c.areas ?? []).length === 0) {
-    throw new HttpError(400, '至少配置 LLM 提示词或关键词/分区条件');
+  const noCond = (c.keywords ?? []).length === 0
+    && (c.areas ?? []).length === 0
+    && (c.postTypes ?? []).length === 0
+    && !c.requireQuote
+    && !c.requireMedia;
+  if (!prompt && noCond) {
+    throw new HttpError(400, '至少配置 LLM 提示词或一组确定性条件（关键词/分区/帖子类型/引用/带图）');
   }
 }
 
@@ -232,6 +254,10 @@ export function parseNewCategory(body: unknown): NewCategory {
     llmPrompt: p.llmPrompt !== undefined ? p.llmPrompt : null,
     keywords: p.keywords ?? [],
     areas: p.areas ?? [],
+    postTypes: p.postTypes ?? [],
+    requireQuote: p.requireQuote ?? false,
+    requireMedia: p.requireMedia ?? false,
+    appliesTo: p.appliesTo ?? 'live',
     condMode: p.condMode ?? 'and',
     enabled: p.enabled ?? true,
   };
@@ -249,9 +275,11 @@ export function parseCategoryPatch(body: unknown): CategoryInput {
   return p;
 }
 
-// ---- push_rules v2：推送规则（全局；分类引用 + 生效主播集合）----
+// ---- push_rules：推送规则（统一规则：分类引用 × 生效范围 × 渠道 × 推送词 × 附加动作）----
 
-const RULE_KEYS = ['name', 'categoryId', 'uids', 'channels', 'messageTemplate', 'enabled'] as const;
+const RULE_KEYS = [
+  'name', 'subjectKind', 'categoryId', 'scope', 'channels', 'messageTemplate', 'llmTranslate', 'enabled',
+] as const;
 
 function asIdArray(v: unknown, field: string): number[] {
   if (!Array.isArray(v) || v.some((x) => typeof x !== 'number' || !Number.isInteger(x) || x <= 0)) {
@@ -260,7 +288,7 @@ function asIdArray(v: unknown, field: string): number[] {
   return v as number[];
 }
 
-/** categoryId：正整数 id 或 null（null = 任意开播） */
+/** categoryId：正整数 id 或 null（null = 任意内容） */
 function asNullableId(v: unknown, field: string): number | null {
   if (v === null) return null;
   if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
@@ -273,6 +301,19 @@ function asUidArray(v: unknown, field: string): string[] {
   const arr = asStringArray(v, field);
   for (const u of arr) {
     if (!/^\d+$/.test(u)) throw new HttpError(400, `${field} 元素必须是纯数字 uid`);
+  }
+  return arr;
+}
+
+/** 生效范围引用的宽松形状校验：元素 = 纯数字 uid（live）或 `twitter:账号`/`weibo:uid`/`bili:uid`（post）。
+ *  归属语义（哪类引用合法）由 checkRuleRefs 按合并后的 subject_kind 权威校验——PATCH 只给 scope
+ *  时 subjectKind 还在旧行上，解析层不能替它决定。 */
+function asScopeArray(v: unknown, field = 'scope'): string[] {
+  const arr = asStringArray(v, field);
+  for (const ref of arr) {
+    if (!/^\d+$/.test(ref) && !/^(twitter|weibo|bili):.+/.test(ref)) {
+      throw new HttpError(400, `${field} 元素必须是纯数字 uid 或 \`twitter:账号\` / \`weibo:uid\` / \`bili:uid\` 形式`);
+    }
   }
   return arr;
 }
@@ -290,14 +331,16 @@ function parseRuleFields(o: Record<string, unknown>, p: PushRuleInput): void {
     if (!name) throw new HttpError(400, '规则名称不能为空');
     p.name = name;
   }
+  if ('subjectKind' in o) p.subjectKind = asEnum(o.subjectKind, 'subjectKind', SUBJECT_KINDS);
   if ('categoryId' in o) p.categoryId = asNullableId(o.categoryId, 'categoryId');
-  if ('uids' in o) p.uids = asUidArray(o.uids, 'uids');
+  if ('scope' in o) p.scope = asScopeArray(o.scope);
   if ('channels' in o) p.channels = asIdArray(o.channels, 'channels');
   if ('messageTemplate' in o) p.messageTemplate = parseMessageTemplate(o.messageTemplate);
+  if ('llmTranslate' in o) p.llmTranslate = asBoolean(o.llmTranslate, 'llmTranslate');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
 }
 
-/** POST /api/rules 的新建体：全部可省（缺省 = 任意开播 / 全部主播 / 无渠道 / 默认模板）。引用存在性校验在路由层。 */
+/** POST /api/rules 的新建体：全部可省（缺省 = 任意内容 / 全部生效 / 无渠道 / 默认模板）。引用存在性校验在路由层。 */
 export function parseNewRule(body: unknown): NewPushRule {
   const o = asObject(body);
   rejectUnknownKeys(o, RULE_KEYS);
@@ -305,10 +348,12 @@ export function parseNewRule(body: unknown): NewPushRule {
   parseRuleFields(o, p);
   return {
     name: p.name ?? '',
+    subjectKind: p.subjectKind ?? 'live',
     categoryId: p.categoryId !== undefined ? p.categoryId : null,
-    uids: p.uids ?? [],
+    scope: p.scope ?? [],
     channels: p.channels ?? [],
     messageTemplate: p.messageTemplate ?? null,
+    llmTranslate: p.llmTranslate ?? false,
     enabled: p.enabled ?? true,
   };
 }
@@ -325,8 +370,16 @@ export function parseRulePatch(body: unknown): PushRuleInput {
 
 // ---- 跨表共用逻辑（面板路由与 MCP 工具复用）----
 
-/** 规则引用存在性校验：分类 / 渠道 / 主播（监听名单内）都必须存在。 */
-export function checkRuleRefs(db: Db, r: { categoryId: number | null; uids: string[]; channels: number[] }): void {
+/**
+ * 规则引用存在性校验：分类 / 渠道 / 生效主体（scope）都必须存在。
+ * scope 引用域随 subject_kind：live = 监听名单内的主播 uid；post = 图文账号引用
+ * （`twitter:screenName` / `weibo:uid` / `bili:uid`，对应名单行必须在）。
+ * 形状也在这一层按 kind 权威校验（解析层只做宽松形状检查，见 asScopeArray）。
+ */
+export function checkRuleRefs(
+  db: Db,
+  r: { subjectKind: 'live' | 'post'; categoryId: number | null; scope: string[]; channels: number[] },
+): void {
   if (r.categoryId !== null && !db.listCategories().some((c) => c.id === r.categoryId)) {
     throw new HttpError(400, '分类不存在');
   }
@@ -334,10 +387,29 @@ export function checkRuleRefs(db: Db, r: { categoryId: number | null; uids: stri
   for (const id of r.channels) {
     if (!channelIds.has(id)) throw new HttpError(400, `渠道不存在: ${id}`);
   }
-  const streamerUids = new Set(db.listStreamers().map((s) => s.uid));
-  for (const uid of r.uids) {
-    if (!streamerUids.has(uid)) throw new HttpError(400, `主播不在监听名单: ${uid}`);
+  if (r.subjectKind === 'live') {
+    const streamerUids = new Set(db.listStreamers().map((s) => s.uid));
+    for (const uid of r.scope) {
+      if (!/^\d+$/.test(uid) || !streamerUids.has(uid)) throw new HttpError(400, `主播不在监听名单: ${uid}`);
+    }
+    return;
   }
+  for (const ref of r.scope) {
+    if (!checkPostSubjectRefExists(db, ref)) throw new HttpError(400, `账号引用不存在: ${ref}`);
+  }
+}
+
+/** post 规则 scope 引用的账号行存在性（`twitter:screenName` / `weibo:uid` / `bili:uid`） */
+function checkPostSubjectRefExists(db: Db, ref: string): boolean {
+  const i = ref.indexOf(':');
+  if (i <= 0) return false;
+  const kind = ref.slice(0, i);
+  const key = ref.slice(i + 1);
+  if (!key) return false;
+  if (kind === 'twitter') return Boolean(db.getXAccountByScreenName(key));
+  if (kind === 'weibo') return Boolean(db.getWeiboAccountByUid(key));
+  if (kind === 'bili') return Boolean(db.getBiliAccountByUid(key));
+  return false;
 }
 
 /** 候选池一键加入监听；已有条目不碰来源，仅 watch=0 时重新打开。新行默认 notify=1、analyze=0。uname/face 从 follows 预填。 */
@@ -464,8 +536,8 @@ export function parseXTestRequest(body: unknown): XTestRequest {
 // 身份（screenName）与平台昵称（nickname）都是平台事实：POST 只收身份——昵称由添加时的
 // verify 顺手种入、抓取回写（见 sources/twitter/web.ts / feed.ts）；PUT 一律不可改
 //（要换账号就删除重加，改了只会让 posts.uid 历史孤立）
-const X_ACCOUNT_KEYS = ['screenName', 'biliUid', 'displayName', 'enabled', 'ruleIds'] as const;
-const X_PATCH_KEYS = ['biliUid', 'displayName', 'enabled', 'ruleIds'] as const;
+const X_ACCOUNT_KEYS = ['screenName', 'biliUid', 'displayName', 'enabled'] as const;
+const X_PATCH_KEYS = ['biliUid', 'displayName', 'enabled'] as const;
 
 /** screen name 归一化 + 形状校验（`@abc` / `ABC` 都收，统一成小写） */
 function asScreenName(v: unknown, field = 'screenName'): string {
@@ -478,26 +550,23 @@ function asScreenName(v: unknown, field = 'screenName'): string {
 }
 
 /** POST /api/x/accounts：screenName 必填；biliUid / displayName 可选（存在性在路由层校验）；
- * enabled 缺省 true；ruleIds 缺省 []。昵称不收（平台事实：verify 种入 / 抓取回写） */
+ * enabled 缺省 true。昵称不收（平台事实：verify 种入 / 抓取回写） */
 export function parseNewXAccount(body: unknown): {
   screenName: string; biliUid: string | null; displayName: string | null; enabled: boolean;
-  ruleIds: number[];
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, X_ACCOUNT_KEYS);
   if (!('screenName' in o)) throw new HttpError(400, 'screenName 必填');
-  const out: { screenName: string; biliUid: string | null; displayName: string | null; enabled: boolean; ruleIds: number[] } = {
+  const out: { screenName: string; biliUid: string | null; displayName: string | null; enabled: boolean } = {
     screenName: asScreenName(o.screenName),
     biliUid: null,
     displayName: null,
     enabled: true,
-    ruleIds: [],
   };
   if ('biliUid' in o && o.biliUid !== null) out.biliUid = parseUid(o.biliUid, 'biliUid');
   if ('displayName' in o) out.displayName = asNullableString(o.displayName, 'displayName');
   // enabled 必须被采纳：显式传 false 却被静默忽略会让人以为停用生效了
   if ('enabled' in o) out.enabled = asBoolean(o.enabled, 'enabled');
-  if ('ruleIds' in o) out.ruleIds = asIdArray(o.ruleIds, 'ruleIds');
   return out;
 }
 
@@ -505,158 +574,24 @@ export function parseNewXAccount(body: unknown): {
  *  （传入按未知字段 400；要换账号就删除后重新添加） */
 export function parseXAccountPatch(body: unknown): {
   biliUid?: string | null; displayName?: string | null; enabled?: boolean;
-  ruleIds?: number[];
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, X_PATCH_KEYS);
   const p: {
     biliUid?: string | null; displayName?: string | null; enabled?: boolean;
-    ruleIds?: number[];
   } = {};
   if ('biliUid' in o) p.biliUid = o.biliUid === null ? null : parseUid(o.biliUid, 'biliUid');
   if ('displayName' in o) p.displayName = asNullableString(o.displayName, 'displayName');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
-  if ('ruleIds' in o) p.ruleIds = asIdArray(o.ruleIds, 'ruleIds');
   if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
   return p;
-}
-
-// ---- 图文帖规则（平台无关，X / 微博 / B站动态账号都可选用；与推送规则平行的一张表）----
-// 规则只定义「筛选 + 渠道 + 推送词」，生效范围在账号侧（x/weibo/bili_accounts 行的 ruleIds），
-// 规则本身不带账号集合（account_ids 列是旧设计遗留，见 core/post-rules.ts 头注释）。
-
-const POST_RULE_KEYS = [
-  'name', 'channels', 'filters', 'messageTemplate',
-  'llmJudge', 'judgePrompt', 'llmTranslate', 'enabled',
-] as const;
-const POST_FILTER_KEYS = ['original', 'retweet', 'quote', 'media', 'keywords'] as const;
-
-/** filters 只认已知字段；非法类型一律 400（配置错误当场报，别等推送时才发现规则是死的） */
-function parsePostFiltersField(v: unknown): Partial<PostFilters> {
-  const o = asObject(v);
-  rejectUnknownKeys(o, POST_FILTER_KEYS);
-  const f: Partial<PostFilters> = {};
-  for (const k of ['original', 'retweet', 'quote', 'media'] as const) {
-    if (k in o) f[k] = asBoolean(o[k], `filters.${k}`);
-  }
-  if ('keywords' in o) {
-    const arr = asStringArray(o.keywords, 'filters.keywords');
-    f.keywords = arr.map((s) => s.trim()).filter(Boolean);
-  }
-  return f;
-}
-
-function parsePostRuleFields(o: Record<string, unknown>, p: PostRuleInput): void {
-  if ('name' in o) {
-    if (typeof o.name !== 'string') throw new HttpError(400, 'name 必须是字符串');
-    const name = o.name.trim();
-    if (!name) throw new HttpError(400, '规则名称不能为空');
-    p.name = name;
-  }
-  // platform 已退役（规则平台无关）：不在 POST_RULE_KEYS 里，传入会被当未知字段 400
-  if ('channels' in o) p.channels = asIdArray(o.channels, 'channels');
-  if ('filters' in o) p.filters = parsePostFiltersField(o.filters);
-  if ('messageTemplate' in o) p.messageTemplate = parseMessageTemplate(o.messageTemplate);
-  if ('llmJudge' in o) p.llmJudge = asBoolean(o.llmJudge, 'llmJudge');
-  if ('judgePrompt' in o) p.judgePrompt = asNullableString(o.judgePrompt, 'judgePrompt');
-  if ('llmTranslate' in o) p.llmTranslate = asBoolean(o.llmTranslate, 'llmTranslate');
-  if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
-}
-
-/** 「原创/转发都不勾」= 永不命中的死规则，拒绝保存（quote 不再按平台拒：非 X 帖永不命中是语义，见 core/post-rules.ts） */
-export function checkPostFiltersUsable(f: PostFilters): void {
-  if (!filtersAreUsable(f)) {
-    throw new HttpError(400, '「原创」与「转发」至少要勾一个，否则这条规则永远不会命中');
-  }
-}
-
-/** 开了 LLM 判定却没填判定标准 = 让模型自由发挥，拒绝保存（口径必须由人填） */
-export function checkPostJudgeUsable(llmJudge: boolean, judgePrompt: string | null): void {
-  if (!judgeIsUsable(llmJudge, judgePrompt)) {
-    throw new HttpError(400, '开启「LLM 判定」必须填判定提示词');
-  }
-}
-
-/** POST /api/post-rules：缺省照默认值（规则平台无关，无 platform 入参） */
-export function parseNewPostRule(body: unknown): NewPostRule {
-  const o = asObject(body);
-  rejectUnknownKeys(o, POST_RULE_KEYS);
-  const p: PostRuleInput = {};
-  parsePostRuleFields(o, p);
-  const filters: PostFilters = { ...defaultPostFilters(), ...(p.filters ?? {}) };
-  checkPostFiltersUsable(filters);
-  const llmJudge = p.llmJudge ?? false;
-  const judgePrompt = p.judgePrompt ?? null;
-  checkPostJudgeUsable(llmJudge, judgePrompt);
-  return {
-    name: p.name ?? '',
-    channels: p.channels ?? [],
-    filters,
-    messageTemplate: p.messageTemplate ?? null,
-    llmJudge,
-    judgePrompt,
-    llmTranslate: p.llmTranslate ?? false,
-    enabled: p.enabled ?? true,
-  };
-}
-
-/** PUT /api/post-rules/:id 的部分更新体；至少一个字段。合并后是否可用由路由层判 */
-export function parsePostRulePatch(body: unknown): PostRuleInput {
-  const o = asObject(body);
-  rejectUnknownKeys(o, POST_RULE_KEYS);
-  const p: PostRuleInput = {};
-  parsePostRuleFields(o, p);
-  if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
-  return p;
-}
-
-/**
- * 图文帖规则引用存在性校验：只剩渠道（共用 push_channels）。
- * 生效范围在账号侧 ruleIds（见 checkAccountRuleIds），规则本身不带账号集合。
- */
-export function checkPostRuleRefs(db: Db, r: { channels: number[] }): void {
-  const channelIds = new Set(db.listPushChannels().map((c) => c.id));
-  for (const id of r.channels) {
-    if (!channelIds.has(id)) throw new HttpError(400, `渠道不存在: ${id}`);
-  }
-}
-
-/**
- * 账号侧 ruleIds 校验：规则必须存在。
- * 规则平台无关，任何平台的账号都可选任何规则，不做平台匹配。
- */
-export function checkAccountRuleIds(db: Db, ruleIds: number[]): void {
-  const rules = db.listPostRules();
-  for (const id of ruleIds) {
-    if (!rules.some((r) => r.id === id)) {
-      throw new HttpError(400, `图文帖规则不存在: ${id}`);
-    }
-  }
-}
-
-/**
- * 删除图文帖规则并清扫三份账号名单里的选用关系（账号 ruleIds 不残留已删规则的 id）。
- * 面板 DELETE /api/post-rules/:id 与 MCP delete_post_rule 共用（与 webui mock 同构）。
- */
-export function deletePostRuleSweepingRefs(db: Db, id: number): boolean {
-  if (!db.deletePostRule(id)) return false;
-  for (const a of db.listXAccounts()) {
-    if (a.ruleIds.includes(id)) db.upsertXAccount({ id: a.id, ruleIds: a.ruleIds.filter((x) => x !== id) });
-  }
-  for (const a of db.listWeiboAccounts()) {
-    if (a.ruleIds.includes(id)) db.upsertWeiboAccount({ id: a.id, ruleIds: a.ruleIds.filter((x) => x !== id) });
-  }
-  for (const a of db.listBiliAccounts()) {
-    if (a.ruleIds.includes(id)) db.upsertBiliAccount({ id: a.id, ruleIds: a.ruleIds.filter((x) => x !== id) });
-  }
-  return true;
 }
 
 // ---- 微博关注账号（独立名单，biliUid 仅可选关联；与 X 账号同一套语义）----
 // POST 的 nickname 是解析键（只填昵称 → 走匿名解析链补 uid），存下的即平台解析结果；
 // PUT 起 uid 与昵称都锁定——平台事实，抓取每轮回写（要换账号就删除重加）
-const WEIBO_ACCOUNT_KEYS = ['uid', 'nickname', 'displayName', 'biliUid', 'enabled', 'ruleIds'] as const;
-const WEIBO_PATCH_KEYS = ['displayName', 'biliUid', 'enabled', 'ruleIds'] as const;
+const WEIBO_ACCOUNT_KEYS = ['uid', 'nickname', 'displayName', 'biliUid', 'enabled'] as const;
+const WEIBO_PATCH_KEYS = ['displayName', 'biliUid', 'enabled'] as const;
 
 /** uid 归一化 + 形状校验（收 `2203177060` / `u/2203177060` / `weibo.com/u/2203177060`） */
 function asWeiboUid(v: unknown, field = 'uid'): string {
@@ -673,15 +608,13 @@ function asWeiboUid(v: unknown, field = 'uid'): string {
  */
 export function parseNewWeiboAccount(body: unknown): {
   uid: string | null; nickname: string | null; displayName: string | null; biliUid: string | null; enabled: boolean;
-  ruleIds: number[];
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, WEIBO_ACCOUNT_KEYS);
   if (!('uid' in o) && !('nickname' in o)) throw new HttpError(400, 'uid 与昵称至少填一个');
   const out: {
     uid: string | null; nickname: string | null; displayName: string | null; biliUid: string | null; enabled: boolean;
-    ruleIds: number[];
-  } = { uid: null, nickname: null, displayName: null, biliUid: null, enabled: true, ruleIds: [] };
+  } = { uid: null, nickname: null, displayName: null, biliUid: null, enabled: true };
   if ('uid' in o && o.uid !== null && o.uid !== '') out.uid = asWeiboUid(o.uid);
   if ('nickname' in o) {
     const nick = asNullableString(o.nickname, 'nickname');
@@ -692,7 +625,6 @@ export function parseNewWeiboAccount(body: unknown): {
   if ('displayName' in o) out.displayName = asNullableString(o.displayName, 'displayName');
   if ('biliUid' in o && o.biliUid !== null) out.biliUid = parseUid(o.biliUid, 'biliUid');
   if ('enabled' in o) out.enabled = asBoolean(o.enabled, 'enabled');
-  if ('ruleIds' in o) out.ruleIds = asIdArray(o.ruleIds, 'ruleIds');
   return out;
 }
 
@@ -700,18 +632,15 @@ export function parseNewWeiboAccount(body: unknown): {
  *  （传入按未知字段 400；要换账号就删除后重新添加） */
 export function parseWeiboAccountPatch(body: unknown): {
   displayName?: string | null; biliUid?: string | null; enabled?: boolean;
-  ruleIds?: number[];
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, WEIBO_PATCH_KEYS);
   const p: {
     displayName?: string | null; biliUid?: string | null; enabled?: boolean;
-    ruleIds?: number[];
   } = {};
   if ('displayName' in o) p.displayName = asNullableString(o.displayName, 'displayName');
   if ('biliUid' in o) p.biliUid = o.biliUid === null ? null : parseUid(o.biliUid, 'biliUid');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
-  if ('ruleIds' in o) p.ruleIds = asIdArray(o.ruleIds, 'ruleIds');
   if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
   return p;
 }
@@ -719,8 +648,8 @@ export function parseWeiboAccountPatch(body: unknown): {
 // ---- B站动态账号（独立名单：只管推送选用，抓取轮询对象由动态源自并监听主播）----
 // uid 是身份锚点（新建必填、PUT 不可改）；uname 是平台事实（抓取回写），输入面一概不收
 // ——要换账号就删除后重新添加，改了只会让 posts.uid 历史孤立
-const BILI_ACCOUNT_KEYS = ['uid', 'displayName', 'enabled', 'ruleIds'] as const;
-const BILI_ACCOUNT_PATCH_KEYS = ['displayName', 'enabled', 'ruleIds'] as const;
+const BILI_ACCOUNT_KEYS = ['uid', 'displayName', 'enabled'] as const;
+const BILI_ACCOUNT_PATCH_KEYS = ['displayName', 'enabled'] as const;
 
 /** uid 归一化 + 形状校验（收 `7706705` / `space.bilibili.com/7706705` 链接形态） */
 function asBiliUid(v: unknown, field = 'uid'): string {
@@ -732,39 +661,36 @@ function asBiliUid(v: unknown, field = 'uid'): string {
 
 /**
  * POST /api/bili/accounts：uid 必填（账号本身就是主播，身份锚点唯一）；
- * displayName / enabled / ruleIds 可选。uname 不收（平台事实，抓取回写）。不做存在性
+ * displayName / enabled 可选。uname 不收（平台事实，抓取回写）。不做存在性
  * 校验——动态源首轮抓到才回写 uname，硬加校验等于把添加流程挂在 feed/space 的可用性上
  * （与微博名单同一条纪律，见 docs/boundaries.md）。
  */
 export function parseNewBiliAccount(body: unknown): {
-  uid: string; displayName: string | null; enabled: boolean; ruleIds: number[];
+  uid: string; displayName: string | null; enabled: boolean;
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, BILI_ACCOUNT_KEYS);
   if (!('uid' in o)) throw new HttpError(400, 'uid 必填');
-  const out: { uid: string; displayName: string | null; enabled: boolean; ruleIds: number[] } = {
+  const out: { uid: string; displayName: string | null; enabled: boolean } = {
     uid: asBiliUid(o.uid),
     displayName: null,
     enabled: true,
-    ruleIds: [],
   };
   if ('displayName' in o) out.displayName = asNullableString(o.displayName, 'displayName');
   if ('enabled' in o) out.enabled = asBoolean(o.enabled, 'enabled');
-  if ('ruleIds' in o) out.ruleIds = asIdArray(o.ruleIds, 'ruleIds');
   return out;
 }
 
 /** PUT /api/bili/accounts/:id 的部分更新体；uid 是身份锚点不可改、uname 是平台事实不可改
  *  （传入按未知字段 400）；至少一个字段 */
 export function parseBiliAccountPatch(body: unknown): {
-  displayName?: string | null; enabled?: boolean; ruleIds?: number[];
+  displayName?: string | null; enabled?: boolean;
 } {
   const o = asObject(body);
   rejectUnknownKeys(o, BILI_ACCOUNT_PATCH_KEYS);
-  const p: { displayName?: string | null; enabled?: boolean; ruleIds?: number[] } = {};
+  const p: { displayName?: string | null; enabled?: boolean } = {};
   if ('displayName' in o) p.displayName = asNullableString(o.displayName, 'displayName');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
-  if ('ruleIds' in o) p.ruleIds = asIdArray(o.ruleIds, 'ruleIds');
   if (Object.keys(p).length === 0) throw new HttpError(400, '没有可更新的字段');
   return p;
 }

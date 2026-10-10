@@ -17,7 +17,7 @@ function event(over: Partial<LiveEvent> = {}): LiveEvent {
 function post(over: Partial<PostCandidate> = {}): PostCandidate {
   return {
     platform: 'twitter', itemId: '9001',
-    accountId: 1, ruleIds: [1, 2], screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
+    accountId: 1, screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
     pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
     ...over,
   };
@@ -26,6 +26,7 @@ function post(over: Partial<PostCandidate> = {}): PostCandidate {
 function category(over: Partial<Category> = {}): Category {
   return {
     id: 1, name: '歌回', llmPrompt: null, keywords: [], areas: [],
+    postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live',
     condMode: 'and', enabled: true, createdAt: 0, updatedAt: 0,
     ...over,
   };

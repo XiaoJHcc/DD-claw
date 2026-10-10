@@ -43,7 +43,9 @@ function memDb(t: import('node:test').TestContext): Db {
 
 function category(over: Partial<NewCategory> = {}): NewCategory {
   return {
-    name: '', llmPrompt: null, keywords: [], areas: [], condMode: 'and', enabled: true,
+    name: '', llmPrompt: null, keywords: [], areas: [],
+    postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live',
+    condMode: 'and', enabled: true,
     ...over,
   };
 }
@@ -96,17 +98,19 @@ test('buildClassifyRequest：无关键帧用封面兜底，都无图则纯文本
 
 // ---- tasks/classify：结果解析 ----
 
-test('parseClassifyResults：match=true 且置信度达标才采纳，未知 id 丢弃', () => {
+test('parseClassifyResults：逐项全部返回带 pass 标注（match 且置信度达标 = 属于），未知 id 丢弃', () => {
   const out = parseClassifyResults({
     results: [
       { id: 1, match: true, confidence: 0.9, evidence: '在唱歌' },
-      { id: 2, match: false, confidence: 0.95, evidence: '不是游戏' }, // match=false 不采纳
-      { id: 3, match: true, confidence: MIN_CONFIDENCE - 0.01, evidence: '不确定' }, // 置信度不达标
+      { id: 2, match: false, confidence: 0.95, evidence: '不是游戏' }, // LLM 判否 → pass=false 入档
+      { id: 3, match: true, confidence: MIN_CONFIDENCE - 0.01, evidence: '不确定' }, // 置信度不达标 = 判否
       { id: 99, match: true, confidence: 1, evidence: '编造的 id' }, // 未知 id 丢弃
     ],
   }, [...CATS, { id: 3, name: '杂谈', prompt: '在杂谈' }]);
   assert.deepEqual(out, [
-    { categoryId: 1, name: '歌回', source: 'llm', confidence: 0.9, evidence: '在唱歌' },
+    { categoryId: 1, name: '歌回', source: 'llm', confidence: 0.9, evidence: '在唱歌', pass: true },
+    { categoryId: 2, name: '游戏', source: 'llm', confidence: 0.95, evidence: '不是游戏', pass: false },
+    { categoryId: 3, name: '杂谈', source: 'llm', confidence: MIN_CONFIDENCE - 0.01, evidence: '不确定', pass: false },
   ]);
 });
 
@@ -150,7 +154,7 @@ test('LLM 命中：总开关开 → LLM 判定权威入库（source=llm）', asy
 
   const out = await clf.classify(ctx());
   assert.deepEqual(out, [
-    { categoryId: catId, name: '歌回', source: 'llm', confidence: 0.88, evidence: '主播在唱歌' },
+    { categoryId: catId, name: '歌回', source: 'llm', confidence: 0.88, evidence: '主播在唱歌', pass: true },
   ]);
   const v = db.listVerdicts('live', 'r1:1785310737');
   assert.equal(v.length, 1);
@@ -241,7 +245,7 @@ test('verdicts 入库去重：同一场重复判定只留一条', async (t) => {
 
 test('runJudgeChain：首个非 null 档定案，空 Map 也是定案（不落到下一档）', async () => {
   const item = fromLiveEvent(ctx().event);
-  const cats = [{ id: 1, name: '歌回', llmPrompt: '在唱歌', keywords: ['歌'], areas: [], condMode: 'and', enabled: true, createdAt: 0, updatedAt: 0 }];
+  const cats = [{ id: 1, name: '歌回', llmPrompt: '在唱歌', keywords: ['歌'], areas: [], postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live' as const, condMode: 'and' as const, enabled: true, createdAt: 0, updatedAt: 0 }];
   const ctxJ = {
     getRouter: () => null,
     llmEnabled: () => true,
@@ -264,7 +268,7 @@ test('runJudgeChain：首个非 null 档定案，空 Map 也是定案（不落�
 
 test('llmJudge：无 provider / 总开关关返回 null；调用失败返回 null（交下一档）', async () => {
   const item = fromLiveEvent(ctx().event);
-  const cats = [{ id: 1, name: '歌回', llmPrompt: '在唱歌', keywords: [], areas: [], condMode: 'and', enabled: true, createdAt: 0, updatedAt: 0 }];
+  const cats = [{ id: 1, name: '歌回', llmPrompt: '在唱歌', keywords: [], areas: [], postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live' as const, condMode: 'and' as const, enabled: true, createdAt: 0, updatedAt: 0 }];
   assert.equal(await llmJudge.judge(item, cats, { getRouter: () => null, llmEnabled: () => true }), null);
 
   const { router, calls } = fakeRouter(async () => { throw new Error('boom'); });
@@ -276,9 +280,82 @@ test('llmJudge：无 provider / 总开关关返回 null；调用失败返回 nul
 
 test('deterministicJudge：命中才入 Map（键 = 分类 id，source=rule）', async () => {
   const item = fromLiveEvent(ctx().event);
-  const hit = { id: 1, name: '歌回', llmPrompt: null, keywords: ['歌'], areas: [], condMode: 'and', enabled: true, createdAt: 0, updatedAt: 0 };
+  const hit = { id: 1, name: '歌回', llmPrompt: null, keywords: ['歌'], areas: [], postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live' as const, condMode: 'and' as const, enabled: true, createdAt: 0, updatedAt: 0 };
   const miss = { ...hit, id: 2, name: '游戏', keywords: ['APEX'] };
   const out = await deterministicJudge.judge(item, [hit, miss], { getRouter: () => null, llmEnabled: () => false });
   assert.deepEqual([...out.keys()], [1]);
-  assert.deepEqual(out.get(1), { categoryId: 1, name: '歌回', source: 'rule', confidence: null, evidence: '命中关键词「歌」' });
+  assert.deepEqual(out.get(1), { categoryId: 1, name: '歌回', source: 'rule', confidence: null, evidence: '命中关键词「歌」', pass: true });
+});
+
+// ---- post 判定归档（A.4 判定分类制）：feed_post 同走判决链，verdicts 落真实 categoryId、ruleId=0 哨兵 ----
+
+function postCtx(over: Partial<import('./matcher.js').PostCandidate> = {}): AnalysisContext {
+  return {
+    signal: {
+      source: 'twitter/feed', kind: 'feed_post', uid: 'watase_yuzuki', roomId: '', ts: 0,
+      payload: { platform: 'twitter', itemId: '9001', type: 'tweet', text: '今晚有直播', pics: [], pubTs: 1, url: 'u' },
+    },
+    post: {
+      post: {
+        platform: 'twitter', itemId: '9001', accountId: 1, screenName: 'watase_yuzuki',
+        type: 'tweet', text: '今晚有直播', pics: [], pubTs: 1, url: 'u', ...over,
+      },
+    },
+  };
+}
+
+test('post 判定：只判 applies_to=post 的分类，verdicts 落真实 categoryId（ruleId=0 哨兵）', async (t) => {
+  const db = memDb(t);
+  const liveCat = db.upsertCategory(category({ name: '歌回', keywords: ['歌'] })); // applies_to=live
+  const postCat = db.upsertCategory(category({
+    name: '直播预告', appliesTo: 'post', keywords: ['直播'],
+  }));
+  const clf = new RulesClassifier(db, () => null, () => true);
+
+  const out = await clf.classify(postCtx());
+  assert.deepEqual(out.map((c) => c.categoryId), [postCat], 'live 分类不参与 post 判定');
+  assert.notEqual(postCat, liveCat);
+
+  const v = db.listVerdicts('post', 'twitter:9001');
+  assert.equal(v.length, 1);
+  assert.equal(v[0]!.subjectType, 'post');
+  assert.equal(v[0]!.subjectId, 'twitter:9001', '身份键 = platform:item_id');
+  assert.equal(v[0]!.categoryId, postCat, '真实 categoryId（不再是 ruleId 级哨兵）');
+  assert.equal(v[0]!.ruleId, 0, 'ruleId 回 0 哨兵');
+  assert.equal(v[0]!.source, 'rule');
+  assert.equal(v[0]!.pass, true);
+});
+
+test('post 侧 LLM 判否也落 pass=0（「为什么没推」可回看）；直播侧保持只记「属于」', async (t) => {
+  const db = memDb(t);
+  const catId = db.upsertCategory(category({ name: '直播预告', appliesTo: 'post', llmPrompt: '是直播预告' }));
+  const liveCatId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌' }));
+  const { router } = fakeRouter(async (_req, parse) =>
+    parse!({ results: [{ id: catId, match: false, confidence: 0.9, evidence: '只是日常闲聊' }] }));
+  const clf = new RulesClassifier(db, () => router, () => true);
+
+  const out = await clf.classify(postCtx());
+  assert.deepEqual(out, [], '判否不属于任何分类（返回值只含属于）');
+  const v = db.listVerdicts('post', 'twitter:9001');
+  assert.equal(v.length, 1, '判否也落档');
+  assert.equal(v[0]!.pass, false, '判否 = 0 落库');
+  assert.equal(v[0]!.evidence, '只是日常闲聊');
+  assert.equal(v[0]!.source, 'llm');
+
+  // 同一形态的判否在直播侧不落档（只记「属于」，行为逐字保持）
+  const { router: r2 } = fakeRouter(async (_req, parse) =>
+    parse!({ results: [{ id: liveCatId, match: false, confidence: 0.9, evidence: '不在唱歌' }] }));
+  const clf2 = new RulesClassifier(db, () => r2, () => true);
+  const out2 = await clf2.classify(ctx());
+  assert.deepEqual(out2, []);
+  assert.equal(db.listVerdicts('live', 'r1:1785310737').length, 0, '直播侧判否不落档');
+});
+
+test('post 判定去重：同一帖重复判定只留一条（UNIQUE 身份键）', async (t) => {
+  const db = memDb(t);
+  db.upsertCategory(category({ name: '直播预告', appliesTo: 'post', keywords: ['直播'] }));
+  const clf = new RulesClassifier(db, () => null, () => true);
+  await clf.classify(postCtx());
+  await clf.classify(postCtx());
+  assert.equal(db.listVerdicts('post', 'twitter:9001').length, 1);
 });

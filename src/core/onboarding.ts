@@ -51,8 +51,9 @@ export function seedOnboardingDefaults(db: Db): void {
     for (const r of ONBOARDING_RULES) {
       db.upsertPushRule({
         name: r.name,
+        subjectKind: 'live',
         categoryId: r.category !== null ? (catIdByName.get(r.category) ?? null) : null,
-        uids: [],
+        scope: [],
         channels: channelId !== null ? [channelId] : [],
         messageTemplate: r.messageTemplate,
         enabled: true,

@@ -40,7 +40,7 @@ test('缺分区显示未知分区；liveTime=0 不拼开播时间', () => {
 
 function post(over: Partial<PostCandidate> = {}): PostCandidate {
   return {
-    platform: 'twitter', accountId: 1, ruleIds: [1], screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
+    platform: 'twitter', accountId: 1, screenName: 'watase_yuzuki', type: 'tweet', text: '今晚有直播',
     pics: [], pubTs: 1_789_549_200, url: 'https://x.com/watase_yuzuki/status/9001',
     ...over,
   };

@@ -1,7 +1,8 @@
 // 面板前端 · 图文分页（X / 推特 + 微博 + B站动态；图文监听与直播监听是两种输入，共用推送渠道）。
 // 上半 = 三张来源卡（监听开关都在卡片头右上角，一卡一开关，同 NapCat/LLM/推送渠道卡形态）
-//   + 「图文规则」卡（规则列表 = 拖拽排序 / 启停勾即改即存 / 筛选·渠道摘要副行 / 编辑删除，
-//   全局顺序落 /api/post-rules/order；规则平台无关、不带账号——账号侧用 ruleIds「选用」）：
+//   + 「图文规则」卡（= push_rules 里 subject_kind='post' 的行：拖拽排序 / 启停勾即改即存 /
+//   分类·范围·渠道摘要副行 / 编辑删除；判定口径在分类卡 applies_to=图文，规则只引用分类；
+//   生效范围在规则 scope——账号卡勾选反向改写它，同一份数据双向入口）：
 //   X 卡行区只显示连接可达性（出问题才多一行监听诊断）；代理/实例/间隔/回退全部收进「源设置」
 //   二级弹窗，测试按钮是控件右侧的方 icon——结果并入按钮自身：转圈 → 绿勾/红叉，原因进 hover
 //   提示，不往弹窗里插文字块、不动布局。微博卡 / B站动态卡 = 登录态行（扫码弹窗复用 listen.js，
@@ -12,7 +13,7 @@
 // 卡面纯展示 = 身份段 + 规则摘要行 + 帖子段，整卡可点，账号字段在点击后的浮窗编辑
 // （添加浮窗顶部小 segnav 切 X/微博/B站，表单随之切换；微博「昵称 / uid」并排，失焦即解析
 // 回填另一个；B站从简 = uid/空间链接 + 显示名）。浮窗规则区 = 全部图文规则的勾选列表
-// （规则平台无关，任何账号可选用任何规则；勾选 = PUT 账号 ruleIds 即改即存），
+// （勾选 = 该规则对本账号生效，即改即存写规则 scope；空 scope = 全部生效，UI 有提示），
 // 行可点开进规则编辑二级浮窗。
 // 纪律：GET 只读后端快照（后端绝不在读取路径打网络），探测一律由弹窗里的测试 icon 显式触发；
 // 测试允许用输入框里还没保存的值（先测后存），未保存值的结果只动按钮、不污染卡片状态。
@@ -26,17 +27,33 @@ let accountCache = [];
 let weiboAccountCache = [];
 let biliAccountCache = [];
 let streamerCache = [];
+/** 图文规则（= push_rules 里 subject_kind='post' 的行）；分类/规则同后端一份数据 */
 let postRuleCache = [];
+/** 全部规则（含直播规则）——拖拽排序要给 /api/rules/order 交全排列 */
+let allRuleCache = [];
+let categoryCache = [];
 let channelCache = [];
 let testing = false;
 /** 账号墙的平台筛选：'all' | 'twitter' | 'weibo' | 'bili' */
 let platFilter = 'all';
-/** 规则表单草稿（保存时才落库）：规则平台无关，草稿不再带 platform */
+/** 规则表单草稿（保存时才落库） */
 let ruleDraft = null;
 
-/** 规则平台无关：占位措辞用一套通用文案（「引用」「附译文」运行时只对 X 帖生效） */
+/** 占位措辞用一套通用文案（「附译文」运行时只对 X 帖生效） */
 const RULE_TPL = '{author} 发了新帖';
-const RULE_JUDGE_PH = '如：只推与直播预告、新歌发布相关的帖子';
+
+/** 账号 → 规则 scope 引用（A.2 钉死格式：twitter:screenName / weibo:uid / bili:uid） */
+function accountRef(platform, a) {
+  return (platform === 'weibo' ? 'weibo:' : platform === 'bili' ? 'bili:' : 'twitter:') +
+    (platform === 'twitter' ? a.screenName : a.uid);
+}
+
+/** 分类名（判定口径卡上起的名，规则只引用） */
+function catName(id) {
+  if (id == null) return '任意内容';
+  for (let i = 0; i < categoryCache.length; i++) if (categoryCache[i].id === id) return categoryCache[i].name;
+  return '分类已删除';
+}
 
 function acctBase(platform) {
   return platform === 'weibo' ? '/api/weibo/accounts/'
@@ -55,21 +72,23 @@ function rowHtml(dot, title, sub) {
     '<span class="row-sub">' + esc(sub) + '</span></span></div>';
 }
 
-/** 加载：连接快照 + 监听开关 + 三份账号名单 + 主播列表 + 渠道 + 图文帖规则 */
+/** 加载：连接快照 + 监听开关 + 三份账号名单 + 主播列表 + 渠道 + 规则/分类（图文规则卡用） */
 function loadX() {
   return Promise.all([
     api('/api/x'), api('/api/listen'), api('/api/x/accounts'),
-    api('/api/post-rules'), api('/api/channels'), api('/api/streamers'),
-    api('/api/weibo/accounts'), api('/api/bili/accounts'),
+    api('/api/rules'), api('/api/channels'), api('/api/streamers'),
+    api('/api/weibo/accounts'), api('/api/bili/accounts'), api('/api/categories'),
   ]).then(function (rs) {
     xState = rs[0];
     listenState = rs[1];
     accountCache = rs[2].accounts || [];
-    postRuleCache = rs[3].rules || [];
+    allRuleCache = rs[3].rules || [];
+    postRuleCache = allRuleCache.filter(function (r) { return r.subjectKind === 'post'; });
     channelCache = rs[4].channels || [];
     streamerCache = rs[5].streamers || [];
     weiboAccountCache = rs[6].accounts || [];
     biliAccountCache = rs[7].accounts || [];
+    categoryCache = rs[8].categories || [];
     renderXStatus();
     renderWeibo();
     renderBili();
@@ -337,8 +356,9 @@ ACTIONS['save-weibo-settings'] = function () {
   }).catch(function (e) { if (err) err.textContent = e.message; });
 };
 
-// ---- 「图文规则」卡：规则平台无关、不带账号 scope（账号侧 ruleIds 选用）；行 = 拖拽把手 +
-// 启停勾（即改即存）+ 名称 + 副行「筛选 · 渠道 · LLM」+ 编辑/删除 ----
+// ---- 「图文规则」卡（= push_rules 里 subject_kind='post' 的行）：行 = 拖拽把手 +
+// 启停勾（即改即存）+ 名称 + 副行「分类 · 范围 · 渠道 · 译文」+ 编辑/删除 ----
+// 判定口径（原 filters/judgePrompt）已上移进分类（分类卡 applies_to=图文），规则只引用分类。
 function channelName(id) {
   for (let i = 0; i < channelCache.length; i++) {
     if (String(channelCache[i].id) === String(id)) return channelCache[i].name;
@@ -346,31 +366,21 @@ function channelName(id) {
   return '渠道 ' + id;
 }
 
-function filterSummary(f) {
-  const kind = f.original && f.retweet ? '原创·转发' : f.retweet ? '转发' : '原创';
-  const parts = [kind];
-  if (f.quote) parts.push('引用');
-  if (f.media) parts.push('带图');
-  if (f.keywords && f.keywords.length) parts.push('词×' + f.keywords.length);
-  return parts.join(' · ');
-}
-
-function llmSummary(r) {
-  const parts = [];
-  if (r.llmJudge) parts.push('LLM 判定');
-  if (r.llmTranslate) parts.push('译文');
-  return parts.length ? ' · ' + parts.join('+') : '';
+function scopeSummary(r) {
+  const s = r.scope || [];
+  return s.length === 0 ? '全部账号' : s.length + ' 个账号';
 }
 
 function ruleSub(r) {
-  const dead = ruleDeadReason(r, [], channelCache);
-  return dead || (filterSummary(r.filters) +
+  const dead = ruleDeadReason(r, categoryCache, channelCache);
+  return dead || (catName(r.categoryId) +
+    ' · ' + scopeSummary(r) +
     ' · ' + (r.channels.length ? r.channels.map(channelName).join('、') : '未选渠道') +
-    llmSummary(r));
+    (r.llmTranslate ? ' · 译文' : ''));
 }
 
 function postRuleRowHtml(r) {
-  const dead = ruleDeadReason(r, [], channelCache);
+  const dead = ruleDeadReason(r, categoryCache, channelCache);
   return `<div class="row row-2${dead ? ' rule-dead' : ''}" data-sid="${r.id}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-post-rule"', r.enabled) +
@@ -388,12 +398,21 @@ function renderPostRules() {
   box.innerHTML = postRuleCache.map(postRuleRowHtml).join('');
 }
 
-// 拖拽排序：规则全局顺序落库
+// 拖拽排序：全局顺序 = 匹配优先级（live 与 post 同一张序）。
+// 交全排列：图文规则按拖后顺序填进原图文槽位，直播规则相对位置不动。
 makeSortable(document.getElementById('post-rule-list'), {
   items: function () { return postRuleCache; },
   getId: function (r) { return r.id; },
   onOrder: function (ids) {
-    api('/api/post-rules/order', 'PUT', { ids: ids })
+    const postSlots = [];
+    allRuleCache.forEach(function (r, i) { if (r.subjectKind === 'post') postSlots.push(i); });
+    const byId = {};
+    allRuleCache.forEach(function (r) { byId[r.id] = r; });
+    const merged = allRuleCache.map(function (r) { return r.subjectKind === 'live' ? r.id : null; });
+    ids.forEach(function (id, i) {
+      if (postSlots[i] !== undefined) merged[postSlots[i]] = Number(id);
+    });
+    api('/api/rules/order', 'PUT', { ids: merged })
       .then(loadX)
       .catch(function (err) { toast(err.message, true); loadX(); });
   },
@@ -441,10 +460,16 @@ ACTIONS['x-plat-filter'] = function (el) {
   renderAccounts();
 };
 
-/** 卡的规则 = 本账号 ruleIds 选用的规则（规则平台无关；引用了已删规则的 id 静默跳过） */
-function rulesFor(a) {
-  const ids = (a.ruleIds || []).map(String);
-  return postRuleCache.filter(function (r) { return ids.indexOf(String(r.id)) >= 0; });
+/** 卡的规则 = 对本账号生效的图文规则（scope 空 = 全部生效；非空 = 含本账号引用） */
+function rulesFor(platform, a) {
+  const ref = accountRef(platform, a);
+  return postRuleCache.filter(function (r) { return ruleAppliesTo(r, ref); });
+}
+
+/** 该账号视角下规则是否生效（D1：空 scope = 全部账号生效） */
+function ruleAppliesTo(r, ref) {
+  const s = r.scope || [];
+  return s.length === 0 || s.indexOf(ref) >= 0;
 }
 
 // 帖子行：与主播动态同一套结构（.st-post），streamers.js 的全局 hover 委托直接生效。
@@ -479,14 +504,14 @@ function postRowHtml(p, open) {
     : `<div class="${clsAttr}">${inner}</div>`;
 }
 
-function rulesBlockHtml(a) {
-  const rules = rulesFor(a);
+function rulesBlockHtml(platform, a) {
+  const rules = rulesFor(platform, a);
   return '<div class="st-rules"><span class="rl-dot"></span><span class="rl-t">图文规则</span>' +
     (rules.length
       ? rules.map(function (r) {
-          return `<span class="tag${ruleDeadReason(r, [], channelCache) ? ' rl-off' : ''}">${esc(r.name)}</span>`;
+          return `<span class="tag${ruleDeadReason(r, categoryCache, channelCache) ? ' rl-off' : ''}">${esc(r.name)}</span>`;
         }).join('')
-      : '<span class="rl-none">未选用</span>') +
+      : '<span class="rl-none">没有生效规则</span>') +
     '</div>';
 }
 
@@ -518,7 +543,7 @@ function xCardHtml(a) {
         </div>
         ${switchHtml('data-change="toggle-x-account" title="抓取该账号的新推文"', a.enabled)}
       </div>
-      ${rulesBlockHtml(a)}
+      ${rulesBlockHtml('twitter', a)}
     </div>
     <div class="st-posts">${
       posts.length
@@ -549,7 +574,7 @@ function weiboCardHtml(a) {
         </div>
         ${switchHtml('data-change="toggle-weibo-account" title="抓取该账号的新微博"', a.enabled)}
       </div>
-      ${rulesBlockHtml(a)}
+      ${rulesBlockHtml('weibo', a)}
     </div>
     <div class="st-posts">${
       posts.length
@@ -577,7 +602,7 @@ function biliCardHtml(a) {
         </div>
         ${switchHtml('data-change="toggle-bili-account" title="抓取该账号的新动态"', a.enabled)}
       </div>
-      ${rulesBlockHtml(a)}
+      ${rulesBlockHtml('bili', a)}
     </div>
     <div class="st-posts">${
       posts.length
@@ -803,10 +828,12 @@ CHANGES['wa-uid-change'] = function (el) { extractUid(el); runWeiboResolve('uid'
 CHANGES['ba-uid-change'] = function (el) { extractUid(el); };
 CHANGES['wa-resolve-nick'] = function () { runWeiboResolve('nick'); };
 
-/** 浮窗里的选用规则区：行 = 勾选点（选用，即改即存 PUT 账号 ruleIds）+ 摘要，
- *  整行点开二级编辑浮窗（勾/行两种语义并存：勾不触发行点击，同勾选点惯例） */
+/** 浮窗里的选用规则区：行 = 勾选点（该规则是否对本账号生效，勾选即改即存写规则 scope）+ 摘要，
+ *  整行点开二级编辑浮窗（勾/行两种语义并存：勾不触发行点击，同勾选点惯例）。
+ *  勾选语义（D1）：规则 scope 空 = 对全部账号生效（勾选恒亮）；取消勾选 = 把 scope 具体化为
+ *  「除本账号外的全部账号」（等于全集时回落空 = 仍全部生效）；勾选 = 把本账号加进 scope。 */
 function pickRuleRowHtml(r, on) {
-  return '<div class="row row-2 row-click' + (ruleDeadReason(r, [], channelCache) ? ' rule-dead' : '') +
+  return '<div class="row row-2 row-click' + (ruleDeadReason(r, categoryCache, channelCache) ? ' rule-dead' : '') +
     '" data-action="edit-post-rule" data-sid="' + r.id + '">' +
     checkDotHtml('data-change="pick-post-rule"', on) +
     '<span class="row-main"><span class="row-line"><span class="row-title">' + esc(r.name) + '</span></span>' +
@@ -814,30 +841,49 @@ function pickRuleRowHtml(r, on) {
     '<span class="row-end"><span class="row-afford">' + icon('chevron') + '</span></span></div>';
 }
 
+/** 三平台全部账号引用（scope 具体化时的全集） */
+function allAccountRefs() {
+  const out = [];
+  accountCache.forEach(function (a) { out.push(accountRef('twitter', a)); });
+  weiboAccountCache.forEach(function (a) { out.push(accountRef('weibo', a)); });
+  biliAccountCache.forEach(function (a) { out.push(accountRef('bili', a)); });
+  return out;
+}
+
 function renderSheetRules() {
   const box = document.getElementById('xa-rules');
   if (!box || sheetAccountId == null) return;
   const a = accountById(sheetAccountId, sheetPlatform);
   if (!a) return;
-  const picked = (a.ruleIds || []).map(String);
-  // 规则平台无关：列全部规则，任何账号可选用任何规则
+  const ref = accountRef(sheetPlatform, a);
+  // 图文规则卡列出全部图文规则；勾选态 = 该规则对本账号生效（空 scope = 全部生效）
   box.innerHTML = postRuleCache.map(function (r) {
-    return pickRuleRowHtml(r, picked.indexOf(String(r.id)) >= 0);
+    return pickRuleRowHtml(r, ruleAppliesTo(r, ref));
   }).join('');
 }
 
-// 选用/取消选用：PUT 账号 ruleIds 即改即存（规则的启用状态仍在规则卡上单独管）
+// 勾选/取消勾选：改写规则 scope（同一份数据的账号侧入口；规则的启用状态仍在规则卡上单独管）
 CHANGES['pick-post-rule'] = function (el) {
   const row = el.closest('.row');
   const a = row && accountById(sheetAccountId, sheetPlatform);
   if (!a) return;
   const rid = Number(row.getAttribute('data-sid'));
-  const ids = (a.ruleIds || []).map(Number);
-  const i = ids.indexOf(rid);
-  if (el.checked && i < 0) ids.push(rid);
-  if (!el.checked && i >= 0) ids.splice(i, 1);
-  api(acctBase(sheetPlatform) + a.id, 'PUT', { ruleIds: ids }).then(function () {
-    toast(el.checked ? '已选用' : '已取消选用');
+  const r = postRuleById(rid);
+  if (!r) return;
+  const ref = accountRef(sheetPlatform, a);
+  const cur = (r.scope || []).slice();
+  let next;
+  if (el.checked) {
+    // 勾选 = 明确包含本账号；规则本就空 scope（全部生效）时无需改动
+    next = cur.length === 0 ? cur : (cur.indexOf(ref) >= 0 ? cur : cur.concat([ref]));
+  } else {
+    // 取消 = 排除本账号：空 scope 要先具体化成「其余全部账号」
+    const base = cur.length === 0 ? allAccountRefs() : cur;
+    next = base.filter(function (x) { return x !== ref; });
+    if (allAccountRefs().every(function (x) { return next.indexOf(x) >= 0; })) next = []; // 等于全集 → 回落「全部生效」
+  }
+  api('/api/rules/' + r.id, 'PUT', { subjectKind: 'post', scope: next }).then(function () {
+    toast(el.checked ? '该规则对本账号生效' : '该规则不再对本账号生效');
     loadX().then(renderSheetRules);
   }).catch(function (e) { toast(e.message, true); loadX().then(renderSheetRules); });
 };
@@ -966,8 +1012,8 @@ function saveBiliAccount(el) {
   }).catch(function (e) { if (err) err.textContent = e.message; });
 }
 
-// ---- 图文规则编辑浮窗：规则平台无关；「引用（仅X）」「附译文（仅X）」运行时只对 X 帖生效
-// （微博转发折进 retweet、B站动态无引用实体，中文正文也无需翻译）。
+// ---- 图文规则编辑浮窗：规则 = 分类引用 × 生效范围 × 渠道 × 推送词 × 附译文
+// （判定口径在分类卡：applies_to=图文的分类带帖子类型/引用/带图条件与 LLM 提示词）。
 // 从账号浮窗进 = 二级浮窗（保存/删除后回账号浮窗，规则区就地刷新）；从规则卡进 = 一级。
 function postRuleById(id) {
   for (let i = 0; i < postRuleCache.length; i++) {
@@ -994,17 +1040,14 @@ function chip(action, value, label, on) {
 
 function renderRuleDraft() {
   if (!ruleDraft) return;
-  const f = ruleDraft.filters;
-  const filtBox = document.getElementById('pr-filters');
-  if (filtBox) filtBox.innerHTML =
-    chip('rule-filter-toggle', 'original', '原创', f.original) +
-    chip('rule-filter-toggle', 'retweet', '转发', f.retweet) +
-    chip('rule-filter-toggle', 'quote', '引用（仅X）', f.quote) +
-    chip('rule-filter-toggle', 'media', '必须带图', f.media);
+  const refBox = document.getElementById('pr-scope');
+  if (refBox) refBox.innerHTML = chip('rule-scope-toggle', '', '全部账号（不选 = 全部生效）', (ruleDraft.scope || []).length === 0) +
+    allAccountRefs().map(function (ref) {
+      return chip('rule-scope-toggle', ref, ref, (ruleDraft.scope || []).indexOf(ref) >= 0);
+    }).join('');
   const llmBox = document.getElementById('pr-llm');
   if (llmBox) llmBox.innerHTML =
-    chip('rule-llm-toggle', 'judge', '判定要不要推', ruleDraft.llmJudge) +
-    chip('rule-llm-toggle', 'translate', '附译文（仅X）', ruleDraft.llmTranslate);
+    chip('rule-llm-toggle', 'translate', '附译文（仅X帖）', ruleDraft.llmTranslate);
   const chBox = document.getElementById('pr-chs');
   if (chBox) chBox.innerHTML = channelCache.length === 0
     ? '<span class="hint">还没有渠道，去「设置 → 推送渠道」添加</span>'
@@ -1013,33 +1056,26 @@ function renderRuleDraft() {
       }).join('');
 }
 
-/** 「LLM 提示词」只在开了判定时显示；用 hidden 而非重渲，保住已填内容（chips 重渲不影响输入框） */
-function syncJudgeField() {
-  const jf = document.getElementById('pr-judge-field');
-  if (jf) jf.hidden = !(ruleDraft && ruleDraft.llmJudge);
-}
-
 function openPostRuleSheet(r) {
   ruleDraft = {
     id: r ? r.id : null,
     channels: (r ? r.channels : []).map(Number),
-    filters: {
-      original: r ? r.filters.original : true,
-      retweet: r ? r.filters.retweet : false,
-      quote: r ? !!r.filters.quote : false,
-      media: r ? r.filters.media : false,
-    },
-    llmJudge: r ? r.llmJudge : false,
-    llmTranslate: r ? r.llmTranslate : false,
+    scope: (r ? (r.scope || []) : []).slice(),
+    categoryId: r ? r.categoryId : null,
+    llmTranslate: r ? !!r.llmTranslate : false,
   };
   ruleLevel = sheetAccountId != null ? 2 : 1;
+  const postCats = categoryCache.filter(function (c) { return c.appliesTo === 'post' || !c.appliesTo; });
+  const catOpts = [{ value: '', label: '任意内容' }].concat(postCats.map(function (c) {
+    return { value: c.id, label: c.name, off: c.enabled === false };
+  }));
   openSheet(r ? '编辑图文规则' : '新建图文规则',
     field('规则名称', `<input class="inp" id="pr-name" placeholder="留空自动命名" value="${r ? esc(r.name) : ''}">`) +
-    '<div class="field"><label class="field-label">筛选</label><div class="chips" id="pr-filters"></div></div>' +
-    '<div class="field"><label class="field-label">LLM</label><div class="chips" id="pr-llm"></div></div>' +
-    `<div class="field" id="pr-judge-field"><label class="field-label">LLM 提示词</label>` +
-      `<input class="inp" id="pr-judge" placeholder="${RULE_JUDGE_PH}" value="${r && r.judgePrompt ? esc(r.judgePrompt) : ''}"></div>` +
-    field('判定关键词', `<input class="inp" id="pr-kw" placeholder="中英文逗号分隔，留空 = 不限" value="${r && r.filters.keywords.length ? esc(r.filters.keywords.join(',')) : ''}">`) +
+    field('分类（判定口径）', dropdownHtml('pr-cat', catOpts, r ? r.categoryId : ''),
+      ) +
+    '<div class="field"><label class="field-label">生效账号</label><div class="chips" id="pr-scope"></div>' +
+      '<span class="row-sub">不选 = 全部账号生效（含未来新增）；也可在账号卡上反向勾选</span></div>' +
+    '<div class="field"><label class="field-label">附加动作</label><div class="chips" id="pr-llm"></div></div>' +
     field('推送词', `<input class="inp" id="pr-tpl" placeholder="留空 = 默认（${RULE_TPL}）" value="${r && r.messageTemplate ? esc(r.messageTemplate) : ''}">` +
       '<span class="row-sub">可用变量：{author} {text} {url} {liver}</span>') +
     '<div class="field"><label class="field-label">推送渠道</label><div class="chips" id="pr-chs"></div></div>',
@@ -1049,18 +1085,23 @@ function openPostRuleSheet(r) {
     `<button class="btn" data-action="close-sheet" data-level="${ruleLevel}">取消</button>` +
     `<button class="btn btn-primary" data-action="save-post-rule" data-id="${r ? r.id : ''}">保存</button>`);
   renderRuleDraft();
-  syncJudgeField();
 }
 
 ACTIONS['rule-llm-toggle'] = function (el) {
-  if (el.getAttribute('data-value') === 'judge') ruleDraft.llmJudge = !ruleDraft.llmJudge;
-  else ruleDraft.llmTranslate = !ruleDraft.llmTranslate;
+  if (el.getAttribute('data-value') === 'translate') ruleDraft.llmTranslate = !ruleDraft.llmTranslate;
   renderRuleDraft();
-  syncJudgeField();
 };
 
-ACTIONS['rule-filter-toggle'] = function (el) {
-  ruleDraft.filters[el.getAttribute('data-value')] = !ruleDraft.filters[el.getAttribute('data-value')];
+ACTIONS['rule-scope-toggle'] = function (el) {
+  const v = el.getAttribute('data-value');
+  const cur = (ruleDraft.scope || []).slice();
+  if (v === '') {
+    ruleDraft.scope = []; // 「全部账号」= 清空 scope
+  } else {
+    const i = cur.indexOf(v);
+    if (i >= 0) cur.splice(i, 1); else cur.push(v);
+    ruleDraft.scope = cur;
+  }
   renderRuleDraft();
 };
 
@@ -1074,19 +1115,12 @@ ACTIONS['rule-ch-toggle'] = function (el) {
 ACTIONS['save-post-rule'] = function (el) {
   const err = document.getElementById('pr-err');
   if (err) err.textContent = '';
-  const kw = splitCsv(document.getElementById('pr-kw').value);
-  const judgePrompt = document.getElementById('pr-judge').value.trim();
+  const catVal = document.getElementById('pr-cat').value;
   const body = {
+    subjectKind: 'post',
+    categoryId: catVal === '' ? null : Number(catVal),
+    scope: ruleDraft.scope || [],
     channels: ruleDraft.channels,
-    filters: {
-      original: ruleDraft.filters.original,
-      retweet: ruleDraft.filters.retweet,
-      quote: ruleDraft.filters.quote,
-      media: ruleDraft.filters.media,
-      keywords: kw,
-    },
-    llmJudge: ruleDraft.llmJudge,
-    judgePrompt: judgePrompt || null,
     llmTranslate: ruleDraft.llmTranslate,
     messageTemplate: document.getElementById('pr-tpl').value.trim() || null,
   };
@@ -1094,7 +1128,7 @@ ACTIONS['save-post-rule'] = function (el) {
   const name = document.getElementById('pr-name').value.trim();
   if (name) body.name = name;
   const idAttr = el.getAttribute('data-id');
-  const req = idAttr ? api('/api/post-rules/' + idAttr, 'PUT', body) : api('/api/post-rules', 'POST', body);
+  const req = idAttr ? api('/api/rules/' + idAttr, 'PUT', body) : api('/api/rules', 'POST', body);
   req.then(function () {
     closeSheet(ruleLevel);
     toast(idAttr ? '已保存' : '已新建');
@@ -1105,7 +1139,7 @@ ACTIONS['save-post-rule'] = function (el) {
 CHANGES['toggle-post-rule'] = function (el) {
   const row = el.closest('.row');
   if (!row) return;
-  api('/api/post-rules/' + row.getAttribute('data-sid'), 'PUT', { enabled: el.checked }).then(function () {
+  api('/api/rules/' + row.getAttribute('data-sid'), 'PUT', { enabled: el.checked }).then(function () {
     toast(el.checked ? '已启用' : '已停用');
     loadX().then(renderSheetRules);
   }).catch(function (e) { toast(e.message, true); loadX().then(renderSheetRules); });
@@ -1116,9 +1150,9 @@ ACTIONS['del-post-rule'] = function (el) {
     (el.closest('.row') ? el.closest('.row').getAttribute('data-sid') : null);
   const r = postRuleById(idAttr);
   if (!r) return;
-  if (!confirm('删除规则「' + r.name + '」？选用了它的账号会少一条规则。')) return;
+  if (!confirm('删除规则「' + r.name + '」？')) return;
   const fromSheet = !!el.getAttribute('data-id');
-  api('/api/post-rules/' + r.id, 'DELETE').then(function () {
+  api('/api/rules/' + r.id, 'DELETE').then(function () {
     if (fromSheet) closeSheet(ruleLevel);
     toast('已删除');
     loadX().then(renderSheetRules);
@@ -1127,5 +1161,5 @@ ACTIONS['del-post-rule'] = function (el) {
 
 loadX();
 setInterval(loadX, 60000);
-// 图文规则 + 三张账号名单 + X/微博源设置（settings）一次性重拉——撤销后把图文页拉回真实态
-onTableRefresh(['post_rules', 'x_accounts', 'weibo_accounts', 'bili_accounts', 'settings'], loadX);
+// 图文规则 + 三张账号名单 + 分类/规则（settings）一次性重拉——撤销后把图文页拉回真实态
+onTableRefresh(['push_rules', 'categories', 'x_accounts', 'weibo_accounts', 'bili_accounts', 'settings'], loadX);

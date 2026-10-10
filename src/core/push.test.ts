@@ -23,6 +23,7 @@ function channel(over: Partial<NewPushChannel> = {}): NewPushChannel {
 function category(over: Partial<NewCategory> = {}): NewCategory {
   return {
     name: '歌回', llmPrompt: null, keywords: ['歌回'], areas: ['虚拟Singer'],
+    postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live',
     condMode: 'and', enabled: true,
     ...over,
   };
@@ -30,8 +31,8 @@ function category(over: Partial<NewCategory> = {}): NewCategory {
 
 function rule(over: Partial<NewPushRule> = {}): NewPushRule {
   return {
-    name: '', categoryId: null, uids: [], channels: [1, 2],
-    messageTemplate: '{liver} 开播了', enabled: true,
+    name: '', subjectKind: 'live', categoryId: null, scope: [], channels: [1, 2],
+    messageTemplate: '{liver} 开播了', llmTranslate: false, enabled: true,
     ...over,
   };
 }
@@ -136,31 +137,51 @@ test('删除分类级联停用引用它的推送规则，返回受影响条数',
   assert.equal(db.deleteCategory(cat), true);
 });
 
-// ---- push_rules v2 ----
+// ---- push_rules（统一规则：subject_kind × 分类引用 × scope × 渠道）----
 
-test('push_rules v2 CRUD：JSON 数组字段往返 / categoryId 可空 / disabled 不进 enabled 列表', (t) => {
+test('push_rules CRUD：JSON 数组字段往返 / categoryId 可空 / disabled 不进 enabled 列表', (t) => {
   const db = memDb(t);
-  const id = db.upsertPushRule(rule({ categoryId: 3, uids: ['1', '2'] }));
+  const id = db.upsertPushRule(rule({ categoryId: 3, scope: ['1', '2'] }));
   assert.ok(id > 0);
   db.upsertPushRule(rule({ enabled: false }));
 
   const enabled = db.listEnabledPushRules();
   assert.equal(enabled.length, 1, 'disabled 不进 enabled 列表');
   assert.equal(enabled[0]!.categoryId, 3);
-  assert.deepEqual(enabled[0]!.uids, ['1', '2'], 'JSON 数组字段正确解析');
+  assert.equal(enabled[0]!.subjectKind, 'live');
+  assert.deepEqual(enabled[0]!.scope, ['1', '2'], 'JSON 数组字段正确解析');
   assert.deepEqual(enabled[0]!.channels, [1, 2]);
   assert.equal(enabled[0]!.messageTemplate, '{liver} 开播了');
+  assert.equal(enabled[0]!.llmTranslate, false);
   assert.equal(db.listPushRules().length, 2, 'listPushRules 含 disabled');
 
-  db.upsertPushRule({ id, categoryId: null, uids: [], channels: [3], messageTemplate: null });
+  db.upsertPushRule({ id, categoryId: null, scope: [], channels: [3], messageTemplate: null });
   const r = db.listPushRules().find((x) => x.id === id)!;
-  assert.equal(r.categoryId, null, 'categoryId 可置空（任意开播）');
-  assert.deepEqual(r.uids, [], 'uids 可置空（全部主播）');
+  assert.equal(r.categoryId, null, 'categoryId 可置空（任意内容）');
+  assert.deepEqual(r.scope, [], 'scope 可置空（全部生效）');
   assert.deepEqual(r.channels, [3]);
   assert.equal(r.messageTemplate, null, 'messageTemplate 可置空（用内置默认模板）');
 
   assert.equal(db.deletePushRule(id), true);
   assert.equal(db.deletePushRule(id), false);
+});
+
+test('subject_kind / llm_translate 往返（图文规则同表）', (t) => {
+  const db = memDb(t);
+  const id = db.upsertPushRule(rule({
+    subjectKind: 'post', scope: ['twitter:aaa', 'weibo:123', 'bili:456'],
+    llmTranslate: true, messageTemplate: null,
+  }));
+  const r = db.listPushRules().find((x) => x.id === id)!;
+  assert.equal(r.subjectKind, 'post');
+  assert.deepEqual(r.scope, ['twitter:aaa', 'weibo:123', 'bili:456']);
+  assert.equal(r.llmTranslate, true);
+  // 部分更新保留未传字段
+  db.upsertPushRule({ id, enabled: false });
+  const r2 = db.listPushRules().find((x) => x.id === id)!;
+  assert.equal(r2.llmTranslate, true, '未传字段保留原值');
+  assert.equal(r2.subjectKind, 'post');
+  assert.deepEqual(r2.scope, ['twitter:aaa', 'weibo:123', 'bili:456']);
 });
 
 test('规则名称：不传自动补「规则 N」，传了存自定义名', (t) => {
@@ -175,7 +196,7 @@ test('规则拖拽排序：reorderPushRules 全局重写匹配优先级，新规
   const db = memDb(t);
   const a = db.upsertPushRule(rule({ name: 'a' }));
   const b = db.upsertPushRule(rule({ name: 'b' }));
-  const c = db.upsertPushRule(rule({ name: 'c', uids: ['9'] }));
+  const c = db.upsertPushRule(rule({ name: 'c', scope: ['9'] }));
   db.reorderPushRules([c, b, a]);
   assert.deepEqual(db.listEnabledPushRules().map((x) => x.name), ['c', 'b', 'a'], '全局排序，不按主播分组');
   const d = db.upsertPushRule(rule({ name: 'd' }));
@@ -189,7 +210,7 @@ test('splitPushRuleChannel：多渠道规则拆出只含本渠道的一条（cre
   const a = db.upsertPushChannel(channel({ name: 'A群' }));
   const b = db.upsertPushChannel(channel({ name: 'B群' }));
   const id = db.upsertPushRule(rule({
-    name: '双群规则', uids: ['1'], channels: [a, b], messageTemplate: '{liver} 来了', createdBy: null,
+    name: '双群规则', scope: ['1'], channels: [a, b], messageTemplate: '{liver} 来了', createdBy: null,
   }));
 
   const { id: splitId, split } = splitPushRuleChannel(db, db.listPushRules().find((x) => x.id === id)!, a);
@@ -205,7 +226,7 @@ test('splitPushRuleChannel：多渠道规则拆出只含本渠道的一条（cre
   const copy = db.listPushRules().find((x) => x.id === splitId)!;
   assert.deepEqual(copy.channels, [a], '拆出的一条只含本渠道');
   assert.equal(copy.createdBy, 'mcp', '拆出的副本显式打 mcp 标记');
-  assert.deepEqual(copy.uids, ['1']);
+  assert.deepEqual(copy.scope, ['1']);
   assert.equal(copy.messageTemplate, '{liver} 来了');
   assert.equal(db.listPushRules().length, 2);
 });

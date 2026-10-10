@@ -1,38 +1,24 @@
 /**
- * 图文帖分析编排：命中规则要 LLM 时，对一条帖子做「判定 + 翻译」，一次调用出结果。
- *
- * 翻译运行时门控：规则的 llmTranslate 只对 X 帖生效（微博/B站动态本就中文）——
- * 非 X 帖不请求翻译、不附译文；判定（llmJudge）不受平台影响，三平台通用。
+ * 图文帖翻译编排（判定已挪进分类判决链，见 classifier.ts；这里只剩规则层的附加动作）：
+ * 命中规则里任一开了 llmTranslate 且平台支持时，对帖子正文调一次 LLM 生成译文。
  *
  * 降级策略（与 RulesClassifier 同一条思路，也是项目纪律）：
- * - 规则没开判定也没开翻译（或翻译被平台门控掉）→ 根本不调 LLM（`source='off'`）
- * - LLM 总开关关 / router 不可用 / 调用失败 / 解析失败 → `source='fallback'`，
- *   **判定视为通过（照机械筛选推）**、不附译文。宁可按用户填的机械条件发出去，
- *   也不要因为模型抖动让推文凭空消失。
- * - `source='llm'` 时判定权威：pass=false 则该规则不贡献渠道（这条帖子不推）。
+ * - LLM 总开关关 / router 不可用 / 调用失败 / 解析失败 → `source='fallback'`，不附译文。
+ *   **翻译失败绝不挡推送**（正文照发）——生成类任务的任何抖动都不该让推文凭空消失。
  *
  * 熔断状态在 providers 层：服务异常 = completeJson 抛错 → 当场回退，无需额外状态。
  */
 import { makeLogger } from '../logger.js';
 import type { LlmRouter } from './providers.js';
 import type { PostCandidate } from './matcher.js';
-import { platformSupportsTranslate, type PostRule } from '../core/post-rules.js';
-import { buildPostAnalysisRequest, parsePostAnalysis, type PostAnalysisOptions } from './tasks/post-analysis.js';
+import { buildTranslateRequest, parseTranslation } from './tasks/post-analysis.js';
 
 const log = makeLogger('analysis/post-analyzer');
 
-export interface PostAnalysis {
-  /** 'llm' = 模型给了结论；'fallback' = LLM 不可用/失败，按机械筛选放行；'off' = 该规则没请求 LLM */
-  source: 'llm' | 'fallback' | 'off';
-  /** 判定结论（仅 source='llm' 且规则开了判定时有值） */
-  pass: boolean;
-  reason: string;
+export interface PostTranslation {
+  /** 'llm' = 模型给了译文（或明确无需翻译）；'fallback' = LLM 不可用/失败，不附译文 */
+  source: 'llm' | 'fallback';
   translation: string | null;
-}
-
-/** 规则是否请求了 LLM（判定或翻译任一开启） */
-export function ruleNeedsLlm(rule: PostRule): boolean {
-  return rule.llmJudge || rule.llmTranslate;
 }
 
 export class PostAnalyzer {
@@ -42,38 +28,22 @@ export class PostAnalyzer {
     private readonly llmEnabled: () => boolean,
   ) {}
 
-  async analyze(post: PostCandidate, rule: PostRule, imageUrls?: string[]): Promise<PostAnalysis> {
-    const opts: PostAnalysisOptions = {
-      judge: rule.llmJudge,
-      judgePrompt: rule.judgePrompt,
-      // 翻译运行时门控：只有 X 帖才需要译文（微博/B站动态本就中文），非 X 帖不请求翻译
-      translate: rule.llmTranslate && platformSupportsTranslate(post.platform),
-    };
-    if (!opts.judge && !opts.translate) {
-      return { source: 'off', pass: true, reason: '', translation: null };
-    }
+  /** 生成译文（调用方保证平台支持翻译，见 platformSupportsTranslate） */
+  async translate(post: PostCandidate): Promise<PostTranslation> {
     const router = this.getRouter();
     if (router === null || !this.llmEnabled()) {
-      log.debug(`LLM 不可用（${router === null ? '无 provider' : '总开关关'}），按机械筛选放行`);
-      return { source: 'fallback', pass: true, reason: 'LLM 未启用', translation: null };
+      log.debug(`LLM 不可用（${router === null ? '无 provider' : '总开关关'}），不附译文`);
+      return { source: 'fallback', translation: null };
     }
-    // 附图门控：有图且 vision 路由有可用 provider 才带图；否则降级纯文本——
-    // 带图请求在空 vision 路由上会整路失败，把本可纯文本完成的判定/翻译一起拖死
-    const imgs = imageUrls?.length && router.hasVision() ? imageUrls : undefined;
     try {
-      const r = await router.completeJson(
-        buildPostAnalysisRequest(post, opts, imgs),
-        (raw) => parsePostAnalysis(raw),
+      const translation = await router.completeJson(
+        buildTranslateRequest(post),
+        (raw) => parseTranslation(raw),
       );
-      return {
-        source: 'llm',
-        pass: opts.judge ? r.pass : true, // 没开判定就不让模型替我们决定
-        reason: opts.judge ? r.reason : '',
-        translation: opts.translate ? r.translation : null,
-      };
+      return { source: 'llm', translation };
     } catch (e) {
-      log.warn(`图文帖 LLM 分析失败，按机械筛选放行: ${(e as Error).message}`);
-      return { source: 'fallback', pass: true, reason: 'LLM 调用失败', translation: null };
+      log.warn(`图文帖翻译失败，不附译文: ${(e as Error).message}`);
+      return { source: 'fallback', translation: null };
     }
   }
 }

@@ -135,55 +135,48 @@ export const mockX = {
 // ---- X 关注账号（独立名单：不要求对应 B站主播；留一个停用项做对照）----
 // avatar = X 链路抓到的本地缓存文件名；demo 由 webui-dev 把 /api/x-avatar 映射到
 // data/cache/x-avatars，这里的文件名对应该目录下真实存在的缓存文件。
-// ruleIds = 该账号选用的图文规则（mockPostRules 的 id；规则本身不带账号 scope）
+// 生效范围在规则侧 scope（A.2：账号侧 rule_ids 已删除）——选用关系见 mockPostRules 的 scope。
 export const mockXAccounts = [
   {
     // nickname = 平台显示名（添加时校验种入 og:title / 抓取回写）；displayName = 用户自定义备注
     id: 1, screenName: 'watase_yuzuki', nickname: '渡瀬 結月', displayName: '渡濑结月', biliUid: null, enabled: true,
-    ruleIds: [1],
     lastTweetId: '2101671199457894850', lastTweetAt: 1, lastOkAt: 1,
     avatar: '661034f88371821109aed0e05c5389dc.jpg', createdAt: 1, updatedAt: 1,
   },
   {
     id: 2, screenName: 'hololive_en', displayName: 'hololive English', biliUid: null, enabled: false,
-    ruleIds: [],
     lastTweetId: null, lastTweetAt: null, lastOkAt: null,
     avatar: 'a57dc1efff44d79e3ca2b5d9b3144013.png', createdAt: 0, updatedAt: 0,
   },
 ];
 
-// ---- 图文帖规则（与开播推送规则平行的另一套；渠道引用上面 mockChannels 的 id）----
-// 规则平台无关（无 platform 字段）、不带账号 scope——账号侧用 ruleIds 选用，
-// 任何账号可选用任何规则（mockXAccounts / mockWeiboAccounts / fixtures.biliAccounts）。
-// 四条演示不同筛选：「带图原创 → 粉丝群」、停用的「转发 → 系统通知」、
-// 两条「预告词 → 粉丝群（+私聊）」
+// ---- 图文规则（统一 push_rules 里 subject_kind='post' 的行；与开播规则同表同序）----
+// 判定口径（原 filters/judgePrompt）在分类上（categoryId 指向 mock-api 里种的图文分类）；
+// 生效范围在规则 scope（`twitter:账号` / `weibo:uid` / `bili:uid`；空 = 全部账号生效）。
+// 四条演示：「带图原创 → 粉丝群」、停用的「转发 → 系统通知」、两条「预告词 → 粉丝群（+私聊）」
 export const mockPostRules = [
   {
-    id: 1, name: '带图原创', channels: [2],
-    filters: { original: true, retweet: false, quote: false, media: true, keywords: [] },
-    messageTemplate: null,
-    llmJudge: true, judgePrompt: '只推与直播预告、新曲发布相关的推文', llmTranslate: true,
+    id: 101, name: '带图原创', subjectKind: 'post', categoryId: 101,
+    scope: ['twitter:watase_yuzuki', 'weibo:1158211483'], channels: [2],
+    messageTemplate: null, llmTranslate: true,
     enabled: true, sort: 0, createdAt: 1, updatedAt: 1,
   },
   {
-    id: 2, name: '转发也看', channels: [1],
-    filters: { original: false, retweet: true, quote: false, media: false, keywords: ['live'] },
-    messageTemplate: '{author} 转发了',
-    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    id: 102, name: '转发也看', subjectKind: 'post', categoryId: 102,
+    scope: [], channels: [1],
+    messageTemplate: '{author} 转发了', llmTranslate: false,
     enabled: false, sort: 1, createdAt: 1, updatedAt: 1,
   },
   {
-    id: 3, name: '微博预告', channels: [2],
-    filters: { original: true, retweet: false, quote: false, media: false, keywords: ['预告', '直播'] },
-    messageTemplate: '{author} 发了新微博',
-    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    id: 103, name: '微博预告', subjectKind: 'post', categoryId: 103,
+    scope: ['weibo:1158211483'], channels: [2],
+    messageTemplate: '{author} 发了新微博', llmTranslate: false,
     enabled: true, sort: 2, createdAt: 1, updatedAt: 1,
   },
   {
-    id: 4, name: '动态预告', channels: [2, 3],
-    filters: { original: true, retweet: false, quote: false, media: false, keywords: ['预告', '直播'] },
-    messageTemplate: null,
-    llmJudge: false, judgePrompt: null, llmTranslate: false,
+    id: 104, name: '动态预告', subjectKind: 'post', categoryId: 103,
+    scope: ['bili:80397'], channels: [2, 3],
+    messageTemplate: null, llmTranslate: false,
     enabled: true, sort: 3, createdAt: 1, updatedAt: 1,
   },
 ];
@@ -202,8 +195,6 @@ export const mockWeibo = {
 export const mockWeiboAccounts = [
   {
     id: 1, uid: '1158211483', nickname: 'Hosi_Tiri', biliUid: null, enabled: true,
-    // 选用规则含 rule 1（LLM 判定）——mockPostVerdicts 里那条回退判定行就是它跑出来的
-    ruleIds: [1, 3],
     lastPostId: '5345338974275832', lastPostAt: 1, lastOkAt: 1,
     avatar: '39d3ac4936e727f6ae12b559ee372266.jpg', createdAt: 1, updatedAt: 1,
   },

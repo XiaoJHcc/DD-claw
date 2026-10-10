@@ -218,25 +218,8 @@ const INVENTORY: InventoryEntry[] = [
     method: 'DELETE', path: String.raw`^\/api\/bili\/accounts\/(\d+)$`, label: 'DELETE /api/bili/accounts/:id',
     coverage: 'registry', tool: 'delete_bili_account', toolStatus: 'exists', exposeToAgent: true,
   },
-  {
-    method: 'POST', path: '/api/post-rules', label: 'POST /api/post-rules',
-    coverage: 'registry', tool: 'upsert_post_rule', toolStatus: 'exists', exposeToAgent: true,
-  },
-  {
-    method: 'PUT', path: String.raw`^\/api\/post-rules\/([^/]+)$`, label: 'PUT /api/post-rules/:id',
-    coverage: 'registry', tool: 'upsert_post_rule', toolStatus: 'exists', exposeToAgent: true,
-  },
-  {
-    method: 'DELETE', path: String.raw`^\/api\/post-rules\/([^/]+)$`, label: 'DELETE /api/post-rules/:id',
-    coverage: 'registry', tool: 'delete_post_rule', toolStatus: 'exists', exposeToAgent: true,
-  },
 
   // ---- 已收敛但 P0 待补工具（「①成不成立」的答案：成立，写必须过注册表；②暂关） ----
-  {
-    method: 'PUT', path: '/api/post-rules/order', label: 'PUT /api/post-rules/order',
-    coverage: 'registry', tool: 'reorder_post_rules', toolStatus: 'exists', exposeToAgent: false,
-    reason: '排序类：先进注册表以纳入回滚覆盖；是否暴露给 agent 单独决定',
-  },
   {
     method: 'POST', path: '/api/x/test', label: 'POST /api/x/test',
     coverage: 'registry', tool: 'test_x_connection', toolStatus: 'exists', exposeToAgent: false,

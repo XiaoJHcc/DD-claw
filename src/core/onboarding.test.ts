@@ -40,7 +40,7 @@ test('首启：空库种入「系统通知」渠道 + 默认分类 + 默认规�
     const want = ONBOARDING_RULES[i]!;
     const got = rules[i]!;
     assert.equal(got.name, want.name);
-    assert.equal(got.uids.length, 0, '默认规则恒为全部主播生效');
+    assert.equal(got.scope.length, 0, '默认规则恒为全部主播生效（scope 空 = 全部生效）');
     assert.deepEqual(got.channels, [channels[0]!.id], '规则渠道应重映射到种入的系统通知渠道');
     assert.equal(got.messageTemplate, want.messageTemplate);
     assert.equal(got.enabled, true);

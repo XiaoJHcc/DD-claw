@@ -3,16 +3,15 @@ import { readFile } from 'node:fs/promises';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage, postToMessage } from '../notify/message.js';
 import {
-  aggregateRuleHits, defaultPostTitle, matchPostRules, matchPushRules, postAuthorName,
+  aggregateRuleHits, defaultPostTitle, matchRules, postAuthorName,
   renderPostTemplate, renderTemplate,
   type PostCandidate,
 } from '../analysis/matcher.js';
-import { isPushEnabled, postVerdictSubjectId } from './push.js';
+import { isPushEnabled, postSubjectRef, type PushRule, type SubjectKind } from './push.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 import { localizeImage, localizeImageViaProxy } from '../notify/image-cache.js';
 import { mapLimit } from './concurrency.js';
-import { ruleNeedsLlm, type PostAnalysis, type PostAnalyzer } from '../analysis/post-analyzer.js';
-import type { PostRule } from './post-rules.js';
+import type { PostAnalyzer } from '../analysis/post-analyzer.js';
 import type { XAccount } from './x-accounts.js';
 import type { WeiboAccount } from './weibo-accounts.js';
 import type { BiliAccount } from './bili-accounts.js';
@@ -22,13 +21,30 @@ import type { Bus } from './bus.js';
 import type { Db } from './db.js';
 import type { AppConfig } from '../config/schema.js';
 import type { AnalysisQueue } from '../analysis/queue.js';
+import type { Classification } from '../analysis/types.js';
 import type { DecisionRule } from '../rules/types.js';
 import type { NotifyDispatcher } from '../notify/dispatcher.js';
+import { platformSupportsTranslate } from './post-rules.js';
 
 const log = makeLogger('core/pipeline');
 
 /** 同时处理多少个信号的推送。够覆盖同时开播的常见规模，又不至于打爆 NapCat。 */
 const NOTIFY_CONCURRENCY = 4;
+
+/**
+ * 「推送等不等判定」规则级化（A.4）的判据：存在**引用了分类的启用规则**且其 scope 覆盖
+ * 本内容（scope 空 = 全部生效）→ 推送要等判定结果；否则推送不排在 LLM 后面。
+ */
+function hasCoveringCategoryRule(
+  rules: PushRule[],
+  subjectKind: SubjectKind,
+  subjectRef: string,
+): boolean {
+  return rules.some((r) =>
+    r.subjectKind === subjectKind
+    && r.categoryId !== null
+    && (r.scope.length === 0 || r.scope.includes(subjectRef)));
+}
 
 export interface PipelineDeps {
   bus: Bus;
@@ -39,7 +55,7 @@ export interface PipelineDeps {
   dispatcher: NotifyDispatcher;
   /** 图片本地化缓存目录（X 图必须经代理下载成本地文件再推）；缺省 = 图文帖不带图 */
   imageCacheDir?: string;
-  /** 图文帖 LLM 判定/翻译（规则级开关）；缺省 = 规则里的 LLM 开关一律当关 */
+  /** 图文帖翻译（命中规则的 llmTranslate 附加动作）；缺省 = 不附译文 */
   postAnalyzer?: PostAnalyzer;
 }
 
@@ -169,18 +185,29 @@ export class Pipeline {
       return;
     }
 
-    // 分类判定只在 live_start 做（live_end / title_change 不烧 LLM）；
-    // 判定结果进规则匹配：推送规则按 categoryId 引用分类（buildMessage）
-    const classifications = signal.kind === 'live_start' ? await queue.submit({ event, signal }) : [];
+    // 分类判定只在 live_start 做（live_end / title_change 不烧 LLM），每场单次：
+    // 判定结果进规则匹配：推送规则按 categoryId 引用分类（buildMessage）。
+    // **推送等不等判定（A.4 规则级化）**：仅当存在「引用了分类的启用规则且 scope 覆盖本主播」
+    // 时推送才等判定；纯「任意内容」规则的推送不再排在 LLM 后面。判定本身照跑（时间线/verdicts
+    // 的回看面不变），不等时先推后收——绝不产生双推（分类规则只在匹配那一刻生效一次）。
+    const clsPromise = signal.kind === 'live_start'
+      ? queue.submit({ event, signal })
+      : Promise.resolve([] as Classification[]);
+    const needsWait = hasCoveringCategoryRule(db.listEnabledPushRules(), 'live', event.uid);
+    const classifications = needsWait ? await clsPromise : [];
     const decision = await rule.decide({ ...event, classifications }, signal, classifications);
 
     if (!decision.shouldNotify) {
+      if (!needsWait) await clsPromise;
       log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: ${decision.reason}`);
       return;
     }
 
     const msg = this.buildMessage({ ...event, classifications });
-    if (!msg) return; // buildMessage 已记日志（规则不命中 / 规则未选渠道）
+    if (!msg) {
+      if (!needsWait) await clsPromise;
+      return; // buildMessage 已记日志（规则不命中 / 规则未选渠道）
+    }
 
     log.info(`推送 [${signal.kind}] ${event.uname || event.alias} — ${decision.reason}`);
     const outcome = await dispatcher.broadcast(msg);
@@ -189,22 +216,25 @@ export class Pipeline {
     if (outcome.anySuccess && signal.kind === 'live_start') {
       db.markNotified(event.roomId, event.liveTime);
     }
+    // 不等判定的路径：推完再收判定（verdicts 落库收尾，whenIdle 覆盖到）
+    if (!needsWait) await clsPromise;
   }
 
   /**
    * 推送规则 → PushMessage；返回 null = 不推（命中集合渠道并集为空 / 无命中规则）。
-   * - 命中集合非空：所有命中规则独立生效，聚合（渠道并集 + 首个非空推送词）走
-   *   `aggregateRuleHits`；并集为空 = 用户明确不推（记 log 不推）
-   * - 无命中规则（含一条都没有）= 不推——「任意开播 × 全部主播」规则即旧全局默认的等价物，
+   * - 命中 = matchRules（两形态统一：分类引用 × scope）；所有命中规则独立生效，
+   *   聚合（渠道并集 + 首个非空推送词）走 `aggregateRuleHits`；并集为空 = 用户明确不推（记 log 不推）
+   * - 无命中规则（含一条都没有）= 不推——「任意内容 × 全部主播」规则即旧全局默认的等价物，
    *   需要兜底推送的用户自建一条即可
    * - 模板：规则覆盖 > 内置默认 '{liver} 开播了'；正文/图片/跳转沿用默认形状
    */
   private buildMessage(event: LiveEvent): PushMessage | null {
     const { db } = this.deps;
     const base = liveEventToMessage(event);
-    const hits = matchPushRules(
-      db.listEnabledPushRules(), event,
+    const hits = matchRules(
+      db.listEnabledPushRules(), { subjectType: 'live' },
       new Set(event.classifications.map((c) => c.categoryId)),
+      event.uid,
     );
 
     if (hits.length === 0) {
@@ -224,13 +254,17 @@ export class Pipeline {
   }
 
   /**
-   * 图文帖（feed_post）路径：机械筛选 → 图文帖规则 → 带图推送。与开播路径完全平行：
-   *  · 不过决策规则（`DecisionRule` 是「每场直播推一次」那类防抖，帖子没有场次概念，
+   * 图文帖（feed_post）路径：判定分类制（与 live_start 同走判决链）→ matchRules → 带图推送。
+   * 与开播路径完全平行：
+   *  · 不过决策规则（`OncePerSessionRule` 是「每场直播推一次」那类防抖，帖子没有场次概念，
    *    去重由 posts 的 UNIQUE(platform,item_id) 兜住）；
    *  · 不过冷启动抑制（帖子不是「启动时已在播」那种状态，首轮由 source 静默归档挡住）；
    *  · 三个平台走同一条分支：账号在各自名单里查（X→x_accounts / 微博→weibo_accounts /
-   *    B站动态→bili_accounts），规则平台无关——命中只看账号侧 ruleIds 是否选用
-   *    （`matchPostRules`），平台差异只在文案措辞、quote 语义与翻译门控上体现。
+   *    B站动态→bili_accounts），规则统一在 push_rules（subject_kind='post'）——命中 =
+   *    分类判定 × 规则 scope（`matchRules`），平台差异只在文案措辞、quote 语义与翻译门控上体现。
+   *  · 判定每帖单次（verdicts 落真实 categoryId、ruleId=0 哨兵；LLM 判否也落 pass=0 供
+   *    「为什么没推」回看）；推送等不等判定与 live 同一条规则级判据（hasCoveringCategoryRule），
+   *    不产生双推。
    */
   private async handleFeedPost(signal: Signal): Promise<void> {
     const { db, dispatcher } = this.deps;
@@ -280,7 +314,6 @@ export class Pipeline {
       platform,
       itemId: p.itemId ?? '',
       accountId: account.id,
-      ruleIds: account.ruleIds,
       screenName: ident.screenName,
       displayName: ident.displayName,
       // type 已在各 source 归一（B站 FORWARD → 'retweet'，见 sources/bili/dynamic.ts）；
@@ -295,17 +328,12 @@ export class Pipeline {
     };
     const label = postAuthorName(post);
 
-    const hits = matchPostRules(db.listEnabledPostRules(), post);
-    if (hits.length === 0) {
-      log.info(`不推送 ${label}: 无命中图文帖规则`);
-      return;
-    }
-
-    // 图片先落本地文件：推送要带图，LLM 判定也要看图（「只推自拍」这类标准只看文字判不出来）。
+    // 图片先落本地文件：推送要带图，分类判定也要看图（「只推自拍」这类标准只看文字判不出来）。
     // X 图床（pbs.twimg.com）墙内直连不通，NapCat / LLM provider 都拉不到远程 URL ——
     // 唯一可行形态是先经代理隧道下载到本地，推送发本地文件、LLM 发 base64 data URL。
     // 有图的帖全图都下，每张独立容错、失败的单张跳过；全部失败按无图走，不阻塞通知。
     // 微博图床（sinaimg.cn）与B站图床（hdslb.com）境内直连可达 → 普通 fetch，不给代理链路添无关流量。
+    // （判定分类制后判定也吃配图，故本地化提到判定之前；条件与容错纪律不变）
     let images: string[] | undefined;
     let imageDataUrls: string[] | undefined;
     if (post.pics.length > 0 && this.deps.imageCacheDir) {
@@ -321,59 +349,35 @@ export class Pipeline {
       }
     }
 
-    // LLM 判定 / 翻译（规则级，默认关）：判定语义 = 「这条规则是否还贡献渠道」——
-    // 开了判定且模型说不推的规则不贡献渠道（与「命中规则独立生效、渠道取并集」一致），
-    // 没开判定的规则照常贡献。LLM 不可用/失败一律按机械筛选放行（post-analyzer 内部处理）。
-    const subjectId = postVerdictSubjectId(platform, p.itemId ?? '');
-    const contributing: PostRule[] = [];
-    let translated: string | null = null;
-    const analyzed = new Map<string, PostAnalysis>();
-    for (const r of hits) {
-      if (!ruleNeedsLlm(r) || !this.deps.postAnalyzer) {
-        contributing.push(r);
-        continue;
-      }
-      // 同（判定标准 + 是否翻译）只调一次 LLM：多数场景就一条这类规则
-      const key = `${r.llmJudge ? 1 : 0}|${r.judgePrompt ?? ''}|${r.llmTranslate ? 1 : 0}`;
-      let a = analyzed.get(key);
-      if (!a) {
-        a = await this.deps.queue.run(() => this.deps.postAnalyzer!.analyze(post, r, imageDataUrls));
-        analyzed.set(key, a);
-      }
-      // 判定落 verdicts（在聚合推送之前，无论最终推不推）：跑了分析的规则各记一行——
-      // memo 共享同一次分析的多条规则也各落一行（ruleId 不同，UNIQUE 兜住重复）。
-      // 'llm' 判否 = 0 落库（「为什么没推」可回看的核心）；'fallback' = 回退机械筛选放行；
-      // 'off' = 该规则没配判定口径，无判定可记，不写。
-      if (a.source === 'llm') {
-        db.insertVerdict({
-          subjectType: 'post', subjectId, uid: String(post.accountId),
-          categoryId: 0, ruleId: r.id, categoryName: r.name,
-          source: 'llm', pass: a.pass, confidence: null, evidence: a.reason,
-        });
-      } else if (a.source === 'fallback') {
-        db.insertVerdict({
-          subjectType: 'post', subjectId, uid: String(post.accountId),
-          categoryId: 0, ruleId: r.id, categoryName: r.name,
-          source: 'rule', pass: true, confidence: null,
-          evidence: `LLM 不可用/失败，回退机械筛选放行${a.reason ? `（${a.reason}）` : ''}`,
-        });
-      }
-      if (r.llmJudge && a.source === 'llm' && !a.pass) {
-        log.info(
-          `LLM 判定不推 ${label}（规则 #${r.id}）：${a.reason || '模型未给理由'}`,
-        );
-        continue;
-      }
-      contributing.push(r);
-      if (r.llmTranslate && a.translation && !translated) translated = a.translation;
-    }
-    if (contributing.length === 0) {
-      log.info(`不推送 ${label}: 命中 ${hits.length} 条规则，但都被 LLM 判定拦下`);
+    // 判定（A.4 判定分类制）：对 applies_to='post' 的启用分类逐个判定（判决链，verdicts
+    // 由分类器落）。推送等不等判定规则级化（与 live 同一条判据）：有引用分类的启用规则
+    // 覆盖本账号才等；否则推送不排在 LLM 后面（判定照跑，收尾时 await，不产生双推）。
+    const rules = db.listEnabledPushRules();
+    const subjectRef = postSubjectRef(platform, post.screenName);
+    const needsWait = hasCoveringCategoryRule(rules, 'post', subjectRef);
+    const clsPromise = this.deps.queue.submit({ signal, post: { post, imageDataUrls } });
+    const matched = needsWait
+      ? new Set((await clsPromise).map((c) => c.categoryId))
+      : new Set<number>();
+
+    const hits = matchRules(rules, { subjectType: 'post' }, matched, subjectRef);
+    if (hits.length === 0) {
+      if (!needsWait) await clsPromise;
+      log.info(`不推送 ${label}: 无命中规则`);
       return;
     }
 
-    const agg = aggregateRuleHits(contributing);
+    // 翻译（规则附加动作，D3）：命中规则聚合后任一开 llm_translate 且平台支持时调一次生成；
+    // 失败不挡推送（post-analyzer 内部降级为不附译文）
+    let translated: string | null = null;
+    if (this.deps.postAnalyzer && hits.some((r) => r.llmTranslate) && platformSupportsTranslate(platform)) {
+      const t = await this.deps.queue.run(() => this.deps.postAnalyzer!.translate(post));
+      translated = t.translation;
+    }
+
+    const agg = aggregateRuleHits(hits);
     if (!agg) {
+      if (!needsWait) await clsPromise;
       log.info(`不推送 ${label}: 命中 ${hits.length} 条规则但都未勾选渠道`);
       return;
     }
@@ -384,10 +388,11 @@ export class Pipeline {
       channels: agg.channels.map(String),
     };
     log.info(
-      `推送 feed_post ${label} — 命中规则 ${contributing.map((r) => `#${r.id}`).join('/')}` +
+      `推送 feed_post ${label} — 命中规则 ${hits.map((r) => `#${r.id}`).join('/')}` +
       (translated ? '（含译文）' : ''),
     );
     await dispatcher.broadcast(msg);
+    if (!needsWait) await clsPromise;
   }
 
   private async handleHealthAlert(signal: Signal): Promise<void> {

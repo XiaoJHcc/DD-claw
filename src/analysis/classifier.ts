@@ -3,7 +3,7 @@ import type { Db } from '../core/db.js';
 import type { Category } from '../core/push.js';
 import type { LlmRouter } from './providers.js';
 import { matchCategoryItem } from './matcher.js';
-import { fromLiveEvent, type ContentItem } from './content.js';
+import { fromLiveEvent, fromPostCandidate, type ContentItem } from './content.js';
 import { buildClassifyRequest, parseClassifyResults, toClassifyCategory } from './tasks/classify.js';
 import type { AnalysisContext, Classification, Classifier } from './types.js';
 
@@ -29,7 +29,7 @@ export interface JudgeStage {
   judge(item: ContentItem, cats: Category[], ctx: JudgeContext): Promise<Map<number, Classification> | null>;
 }
 
-/** 确定性档：关键词/分区条件（条件算子注册表）。永远可用，判否即空 Map。 */
+/** 确定性档：关键词/分区/帖子类型等条件组（条件算子注册表）。永远可用，判否即空 Map（只记「属于」）。 */
 export const deterministicJudge: JudgeStage = {
   name: 'deterministic',
   async judge(item, cats) {
@@ -39,7 +39,7 @@ export const deterministicJudge: JudgeStage = {
       if (m.matched) {
         out.set(c.id, {
           categoryId: c.id, name: c.name, source: 'rule',
-          confidence: null, evidence: m.evidence,
+          confidence: null, evidence: m.evidence, pass: true,
         });
       }
     }
@@ -49,6 +49,7 @@ export const deterministicJudge: JudgeStage = {
 
 /**
  * LLM 档：批量分类（权威——定案后不回看确定性）。
+ * **逐项全部定案**（含判否 pass=false，判否入档供「为什么没推」回看）；
  * 无 provider / 总开关关 / 调用失败 / 解析失败 = 本档不可用，返回 null 交下一档。
  */
 export const llmJudge: JudgeStage = {
@@ -85,14 +86,17 @@ export async function runJudgeChain(
 }
 
 /**
- * 分类编排：每场 live_start 对全部启用分类逐个判定，结果入 verdicts 表。
+ * 分类编排：live_start 对直播分类逐个判定、feed_post 对图文分类逐个判定，结果入 verdicts 表。
  *
  * 判定语义（LLM 优先，用户拍板；判决链精确映射）：
  * - 无 llmPrompt 的分类：永远只走 deterministic 档（matchCategoryItem），与 LLM 开关无关
  * - 有 llmPrompt 的分类：链序 llm → deterministic——llm 可用时定案（说「否」不回看确定性
  *   条件，空 Map 也算定案）；不可用 / 调用失败 / 解析失败时交 deterministic 兜底
  * - decision 档（决策模型）本期只定义类型不进链
- * - LLM 分类对全部监听主播生效（v2 起 analyze 开关随面板三开关一并删除）
+ * - LLM 分类对全部监听主播 / 名单账号生效（v2 起 analyze 开关随面板三开关一并删除）
+ *
+ * 落档口径两形态（A.4）：post 侧 LLM 判否也落 pass=0（「为什么没推」可回看）；
+ * 直播侧保持只记「属于」。classify() 返回值只含 pass=true（= 被判属于的分类）。
  *
  * 熔断状态在 providers 层：服务异常 = completeJson 抛错 → 当场回退，无需额外状态。
  */
@@ -107,33 +111,41 @@ export class RulesClassifier implements Classifier {
   ) {}
 
   async classify(ctx: AnalysisContext): Promise<Classification[]> {
-    if (ctx.signal.kind !== 'live_start') return [];
-    const item = fromLiveEvent(ctx.event);
-    const cats = this.db.listEnabledCategories();
+    const item = ctx.signal.kind === 'live_start' && ctx.event
+      ? fromLiveEvent(ctx.event)
+      : ctx.signal.kind === 'feed_post' && ctx.post
+        ? fromPostCandidate(ctx.post.post, ctx.post.imageDataUrls)
+        : null;
+    if (item === null) return [];
+    const isPost = item.subjectType === 'post';
+    const cats = this.db.listEnabledCategories().filter((c) => c.appliesTo === item.subjectType);
     const jctx: JudgeContext = { getRouter: this.getRouter, llmEnabled: this.llmEnabled };
-    const out: Classification[] = [];
+    const judged: Classification[] = [];
 
     const deterministicOnly = cats.filter((c) => !c.llmPrompt);
     if (deterministicOnly.length > 0) {
-      out.push(...(await runJudgeChain([deterministicJudge], item, deterministicOnly, jctx)).values());
+      judged.push(...(await runJudgeChain([deterministicJudge], item, deterministicOnly, jctx)).values());
     }
 
     const promptCats = cats.filter((c) => c.llmPrompt);
     if (promptCats.length > 0) {
-      out.push(...(await runJudgeChain([llmJudge, deterministicJudge], item, promptCats, jctx)).values());
+      judged.push(...(await runJudgeChain([llmJudge, deterministicJudge], item, promptCats, jctx)).values());
     }
 
-    for (const c of out) {
+    for (const c of judged) {
+      // post 侧 LLM 判否（pass=false）也落档；直播侧保持只记「属于」
+      if (!isPost && c.pass === false) continue;
       // INSERT OR IGNORE：同一主体同一分类重复判定静默跳过
       this.db.insertVerdict({
-        subjectType: 'live',
+        subjectType: item.subjectType,
         subjectId: item.subjectId,
         uid: item.uid,
         categoryId: c.categoryId, categoryName: c.name,
         ruleId: 0,
         source: c.source, confidence: c.confidence, evidence: c.evidence,
+        ...(c.pass === false ? { pass: false } : {}),
       });
     }
-    return out;
+    return judged.filter((c) => c.pass !== false);
   }
 }

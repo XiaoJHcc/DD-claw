@@ -27,7 +27,7 @@ export function splitCsv(v) {
 // 轮询一律是 GET，天然被挡在门外。
 const CONFIG_WRITE_PREFIXES = [
   '/api/llm', '/api/advanced', '/api/categories', '/api/rules', '/api/channels',
-  '/api/post-rules', '/api/streamers', '/api/follows', '/api/listen', '/api/push',
+  '/api/streamers', '/api/follows', '/api/listen', '/api/push',
   '/api/x', '/api/weibo', '/api/bili', '/api/napcat', '/api/chat/mode', '/api/chat/provider',
 ];
 function isConfigWrite(path, method) {

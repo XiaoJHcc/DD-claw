@@ -233,11 +233,13 @@ const COLUMN_NAMES: Record<string, Record<string, string>> = {
   settings: { key: '键名', value: '值' },
   categories: {
     name: '名称', llm_prompt: 'LLM 提示词', keywords: '关键词', areas: '分区',
+    applies_to: '适用内容', post_types: '帖子类型', require_quote: '必须引用', require_media: '必须带图',
     cond_mode: '条件关系', enabled: '启用', sort: '位置',
   },
   push_rules: {
-    name: '名称', category_id: '分类', uids: '生效主播', channels: '推送渠道',
-    message_template: '推送词', enabled: '启用', sort: '位置', created_by: '创建来源',
+    name: '名称', subject_kind: '内容形态', category_id: '分类', scope: '生效范围', uids: '生效主播（旧字段）',
+    channels: '推送渠道', message_template: '推送词', llm_translate: '翻译',
+    enabled: '启用', sort: '位置', created_by: '创建来源',
   },
   push_channels: {
     name: '名称', notifier: '通道类型', target_type: '目标类型', target_id: '目标 ID',
@@ -325,8 +327,8 @@ export function undoRowAction(img: RowImage): UndoRowAction {
 
 /** 整数 0/1 布尔列（按表；忽略列进不了这里） */
 const BOOL_COLUMNS: Record<string, readonly string[]> = {
-  categories: ['enabled'],
-  push_rules: ['enabled'],
+  categories: ['enabled', 'require_quote', 'require_media'],
+  push_rules: ['enabled', 'llm_translate'],
   push_channels: ['enabled'],
   post_rules: ['enabled', 'llm_judge', 'llm_translate'],
   streamers: ['watch', 'analyze', 'notify'],
@@ -344,8 +346,8 @@ const BOOL_SETTING_KEYS: readonly string[] = [
 
 /** JSON 数组列 → 顿号连接（存的是 JSON 文本；解析失败回退原文截断） */
 const JSON_COLUMNS: Record<string, readonly string[]> = {
-  categories: ['keywords', 'areas'],
-  push_rules: ['uids', 'channels'],
+  categories: ['keywords', 'areas', 'post_types'],
+  push_rules: ['scope', 'uids', 'channels'],
   post_rules: ['channels', 'filters'],
   x_accounts: ['rule_ids'],
   weibo_accounts: ['rule_ids'],
@@ -366,6 +368,9 @@ const SECRET_SETTING_KEYS: readonly string[] = ['mcp_tokens'];
 /** 小枚举列 → 中文（`表.列` 为键） */
 const ENUM_VALUES: Record<string, Record<string, string>> = {
   'categories.cond_mode': { and: '且', or: '或' },
+  'categories.applies_to': { live: '直播', post: '图文' },
+  'categories.post_types': { original: '原创', retweet: '转发' },
+  'push_rules.subject_kind': { live: '直播', post: '图文' },
   'push_channels.notifier': { onebot: 'NapCat', toast: '本机 Toast' },
   'push_channels.target_type': { group: 'QQ 群', private: '私聊' },
 };
@@ -402,9 +407,13 @@ function formatValue(table: string, column: string, v: unknown, settingKey?: str
     return `${String(v)} ${unit}`;
   }
   if (JSON_COLUMNS[table]?.includes(column) ?? false) {
+    // 数组元素若是小枚举（如 categories.post_types 的 original/retweet）按枚举表译名
+    const elemMap = ENUM_VALUES[`${table}.${column}`];
     try {
       const parsed: unknown = JSON.parse(String(v));
-      if (Array.isArray(parsed)) return truncate(parsed.map((x) => String(x)).join('、')) || '（空）';
+      if (Array.isArray(parsed)) {
+        return truncate(parsed.map((x) => (elemMap?.[String(x)] ?? String(x))).join('、')) || '（空）';
+      }
       return truncate(JSON.stringify(parsed));
     } catch { return truncate(String(v)); }
   }
@@ -483,6 +492,7 @@ function boolVerbHeadline(img: RowImage): string | null {
     if (col === 'analyze') return `${on ? '开启了' : '关闭了'}${objectPart(label)}的 LLM 分析`;
     if (col === 'notify') return `${on ? '开启了' : '关闭了'}${objectPart(label)}的推送`;
   }
+  if (img.table === 'push_rules' && col === 'llm_translate') return `${on ? '开启了' : '关闭了'}${label}的翻译`;
   if (img.table === 'post_rules' && col === 'llm_judge') return `${on ? '开启了' : '关闭了'}${label}的 LLM 判定`;
   if (img.table === 'post_rules' && col === 'llm_translate') return `${on ? '开启了' : '关闭了'}${label}的翻译`;
   return null;
