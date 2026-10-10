@@ -278,6 +278,7 @@ export class Pipeline {
         : { screenName: (account as BiliAccount).uid, displayName: (account as BiliAccount).displayName ?? (account as BiliAccount).uname };
     const post: PostCandidate = {
       platform,
+      itemId: p.itemId ?? '',
       accountId: account.id,
       ruleIds: account.ruleIds,
       screenName: ident.screenName,

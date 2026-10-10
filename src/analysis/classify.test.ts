@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { Db } from '../core/db.js';
 import { toLiveEvent, type LiveStatus, type Signal } from '../core/types.js';
 import type { NewCategory } from '../core/push.js';
-import { RulesClassifier } from './classifier.js';
+import { RulesClassifier, runJudgeChain, deterministicJudge, llmJudge } from './classifier.js';
+import { fromLiveEvent } from './content.js';
 import {
   buildClassifyRequest, parseClassifyResults, toClassifyCategory, MIN_CONFIDENCE,
   type ClassifyCategory,
@@ -64,7 +65,7 @@ function fakeRouter(impl: CompleteJson): { router: LlmRouter; calls: LlmRequest[
 // ---- tasks/classify：请求构建 ----
 
 test('buildClassifyRequest：直播信息 + 分类清单进 user 文本，关键帧进图片部件', () => {
-  const req = buildClassifyRequest(ctx().event, CATS);
+  const req = buildClassifyRequest(fromLiveEvent(ctx().event), CATS);
   assert.equal(req.messages.length, 2);
   assert.equal(req.messages[0]!.role, 'system');
   const content = req.messages[1]!.content;
@@ -84,11 +85,11 @@ test('buildClassifyRequest：直播信息 + 分类清单进 user 文本，关键
 });
 
 test('buildClassifyRequest：无关键帧用封面兜底，都无图则纯文本', () => {
-  const withCover = buildClassifyRequest(ctx('live_start', { keyframe: '', cover: 'c.jpg' }).event, CATS);
+  const withCover = buildClassifyRequest(fromLiveEvent(ctx('live_start', { keyframe: '', cover: 'c.jpg' }).event), CATS);
   const c1 = withCover.messages[1]!.content;
   assert.ok(Array.isArray(c1) && c1.some((p) => p.type === 'image_url' && p.image_url.url === 'c.jpg'));
 
-  const noImage = buildClassifyRequest(ctx('live_start', { keyframe: '', cover: '' }).event, CATS);
+  const noImage = buildClassifyRequest(fromLiveEvent(ctx('live_start', { keyframe: '', cover: '' }).event), CATS);
   const c2 = noImage.messages[1]!.content;
   assert.ok(Array.isArray(c2) && !c2.some((p) => p.type === 'image_url'), '无图 = 纯文本（走 text 路由）');
 });
@@ -234,4 +235,50 @@ test('verdicts 入库去重：同一场重复判定只留一条', async (t) => {
   await clf.classify(ctx());
   await clf.classify(ctx());
   assert.equal(db.listVerdicts('live', 'r1:1785310737').length, 1, 'UNIQUE(subject_type, subject_id, category_id, rule_id) 去重');
+});
+
+// ---- 判决链（runJudgeChain / 各档）----
+
+test('runJudgeChain：首个非 null 档定案，空 Map 也是定案（不落到下一档）', async () => {
+  const item = fromLiveEvent(ctx().event);
+  const cats = [{ id: 1, name: '歌回', llmPrompt: '在唱歌', keywords: ['歌'], areas: [], condMode: 'and', enabled: true, createdAt: 0, updatedAt: 0 }];
+  const ctxJ = {
+    getRouter: () => null,
+    llmEnabled: () => true,
+  };
+  // llm 档返回空 Map（权威判否）→ 不交给 deterministic（关键词本可命中）
+  const emptyLlm = { name: 'llm', judge: async () => new Map() } as typeof llmJudge;
+  const viaLlm = await runJudgeChain([emptyLlm, deterministicJudge], item, cats, ctxJ);
+  assert.equal(viaLlm.size, 0, 'llm 定案空 Map = 判否，不回看确定性');
+
+  // llm 档返回 null（不可用）→ 交 deterministic
+  const offLlm = { name: 'llm', judge: async () => null } as typeof llmJudge;
+  const viaDet = await runJudgeChain([offLlm, deterministicJudge], item, cats, ctxJ);
+  assert.deepEqual([...viaDet.keys()], [1]);
+  assert.equal(viaDet.get(1)!.source, 'rule');
+
+  // 全档 null → 空 Map
+  const allOff = await runJudgeChain([offLlm], item, cats, ctxJ);
+  assert.equal(allOff.size, 0);
+});
+
+test('llmJudge：无 provider / 总开关关返回 null；调用失败返回 null（交下一档）', async () => {
+  const item = fromLiveEvent(ctx().event);
+  const cats = [{ id: 1, name: '歌回', llmPrompt: '在唱歌', keywords: [], areas: [], condMode: 'and', enabled: true, createdAt: 0, updatedAt: 0 }];
+  assert.equal(await llmJudge.judge(item, cats, { getRouter: () => null, llmEnabled: () => true }), null);
+
+  const { router, calls } = fakeRouter(async () => { throw new Error('boom'); });
+  assert.equal(await llmJudge.judge(item, cats, { getRouter: () => router, llmEnabled: () => false }), null);
+  assert.equal(calls.length, 0, '总开关关不调 LLM');
+  assert.equal(await llmJudge.judge(item, cats, { getRouter: () => router, llmEnabled: () => true }), null, '调用失败交下一档');
+  assert.equal(calls.length, 1);
+});
+
+test('deterministicJudge：命中才入 Map（键 = 分类 id，source=rule）', async () => {
+  const item = fromLiveEvent(ctx().event);
+  const hit = { id: 1, name: '歌回', llmPrompt: null, keywords: ['歌'], areas: [], condMode: 'and', enabled: true, createdAt: 0, updatedAt: 0 };
+  const miss = { ...hit, id: 2, name: '游戏', keywords: ['APEX'] };
+  const out = await deterministicJudge.judge(item, [hit, miss], { getRouter: () => null, llmEnabled: () => false });
+  assert.deepEqual([...out.keys()], [1]);
+  assert.deepEqual(out.get(1), { categoryId: 1, name: '歌回', source: 'rule', confidence: null, evidence: '命中关键词「歌」' });
 });

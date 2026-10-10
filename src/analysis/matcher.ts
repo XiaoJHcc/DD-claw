@@ -1,6 +1,7 @@
 import type { LiveEvent } from '../core/types.js';
-import type { Category, PushRule } from '../core/push.js';
+import type { Category, CondMode, PushRule } from '../core/push.js';
 import type { PostFilters, PostPlatform, PostRule } from '../core/post-rules.js';
+import { fromLiveEvent, type ContentItem } from './content.js';
 
 export interface CategoryMatch {
   matched: boolean;
@@ -8,30 +9,88 @@ export interface CategoryMatch {
   evidence: string;
 }
 
+// ---- 条件算子注册表：分类条件组的确定性判定按算子注册（图文 filters 的算子 P2b 接入）----
+
+/** 条件算子：对一组条件串判定内容项，返回命中证据文案或 null（未命中） */
+export interface ConditionOperator {
+  id: string;
+  /** 适用的内容类型；不适用的算子一律按未命中处理 */
+  appliesTo: Array<'live' | 'post'>;
+  test(condValue: string[], item: ContentItem): string | null;
+}
+
+/** keyword：text 大小写不敏感子串，任一命中（证据用配置串原文） */
+const keywordOperator: ConditionOperator = {
+  id: 'keyword',
+  appliesTo: ['live', 'post'],
+  test(condValue, item) {
+    const text = item.text.toLowerCase();
+    const hit = condValue.find((k) => text.includes(k.toLowerCase()));
+    return hit !== undefined ? `关键词「${hit}」` : null;
+  },
+};
+
+/** area：仅 live，对 tags.area / tags.parentArea（两分区拼一行再子串，口径同旧实现） */
+const areaOperator: ConditionOperator = {
+  id: 'area',
+  appliesTo: ['live'],
+  test(condValue, item) {
+    const hay = `${item.tags.area ?? ''}\n${item.tags.parentArea ?? ''}`.toLowerCase();
+    const hit = condValue.find((a) => hay.includes(a.toLowerCase()));
+    return hit !== undefined ? `分区「${hit}」` : null;
+  },
+};
+
+/** 条件算子注册表（首批：keyword / area；postType、media 等 P2b 随 filters 上移进分类时注册） */
+export const CONDITION_OPERATORS: Readonly<Record<string, ConditionOperator>> = {
+  keyword: keywordOperator,
+  area: areaOperator,
+};
+
+function testOperator(op: ConditionOperator, condValue: string[], item: ContentItem): string | null {
+  return op.appliesTo.includes(item.subjectType) ? op.test(condValue, item) : null;
+}
+
 /**
- * 分类规则的确定性判定（零 LLM 依赖）：
- * - keywords 组 → event.title 大小写不敏感子串命中任一
- * - areas 组 → areaName / parentAreaName 任一字段子串命中任一
- * - condMode 控制两组间关系：'and' 都中 / 'or' 任一中；空组忽略（只剩一组按该组判）
- * - 两组皆空 → 不命中（纯 LLM 分类不该被确定性路径误判为恒中）
+ * 条件组判定（算子注册表版，分类与未来的图文 filters 共用）：
+ * - 每组 = 算子 + 条件串列表；空组忽略（只剩一组按该组判）
+ * - condMode 控制组间关系：'and' 都中 / 'or' 任一中
+ * - 无有效组 → 不命中（纯 LLM 分类不该被确定性路径误判为恒中）
+ * - evidence = 命中的组证据按组序拼「命中关键词「xx」、分区「yy」」（部分组命中也照记）
+ */
+function matchByGroups(
+  groups: ReadonlyArray<{ op: ConditionOperator; values: string[] }>,
+  item: ContentItem,
+  condMode: CondMode,
+): CategoryMatch {
+  const active = groups.filter((g) => g.values.length > 0);
+  if (active.length === 0) return { matched: false, evidence: '' };
+  const hits = active
+    .map((g) => testOperator(g.op, g.values, item))
+    .filter((s): s is string => s !== null);
+  const matched = condMode === 'or' ? hits.length > 0 : hits.length === active.length;
+  return { matched, evidence: hits.length > 0 ? `命中${hits.join('、')}` : '' };
+}
+
+/** 分类判定的内容项入口（matchCategory 的 ContentItem 形态） */
+export function matchCategoryItem(cat: Category, item: ContentItem): CategoryMatch {
+  return matchByGroups(
+    [
+      { op: keywordOperator, values: cat.keywords },
+      { op: areaOperator, values: cat.areas },
+    ],
+    item,
+    cat.condMode,
+  );
+}
+
+/**
+ * 分类规则的确定性判定（零 LLM 依赖）：投影 ContentItem 后走条件算子注册表。
+ * - keywords 组 → keyword 算子（text 子串）；areas 组 → area 算子（分区标签）
+ * - condMode / 空组忽略 / 两组皆空不命中 / evidence 格式与旧实现逐字一致
  */
 export function matchCategory(cat: Category, event: LiveEvent): CategoryMatch {
-  const title = event.title.toLowerCase();
-  const area = `${event.areaName}\n${event.parentAreaName}`.toLowerCase();
-  const keywordHit = cat.keywords.find((k) => title.includes(k.toLowerCase()));
-  const areaHit = cat.areas.find((a) => area.includes(a.toLowerCase()));
-  const hasKeywords = cat.keywords.length > 0;
-  const hasAreas = cat.areas.length > 0;
-
-  let matched: boolean;
-  if (!hasKeywords && !hasAreas) return { matched: false, evidence: '' };
-  else if (cat.condMode === 'or') matched = keywordHit !== undefined || areaHit !== undefined;
-  else matched = (!hasKeywords || keywordHit !== undefined) && (!hasAreas || areaHit !== undefined);
-
-  const parts: string[] = [];
-  if (keywordHit !== undefined) parts.push(`关键词「${keywordHit}」`);
-  if (areaHit !== undefined) parts.push(`分区「${areaHit}」`);
-  return { matched, evidence: parts.length > 0 ? `命中${parts.join('、')}` : '' };
+  return matchCategoryItem(cat, fromLiveEvent(event));
 }
 
 /**
@@ -119,6 +178,8 @@ export interface PostCandidate {
   /** 帖子来源平台：决定文案措辞（{author}/「推文/微博/动态」）、quote 语义与 LLM 翻译门控；
    *  规则不再按平台分流，命中只看账号侧 ruleIds + 机械筛选 */
   platform: PostPlatform;
+  /** 帖子平台内唯一 id（posts.item_id / feed_post 载荷）；ContentItem.subjectId 用它拼 `platform:itemId` */
+  itemId?: string;
   /** 对应平台名单的行 id（x_accounts / weibo_accounts / bili_accounts） */
   accountId: number;
   /** 该账号选用的图文帖规则（账号行的 ruleIds）；空 = 一律不推 */

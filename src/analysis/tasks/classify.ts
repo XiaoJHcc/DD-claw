@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import type { LiveEvent } from '../../core/types.js';
 import type { Category } from '../../core/push.js';
 import type { ContentPart, LlmRequest } from '../providers.js';
+import type { ContentItem } from '../content.js';
 import type { Classification } from '../types.js';
 
 /**
@@ -33,19 +33,18 @@ const SYSTEM_PROMPT =
   '你是直播内容分类器。逐项判断当前直播是否属于用户给出的每个分类，' +
   '严格按 JSON schema 输出，不要输出任何多余内容。';
 
-export function buildClassifyRequest(event: LiveEvent, categories: ClassifyCategory[]): LlmRequest {
+export function buildClassifyRequest(item: ContentItem, categories: ClassifyCategory[]): LlmRequest {
   const text = [
-    `主播：${event.uname || event.alias}`,
-    `标题：${event.title}`,
-    `分区：${event.parentAreaName} / ${event.areaName}`,
+    `主播：${item.authorName}`,
+    `标题：${item.text}`,
+    `分区：${item.tags.parentArea ?? ''} / ${item.tags.area ?? ''}`,
     '',
     '分类清单（id、名称、判定提示词）：',
     ...categories.map((c) => `- id=${c.id} 「${c.name}」：${c.prompt}`),
   ].join('\n');
   const content: ContentPart[] = [{ type: 'text', text }];
-  // 开播瞬间常无关键帧，封面兜底；带图自动走 vision 路由
-  const image = event.keyframe || event.cover;
-  if (image) content.push({ type: 'image_url', image_url: { url: image } });
+  // 开播瞬间常无关键帧，封面兜底（fromLiveEvent 已折叠）；带图自动走 vision 路由
+  for (const image of item.imageUrls) content.push({ type: 'image_url', image_url: { url: image } });
   return {
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
