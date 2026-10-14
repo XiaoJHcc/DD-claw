@@ -722,6 +722,21 @@ test('search_posts：platform=twitter 可检索 X 归档；set_listen 支持 twi
   assert.equal(f.db.getSetting('listen_twitter'), '0');
 });
 
+test('gateway 开播自助规则不能引用图文分类', async (t) => {
+  const fixture = await setup(t);
+  const { groupChannelId } = seedBase(fixture.db);
+  const categoryId = fixture.db.upsertCategory({
+    name: '图文带图', appliesTo: 'post', requireMedia: true,
+    llmPrompt: null, keywords: [], areas: [], condMode: 'and', enabled: true,
+  });
+  const gateway = await gwClient(fixture, 'type-boundary', groupChannelId);
+  await assert.rejects(
+    () => call(gateway, 'add_group_push_rule', { uid: '7706705', categoryId }),
+    /内容类型不一致/,
+  );
+  assert.equal(fixture.db.listPushRules().length, 0);
+});
+
 test('分类 + 图文规则工具：applies_to/post 条件组、引用校验、scope 账号引用校验、合并后校验', async (t) => {
   const f = await setup(t);
   const adm = await mcpClient(f, ADMIN_TOKEN);
@@ -738,6 +753,19 @@ test('分类 + 图文规则工具：applies_to/post 条件组、引用校验、s
   assert.equal(row.appliesTo, 'post');
   assert.deepEqual(row.postTypes, ['original']);
   assert.equal(row.requireMedia, true);
+
+  await assert.rejects(
+    () => call(adm, 'upsert_push_rule', { categoryId: cat.id }),
+    /内容类型不一致/,
+  );
+  await assert.rejects(
+    () => call(adm, 'upsert_category', { id: cat.id, appliesTo: 'live' }),
+    /内容类型不可更改/,
+  );
+  await assert.rejects(
+    () => call(adm, 'upsert_category', { id: cat.id, areas: ['游戏'] }),
+    /图文分类不能配置直播分区/,
+  );
 
   // 死分类拒绝：所有条件组皆空且无 LLM 提示词
   await assert.rejects(

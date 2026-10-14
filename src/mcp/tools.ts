@@ -676,7 +676,7 @@ const adminTools: McpToolDef[] = [
       llmPrompt: z.string().nullable().optional().describe('LLM 判定提示词；null/空串 = 纯确定性分类'),
       keywords: z.array(z.string()).optional().describe('标题/正文关键词，命中任一即可'),
       areas: z.array(z.string()).optional().describe('分区（仅直播分类）'),
-      appliesTo: z.enum(['live', 'post']).optional().describe('分类服务的内容类型：live=直播场次 / post=图文帖'),
+      appliesTo: z.enum(['live', 'post']).optional().describe('分类服务的内容类型：live=直播场次 / post=图文帖；新建后不可更改'),
       postTypes: z.array(z.enum(['original', 'retweet'])).optional()
         .describe('帖子类型条件（仅图文分类）：勾选集合，空 = 不限'),
       requireQuote: z.boolean().optional().describe('必须是引用帖（仅图文分类；只有 X 帖可能命中）'),
@@ -699,8 +699,12 @@ const adminTools: McpToolDef[] = [
       const prev = deps.db.listCategories().find((c) => c.id === id);
       if (!prev) throw new HttpError(404, '分类不存在');
       const patch = parseCategoryPatch(pickBody(args, keys));
+      if (patch.appliesTo !== undefined && patch.appliesTo !== prev.appliesTo) {
+        throw new HttpError(400, '分类的内容类型不可更改，请在对应页面新增分类');
+      }
       // 条件校验对合并后的形状做（同面板 PUT）
       checkCategoryConditions({
+        appliesTo: prev.appliesTo,
         llmPrompt: patch.llmPrompt !== undefined ? patch.llmPrompt : prev.llmPrompt,
         keywords: patch.keywords ?? prev.keywords,
         areas: patch.areas ?? prev.areas,
@@ -1074,9 +1078,7 @@ const gatewayTools: McpToolDef[] = [
         throw new HttpError(400, '该主播不在监听名单（想监听新主播请联系主人在面板添加）');
       }
       const categoryId = (args.categoryId as number | null | undefined) ?? null;
-      if (categoryId !== null && !deps.db.listCategories().some((c) => c.id === categoryId)) {
-        throw new HttpError(400, '分类不存在');
-      }
+      checkRuleRefs(deps.db, { subjectKind: 'live', categoryId, scope: [uid], channels: [channelId] });
       const mine = deps.db.listPushRules()
         .filter((r) => r.createdBy === 'mcp' && r.channels.includes(channelId));
       if (mine.length >= MAX_MCP_RULES_PER_CHANNEL) {

@@ -1,11 +1,10 @@
 // 面板前端 · 卡片「推送渠道」+「推送规则」两张独立小卡（v2 形态）：
 // 渠道卡 = 总开关（卡片右上角）+ 渠道行列表（拖拽把手/启停勾/名称+类型标签/副行「类型 · 目标号」，
 // 双行档 .row-2）+ 底部新增渠道按钮，本文件自管；规则卡 = **统一规则组件**（rules.js）渲染的
-// 规则行（直播与图文同表混排，图文行带「图文」标签）+ 底部添加规则按钮。规则的行渲染/弹窗/
 // 作用域编辑/启停删除全部走 rules.js（与图文页「图文规则」卡同一组件、同一交互语言）。
 // 渠道的新增/编辑走一级 sheet。规则整体不可达（ruleDeadReason，core.js）时整行置灰 + 标题划线，
 // 副行只留不可达原因；勾选状态不受影响，恢复引用对象即自动复原。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, makeSortable, openSheet, closeSheet, dropdownHtml, onTableRefresh } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, checkRowHtml, chanTypeName, makeSortable, mergeVisibleOrder, openSheet, closeSheet, dropdownHtml, onTableRefresh } from './core.js';
 import { loadRuleCard, getRuleCardData, ruleRowHtml, openRuleSheet, onRulesChanged } from './rules.js';
 import { icon } from './icons.js';
 import { loadStreamers } from './streamers.js';
@@ -35,10 +34,9 @@ export function loadPush() {
     if (en) en.checked = rs[0].enabled;
     chCache = rs[1].channels;
     document.getElementById('channel-list').innerHTML = chCache.map(channelRowHtml).join('');
-    // 规则行混排（直播 + 图文）：图文行补「图文」标签，其余交给统一组件
-    ruleCache = rs[1].rules;
+    ruleCache = rs[1].rules.filter(function (r) { return (r.subjectKind || 'live') === 'live'; });
     const list = document.getElementById('rule-list');
-    if (list) list.innerHTML = ruleCache.map(function (r) { return ruleRowHtml(r, { showKindTag: true }); }).join('');
+    if (list) list.innerHTML = ruleCache.map(ruleRowHtml).join('');
   }).catch(function (e) { toast(e.message, true); });
 }
 
@@ -148,12 +146,11 @@ makeSortable(document.getElementById('channel-list'), {
   },
 });
 
-// 拖拽排序：规则全局顺序 = 匹配优先级（本卡混排直播与图文，交全排列）
 makeSortable(document.getElementById('rule-list'), {
   items: function () { return ruleCache; },
   getId: function (r) { return r.id; },
   onOrder: function (ids) {
-    api('/api/rules/order', 'PUT', { ids: ids })
+    api('/api/rules/order', 'PUT', { ids: mergeVisibleOrder(getRuleCardData().rules, ids) })
       .then(loadPush)
       .catch(function (err) { toast(err.message, true); loadPush(); });
   },
@@ -239,7 +236,6 @@ ACTIONS['save-push-settings'] = function () {
 };
 
 loadPush();
-// 规则任一入口（本卡 / 图文页 / 账号浮窗反向勾选）写成功后：本卡规则区 + 主播卡规则标签一起刷新
 onRulesChanged(function () { loadPush(); loadStreamers(); });
 // 一次拉全（推送开关 / 渠道 / 规则·分类·名单·账号〔rules.js 共享缓存〕）——这些表任一被撤销
 // 都靠它拉回真实态；登记为同一个函数，refreshTables 的去重保证只跑一次。

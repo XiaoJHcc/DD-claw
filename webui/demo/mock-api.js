@@ -445,6 +445,45 @@ function isMockConfigWrite(method, path) {
 }
 
 // ---- 路由 ----
+function categoryError(category) {
+  const kind = category.appliesTo || 'live';
+  if (kind !== 'live' && kind !== 'post') return 'appliesTo 必须是 live 或 post';
+  if (kind === 'live' && ((category.postTypes || []).length || category.requireQuote || category.requireMedia)) {
+    return '直播分类不能配置帖子类型、引用或带图条件';
+  }
+  if (kind === 'post' && (category.areas || []).length) return '图文分类不能配置直播分区条件';
+  if (!(category.llmPrompt || '').trim() && !(category.keywords || []).length
+    && !(category.areas || []).length && !(category.postTypes || []).length
+    && !category.requireQuote && !category.requireMedia) return '至少配置 LLM 提示词或一组确定性条件（关键词/分区/帖子类型/引用/带图）';
+  return null;
+}
+
+function ruleRefsError(rule) {
+  if (rule.categoryId != null) {
+    const category = store.categories.find((category) => category.id === rule.categoryId);
+    if (!category) return '分类不存在';
+    if ((category.appliesTo || 'live') !== (rule.subjectKind || 'live')) return '分类与推送规则的内容类型不一致';
+  }
+  if ((rule.channels || []).some((id) => !store.channels.some((channel) => channel.id === id))) return '渠道不存在';
+  for (const ref of rule.scope || []) {
+    if ((rule.subjectKind || 'live') === 'live') {
+      if (!store.streamers.some((streamer) => String(streamer.uid) === ref)) return '主播不在监听名单: ' + ref;
+    } else {
+      const [platform, key] = ref.split(':');
+      const exists = platform === 'twitter' ? store.xAccounts.some((account) => account.screenName === key)
+        : platform === 'weibo' ? store.weiboAccounts.some((account) => account.uid === key)
+        : platform === 'bili' && store.biliAccounts.some((account) => account.uid === key);
+      if (!exists) return '账号引用不存在: ' + ref;
+    }
+  }
+  return null;
+}
+
+function orderError(items, ids) {
+  return !Array.isArray(ids) || ids.length !== items.length || new Set(ids).size !== ids.length
+    || ids.some((id) => !items.some((item) => item.id === id)) ? 'ids 必须包含全部现有 id，且不能重复' : null;
+}
+
 function handle(method, path, q, rawBody) {
   const body = () => { try { return JSON.parse(rawBody || '{}'); } catch { return {}; } };
 
@@ -972,6 +1011,8 @@ for (const p of store.twitterPosts) {
   if (path === '/api/categories' && method === 'GET') return ok({ categories: store.categories });
   if (path === '/api/categories' && method === 'POST') {
     const b = body();
+    const error = categoryError(b);
+    if (error) return err(400, error);
     const id = store.categories.reduce((m, c) => Math.max(m, c.id), 0) + 1;
     store.categories.push({
       id, name: b.name || ('分类 ' + id),
@@ -980,13 +1021,15 @@ for (const p of store.twitterPosts) {
       appliesTo: b.appliesTo || 'live',
       postTypes: b.postTypes || [],
       requireQuote: !!b.requireQuote, requireMedia: !!b.requireMedia,
-      condMode: b.condMode || 'and', enabled: true,
+      condMode: b.condMode || 'and', enabled: b.enabled !== false,
       createdAt: Date.now(), updatedAt: Date.now(),
     });
     return created({ id });
   }
   if (path === '/api/categories/order' && method === 'PUT') {
     const ids = body().ids || [];
+    const error = orderError(store.categories, ids);
+    if (error) return err(400, error);
     store.categories.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
     return ok({ ok: true });
   }
@@ -998,6 +1041,11 @@ for (const p of store.twitterPosts) {
       if (!c) return err(404, '分类不存在');
       if (method === 'PUT') {
         const b = body();
+        if (b.appliesTo !== undefined && b.appliesTo !== (c.appliesTo || 'live')) {
+          return err(400, '分类的内容类型不可更改，请在对应页面新增分类');
+        }
+        const error = categoryError({ ...c, ...b });
+        if (error) return err(400, error);
         for (const k of ['name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia', 'condMode']) if (b[k] !== undefined) c[k] = b[k];
         if (typeof b.enabled === 'boolean') c.enabled = b.enabled;
         return ok({ ok: true });
@@ -1022,6 +1070,8 @@ for (const p of store.twitterPosts) {
   }
   if (path === '/api/rules' && method === 'POST') {
     const b = body();
+    const error = ruleRefsError(b);
+    if (error) return err(400, error);
     const id = store.rules.reduce((m, r) => Math.max(m, r.id), 0) + 1;
     if (b.channels && b.channels.some((cid) => !store.channels.some((c) => c.id === cid))) {
       return json(400, { error: '渠道不存在' });
@@ -1033,13 +1083,15 @@ for (const p of store.twitterPosts) {
       scope: b.scope || [], channels: b.channels || [],
       messageTemplate: b.messageTemplate ?? null,
       llmTranslate: b.llmTranslate === true,
-      enabled: true,
+      enabled: b.enabled !== false,
       createdAt: Date.now(), updatedAt: Date.now(),
     });
     return created({ id });
   }
   if (path === '/api/rules/order' && method === 'PUT') {
     const ids = body().ids || [];
+    const error = orderError(store.rules, ids);
+    if (error) return err(400, error);
     store.rules.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
     return ok({ ok: true });
   }
@@ -1051,6 +1103,8 @@ for (const p of store.twitterPosts) {
       if (!r) return err(404, '规则不存在');
       if (method === 'PUT') {
         const b = body();
+        const error = ruleRefsError({ ...r, ...b });
+        if (error) return err(400, error);
         if (b.channels && b.channels.some((cid) => !store.channels.some((c) => c.id === cid))) {
           return json(400, { error: '渠道不存在' });
         }

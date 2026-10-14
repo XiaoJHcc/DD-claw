@@ -194,6 +194,12 @@ export function checkRowHtml(attrs, checked, innerHtml, extraClass) {
 // 分类已停用（分类判定只跑启用分类，永不命中）/ 分类与内容形态不符（分类只服务另一种内容，
 // 判定集里永远没有它）/ 未选渠道（命中后渠道并集为空不推）/ 渠道不可用（所选渠道全部停用或
 // 已删除，dispatcher 只发「选中且启用」）。uids 全为主播 watch=0 属临时态，不算死态。
+export function mergeVisibleOrder(items, ids) {
+  const visible = new Set(ids);
+  let next = 0;
+  return items.map(function (item) { return visible.has(item.id) ? ids[next++] : item.id; });
+}
+
 export function ruleDeadReason(r, cats, chans) {
   if (!r.enabled) return '已停用';
   if (r.categoryId != null) {
@@ -304,23 +310,36 @@ function ddSyncTrigger(id) {
   const sel = document.getElementById(id);
   const labelEl = document.querySelector('.dd-trigger[data-dd="' + id + '"] .dd-value');
   if (!sel || !labelEl) return;
+  if (sel.multiple) {
+    const selected = Array.from(sel.selectedOptions);
+    labelEl.textContent = selected.length ? selected.map(function (option) { return option.textContent; }).join('、') : sel.getAttribute('data-placeholder');
+    labelEl.classList.toggle('dd-placeholder', selected.length === 0);
+    labelEl.classList.remove('off');
+    return;
+  }
   const cur = sel.options[sel.selectedIndex];
   if (!cur) return;
   labelEl.textContent = cur.textContent;
   labelEl.classList.toggle('off', ddOptOff(cur));
 }
-export function dropdownHtml(id, options, value, changeAction) {
+export function dropdownHtml(id, options, value, changeAction, placeholder) {
   const opts = options || [];
+  const multiple = Array.isArray(value);
+  const selectedValues = multiple ? value.map(String) : [];
   const selIdx = Math.max(0, opts.findIndex(function (o) { return String(o.value) === String(value); }));
   const selOpts = opts.map(function (o, i) {
-    return `<option value="${esc(o.value)}"${i === selIdx ? ' selected' : ''}` +
+    const selected = multiple ? selectedValues.includes(String(o.value)) : i === selIdx;
+    return `<option value="${esc(o.value)}"${selected ? ' selected' : ''}` +
       `${o.off ? ' data-off="1"' : ''}>${esc(o.label)}</option>`;
   }).join('');
   const cur = opts[selIdx];
+  const selectedOpts = multiple ? opts.filter(function (option) { return selectedValues.includes(String(option.value)); }) : [];
+  const label = multiple ? (selectedOpts.length ? selectedOpts.map(function (option) { return option.label; }).join('、') : (placeholder || '请选择')) : (cur ? cur.label : '');
   return `<div class="dd"><select id="${id}" class="dd-native"` +
+    (multiple ? ` multiple data-placeholder="${esc(placeholder || '请选择')}"` : '') +
     `${changeAction ? ' data-change="' + changeAction + '"' : ''}>${selOpts}</select>` +
-    `<button type="button" class="dd-trigger" data-action="dd-toggle" data-dd="${id}">` +
-    `<span class="dd-value${cur && cur.off ? ' off' : ''}">${esc(cur ? cur.label : '')}</span>${ddCaret}</button></div>`;
+    `<button type="button" class="dd-trigger" data-action="dd-toggle" data-dd="${id}" aria-haspopup="listbox" aria-expanded="false">` +
+    `<span class="dd-value${multiple ? (selectedOpts.length ? '' : ' dd-placeholder') : (cur && cur.off ? ' off' : '')}">${esc(label)}</span>${ddCaret}</button></div>`;
 }
 export function ddSetValue(id, value) {
   const sel = document.getElementById(id);
@@ -342,11 +361,7 @@ function openDropDown(id) {
   const sel = document.getElementById(id);
   const trig = document.querySelector('.dd-trigger[data-dd="' + id + '"]');
   if (!sel || !trig) return;
-  if (openDd) {                 // 已有展开的下拉：先收起（不夺焦点）
-    const om = ddMenus[openDd];
-    if (om) { om.classList.remove('open'); om.classList.remove('show'); }
-    openDd = null;
-  }
+  if (openDd) closeDropDown();
   const rows = Array.prototype.map.call(sel.options, function (o) {
     return `<button type="button" role="option" aria-selected="${o.selected}" class="dd-opt${o.selected ? ' sel' : ''}` +
       `${ddOptOff(o) ? ' off' : ''}" data-action="dd-pick" data-dd="${id}" data-ddv="${esc(o.value)}">` +
@@ -361,6 +376,8 @@ function openDropDown(id) {
     ddMenus[id] = menu;
   }
   menu.innerHTML = rows;
+  menu.setAttribute('aria-multiselectable', String(sel.multiple));
+  trig.setAttribute('aria-expanded', 'true');
   menu.classList.remove('show');   // visibility:hidden 仍可测量，定位后再 visible
   menu.classList.add('open');      // display:block 供测量高度
   const r = trig.getBoundingClientRect();
@@ -380,6 +397,8 @@ function closeDropDown(refocus) {
   openDd = null;
   const menu = ddMenus[id];
   if (menu) { menu.classList.remove('open'); menu.classList.remove('show'); }
+  const trigger = document.querySelector('.dd-trigger[data-dd="' + id + '"]');
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
   if (refocus) {
     const trig = document.querySelector('.dd-trigger[data-dd="' + id + '"]');
     if (trig) trig.focus();
@@ -388,6 +407,20 @@ function closeDropDown(refocus) {
 function pickDropDown(id, value) {
   const sel = document.getElementById(id);
   if (!sel) return;
+  if (sel.multiple) {
+    const option = Array.from(sel.options).find(function (option) { return String(option.value) === String(value); });
+    if (!option) return;
+    option.selected = !option.selected;
+    ddSyncTrigger(id);
+    const menu = ddMenus[id];
+    if (menu) menu.querySelectorAll('.dd-opt').forEach(function (entry) {
+      if (entry.getAttribute('data-ddv') !== String(value)) return;
+      entry.classList.toggle('sel', option.selected);
+      entry.setAttribute('aria-selected', String(option.selected));
+    });
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    return;
+  }
   if (String(sel.value) !== String(value)) {
     sel.value = value;
     ddSyncTrigger(id); // 同步触发器文本与 off 态（引用对象停用时选中项划线）

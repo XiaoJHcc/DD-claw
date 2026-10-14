@@ -1,8 +1,5 @@
 // 面板前端 · 图文分页（X / 推特 + 微博 + B站动态；图文监听与直播监听是两种输入，共用推送渠道）。
 // 上半 = 三张来源卡（监听开关都在卡片头右上角，一卡一开关，同 NapCat/LLM/推送渠道卡形态）
-//   + 「图文规则」卡（= push_rules 里 subject_kind='post' 的行：拖拽排序 / 启停勾即改即存 /
-//   分类·范围·渠道摘要副行 / 编辑删除；判定口径在分类卡 applies_to=图文，规则只引用分类；
-//   生效范围在规则 scope——账号卡勾选反向改写它，同一份数据双向入口）：
 //   X 卡行区只显示连接可达性（出问题才多一行监听诊断）；代理/实例/间隔/回退全部收进「源设置」
 //   二级弹窗，测试按钮是控件右侧的方 icon——结果并入按钮自身：转圈 → 绿勾/红叉，原因进 hover
 //   提示，不往弹窗里插文字块、不动布局。微博卡 / B站动态卡 = 登录态行（扫码弹窗复用 listen.js，
@@ -12,15 +9,12 @@
 // 三张名单的自增 id 会撞，用户必须一眼看出账号是哪个平台）：
 // 卡面纯展示 = 身份段 + 规则摘要行 + 帖子段，整卡可点，账号字段在点击后的浮窗编辑
 // （添加浮窗顶部小 segnav 切 X/微博/B站，表单随之切换；微博「昵称 / uid」并排，失焦即解析
-// 回填另一个；B站从简 = uid/空间链接 + 显示名）。浮窗规则区 = 全部图文规则的勾选列表
-// （勾选 = 该规则对本账号生效，即改即存写规则 scope；空 scope = 全部生效，UI 有提示），
-// 行可点开进规则编辑二级浮窗。
 // 纪律：GET 只读后端快照（后端绝不在读取路径打网络），探测一律由弹窗里的测试 icon 显式触发；
 // 测试允许用输入框里还没保存的值（先测后存），未保存值的结果只动按钮、不污染卡片状态。
-import { api, toast, ACTIONS, CHANGES, INPUTS, esc, field, checkRowHtml, dropdownHtml, openSheet, closeSheet, sheetCleanups, switchHtml, iconBtn, checkDotHtml, makeSortable, avatarHtml, relTime, segnavHtml, layoutSegnav, segnavSelect, onTableRefresh } from './core.js';
+import { api, toast, ACTIONS, CHANGES, INPUTS, esc, field, checkRowHtml, dropdownHtml, openSheet, closeSheet, sheetCleanups, switchHtml, iconBtn, makeSortable, mergeVisibleOrder, avatarHtml, relTime, segnavHtml, layoutSegnav, segnavSelect, onTableRefresh } from './core.js';
 import { icon } from './icons.js';
 import { openPlatformLogin, PLAT_STATE, setLoginConfirmedHook } from './listen.js';
-import { loadRuleCard, ruleRowHtml, openRuleSheet, onRulesChanged, accountRef, allAccountRefs, ruleAppliesTo, ruleSub, deadReason, scopeTitle } from './rules.js';
+import { loadRuleCard, ruleRowHtml, openRuleSheet, onRulesChanged, accountRef, ruleAppliesTo, ruleSub, deadReason, scopeTitle } from './rules.js';
 
 let xState = null;
 let listenState = null;
@@ -347,15 +341,7 @@ makeSortable(document.getElementById('post-rule-list'), {
   items: function () { return postRuleCache; },
   getId: function (r) { return r.id; },
   onOrder: function (ids) {
-    const postSlots = [];
-    allRuleCache.forEach(function (r, i) { if (r.subjectKind === 'post') postSlots.push(i); });
-    const byId = {};
-    allRuleCache.forEach(function (r) { byId[r.id] = r; });
-    const merged = allRuleCache.map(function (r) { return r.subjectKind === 'live' ? r.id : null; });
-    ids.forEach(function (id, i) {
-      if (postSlots[i] !== undefined) merged[postSlots[i]] = Number(id);
-    });
-    api('/api/rules/order', 'PUT', { ids: merged })
+    api('/api/rules/order', 'PUT', { ids: mergeVisibleOrder(allRuleCache, ids) })
       .then(loadX)
       .catch(function (err) { toast(err.message, true); loadX(); });
   },
@@ -449,7 +435,7 @@ function postRowHtml(p, open) {
  *  不可达（deadReason）= 划线降透明，与规则卡同一视觉语言 */
 function rulesBlockHtml(platform, a) {
   const rules = rulesFor(platform, a);
-  return '<div class="st-rules"><span class="rl-dot"></span><span class="rl-t">图文规则</span>' +
+  return '<div class="st-rules"><span class="rl-dot"></span><span class="rl-t">推送规则</span>' +
     (rules.length
       ? rules.map(function (r) {
           const tip = deadReason(r) || scopeTitle(r.scope, '账号');
@@ -566,9 +552,7 @@ function renderAccounts() {
   }).join('');
 }
 
-// ---- 账号浮窗（整卡点击打开）：字段编辑 + 选用规则（勾选即改即存，行可点开二级编辑浮窗）----
 let sheetAccountId = null;
-/** 当前浮窗的平台（'twitter' | 'weibo' | 'bili'）：决定表单字段与保存路由（选用规则平台无关，列全部规则） */
 let sheetPlatform = null;
 
 function biliOptions() {
@@ -579,7 +563,7 @@ function biliOptions() {
 
 function rulesSectionHtml(a) {
   if (!a) return '';
-  return '<div class="sheet-section"><div class="sheet-sub">选用规则</div>' +
+  return '<div class="sheet-section"><div class="sheet-sub">生效规则</div>' +
     '<div id="xa-rules" class="sheet-rules"></div></div>';
 }
 
@@ -702,8 +686,6 @@ function acctFormHtml(a) {
 
 /**
  * 账号浮窗（整卡点击/圆形添加钮打开）：添加 = 顶部小 segnav 切 X/微博/B站、表单随之切换；
- * 编辑 = 平台固定（平台是账号 id 的解释域，不给换）。字段编辑 + 选用规则（勾选即改即存，
- * 规则行点开二级编辑浮窗）。
  */
 function openAccountSheet(a, platform) {
   sheetAccountId = a ? a.id : null;
@@ -772,21 +754,11 @@ CHANGES['wa-uid-change'] = function (el) { extractUid(el); runWeiboResolve('uid'
 CHANGES['ba-uid-change'] = function (el) { extractUid(el); };
 CHANGES['wa-resolve-nick'] = function () { runWeiboResolve('nick'); };
 
-/** 浮窗里的选用规则区：行 = 勾选点（该规则是否对本账号生效，勾选即改即存写规则 scope）+ 摘要，
- *  整行点开二级统一规则弹窗（rules.js openRuleSheet，勾/行两种语义并存：勾不触发行点击）。
- *  勾选语义（D1）：规则 scope 空 = 对全部账号生效（勾选恒亮，hover 注明）；取消勾选 = 把 scope
- *  具体化为「除本账号外的全部账号」——这一步会弹确认说明具体化行为；勾选 = 把本账号加进 scope。 */
-function pickRuleRowHtml(r, on) {
+function pickRuleRowHtml(r) {
   const dead = deadReason(r);
-  const empty = (r.scope || []).length === 0;
-  const tip = dead
-    ? esc(dead)
-    : empty
-      ? '该规则对全部账号生效（空范围）；取消勾选将限定为除本账号外的账号'
-      : '按生效范围限定：仅所选账号生效';
+  const tip = esc(dead || scopeTitle(r.scope, '账号'));
   return '<div class="row row-2 row-click' + (dead ? ' rule-dead' : '') + '"' +
-    ' title="' + tip + '" data-action="edit-rule" data-sid="' + r.id + '">' +
-    checkDotHtml('data-change="pick-post-rule"', on) +
+    ' title="' + tip + '" data-action="goto-post-rule" data-sid="' + r.id + '">' +
     '<span class="row-main"><span class="row-line"><span class="row-title">' + esc(r.name) + '</span></span>' +
     '<span class="row-sub">' + esc(ruleSub(r)) + '</span></span>' +
     '<span class="row-end"><span class="row-afford">' + icon('chevron') + '</span></span></div>';
@@ -798,42 +770,18 @@ function renderSheetRules() {
   const a = accountById(sheetAccountId, sheetPlatform);
   if (!a) return;
   const ref = accountRef(sheetPlatform, a);
-  // 图文规则卡列出全部图文规则；勾选态 = 该规则对本账号生效（空 scope = 全部生效）
-  box.innerHTML = postRuleCache.map(function (r) {
-    return pickRuleRowHtml(r, ruleAppliesTo(r, ref));
-  }).join('');
+  box.innerHTML = postRuleCache.filter(function (r) { return ruleAppliesTo(r, ref); })
+    .map(pickRuleRowHtml).join('') || '<p class="hint">还没有推送规则（在推送规则卡片中添加）。</p>';
 }
 
-// 勾选/取消勾选：改写规则 scope（同一份数据的账号侧入口；规则的启用状态仍在规则卡上单独管）。
-// 空 scope（对全部账号生效）的规则取消勾选 = 把 scope 具体化为「除本账号外的全部账号」——
-// 这会改变未来新增账号的默认行为，先 confirm 说明再落库（P2 偏离 4 的呈现补偿）。
-CHANGES['pick-post-rule'] = function (el) {
-  const row = el.closest('.row');
-  const a = row && accountById(sheetAccountId, sheetPlatform);
-  if (!a) return;
-  const rid = Number(row.getAttribute('data-sid'));
-  const r = postRuleById(rid);
-  if (!r) return;
-  const ref = accountRef(sheetPlatform, a);
-  const cur = (r.scope || []).slice();
-  let next;
-  if (el.checked) {
-    // 勾选 = 明确包含本账号；规则本就空 scope（全部生效）时无需改动
-    next = cur.length === 0 ? cur : (cur.indexOf(ref) >= 0 ? cur : cur.concat([ref]));
-  } else {
-    // 取消 = 排除本账号：空 scope 要先具体化成「其余全部账号」
-    if (cur.length === 0 && !confirm('该规则当前对全部账号生效（空范围）。\n取消勾选后将把生效范围具体化为「除本账号外的全部账号」——以后新增账号默认不再对它生效。\n\n继续？')) {
-      el.checked = true; // 用户反悔：把勾选点回去（change 已触发，UI 需复原）
-      return;
-    }
-    const base = cur.length === 0 ? allAccountRefs() : cur;
-    next = base.filter(function (x) { return x !== ref; });
-    if (allAccountRefs().every(function (x) { return next.indexOf(x) >= 0; })) next = []; // 等于全集 → 回落「全部生效」
-  }
-  api('/api/rules/' + r.id, 'PUT', { subjectKind: 'post', scope: next }).then(function () {
-    toast(el.checked ? '该规则对本账号生效' : '该规则不再对本账号生效');
-    loadX().then(renderSheetRules);
-  }).catch(function (e) { toast(e.message, true); loadX().then(renderSheetRules); });
+ACTIONS['goto-post-rule'] = function (el) {
+  const id = Number(el.getAttribute('data-sid'));
+  closeSheet(1);
+  loadX().then(function () {
+    const rule = postRuleById(id);
+    if (rule) openRuleSheet(rule);
+    else toast('规则已删除', true);
+  });
 };
 
 ACTIONS['save-feed-account'] = function (el) {
@@ -867,7 +815,7 @@ function saveXAccount(el) {
   const req = idAttr ? api('/api/x/accounts/' + idAttr, 'PUT', body) : api('/api/x/accounts', 'POST', body);
   req.then(function (r) {
     if (idAttr) {
-      closeSheet(1); // 编辑：保存即关浮窗（选用规则勾选本就即改即存，不靠浮窗留着）
+      closeSheet(1);
       toast('已保存');
     } else {
       closeSheet(1);
@@ -923,7 +871,7 @@ function saveWeiboAccount(el) {
   const req = idAttr ? api('/api/weibo/accounts/' + idAttr, 'PUT', body) : api('/api/weibo/accounts', 'POST', body);
   req.then(function () {
     if (idAttr) {
-      closeSheet(1); // 编辑：保存即关浮窗（选用规则勾选本就即改即存）
+      closeSheet(1);
       toast('已保存');
     } else {
       closeSheet(1);
@@ -949,7 +897,7 @@ function saveBiliAccount(el) {
   const req = idAttr ? api('/api/bili/accounts/' + idAttr, 'PUT', body) : api('/api/bili/accounts', 'POST', body);
   req.then(function () {
     if (idAttr) {
-      closeSheet(1); // 编辑：保存即关浮窗（选用规则勾选本就即改即存）
+      closeSheet(1);
       toast('已保存');
     } else {
       closeSheet(1);
@@ -961,8 +909,6 @@ function saveBiliAccount(el) {
 }
 
 // ---- 图文规则：入口开统一规则弹窗（rules.js openRuleSheet，post 形态）；判定口径在分类卡
-// （applies_to=图文的分类带帖子类型/引用/带图条件与 LLM 提示词）。从账号浮窗进 = 二级弹窗
-//（rules.js 按「一级弹窗已开」自动判级），从规则卡进 = 一级。
 function postRuleById(id) {
   for (let i = 0; i < postRuleCache.length; i++) {
     if (String(postRuleCache[i].id) === String(id)) return postRuleCache[i];
@@ -974,7 +920,6 @@ ACTIONS['add-post-rule'] = function () { openRuleSheet(null, { kind: 'post' }); 
 
 loadX();
 setInterval(loadX, 60000);
-// 规则任一入口（本卡 / 主播页规则卡 / 账号浮窗反向勾选）写成功后：本页规则卡 + 账号浮窗规则区刷新
 onRulesChanged(function () { loadX().then(renderSheetRules); });
 // 图文规则 + 三张账号名单 + 分类/规则（settings）一次性重拉——撤销后把图文页拉回真实态
 onTableRefresh(['push_rules', 'categories', 'x_accounts', 'weibo_accounts', 'bili_accounts', 'settings'], loadX);

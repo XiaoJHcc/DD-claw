@@ -2,6 +2,8 @@
 
 本机控制面板（localhost WebUI）：`src/panel/` 提供同进程 HTTP 服务与 REST API，`webui/` 是前端唯一信源，构建期内嵌进产物、运行时绝不读磁盘。Agent 接口 `/mcp` 挂在同一端口，见 [../mcp.md](../mcp.md)；时间表数据层（live_sessions / listTimeline）见 [core.md](core.md)。
 
+**2026-10-14 统一规则验收纠偏**：主播页只显示直播分类/推送规则；图文页在来源卡下并排显示「分类规则」「推送规则」，两页分别投影同一 categories/push_rules 表，行与编辑器共用。新增类型跟随页面，编辑分类不可更换类型；能力层拒绝跨类型分类引用与不适用的条件。生效范围两侧均用圆柱摘要 → 二级搜索多选 → 保存；主体详情只展示生效规则并跳到一级规则编辑器，不再通过账号勾选改范围。分页排序由 `core.mergeVisibleOrder` 合并全排列，另一类的槽位保持。差异交互矩阵与审查记录见 [统一计划附录 B](../plan/unify-classify-push.md#附录-b产品验收纠偏2026-10-14)，下文旧 post_rules/ruleIds 记载为历史实现。
+
 ## src/panel/server.ts
 
 `createPanelServer({ db, status, weiboResolver?, auth?, weiboAuth?, listen?, napcat? })`：同进程 node:http，零框架零依赖，**只绑 127.0.0.1**（默认端口 8787，config panel 段仅作自举）。多数 API 组按 dep 存在与否条件挂载（无 dep = 不挂该组路由）。

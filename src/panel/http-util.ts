@@ -229,9 +229,16 @@ function parseCategoryFields(o: Record<string, unknown>, p: CategoryInput): void
  * POST 对缺省合并后的形状调，PUT 对合并后形状调。
  */
 export function checkCategoryConditions(c: {
+  appliesTo?: 'live' | 'post';
   llmPrompt?: string | null; keywords?: string[]; areas?: string[];
   postTypes?: string[]; requireQuote?: boolean; requireMedia?: boolean;
 }): void {
+  if ((c.appliesTo ?? 'live') === 'live' && ((c.postTypes ?? []).length > 0 || c.requireQuote || c.requireMedia)) {
+    throw new HttpError(400, '直播分类不能配置帖子类型、引用或带图条件');
+  }
+  if (c.appliesTo === 'post' && (c.areas ?? []).length > 0) {
+    throw new HttpError(400, '图文分类不能配置直播分区条件');
+  }
   const prompt = c.llmPrompt?.trim() ?? '';
   const noCond = (c.keywords ?? []).length === 0
     && (c.areas ?? []).length === 0
@@ -380,8 +387,10 @@ export function checkRuleRefs(
   db: Db,
   r: { subjectKind: 'live' | 'post'; categoryId: number | null; scope: string[]; channels: number[] },
 ): void {
-  if (r.categoryId !== null && !db.listCategories().some((c) => c.id === r.categoryId)) {
-    throw new HttpError(400, '分类不存在');
+  if (r.categoryId !== null) {
+    const category = db.listCategories().find((c) => c.id === r.categoryId);
+    if (!category) throw new HttpError(400, '分类不存在');
+    if (category.appliesTo !== r.subjectKind) throw new HttpError(400, '分类与推送规则的内容类型不一致');
   }
   const channelIds = new Set(db.listPushChannels().map((c) => c.id));
   for (const id of r.channels) {

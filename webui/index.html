@@ -48,7 +48,7 @@
 <div class="card-head"><span class="card-ic" data-icon="tag"></span><h2>分类规则</h2></div>
 <div id="category-list">加载中…</div>
 <div class="card-actions">
-<button class="btn btn-ghost" data-action="add-category"><span data-icon="plus"></span>新增分类</button>
+<button class="btn btn-ghost" data-action="add-category" data-kind="live"><span data-icon="plus"></span>新增分类</button>
 </div>
 </section>
 
@@ -159,13 +159,24 @@
 </section>
 </div>
 
-<section class="card acc-purple" id="card-post-rules">
-<div class="card-head"><span class="card-ic" data-icon="list"></span><h2>图文规则</h2></div>
-<div id="post-rule-list">加载中…</div>
+<div class="set-grid">
+<section class="card set-card acc-amber" id="card-post-categories">
+<div class="card-head"><span class="card-ic" data-icon="tag"></span><h2>分类规则</h2></div>
+<div id="post-category-list">加载中…</div>
 <div class="card-actions">
-<button class="btn btn-ghost" data-action="add-post-rule"><span data-icon="plus"></span>新建规则</button>
+<button class="btn btn-ghost" data-action="add-category" data-kind="post"><span data-icon="plus"></span>新增分类</button>
 </div>
 </section>
+
+<section class="card set-card acc-mint" id="card-post-rules">
+<div class="card-head"><span class="card-ic" data-icon="list"></span><h2>推送规则</h2></div>
+<div id="post-rule-list">加载中…</div>
+<div class="card-actions">
+<button class="btn btn-ghost" data-action="add-post-rule"><span data-icon="plus"></span>添加规则</button>
+</div>
+</section>
+
+</div>
 
 <div class="x-accounts-head">
 <div id="x-account-filter"></div>

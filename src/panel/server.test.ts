@@ -848,6 +848,27 @@ test('rule 校验：引用存在性（分类/渠道/主播）+ 字段类型 + �
   assert.match(huge.json.error ?? '', /64KB/);
 });
 
+test('分类和规则的内容类型边界：拒绝跨类型引用、改分类类型和不适用的条件', async (t) => {
+  const { db, base } = await setup(t);
+  const liveCategory = (await api(base, '/api/categories', 'POST', { keywords: ['唱歌'] })).json as { id: number };
+  const postCategory = (await api(base, '/api/categories', 'POST', { appliesTo: 'post', requireMedia: true })).json as { id: number };
+  for (const [subjectKind, categoryId] of [['live', postCategory.id], ['post', liveCategory.id]]) {
+    const result = await api(base, '/api/rules', 'POST', { subjectKind, categoryId });
+    assert.equal(result.status, 400);
+    assert.match(result.json.error ?? '', /内容类型不一致/);
+  }
+  const rule = (await api(base, '/api/rules', 'POST', { categoryId: liveCategory.id })).json as { id: number };
+  assert.equal((await api(base, `/api/rules/${rule.id}`, 'PUT', { categoryId: postCategory.id })).status, 400);
+  assert.equal((await api(base, `/api/rules/${rule.id}`, 'PUT', { subjectKind: 'post' })).status, 400);
+  assert.equal(db.listPushRules()[0]!.categoryId, liveCategory.id);
+  assert.equal((await api(base, `/api/categories/${liveCategory.id}`, 'PUT', { appliesTo: 'post' })).status, 400);
+  assert.equal((await api(base, '/api/categories', 'POST', { requireMedia: true })).status, 400);
+  assert.equal((await api(base, '/api/categories', 'POST', { appliesTo: 'post', areas: ['游戏'] })).status, 400);
+  assert.equal((await api(base, `/api/categories/${postCategory.id}`, 'PUT', { areas: ['游戏'] })).status, 400);
+  assert.equal((await api(base, `/api/categories/${liveCategory.id}`, 'PUT', { requireQuote: true })).status, 400);
+  assert.equal(db.listCategories().find((category) => category.id === liveCategory.id)!.appliesTo, 'live');
+});
+
 test('rule 名称：不传自动补「规则 N」，传了存自定义名（trim）；空白名 400', async (t) => {
   const { db, base } = await setup(t);
 

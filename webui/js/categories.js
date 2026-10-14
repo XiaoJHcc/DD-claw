@@ -1,12 +1,8 @@
 // 面板前端 · 卡片「分类规则」：分类列表（拖拽把手/启停勾/名称/条件摘要标签/编辑/删除）
 // + 底部新增按钮。分类 = LLM 提示词 + 确定性条件组，归类结果供推送规则引用。
 // 新增/编辑走一级 sheet，保存报错内联在按钮行；删除分类会级联停用引用它的推送规则（先 confirm 告知）。
-// **直播与图文同一组件**（P3 统一）：分类卡只出现在主播页这一处，但行渲染（摘要标签 =
-// LLM / 关键词 / 分区 / 帖子类型 / 引用 / 带图，同一套 tag 语言）与编辑弹窗都按 appliesTo
-// 驱动——适用内容切换时只换「确定性条件」算子区（live = 关键词+分区；post = 关键词 +
-// 原创·转发 chips + 须引用 + 须带图），LLM 提示词 / 名称 / 启停 / 拖拽排序 / 删除级联确认共用。
 // 摘要标签格式两形态统一：LLM（有提示词）+ 条件摘要（关键词 N / 分区 N / 只原·只转 / 须引用 / 须带图）。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, makeSortable, openSheet, closeSheet, splitCsv, dropdownHtml, onTableRefresh } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, makeSortable, mergeVisibleOrder, openSheet, closeSheet, splitCsv, dropdownHtml, onTableRefresh } from './core.js';
 import { notifyRulesChanged } from './rules.js';
 
 let catCache = [];
@@ -19,7 +15,6 @@ function catById(id) {
 // 摘要标签（两形态统一的 tag 语言）：LLM 紫 / 关键词蓝 / 分区·帖子形态·引用·带图 mint
 function catSummaryTags(c) {
   let tags = '';
-  if (c.appliesTo === 'post') tags += '<span class="tag tag-purple">图文</span>';
   if (c.llmPrompt) tags += '<span class="tag tag-purple">LLM</span>';
   if (c.keywords.length) tags += `<span class="tag tag-blue">关键词 ${c.keywords.length}</span>`;
   if (c.appliesTo !== 'post' && c.areas.length) tags += `<span class="tag tag-mint">分区 ${c.areas.length}</span>`;
@@ -49,7 +44,10 @@ function categoryRowHtml(c) {
 function loadCategories() {
   return api('/api/categories').then(function (j) {
     catCache = j.categories || [];
-    document.getElementById('category-list').innerHTML = catCache.map(categoryRowHtml).join('');
+    ['live', 'post'].forEach(function (kind) {
+      const list = document.getElementById(kind === 'live' ? 'category-list' : 'post-category-list');
+      if (list) list.innerHTML = catCache.filter(function (c) { return (c.appliesTo || 'live') === kind; }).map(categoryRowHtml).join('');
+    });
   }).catch(function (e) { toast(e.message, true); });
 }
 
@@ -82,12 +80,11 @@ ACTIONS['del-category'] = function (el) {
 };
 
 // ---- 分类 新增/编辑 弹窗（id=null 新增）；保存报错内联在按钮行 ----
-ACTIONS['add-category'] = function () { openCategorySheet(null); };
+ACTIONS['add-category'] = function (el) { openCategorySheet(null, el.getAttribute('data-kind') || 'live'); };
 ACTIONS['edit-category'] = function (el) {
   openCategorySheet(Number(el.closest('.row').getAttribute('data-sid')));
 };
 
-// 分类表单草稿：适用内容切换时条件区整体重建，值从 DOM 收进草稿再重渲（不丢已填内容）
 let catDraft = null;
 
 function captureCatDraft() {
@@ -98,21 +95,20 @@ function captureCatDraft() {
   if (kw) catDraft.keywords = kw.value;
   if (area) catDraft.areas = area.value;
   if (cond) catDraft.condMode = cond.getAttribute('data-mode') || 'and';
-  const pts = Array.prototype.slice.call(document.querySelectorAll('#cg-cond-area .cg-pt'))
-    .filter(function (x) { return x.classList.contains('on'); })
-    .map(function (x) { return x.getAttribute('data-value'); });
-  if (pts.length || document.querySelector('#cg-cond-area .cg-pt')) catDraft.postTypes = pts;
-  const q = document.querySelector('#cg-cond-area .cg-flag[data-value="requireQuote"]');
-  const m = document.querySelector('#cg-cond-area .cg-flag[data-value="requireMedia"]');
-  if (q) catDraft.requireQuote = q.classList.contains('on');
-  if (m) catDraft.requireMedia = m.classList.contains('on');
+  const postConditions = document.getElementById('cg-post-conditions');
+  if (postConditions) {
+    const selected = Array.from(postConditions.selectedOptions).map(function (option) { return option.value; });
+    catDraft.postTypes = selected.filter(function (value) { return value === 'original' || value === 'retweet'; });
+    catDraft.requireQuote = selected.includes('requireQuote');
+    catDraft.requireMedia = selected.includes('requireMedia');
+  }
 }
 
-function openCategorySheet(id) {
+function openCategorySheet(id, kind) {
   const c = id === null ? null : catById(id);
   if (id !== null && !c) { toast('分类数据未加载', true); return; }
   catDraft = {
-    kind: c ? (c.appliesTo || 'live') : 'live',
+    kind: c ? (c.appliesTo || 'live') : (kind || 'live'),
     keywords: c ? c.keywords.join(', ') : '',
     areas: c ? c.areas.join(', ') : '',
     condMode: c ? (c.condMode || 'and') : 'and',
@@ -121,13 +117,9 @@ function openCategorySheet(id) {
     requireMedia: !!(c && c.requireMedia),
   };
   openSheet(c ? '编辑分类' : '新增分类',
-    field('适用内容', dropdownHtml('cg-kind', [
-      { value: 'live', label: '直播（开播场次）' },
-      { value: 'post', label: '图文帖（X/微博/B站动态）' },
-    ], catDraft.kind, 'cg-kind-change')) +
     field('名称', `<input class="inp" id="cg-name" placeholder="如：歌回；留空自动命名" value="` +
       (c ? esc(c.name) : '') + '">') +
-    field('LLM 提示词', '<textarea class="inp" id="cg-prompt" rows="4" placeholder="留空 = 不使用 LLM 判定（只走下面的确定性条件）">' +
+    field('LLM 提示词', '<textarea class="inp" id="cg-prompt" rows="4" placeholder="留空仅使用确定性条件">' +
       (c && c.llmPrompt ? esc(c.llmPrompt) : '') + '</textarea>') +
     // 确定性条件区：按适用内容渲染可用算子（同一组件、同一交互语言）
     `<div class="field" id="cg-cond-area">${condAreaHtml()}</div>` +
@@ -138,7 +130,6 @@ function openCategorySheet(id) {
   // （sheetCleanups 不导出到本模块，openSheet/closeSheet 的 innerHTML 重置已足够）
 }
 
-// 条件区（live：关键词 + 且/或 + 分区；post：关键词 + 且/或 + 原创/转发/须引用/须带图 chips）。
 // 中间小方钮切换两组条件的关系（且/或）；当前值在按钮 data-mode 上。
 function condAreaHtml() {
   const d = catDraft;
@@ -149,34 +140,19 @@ function condAreaHtml() {
     return '<label class="field-label">确定性条件</label><div class="cond-row">' +
       kw + toggle +
       `<input class="inp" id="cg-area" placeholder="分区，中英文逗号分隔" value="${esc(d.areas)}">` +
-      '</div>' +
-      '<div class="hint" style="margin-top:6px">关键词与分区两组条件留空且无 LLM 提示词 = 死分类（保存时拒绝）</div>';
+      '</div>';
   }
-  const chip = function (value, label, on) {
-    return `<button type="button" class="chip ${value === 'original' || value === 'retweet' ? 'cg-pt' : 'cg-flag'}${on ? ' on' : ''}"` +
-      ` data-action="cg-post-type" data-value="${value}"><span class="chip-ic">✓</span>` +
-      `<span class="chip-txt">${esc(label)}</span></button>`;
-  };
+  const selected = d.postTypes.slice();
+  if (d.requireQuote) selected.push('requireQuote');
+  if (d.requireMedia) selected.push('requireMedia');
   return '<label class="field-label">确定性条件</label><div class="cond-row">' +
-    kw + toggle + '</div>' +
-    '<div class="chips" style="margin-top:8px">' +
-    chip('original', '原创', d.postTypes.indexOf('original') >= 0) +
-    chip('retweet', '转发', d.postTypes.indexOf('retweet') >= 0) +
-    chip('requireQuote', '须引用（仅X）', d.requireQuote) +
-    chip('requireMedia', '须带图', d.requireMedia) +
-    '</div>' +
-    '<div class="hint" style="margin-top:6px">帖子类型都不勾 = 不限；条件留空且无 LLM 提示词 = 死分类（保存时拒绝）</div>';
+    kw + toggle + dropdownHtml('cg-post-conditions', [
+      { value: 'original', label: '原创' },
+      { value: 'retweet', label: '转发' },
+      { value: 'requireQuote', label: '须引用（仅X）' },
+      { value: 'requireMedia', label: '须带图' },
+    ], selected, null, '帖子条件') + '</div>';
 }
-
-// 适用内容联动：live ↔ post 切换时先把 DOM 值收进草稿，再整体重建条件区（已填关键词不丢）
-CHANGES['cg-kind-change'] = function (el) {
-  if (!catDraft) return;
-  captureCatDraft();
-  catDraft.kind = el.value;
-  const box = document.getElementById('cg-cond-area');
-  if (box) box.innerHTML = condAreaHtml();
-};
-ACTIONS['cg-post-type'] = function (el) { el.classList.toggle('on'); };
 
 ACTIONS['toggle-cond'] = function (el) {
   const or = el.getAttribute('data-mode') !== 'or';
@@ -216,14 +192,16 @@ ACTIONS['save-category'] = function (el) {
 };
 
 // 拖拽排序：分类展示顺序落库
-makeSortable(document.getElementById('category-list'), {
-  items: function () { return catCache; },
-  getId: function (c) { return c.id; },
-  onOrder: function (ids) {
-    api('/api/categories/order', 'PUT', { ids: ids })
-      .then(loadCategories)
-      .catch(function (err) { toast(err.message, true); loadCategories(); });
-  },
+['live', 'post'].forEach(function (kind) {
+  makeSortable(document.getElementById(kind === 'live' ? 'category-list' : 'post-category-list'), {
+    items: function () { return catCache.filter(function (c) { return (c.appliesTo || 'live') === kind; }); },
+    getId: function (c) { return c.id; },
+    onOrder: function (ids) {
+      api('/api/categories/order', 'PUT', { ids: mergeVisibleOrder(catCache, ids) })
+        .then(loadCategories)
+        .catch(function (err) { toast(err.message, true); loadCategories(); });
+    },
+  });
 });
 
 loadCategories();

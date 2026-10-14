@@ -124,10 +124,13 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 
 /* 设置小卡片区：响应式换行（宽 3 / 中 2 / 窄 1），卡内 卡片头→行列表(撑开)→底部按钮 */
 .set-grid{display:flex;flex-wrap:wrap;gap:var(--pad);margin-bottom:var(--pad)}
+#view-x > .set-grid:nth-child(2){margin-bottom:var(--sp-5)}
+#view-x > .set-grid:nth-child(2) > .set-card{flex-basis:calc(50% - var(--pad)/2);max-width:calc(50% - var(--pad)/2)}
 .set-card{flex:1 1 calc((100% - var(--pad)*2)/3);max-width:calc((100% - var(--pad)*2)/3);min-width:0;
   display:flex;flex-direction:column}
 @media (max-width:1100px){.set-card{flex-basis:calc(50% - var(--pad)/2);max-width:calc(50% - var(--pad)/2)}}
 @media (max-width:720px){.set-card{flex-basis:100%;max-width:100%}}
+@media (max-width:720px){#view-x > .set-grid:nth-child(2) > .set-card{flex-basis:100%;max-width:100%}}
 .set-rows{flex:1;min-height:0}
 /* 底部按钮：左右及底部外边距 = --inset + --pad（行内边距），按钮左右缘/底缘与行的实际内容
    同一条缘，而不是与行盒外缘对齐；顶距 = --inset - 行底距 2px，使末行→按钮的净距与卡片头四边的 --inset 一致 */
@@ -272,6 +275,7 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .dd-trigger:hover{border-color:var(--border-strong)}
 .dd-trigger:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(76,141,255,.16)}
 .dd-value{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dd-value.dd-placeholder{color:var(--text-2)}
 .dd-trigger > svg{width:var(--icon);height:var(--icon);color:var(--text-2);flex:none;display:block}
 .dd-menu{display:none;position:fixed;z-index:80;min-width:160px;max-height:280px;overflow:auto;padding:var(--sp-1);
   background:var(--card-bg);border-radius:var(--r-md);box-shadow:var(--shadow-lg)}
@@ -286,8 +290,8 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .dd-opt svg{width:var(--icon);height:var(--icon);color:var(--blue);flex:none;display:block;opacity:0}
 .dd-opt.sel svg{opacity:1}
 /* 关键词/分区并排 + 中间且/或切换小方钮（与输入框同高同圆角） */
-.cond-row{display:flex;gap:var(--sp-2);align-items:center}
-.cond-row .inp,.cond-row input{flex:1;min-width:0}
+.cond-row{display:grid;grid-template-columns:minmax(0,1fr) var(--ctl-h) minmax(0,1fr);gap:var(--sp-2);align-items:center}
+.cond-row > .inp,.cond-row > .dd{width:100%;min-width:0}
 .cond-toggle{flex:none;width:var(--ctl-h);height:var(--ctl-h);padding:0;border:none;border-radius:var(--r-md);
   background:var(--fill);color:var(--text);cursor:pointer;font:inherit;font-size:var(--fs-sm);transition:background-color .15s ease}
 .cond-toggle:hover{background:var(--hover)}
@@ -324,17 +328,6 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .pick-card.on:hover{background:#DFEAFF}
 .pick-card:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
 .pick-empty{padding:48px 0;text-align:center;font-size:var(--fs-sm);color:var(--text-2)}
-
-/* ---- 生效账号挑选栅格（统一规则弹窗 post 形态）：账号墙同款 pick-card（头像 + 名字）+
-   平台角标（三平台混排必须一眼看出归属）；失效引用（账号已删）= 可点移除的灰 chip ---- */
-.acct-pick{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;
-  max-height:clamp(200px,38vh,320px);overflow-y:auto;scrollbar-width:thin}
-.acct-pick::-webkit-scrollbar{width:8px}
-.acct-pick::-webkit-scrollbar-thumb{background:var(--separator);border-radius:4px}
-.acct-pick .pick-card{padding:12px 8px;gap:5px;min-width:0}
-.acct-pick .pick-card .f-name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.acct-pick .pick-card .x-plat{margin-bottom:-1px}
-.acct-pick .chip{align-self:center}
 
 /* ---- 生效主播 3D 圆柱卡（推送规则弹窗）：可点卡片，一排头像按圆柱面投影位置排布
    （translate3d + perspective，近大远小；头像正对观察者、不随柱面旋转），scale3d 两侧减半。
@@ -665,7 +658,7 @@ input:disabled{opacity:.5;background:var(--fill)}
 /* sheet 增补：标题右侧自动提取信息（主播详情 UID · 直播间号）；sheet-foot 也可由 openSheet 第四参
    放在 body 外（v2 形态），生产现存调用把按钮写在 bodyHtml 内——body 内的 sheet-foot 不再加横向 padding */
 .sheet-head-meta{margin-left:var(--sp-2);font-size:var(--fs-sm);font-weight:400;color:var(--text-2);white-space:nowrap}
-.sheet-body > .sheet-foot{padding:0;margin-top:var(--sp-3)}
+.sheet-body > .sheet-foot{padding:0;margin-top:var(--sp-4)}
 .sheet-section{margin-top:var(--pad);padding-top:var(--sp-1)}
 .sheet-sub{font-size:var(--fs-base);font-weight:600;margin-bottom:var(--sp-1)}
 .form-err{color:var(--red);font-size:var(--fs-sm);margin-right:auto}
