@@ -120,6 +120,15 @@ test('parseClassifyResults：非 schema 输出抛错（计入熔断并触发回�
   assert.throws(() => parseClassifyResults(null, CATS));
 });
 
+test('分类结果漏项、重复或置信度越界不得误成功', () => {
+  const first = { id: 1, match: true, confidence: 0.9, evidence: '歌回' };
+  assert.throws(() => parseClassifyResults({ results: [first] }, CATS), /不完整/);
+  assert.throws(() => parseClassifyResults({ results: [first, first] }, [CATS[0]!]), /重复/);
+  for (const confidence of [-0.1, 1.1]) {
+    assert.throws(() => parseClassifyResults({ results: [{ ...first, confidence }] }, [CATS[0]!]));
+  }
+});
+
 test('toClassifyCategory：取 Category 的 id/name/llmPrompt', () => {
   const db = new Db(':memory:');
   try {
@@ -358,4 +367,29 @@ test('post 判定去重：同一帖重复判定只留一条（UNIQUE 身份键�
   await clf.classify(postCtx());
   await clf.classify(postCtx());
   assert.equal(db.listVerdicts('post', 'twitter:9001').length, 1);
+});
+
+test('审计记录确定性负判、回退原因与当时标准，后续修改分类不改历史', async (t) => {
+  const db = memDb(t);
+  const id = db.upsertCategory(category({ name: '自拍', appliesTo: 'post', keywords: ['自拍'], llmPrompt: '是自拍' }));
+  const { router } = fakeRouter(async () => { throw new Error('connect ECONNREFUSED'); });
+  await new RulesClassifier(db, () => router, () => true).classify(postCtx());
+  db.upsertCategory({ id, llmPrompt: '新的标准' });
+  const audit = db.getContentAudit('post', 'twitter:9001')!;
+  assert.equal(audit.analysis!.status, 'done');
+  assert.equal(audit.analysis!.results[0]!.pass, false);
+  assert.equal(audit.analysis!.results[0]!.source, 'rule');
+  assert.equal(audit.analysis!.categories[0]!.llmPrompt, '是自拍');
+  assert.match(audit.analysis!.fallbackReason!, /ECONNREFUSED/);
+  assert.equal(audit.analysis!.input!.text, '今晚有直播');
+});
+
+test('漏返分类触发确定性回退并记录解析失败原因', async (t) => {
+  const db = memDb(t);
+  const id = db.upsertCategory(category({ name: '预告', appliesTo: 'post', keywords: ['直播'], llmPrompt: '是预告' }));
+  const { router } = fakeRouter(async (_req, parse) => parse!({ results: [] }));
+  const result = await new RulesClassifier(db, () => router, () => true).classify(postCtx());
+  assert.equal(result[0]!.categoryId, id);
+  assert.equal(result[0]!.source, 'rule');
+  assert.match(db.getContentAudit('post', 'twitter:9001')!.analysis!.fallbackReason!, /不完整/);
 });

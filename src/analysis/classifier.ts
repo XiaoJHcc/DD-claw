@@ -6,6 +6,7 @@ import { matchCategoryItem } from './matcher.js';
 import { fromLiveEvent, fromPostCandidate, type ContentItem } from './content.js';
 import { buildClassifyRequest, parseClassifyResults, toClassifyCategory } from './tasks/classify.js';
 import type { AnalysisContext, Classification, Classifier } from './types.js';
+import type { AnalysisAudit, ModelAttempt } from '../core/content-audit.js';
 
 const log = makeLogger('analysis/classifier');
 
@@ -17,6 +18,8 @@ export interface JudgeContext {
   getRouter: () => LlmRouter | null;
   /** LLM 总开关 */
   llmEnabled: () => boolean;
+  onFallback?: (reason: string) => void;
+  onAttempt?: (attempt: ModelAttempt) => void;
 }
 
 /**
@@ -56,16 +59,21 @@ export const llmJudge: JudgeStage = {
   name: 'llm',
   async judge(item, cats, ctx) {
     const router = ctx.getRouter();
-    if (router === null || !ctx.llmEnabled()) return null;
+    if (router === null || !ctx.llmEnabled()) {
+      ctx.onFallback?.(router === null ? '未配置 LLM provider，使用确定性条件' : 'LLM 总开关关闭，使用确定性条件');
+      return null;
+    }
     try {
       const inputs = cats.map(toClassifyCategory);
       const results = await router.completeJson(
         buildClassifyRequest(item, inputs),
         (raw) => parseClassifyResults(raw, inputs),
+        ctx.onAttempt,
       );
       return new Map(results.map((c) => [c.categoryId, c]));
     } catch (e) {
       log.warn(`LLM 分类失败，回退确定性条件: ${(e as Error).message}`);
+      ctx.onFallback?.(e instanceof Error ? e.message : String(e));
       return null;
     }
   },
@@ -119,7 +127,13 @@ export class RulesClassifier implements Classifier {
     if (item === null) return [];
     const isPost = item.subjectType === 'post';
     const cats = this.db.listEnabledCategories().filter((c) => c.appliesTo === item.subjectType);
-    const jctx: JudgeContext = { getRouter: this.getRouter, llmEnabled: this.llmEnabled };
+    const started = Date.now();
+    const audit: AnalysisAudit = { status: 'pending', categories: cats, results: [], imageCount: item.imageUrls.length, attempts: [],
+      input: { text: item.text, authorName: item.authorName, tags: item.tags, url: item.url, ts: item.ts } };
+    this.db.recordContentAudit(item.subjectType, item.subjectId, 'analysis', audit);
+    const jctx: JudgeContext = { getRouter: this.getRouter, llmEnabled: this.llmEnabled,
+      onFallback: (reason) => { audit.fallbackReason = reason; },
+      onAttempt: (attempt) => { audit.attempts!.push(attempt); } };
     const judged: Classification[] = [];
 
     const deterministicOnly = cats.filter((c) => !c.llmPrompt);
@@ -131,6 +145,16 @@ export class RulesClassifier implements Classifier {
     if (promptCats.length > 0) {
       judged.push(...(await runJudgeChain([llmJudge, deterministicJudge], item, promptCats, jctx)).values());
     }
+
+    audit.results = cats.map((cat) => {
+      const result = judged.find((entry) => entry.categoryId === cat.id);
+      return { categoryId: cat.id, name: cat.name, source: result?.source ?? 'rule',
+        pass: result?.pass !== false && result !== undefined, confidence: result?.confidence ?? null,
+        evidence: result?.evidence || '确定性条件未命中' };
+    });
+    audit.status = 'done';
+    audit.durationMs = Date.now() - started;
+    this.db.recordContentAudit(item.subjectType, item.subjectId, 'analysis', audit);
 
     for (const c of judged) {
       // post 侧 LLM 判否（pass=false）也落档；直播侧保持只记「属于」

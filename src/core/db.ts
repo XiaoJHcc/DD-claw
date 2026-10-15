@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { PrevState } from './state.js';
+import type { AnalysisAudit, ContentAudit, PushAudit } from './content-audit.js';
 import {
   rowToFollow, rowToStreamer,
   type Follow, type FollowRow, type Streamer, type StreamerInput, type StreamerRow,
@@ -352,6 +353,14 @@ export class Db {
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
     this.db.exec(SCHEMA);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS content_audit (
+      subject_type TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      analysis TEXT,
+      push TEXT,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (subject_type, subject_id)
+    )`);
     // 存量库迁移：room_state 展示字段（last_live_at = 最后一次观测到在播的时间，下播时长锚点）
     for (const ddl of ['area_name TEXT', 'parent_area_name TEXT', 'keyframe TEXT',
       'cover TEXT', 'online INTEGER', 'last_live_at INTEGER']) {
@@ -1442,6 +1451,23 @@ export class Db {
       .prepare('SELECT * FROM verdicts WHERE subject_type = ? AND subject_id = ? ORDER BY id')
       .all(subjectType, subjectId) as VerdictRow[];
     return rows.map(rowToVerdict);
+  }
+
+  recordContentAudit(subjectType: VerdictSubjectType, subjectId: string, section: 'analysis', value: AnalysisAudit): void;
+  recordContentAudit(subjectType: VerdictSubjectType, subjectId: string, section: 'push', value: PushAudit): void;
+  recordContentAudit(subjectType: VerdictSubjectType, subjectId: string, section: 'analysis' | 'push', value: AnalysisAudit | PushAudit): void {
+    this.db.prepare(`INSERT INTO content_audit (subject_type, subject_id, ${section}, updated_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(subject_type, subject_id)
+      DO UPDATE SET ${section}=excluded.${section}, updated_at=excluded.updated_at`)
+      .run(subjectType, subjectId, JSON.stringify(value), now());
+  }
+
+  getContentAudit(subjectType: VerdictSubjectType, subjectId: string): ContentAudit | null {
+    const row = this.db.prepare('SELECT * FROM content_audit WHERE subject_type=? AND subject_id=?')
+      .get(subjectType, subjectId) as { analysis: string | null; push: string | null; updated_at: number } | undefined;
+    if (!row) return null;
+    return { subjectType, subjectId, analysis: row.analysis ? JSON.parse(row.analysis) as AnalysisAudit : null,
+      push: row.push ? JSON.parse(row.push) as PushAudit : null, updatedAt: row.updated_at };
   }
 
   // ---- posts：动态/微博时间线归档 ----

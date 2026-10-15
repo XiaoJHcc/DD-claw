@@ -110,6 +110,49 @@ const store = {
   weiboQrStep: 0,
 };
 
+const demoContentAudits = Object.fromEntries(Object.entries(store.postVerdicts).map(function ([subjectId, verdicts], index) {
+  const results = verdicts.map(function (entry) {
+    const category = demoCategories.find(function (item) { return item.name === entry.ruleName; });
+    return { categoryId: category?.id ?? 0, name: entry.ruleName, pass: entry.pass,
+      evidence: entry.evidence, source: entry.source, confidence: entry.source === 'llm' ? 0.91 : null };
+  });
+  const matchedRules = clone(demoRules.filter(function (rule) { return rule.subjectKind === 'post'; }));
+  const post = [...store.twitterPosts, ...store.weiboPosts, ...store.biliPosts]
+    .find(function (entry) { return entry.platform + ':' + entry.itemId === subjectId; });
+  const ref = post ? (post.platform === 'bili_dynamic' ? 'bili:' : post.platform + ':') + post.uid : '';
+  const rules = matchedRules.map(function (rule) {
+    const inScope = !rule.scope.length || rule.scope.includes(ref);
+    const matchedCategory = rule.categoryId === null || results.some(function (entry) { return entry.categoryId === rule.categoryId && entry.pass; });
+    const matched = rule.enabled && inScope && matchedCategory;
+    return { id: rule.id, name: rule.name, matched, reason: !rule.enabled ? '规则已停用'
+      : !inScope ? '内容不在生效范围' : !matchedCategory ? '未命中引用分类' : '规则命中', configuration: rule };
+  });
+  const channelIds = new Set(rules.filter(function (rule) { return rule.matched; }).flatMap(function (rule) { return rule.configuration.channels; }));
+  const channels = clone(store.channels.filter(function (channel) { return channelIds.has(channel.id); }))
+    .map(function ({ id, name, enabled }) { return { id, name, enabled }; });
+  const pass = channels.some(function (channel) { return channel.enabled; });
+  const failedDelivery = pass && index === 0;
+  const deliveries = store.channels.filter(function (channel) { return channelIds.has(channel.id) && channel.enabled; })
+    .map(function (channel) {
+      const failed = failedDelivery && channel.notifier === 'onebot';
+      return { channel: channel.notifier, ...(channel.targetId ? { target: channel.targetType + ':' + channel.targetId } : {}),
+        ok: !failed, ...(failed ? { error: '演示：NapCat 连接超时' } : {}) };
+    });
+  const succeeded = deliveries.filter(function (delivery) { return delivery.ok; }).length;
+  return ['post:' + subjectId, {
+    subjectType: 'post', subjectId, updatedAt: nowSec,
+    analysis: { status: 'done', categories: clone(demoCategories.filter(function (category) { return category.appliesTo === 'post'; })),
+      results, imageCount: 1, durationMs: 850,
+      attempts: [{ provider: '演示模型', model: 'demo-vision', status: 'success' }] },
+    push: { status: !pass ? 'skipped' : succeeded === 0 ? 'failed' : succeeded < deliveries.length ? 'partial' : 'sent',
+      reason: pass ? `发送完成：${succeeded}/${deliveries.length} 成功` : '无命中规则或没有启用的发送渠道',
+      rules,
+      channels,
+      deliveries,
+    },
+  }];
+}));
+
 // 账号卡帖子段的帖子形状（与真实后端 accountPosts 同构）：Post + 该帖判定行 verdicts
 // （键 = `platform:item_id`，字段 ruleId/ruleName/pass/evidence/source；无判定行 = 空数组）
 const postView = (p) => ({
@@ -486,6 +529,19 @@ function orderError(items, ids) {
 
 function handle(method, path, q, rawBody) {
   const body = () => { try { return JSON.parse(rawBody || '{}'); } catch { return {}; } };
+  if (path === '/api/content-audit' && method === 'GET') {
+    const subjectType = q.get('subjectType');
+    const subjectId = q.get('subjectId');
+    if (!['live', 'post'].includes(subjectType) || !subjectId || subjectId.length > 256) {
+      return json(400, { error: '内容类型或身份键不合法' });
+    }
+    return ok({ audit: demoContentAudits[subjectType + ':' + subjectId] || null,
+      verdicts: subjectType === 'post' ? (store.postVerdicts[subjectId] || []).map(function (entry) {
+        return { categoryName: entry.ruleName, source: entry.source, pass: entry.pass, evidence: entry.evidence, confidence: null };
+      }) : store.schedule.flatMap(function (day) { return day.entries || []; })
+        .filter(function (entry) { return entry.roomId + ':' + entry.liveTime === subjectId; })
+        .flatMap(function (entry) { return entry.verdicts || []; }).map(function (entry) { return { ...entry, pass: true }; }) });
+  }
 
   // ---- 扫码登录（演示循环：waiting → scanned → confirmed）----
   if (path === '/api/auth/bili/qrcode' && method === 'POST') {

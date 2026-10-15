@@ -371,6 +371,12 @@ async function handle(
     sendJson(res, 200, deps.status());
     return;
   }
+  if (method === 'GET' && path === '/api/content-audit') {
+    await callTool(deps, res, 'get_content_audit', {
+      subjectType: url.searchParams.get('subjectType'), subjectId: url.searchParams.get('subjectId'),
+    });
+    return;
+  }
   // ---- 监听功能开关（listen dep 存在才挂）：动态（B站）/ 微博 / 推特（X 独立分页）----
   if (deps.listen && method === 'GET' && path === '/api/listen') {
     sendJson(res, 200, listenInfo(deps));

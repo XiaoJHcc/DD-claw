@@ -4,6 +4,9 @@ import { Pipeline } from './pipeline.js';
 import { Bus } from './bus.js';
 import { AnalysisQueue } from '../analysis/queue.js';
 import { OncePerSessionRule } from '../rules/once-per-session.js';
+import { Db } from './db.js';
+import { RulesClassifier } from '../analysis/classifier.js';
+import { NotifyDispatcher } from '../notify/dispatcher.js';
 import type { AnalysisContext, Classification, Classifier } from '../analysis/types.js';
 import type { PushMessage, Signal } from './types.js';
 import type { NewVerdict, PushChannel, PushRule } from './push.js';
@@ -82,6 +85,13 @@ class FakeDb {
     return this.rules.filter((r) => r.enabled).sort((a, b) => a.id - b.id);
   }
   listPushChannels() { return this.channels; }
+  listPushRules() { return this.rules; }
+  audits = new Map<string, Record<string, unknown>>();
+  recordContentAudit(kind: string, id: string, section: string, value: unknown) {
+    const key = `${kind}:${id}`;
+    this.audits.set(key, { ...this.audits.get(key), [section]: value });
+  }
+  getContentAudit(kind: string, id: string) { return this.audits.get(`${kind}:${id}`) ?? null; }
   getSetting(key: string) { return this.settings.get(key) ?? null; }
 
   // ---- X / 图文帖（pipeline 的 feed_post 分支：账号解析按平台分名单；规则统一在 push_rules）----
@@ -568,6 +578,105 @@ test('纯「任意内容」规则：推送不排在 LLM 后面（判定照跑，
   h.cls.resolve([]);
   await h.pipeline.whenIdle();
   assert.equal(h.disp.sent.length, 1, '判定回来也不产生双推');
+});
+
+test('30 场同时开播：分析挂起不挡任意内容推送、归档、下播与健康告警', async () => {
+  const bus = new Bus();
+  const db = new FakeDb();
+  db.rules = [rule()];
+  const disp = new FakeDispatcher();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const classifier: Classifier = { name: 'gate', classify: async () => { await gate; return []; } };
+  const pipeline = new Pipeline({ bus, db: db as never, config: config(), queue: new AnalysisQueue(classifier),
+    rule: new OncePerSessionRule(db), dispatcher: disp as never });
+  pipeline.attach();
+  try {
+    for (let index = 1; index <= 30; index++) {
+      bus.emit(sig({ uid: String(index), roomId: `r${index}`, status: status({ uid: String(index), roomId: `r${index}` }) }));
+    }
+    bus.emit(sig({ kind: 'live_end' }));
+    bus.emit({ source: 'test', kind: 'health_alert', uid: '', roomId: '', ts: 1 });
+    await tick();
+    assert.equal(disp.sent.length, 30);
+    assert.equal(db.sessions.length, 30);
+    assert.equal(db.ended.length, 1);
+    assert.equal(disp.alerts.length, 1);
+    let idle = false;
+    void pipeline.whenIdle().then(() => { idle = true; });
+    await tick();
+    assert.equal(idle, false, 'whenIdle 仍追踪在飞分析');
+  } finally {
+    release();
+    await pipeline.whenIdle();
+  }
+});
+
+test('分析异常不改写已经成功的推送结果', async () => {
+  const bus = new Bus();
+  const db = new FakeDb();
+  db.rules = [rule()];
+  const disp = new FakeDispatcher();
+  const classifier: Classifier = { name: 'failure', classify: async () => { throw new Error('boom'); } };
+  const pipeline = new Pipeline({ bus, db: db as never, config: config(), queue: new AnalysisQueue(classifier),
+    rule: new OncePerSessionRule(db), dispatcher: disp as never });
+  pipeline.attach();
+  bus.emit(sig());
+  await pipeline.whenIdle();
+  const audit = db.getContentAudit('live', 'r1:1785310737')!;
+  assert.equal((audit.push as { status: string }).status, 'sent');
+  assert.equal((audit.analysis as { status: string }).status, 'failed');
+});
+
+test('同时收到同场开播信号不会绕过每场一次去重', async () => {
+  const h = harness({}, 20);
+  h.db.rules = [rule()];
+  h.bus.emit(sig());
+  h.bus.emit(sig());
+  await h.pipeline.whenIdle();
+  assert.equal(h.disp.sent.length, 1);
+});
+
+test('图文审计区分分类判否与任意内容规则的实际推送', async () => {
+  const h = feedHarness([postRule({ categoryId: 7 }), postRule({ id: 11 })]);
+  h.bus.emit(feedSig());
+  await h.pipeline.whenIdle();
+  const audit = h.db.getContentAudit('post', 'twitter:9001')!.push as import('./content-audit.js').PushAudit;
+  assert.equal(audit.status, 'sent');
+  assert.equal(audit.rules[0]!.matched, false);
+  assert.equal(audit.rules[1]!.matched, true);
+});
+
+test('真实图文链路归档模型失败、确定性负判、规则命中和部分发送失败', async (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+  db.upsertXAccount({ screenName: 'watase_yuzuki' });
+  const categoryId = db.upsertCategory({ name: '自拍', appliesTo: 'post', llmPrompt: '是自拍', keywords: ['自拍'] });
+  const toastId = db.upsertPushChannel({ name: '本机', notifier: 'toast', enabled: true });
+  const groupId = db.upsertPushChannel({ name: '测试群', notifier: 'onebot', targetType: 'group', targetId: '123', enabled: true });
+  db.upsertPushRule({ name: '自拍规则', subjectKind: 'post', categoryId, channels: [groupId] });
+  const anyId = db.upsertPushRule({ name: '任意帖', subjectKind: 'post', channels: [toastId, groupId] });
+  const classifier = new RulesClassifier(db, () => ({ completeJson: async () => { throw new Error('模型网络超时'); } }) as never, () => true);
+  const capabilities = { image: true, clickThrough: true };
+  const dispatcher = new NotifyDispatcher([
+    { name: 'toast', capabilities, send: async () => [{ ok: true }] },
+    { name: 'onebot', capabilities, send: async () => [{ ok: false, target: 'group:123', error: 'NapCat ECONNREFUSED' }] },
+  ], db);
+  const bus = new Bus();
+  const pipeline = new Pipeline({ bus, db, config: config(), queue: new AnalysisQueue(classifier),
+    rule: new OncePerSessionRule(db), dispatcher });
+  pipeline.attach();
+  bus.emit(feedSig());
+  await pipeline.whenIdle();
+  db.upsertPushRule({ id: anyId, name: '修改后的规则' });
+  const audit = db.getContentAudit('post', 'twitter:9001')!;
+  assert.equal(audit.analysis!.results[0]!.pass, false);
+  assert.match(audit.analysis!.fallbackReason!, /模型网络超时/);
+  assert.equal(audit.push!.status, 'partial');
+  assert.equal(audit.push!.rules[0]!.matched, false);
+  assert.equal(audit.push!.rules[1]!.matched, true);
+  assert.equal(audit.push!.rules[1]!.configuration!.name, '任意帖');
+  assert.equal(audit.push!.deliveries![1]!.error, 'NapCat ECONNREFUSED');
 });
 
 test('覆盖本主播的分类规则：推送等判定结果再发（单次推送）', async () => {

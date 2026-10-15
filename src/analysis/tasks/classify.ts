@@ -22,9 +22,9 @@ export interface ClassifyCategory {
 
 const resultSchema = z.object({
   results: z.array(z.object({
-    id: z.number(),
+    id: z.number().int(),
     match: z.boolean(),
-    confidence: z.number(),
+    confidence: z.number().min(0).max(1),
     evidence: z.string(),
   })),
 });
@@ -56,6 +56,7 @@ function postUserText(item: ContentItem, categories: ClassifyCategory[]): string
     `作者：${item.authorName}`,
     `类型：${kind}`,
     item.tags.platform ? `平台：${item.tags.platform}` : '',
+    `引用：${item.tags.isQuote === 'unknown' ? '来源未提供引用状态' : item.tags.isQuote === 'true' ? '是' : '否'}`,
     item.tags.hasMedia === 'true' ? '配图：有（见下方附图）' : '配图：无',
     '',
     '帖子正文：',
@@ -101,7 +102,7 @@ export function buildClassifyRequest(item: ContentItem, categories: ClassifyCate
         additionalProperties: false,
       },
     },
-    maxTokens: 1024,
+    maxTokens: Math.max(1024, Math.min(8192, categories.length * 160)),
   };
 }
 
@@ -113,16 +114,20 @@ export function buildClassifyRequest(item: ContentItem, categories: ClassifyCate
 export function parseClassifyResults(raw: unknown, categories: ClassifyCategory[]): Classification[] {
   const parsed = resultSchema.parse(raw);
   const byId = new Map(categories.map((c) => [c.id, c]));
+  const seen = new Set<number>();
   const out: Classification[] = [];
   for (const r of parsed.results) {
     const cat = byId.get(r.id);
     if (!cat) continue;
+    if (seen.has(r.id)) throw new Error(`分类结果重复 id=${r.id}`);
+    seen.add(r.id);
     out.push({
       categoryId: cat.id, name: cat.name, source: 'llm',
       confidence: r.confidence, evidence: r.evidence,
       pass: r.match && r.confidence >= MIN_CONFIDENCE,
     });
   }
+  if (seen.size !== byId.size) throw new Error('分类结果不完整：必须返回每个分类的判定');
   return out;
 }
 

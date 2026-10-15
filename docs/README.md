@@ -10,6 +10,7 @@ B站关注列表全员监听（直播间 + 动态 + 微博）→ 持续追踪 �
 | [status.md](status.md) | **实现现状**：里程碑（M1 起）与模块两视图 + 未实现清单 |
 | [boundaries.md](boundaries.md) | **能力边界**：什么能做、什么做不到、代价是什么 + 已知踩坑清单 |
 | [mcp.md](mcp.md) | **MCP 接口**：Agent 接入（令牌/角色权限/Claude Code 等 Host 配置/安全边界；MaiBot 不直连） |
+| [content-audit.md](content-audit.md) | **分类与推送记录**：WebUI 入口、模型回退与发送失败、历史快照、升级边界 |
 
 ### 实施计划
 

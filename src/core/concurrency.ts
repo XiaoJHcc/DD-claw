@@ -33,3 +33,17 @@ export async function mapLimit<T, R>(
   await Promise.all(Array.from({ length: width }, worker));
   return results;
 }
+
+export function createLimiter(limit: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    await new Promise<void>((resolve) => {
+      const start = () => { active++; resolve(); };
+      if (active < limit) start();
+      else waiting.push(start);
+    });
+    try { return await task(); }
+    finally { active--; waiting.shift()?.(); }
+  };
+}

@@ -4,6 +4,7 @@ import { ACTIONS } from './core.js';
 import './listen.js';
 import './llm.js';
 import './categories.js';
+import './content-audit.js';
 import './push.js';
 import './napcat.js';
 import { loadUndoHistory } from './undo.js';

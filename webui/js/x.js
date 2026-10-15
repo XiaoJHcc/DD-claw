@@ -400,14 +400,14 @@ function rulesFor(platform, a) {
 // 帖子行：与主播动态同一套结构（.st-post），streamers.js 的全局 hover 委托直接生效。
 // 「转发」三平台共用（type='retweet'：X/微博在抓取层折进、B站 FORWARD 在源归一）；
 // B站的非转发帖统一标「动态」（细分标签 DYNAMIC_TYPE_* 在主播卡第三栏才有）。
-// 判定标记（判定回看）：该帖每条判定行一个标记——pass=1 绿「推」/ pass=0 灰「不推」；
+// 判定标记（判定回看）：该帖每条判定行一个标记——pass=1 绿「属于」/ pass=0 灰「不属于」；
 // hover/title 看 **分类名 + 理由**（P2 判定分类制：verdicts 落分类级，ruleName 字段实为
 // 分类名，ruleId=0 哨兵——文案不再叫「规则名」以免误导）；无判定行（没跑过判定）不显示标记。
 function verdictTagsHtml(verdicts) {
   return (verdicts || []).map(function (v) {
     const label = v.ruleName || '分类 #' + v.ruleId;
     const tip = '分类「' + label + '」' + (v.evidence ? '：' + v.evidence : '');
-    return `<span class="tag ${v.pass ? 'tag-mint' : 'tag-gray'}" title="${esc(tip)}">${v.pass ? '推' : '不推'}</span>`;
+    return `<span class="tag ${v.pass ? 'tag-mint' : 'tag-gray'}" title="${esc(tip)}">${v.pass ? '属于' : '不属于'}</span>`;
   }).join('');
 }
 
@@ -426,9 +426,11 @@ function postRowHtml(p, open) {
     `<small class="pt-tm">${p.pubTs ? relTime(p.pubTs) : ''}</small></span>` +
     `<span class="pt-x">${esc(p.text || '(无文字)')}</span></span>`;
   const clsAttr = `st-post${open ? ' open' : ''}`;
-  return p.url
+  const content = p.url
     ? `<a class="${clsAttr}" href="${esc(p.url)}" target="_blank" rel="noopener" data-action="noop">${inner}</a>`
     : `<div class="${clsAttr}">${inner}</div>`;
+  return `<div class="post-audit-row">${content}<button type="button" class="icon-btn" data-action="open-content-audit"` +
+    ` data-kind="post" data-subject="${esc(p.platform + ':' + p.itemId)}" title="分类与推送记录" aria-label="分类与推送记录">${icon('list')}</button></div>`;
 }
 
 /** 账号卡规则标签行：对本账号生效的图文规则（空 scope = 全部生效）。hover 注明空 scope 语义；

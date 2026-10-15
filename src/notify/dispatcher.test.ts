@@ -92,3 +92,26 @@ test('alertAll：本机告警只派发到实现 alert 的通道；带 qqTarget �
   assert.deepEqual(onebot.sent[0]!.targets, [{ type: 'private', id: '12345' }]);
   assert.match(onebot.sent[0]!.title, /【告警】标题/);
 });
+
+test('发送结果带失败明细，部分成功不能掩盖网络失败', async (t) => {
+  const { db, toast, onebot, disp } = harness(t);
+  seedChannels(db);
+  onebot.send = async () => [{ ok: false, target: 'group:11111', error: 'connect ECONNREFUSED' }];
+  const outcome = await disp.broadcast(msg({ channels: ['1', '2'] }));
+  assert.equal(outcome.anySuccess, true);
+  assert.equal(outcome.succeeded, 1);
+  assert.equal(outcome.total, 2);
+  assert.equal(outcome.deliveries![1]!.error, 'connect ECONNREFUSED');
+  assert.equal(toast.sent.length, 1);
+});
+
+test('未装配的通知服务也记录失败，其他渠道成功仍只算部分成功', async (t) => {
+  const { db, toast } = harness(t);
+  seedChannels(db);
+  const dispatcher = new NotifyDispatcher([toast], db);
+  const outcome = await dispatcher.broadcast(msg({ channels: ['1', '2'] }));
+  assert.equal(outcome.total, 2);
+  assert.equal(outcome.succeeded, 1);
+  assert.equal(outcome.deliveries![0]!.target, 'group:11111');
+  assert.match(outcome.deliveries![0]!.error!, /未装配/);
+});

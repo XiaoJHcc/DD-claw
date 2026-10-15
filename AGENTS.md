@@ -86,6 +86,7 @@ src/mcp/tools.ts ───┼─ WebUI Agent（进程内 agent loop）       [�
 - `src/core/streamers.ts` — streamers / follows 行类型与映射
 - `src/core/push.ts` — push_channels / categories / push_rules / verdicts 行类型与映射
 - `src/core/posts.ts` — posts 行类型与映射（pics JSON）
+- `src/core/content-audit.ts` — 分类与推送过程归档类型（标准与规则快照、模型尝试、发送结果）；表与仓储在 db.ts，WebUI 两形态共用回看组件，见 `docs/content-audit.md`
 - `src/core/listen.ts` — 监听功能开关（settings `listen_<feature>`）；`dynamic` 只管动态账号名单（bili_accounts）的轮询，监听主播的动态归档随 B站登录常开；手动关→重开 = 该平台启用账号全部进入恢复轮静默
 - `src/core/backlog.ts` — 图文补推语义（轮次判定 resume/gap/normal + 时间窗/条数上限挑选；三源共用的唯一权威定义）
 - `src/core/runtime-config.ts` — 运行时参数（settings 唯一信源）

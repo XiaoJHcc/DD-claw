@@ -161,6 +161,27 @@ async function call(client: Client, name: string, args: Record<string, unknown> 
   return JSON.parse(text) as unknown;
 }
 
+test('真实 MCP 链路拒绝旧 uids，新建和更新都不会静默扩大范围', async (t) => {
+  const fixture = await setup(t);
+  const { toastChannelId } = seedBase(fixture.db);
+  const client = await mcpClient(fixture, ADMIN_TOKEN);
+  const args = { name: '旧规则', uids: ['7706705'], channels: [toastChannelId] };
+  await assert.rejects(call(client, 'upsert_push_rule', args), /uids/);
+  assert.equal(fixture.db.listPushRules().length, 0);
+  const id = fixture.db.upsertPushRule({ scope: ['7706705'], channels: [toastChannelId] });
+  await assert.rejects(call(client, 'upsert_push_rule', { ...args, id }), /uids/);
+  assert.deepEqual(fixture.db.listPushRules()[0]!.scope, ['7706705']);
+});
+
+test('内容审计只暴露给 admin，gateway 工具面不可见', async (t) => {
+  const fixture = await setup(t);
+  const admin = await mcpClient(fixture, ADMIN_TOKEN);
+  const gateway = await mcpClient(fixture, GATEWAY_TOKEN);
+  assert.ok((await admin.listTools()).tools.some((tool) => tool.name === 'get_content_audit'));
+  assert.ok(!(await gateway.listTools()).tools.some((tool) => tool.name === 'get_content_audit'));
+  assert.deepEqual(await call(admin, 'get_content_audit', { subjectType: 'post', subjectId: 'twitter:missing' }), { audit: null, verdicts: [] });
+});
+
 /** 预置：一群渠道 + 一 toast 渠道 + 一分类 + 一主播 */
 function seedBase(db: Db): { groupChannelId: number; toastChannelId: number; categoryId: number } {
   const groupChannelId = db.upsertPushChannel({

@@ -19,6 +19,7 @@ export interface PostTranslation {
   /** 'llm' = 模型给了译文（或明确无需翻译）；'fallback' = LLM 不可用/失败，不附译文 */
   source: 'llm' | 'fallback';
   translation: string | null;
+  error?: string;
 }
 
 export class PostAnalyzer {
@@ -33,7 +34,7 @@ export class PostAnalyzer {
     const router = this.getRouter();
     if (router === null || !this.llmEnabled()) {
       log.debug(`LLM 不可用（${router === null ? '无 provider' : '总开关关'}），不附译文`);
-      return { source: 'fallback', translation: null };
+      return { source: 'fallback', translation: null, error: router === null ? '未配置 LLM provider' : 'LLM 总开关关闭' };
     }
     try {
       const translation = await router.completeJson(
@@ -43,7 +44,7 @@ export class PostAnalyzer {
       return { source: 'llm', translation };
     } catch (e) {
       log.warn(`图文帖翻译失败，不附译文: ${(e as Error).message}`);
-      return { source: 'fallback', translation: null };
+      return { source: 'fallback', translation: null, error: e instanceof Error ? e.message : String(e) };
     }
   }
 }

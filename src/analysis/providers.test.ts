@@ -61,6 +61,23 @@ const imgMsg: ChatMessage[] = [{
   ],
 }];
 
+test('分类审计捕获 provider 解析失败和降级成功，不把失败当成功', async () => {
+  const broken = fakeFetch([okResponse('{"results":[]}')]);
+  const healthy = fakeFetch([okResponse('{"ok":true}')]);
+  const router = new LlmRouter([provider({ name: 'broken' }, [], broken.fn), provider({ name: 'healthy' }, [], healthy.fn)],
+    { text: ['broken', 'healthy'], vision: [] });
+  const attempts: import('../core/content-audit.js').ModelAttempt[] = [];
+  const result = await router.completeJson({ messages: textMsg }, (raw) => {
+    if (!(raw as { ok?: boolean }).ok) throw new Error('分类结果不完整');
+    return raw;
+  }, (attempt) => attempts.push(attempt));
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(attempts.map(({ provider: name, status }) => ({ name, status })), [
+    { name: 'broken', status: 'failed' }, { name: 'healthy', status: 'success' },
+  ]);
+  assert.match(attempts[0]!.error!, /不完整/);
+});
+
 // ---- 路由 ----
 
 test('纯文本走 text 路由，不碰 vision provider', async () => {

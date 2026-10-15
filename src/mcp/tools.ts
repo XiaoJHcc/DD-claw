@@ -227,6 +227,14 @@ const sharedTools: McpToolDef[] = [
     handler: (deps) => deps.db.listCategories(),
   },
   {
+    name: 'get_content_audit',
+    description: '回看一份内容的分类标准、结论、模型回退、规则命中与发送结果；无记录不等于未推送',
+    schema: { subjectType: z.enum(['live', 'post']), subjectId: z.string().min(1).max(256) },
+    role: 'admin',
+    handler: (deps, args) => ({ audit: deps.db.getContentAudit(args.subjectType as 'live' | 'post', args.subjectId as string),
+      verdicts: deps.db.listVerdicts(args.subjectType as 'live' | 'post', args.subjectId as string) }),
+  },
+  {
     name: 'list_channels',
     description: '推送渠道列表：toast=系统通知，onebot=QQ（targetType group/private + targetId 群号/QQ号）。'
       + 'gateway 令牌只能看到本渠道这一条（别的渠道不在可见范围内）',
@@ -746,6 +754,7 @@ const adminTools: McpToolDef[] = [
       categoryId: idSchema.nullable().optional().describe('分类 id；null = 任意内容（按 subjectKind 匹配分类的 appliesTo）'),
       scope: z.array(z.string()).optional()
         .describe('生效主体集合；空数组 = 全部生效。live=主播 uid；post=账号引用（twitter:账号 / weibo:uid / bili:uid）'),
+      uids: z.array(uidSchema).optional().describe('旧字段已退役，请改用 scope；传入此字段会拒绝保存'),
       channels: z.array(idSchema).optional(),
       messageTemplate: z.string().nullable().optional()
         .describe('推送词；live 用 {liver}/{uname}/{title}，post 用 {author}/{text}/{url}/{liver}；null = 内置默认'),
@@ -756,6 +765,7 @@ const adminTools: McpToolDef[] = [
     write: true,
     handler: (deps, args) => {
       const keys = ['name', 'subjectKind', 'categoryId', 'scope', 'channels', 'messageTemplate', 'llmTranslate', 'enabled'] as const;
+      if (args.uids !== undefined) throw new HttpError(400, 'uids 已退役，请改用 scope；为避免扩大生效范围，本次未保存');
       if (args.id === undefined) {
         const rule = parseNewRule(pickBody(args, keys));
         checkRuleRefs(deps.db, rule);

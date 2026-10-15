@@ -2,6 +2,7 @@ import { makeLogger } from '../logger.js';
 import type { AppConfig, LlmProviderConfig } from '../config/index.js';
 import { splitCsvText } from '../core/csv.js';
 import type { Db } from '../core/db.js';
+import type { ModelAttempt } from '../core/content-audit.js';
 
 const log = makeLogger('llm');
 
@@ -661,7 +662,9 @@ export class LlmRouter {
    * 且 retryable 标记是传输层的概念，够不着任务层）；provider 内部的
    * 可重试失败（网络/超时/429/5xx/正文非 JSON）已在 complete() 里重试过。
    */
-  async completeJson<T>(req: LlmRequest, parse?: (raw: unknown) => T): Promise<T> {
+  async completeJson<T>(req: LlmRequest, parse?: (raw: unknown) => T,
+    onAttempt?: (attempt: ModelAttempt) => void,
+  ): Promise<T> {
     const routeKind: 'text' | 'vision' = req.vision ?? hasImage(req.messages) ? 'vision' : 'text';
     const route = this.routes[routeKind];
     const attempts: string[] = [];
@@ -671,16 +674,19 @@ export class LlmRouter {
       if (!p) continue;
       if (!p.isReady()) {
         attempts.push(`${name}[跳过:${p.status()}]`);
+        onAttempt?.({ provider: name, model: p.spec.model, status: 'skipped', error: p.status() });
         continue;
       }
       try {
         const raw = await p.complete(req);
         const result = parse ? parse(raw) : (raw as T);
         p.recordSuccess();
+        onAttempt?.({ provider: name, model: p.spec.model, status: 'success' });
         return result;
       } catch (e) {
         p.recordFailure(e);
         attempts.push(`${name}[失败]`);
+        onAttempt?.({ provider: name, model: p.spec.model, status: 'failed', error: String(e) });
       }
     }
     throw new AllProvidersExhaustedError(routeKind, attempts);

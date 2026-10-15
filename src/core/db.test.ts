@@ -6,6 +6,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from './db.js';
 
+test('内容审计跨重启保留，两段独立更新不覆盖彼此', (t) => {
+  let db: Db;
+  const dir = tmpdir_(t, () => db.close());
+  const path = join(dir, 'audit.db');
+  db = new Db(path);
+  db.recordContentAudit('post', 'twitter:9001', 'analysis', { status: 'done', categories: [], results: [] });
+  db.recordContentAudit('post', 'twitter:9001', 'push', { status: 'failed', reason: 'timeout', rules: [], channels: [] });
+  db.close();
+  db = new Db(path);
+  const audit = db.getContentAudit('post', 'twitter:9001')!;
+  assert.equal(audit.analysis!.status, 'done');
+  assert.equal(audit.push!.reason, 'timeout');
+  assert.equal(db.getContentAudit('live', 'twitter:9001'), null);
+});
+
 /** 临时目录；afterClose 先跑（关连接）再删目录，避免 Windows 文件锁 EBUSY */
 function tmpdir_(t: import('node:test').TestContext, afterClose: () => void): string {
   const dir = mkdtempSync(join(tmpdir(), 'ddclaw-'));

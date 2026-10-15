@@ -28,6 +28,22 @@ interface Fixture {
   chat?: ChatStore;
 }
 
+test('内容审计 REST 验证身份键并返回真实过程记录，旧内容明确无记录', async (t) => {
+  const fixture = await setup(t);
+  const response = await fetch(fixture.base + '/api/content-audit?subjectType=post&subjectId=twitter%3A9001');
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { audit: null, verdicts: [] });
+  fixture.db.recordContentAudit('post', 'twitter:9001', 'push', {
+    status: 'failed', reason: '发送失败', rules: [], channels: [],
+    deliveries: [{ channel: 'onebot', ok: false, error: 'connect ECONNREFUSED' }],
+  });
+  const saved = await fetch(fixture.base + '/api/content-audit?subjectType=post&subjectId=twitter%3A9001');
+  const payload = await saved.json() as { audit: { push: { deliveries: Array<{ error: string }> } } };
+  assert.equal(payload.audit.push.deliveries[0]!.error, 'connect ECONNREFUSED');
+  assert.equal((await fetch(fixture.base + '/api/content-audit?subjectType=bad&subjectId=123')).status, 400);
+  assert.equal((await fetch(fixture.base + '/api/content-audit?subjectType=post')).status, 400);
+});
+
 /** 记录 listen dep 的 onChanged 被调用次数（面板改开关 → 热启停源） */
 let listenChangedCount = 0;
 

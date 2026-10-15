@@ -110,5 +110,5 @@
 
 ## 未实现 / 预留
 
-- verdicts 总览（分类判定结果的面板视图）
+- 跨内容 verdicts 总览（单份内容回看已落地，图文帖子旁按钮 / 时间表直播条 → `GET /api/content-audit` → admin 工具 `get_content_audit`；详见 [content-audit.md](../content-audit.md)）
 - 预告半透明条与「预定时间到」推送（依赖 schedules 表与 schedule-extract，见 [analysis.md](analysis.md)）

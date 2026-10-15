@@ -107,7 +107,8 @@ admin 令牌没有 scope：管理侧指定渠道一直走 `upsert_push_rule` 的
 
 - **只读（两角色共享）**：`get_status` / `get_live_now` / `get_schedule` / `list_streamers` /
   `search_streamers` / `list_push_rules` / `list_categories` / `list_channels` / `search_posts` /
-  `list_x_accounts` / `list_weibo_accounts` / `list_bili_accounts` / `list_post_rules`
+  `list_x_accounts` / `list_weibo_accounts` / `list_bili_accounts`
+- **admin 只读审计**：`get_content_audit`——分类标准、模型尝试、规则命中与实际发送结果，见 [content-audit.md](content-audit.md)
 - **两角色共享的写（唯一一个）**：`undo_last_change`——撤**本调用域**的栈顶（admin = 全局栈，
   gateway = 令牌绑定渠道的栈；未绑渠道直接拒绝，不回落），逐行比对后像与当前值，不一致则中止且一行不动；
   撤完触发热生效（等同面板上改回来）。它自身**不进变更记录**（撤销不该可再撤，见 `UndoStore`）。
@@ -116,8 +117,7 @@ admin 令牌没有 scope：管理侧指定渠道一直走 `upsert_push_rule` 的
   `upsert_push_rule` / `delete_push_rule` / `upsert_channel` / `delete_channel` /
   `list_llm_providers` / `upsert_llm_provider` / `delete_llm_provider` / `set_llm_key` /
   `get_x_config` / `update_x_config` / `upsert_x_account` / `delete_x_account` /
-  `upsert_weibo_account` / `delete_weibo_account` / `upsert_bili_account` / `delete_bili_account` /
-  `upsert_post_rule` / `delete_post_rule`
+  `upsert_weibo_account` / `delete_weibo_account` / `upsert_bili_account` / `delete_bili_account`
 - **gateway 自助**：`list_group_channels` / `add_group_push_rule` / `remove_group_push_rule`
   ——渠道来自令牌绑定的 scope（参数里没有渠道字段；admin 令牌看不到这三个工具）
 

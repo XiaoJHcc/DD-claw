@@ -37,6 +37,7 @@
 // 逐 bar 装箱）。装箱窗口 == 绘制窗口，行高 = 泳道数 × 道高。
 import { api, toast, ACTIONS, esc } from './core.js';
 import { icon } from './icons.js';
+import { openContentAudit } from './content-audit.js';
 
 var schedDays = [];           // 窗口内 5 天升序 [{date, entries:[...]}]
 var schedCenter = null;       // 居中日（日串）
@@ -1109,6 +1110,16 @@ function schedMovePop(evt) {
     if (!el) return;
     if (el.closest('.sched-day.mini')) return; // 缩略行（无字色条）无 hover
     schedShowPop(el, e);
+  });
+  body.addEventListener('click', function (event) {
+    if (!(event.target instanceof Element)) return;
+    const part = event.target.closest('.sched-part');
+    if (!part || part.closest('.sched-day.mini')) return;
+    const found = schedEntryOf(part);
+    if (!found) return;
+    event.stopPropagation();
+    schedHidePop();
+    openContentAudit('live', found.entry.roomId + ':' + found.entry.liveTime, found.entry.uname + ' · 分类与推送记录');
   });
   body.addEventListener('mousemove', function (e) {
     var p = document.getElementById('sched-pop');
