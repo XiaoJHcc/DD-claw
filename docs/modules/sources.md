@@ -1,56 +1,70 @@
-# 抓取层（src/sources/）
+# 抓取层：机制、轮次语义与排障
 
-持续生产：原始数据入库归档 + 变更信号上总线。source 不知道有 LLM（解耦点 1）；轮询循环只做「拉批量状态 + diff 产信号」两件便宜事。外部接口的坑（UA 必填、Referer、轮播状态等）一律查 [../boundaries.md](../boundaries.md) 第 5 节，本文不重复。
+`src/sources` 只做两件事：把原始数据与状态归档进库、把变更作为信号发上总线。逐文件职责与长期不变量见 [sources/AGENTS.md](../../src/sources/AGENTS.md)；外部接口的参数坑（UA / Referer / 轮播 / dm 指纹 / 扫码 retcode / 实例存活）唯一信源是 [boundaries.md](../boundaries.md) §5，本页不复述。
 
-**全体源共同纪律**（各文件只记差异）：
+## 失败语义：为什么「拉不到」不等于「没有」
 
-- **拉取失败绝不能当成下播/清空**——保留旧数据，什么都不做。
-- **健康告警**：单对象连续失败达阈值 emit 一次 `health_alert`；首轮失败记 firstFailTs，持续满 10 分钟（`STREAK_QQ_ALERT_AFTER_SEC`）再发一次（payload `durationAlert` + durationSec）；恢复复位。
-- **登录态心跳折进轮询/同步周期**，不单独起任务；只有**运行中意外失效**（本进程内此前成功登录过）才发一次 `health_alert` 并跳过本轮，本来就没登录只记日志不告警；每轮 `onLoginState` 上报登录态供面板展示。
-- cookie 绝不进日志/错误信息。
+一次网络抖动如果被读成下播或「没有新内容」，后果是全场次批量下播（污染时间轴）或下一条真动态被当成旧内容（丢通知）。所以失败的处置原则是**不覆盖已确认的东西**：已归档的内容、已确认的状态、已前进的游标都不因本轮失败而改变，也不为失败账号发信号。失败本身仍然要留痕——告警计数、账号故障列、运行状态快照都是允许且期望的诊断回写；同一轮里成功的账号照常归档、前进。
 
-## 接口与公共件
+故障分两级的依据是**责任方不同、处置也不同**：一条链路挂了（代理、登录态、风控）重试单个账号没有任何意义，需要人介入；单个账号改名 / 销号 / 被保护则是长期问题，持续告警只会变成噪音，面板上能看见就够。判据用「本轮是否全灭」而不是重试次数，是因为图文源的账号数随时增减，固定次数阈值会把大规模失败误判成个别失败。
 
-| 文件 | 职责 |
-|---|---|
-| `src/sources/types.ts` | `Source` / `SourceContext` 接口：只产 Signal + 归档，不含通知逻辑 |
-| `src/sources/bili/client.ts` | HTTP 层：强制注入 UA、超时重试、HTTP 错误与业务错误（`code != 0`）分层 |
-| `src/sources/bili/types.ts` | B站接口返回类型 |
-| `src/sources/bili/dm.ts` | dm 设备指纹参数（`dm_img_list` 高斯随机轨迹 + 两个静态 base64），算法出处 RSSHub `addDmVerifyInfo`；弹幕等风控接口复用 |
-| `src/sources/bili/wbi.ts` | ⬜ 目标（待启动）。WBI 签名仅弹幕 WS 前置需要；动态接口实测不需要，勿为此实现 |
+告警用时间而不是轮数：轮询间隔是用户可改的，同一个轮数在 45 秒和 3600 秒间隔下代表完全不同的时长，两级顺序会倒挂。恢复不需要人工干预，下一轮成功即复位。
 
-## B站 直播间状态
+## 直播状态：diff、身份与冷启动
 
-- `src/sources/bili/live-status.ts` — 批量 `get_status_info_by_uids`（POST，50/片，非逐个轮询）；缺 key = 未开播，不是失败。
-- `src/sources/bili/live-status-source.ts` — 轮询 + diff + 批量落状态 + `coldStart` 标记（`first_run` / `new_subscription` / 重启恢复 `restart_recovery`）+ 健康计数发 `health_alert`（共同纪律）；face / roomId 空值回填（已有值不覆盖）；`saveRoomStates` 同事务点 `touchLiveSessions` 存活打点（在播条目刷 last_seen + 非空 keyframe 覆盖）。
-- `src/sources/bili/danmaku.ts` — ⬜ 未实现。弹幕 WS：开播拉起、下播关闭；采样进分析队列。
+`live-status` 批量拉状态（分片请求，不是逐 uid 轮询），然后对每个 uid 做纯函数 diff。三条语义值得记住：
 
-## B站 凭据与关注列表
+- **一场直播的身份是 `(room_id, live_time)`**：`live_time` 来自服务端，所以网络闪断不换身份、真下播再开播才换。
+- **轮播不是直播**：B站自动放录像的状态必须折叠成未开播，否则会把录像推成开播。
+- **无历史也如实产 `live_start`**：抑制是策略，不是事实，政策一律留在 pipeline。
 
-- `src/sources/bili/auth.ts` — cookie 管理：`loadCookies`（cookies.json 整套字段，坏 JSON 启动即失败）/ `saveCookies`（扫码落盘，merge：新值覆盖、旧值兜底）/ `cookieHeader` / `fetchSelf`（nav isLogin 心跳，-101 归一化为未登录）。
-- `src/sources/bili/qrcode.ts` — passport 扫码登录客户端：`generateQrcode` / `pollQrcode`（data.code 归一化 waiting/scanned/confirmed/expired，confirmed 从 Set-Cookie 提全套 cookie）；不走 biliRequest（要响应头）。
-- `src/sources/bili/followings.ts` — 分页拉 `x/relation/followings`（50/页，按 total 翻页，短页到底）；实测 604 关注 13 页无需 WBI 签名。
-- `src/sources/bili/follows.ts` — `FollowsSource`：登录态心跳合并进同步周期（共同纪律）→ **整轮成功才落库**（单页失败整轮放弃，绝不清空）。关注**不自动入监听**：follows 表只是面板候选池，监听名单全由用户在面板管理；仅对已有 streamer 做空 face 回填。
+冷启动标记由源打、策略在 pipeline。三个标记的判定条件是整轮统一算的，不是逐 uid 算的——否则首轮里排在后面的 uid 会被误判成「新增订阅」，一次启动就能把几十条通知炸出去。`restart_recovery` 从 `restore()` 恢复基线后的第一轮产生：这一轮里的开播发生在停机期间，无法得知真实开播时间，所以只能与首次运行共用同一个政策开关。
 
-## B站 空间动态
+在播期间每轮顺手做两件便宜事：给场次打存活点（下播时间与崩溃恢复的近似终点），以及把同一份在播数据喂给关键帧缓存。uid 名单只取在监听且纯数字的那部分——非数字 uid（历史演示数据）会让批量请求整单报错，一个坏 uid 能拖垮整轮轮询。
 
-- `src/sources/bili/dynamic.ts` — `DynamicSource`：空间动态轮询（`feed/space`，全量 cookie + dm 三参 + space Referer，**无 WBI**；**对象 = `listWatchedUids()` ∪ `bili_accounts` 里 enabled=1 的账号**，mapLimit(2) 逐 uid）→ posts 表归档（UNIQUE 去重）→ 新帖 emit `feed_post`（payload 带 post 摘要；**监听主播的信号由 pipeline 丢弃 = 只归档，动态名单账号才走图文推送**）。名单账号回写 uname/last_ok_at，顺手抠 `module_author.face` 头像落 `cache/bili-avatars`（`bili/avatar.ts` 直连 hdslb，md5 文件名入库；`avatarDir` opt 不注入则只抠不落盘）。登录态心跳折进轮询周期（共同纪律；follows.enabled=false 时这是 B站登录态唯一来源）；每 uid 首轮静默归档；拉取失败保留旧数据；故障两级（2026-11 重构）：一轮全灭 = 链路级（多为风控 412/-352，聚合 health_alert 一条：次数阈值 → toast，持续满 10 分钟 → 告警 QQ），个别 uid 失败 = 账号级（不推送，达阈值落库 bili_accounts.fetch_fail_* 给面板账号卡展示，恢复清库）；无 cookie 不启动，随 follows 热重启。`parseDynamicItem`：LIVE_RCMD 二次解析 live_play_info / WORD / DRAW（opus pics、draw items）/ AV / FORWARD（拼「//转发自 @xx」摘要）。`kickAccount(uid)`：面板添加动态账号后的即时首拉（轮询间隔默认 300s，等不起；走同一 pollUid，首轮静默政策同样生效）。
+## 图文三源：轮次、游标、归属
 
-## 微博（图文来源之一，与 X 同构）
+三条链路（B站空间动态 / 微博时间线 / X 时间线）结构同构，差异只在解析与出网：
 
-- `src/sources/weibo/feed.ts` — `WeiboFeedSource`：时间线轮询（`ajax/statuses/mymblog`，桌面 UA + `Referer: /u/<uid>` + 全量 weibo cookie；**对象 = `weibo_accounts` 里 enabled=1 的账号**〔2026-09 前是 `streamers.weibo_uid`〕，mapLimit(2)）→ posts 表归档（`platform='weibo'`，**`posts.uid` = 微博账号 uid**，与 X 存 screen name 同语义）→ 新帖 emit `feed_post`。登录态心跳折进同步周期（`fetchWeiboSelf`，失效跳过整轮，共同纪律）；每账号首轮静默归档；失败纪律同 dynamic（故障两级：全灭 = 链路级聚合告警，个别失败 = 账号级落库 `weibo_accounts.fetch_fail_*` 不推送）。每轮 `onStatus` 上报运行状态快照（`accounts` / `okAccounts` / `lastOkAt` / `lastError`——「抓不到」与「没新帖」可区分的前提；**面板当前不展示它**，`GET /api/weibo` 只读）；抓取顺手抠头像（`avatar_large` 优先）落 `cache/weibo-avatars` 并回写文件名；游标（`last_post_id`，只往前推、按数值比较）与昵称（昵称会改、uid 不会）回写。`parseMblog(item, weiboUid, longText?)`：text_raw 纯文本 / retweeted_status 转发拼「//转发自 @xx」（被删残桩不炸）/ pics 两形态（`pics` 数组优先；mymblog 实测是 `pic_infos` 按 pic_id 键控 + `pic_ids` 定序，large→bmiddle→thumbnail 回退）/ created_at Date.parse 转秒 / isLongText 补 `ajax/statuses/longtext`（失败用截断兜底不算错误）。
-- `src/sources/weibo/avatar.ts` — 微博头像本地化：`sinaimg.cn` 境内可达，**直连 fetch**（不走 X 那条代理隧道），md5(url)+扩展名落盘、已缓存直接命中；失败返回 null 不影响抓取主流程。面板经 `/api/weibo-avatar` 按文件名读（白名单校验即防穿越）。
-- 「这条微博属于哪个主播」不再靠 `posts.uid`：由 `weibo_accounts.bili_uid`（可选关联）反查，面板主播卡第三栏走 `db.listRecentPostsMixed`；未关联任何主播的独立博主不会串进主播卡。
-- `src/sources/weibo/qrcode.ts` — passport sso/v2 扫码客户端：`generateQrcode`（**必须带 `Referer: https://weibo.com/` 否则 403**，image 是 png 直链面板直接 `<img src>`）/ `pollQrcode`（retcode 归一化：20000000=confirmed、50114001=waiting 已实测；50114002=scanned、其他 50114xxx=expired 防御式映射）/ `exchangeCookies`（confirmed 的 data.url 起跟 302 链收集 Set-Cookie 换全套 cookie，3xx 时 res.ok=false 勿当错误）；fetch 可注入。
-- `src/sources/weibo/auth.ts` — weibo-cookies.json 管理：`loadWeiboCookies`（坏 JSON 启动即失败）/ `saveWeiboCookies`（merge：新值覆盖、旧值兜底）/ `weiboCookieHeader` / `fetchWeiboSelf`（`ajax/log/action` 看 X-Log-Uid 响应头，异常与缺头归一化为未登录）。
-- `src/sources/weibo/resolve.ts` — 昵称↔UID 解析（匿名访客通道：genvisitor 拿 tid → incarnate 拿 SUB/SUBP → 昵称→uid 走 `m.weibo.cn/n/<昵称>` 302 /u/<uid>（已实测），uid→昵称走 `m.weibo.cn/api/container/getIndex?type=uid&value=` 的 userInfo.screen_name；cookie 模块级缓存、失效自动重建重试一次；fetch 可注入）。
+- **每条链路有自己的账号名单**：图文博主可以完全不直播，所以名单不能挂在监听主播上。B站动态的特殊之处是轮询集合还要并上监听主播，但信号只对名单账号发——监听主播的动态是预告分析的数据源，不是图文推送内容。
+- **去重靠平台 id 的唯一约束**，不靠时间戳：编辑与置顶都会让时间戳不稳定，拿它判新旧会重复推送或漏推。
+- **轮次只决定发不发信号，不决定归不归档**。这一层最容易写错的地方是自造第二套判断：轮次的语义（主动关闭恢复 / 缺口轮 / 正常轮）与补推封顶全部在 [backlog.ts](../../src/core/backlog.ts)，源只负责回答「这个账号在本实例里跑过没有」和「恢复静默位是否置起」。之所以要双封顶（时间窗 + 每账号条数），是因为停机一周后把上百条旧帖一次性推出去比不推更糟。
+- **游标只前进**：平台 id 在时间线上单调，倒退意味着把旧帖当新帖。
+- **登录态心跳必须折进轮询周期**：未登录时接口仍会返回内容（空时间线或降级页面），把那个响应当成「没新帖」会静默错过整段内容，所以运行中意外掉线要告警并跳过本轮；本来就未登录则只记日志——那是正常状态，不是故障。
 
-## 媒体
+**X 的三条路线与退避。** Nitter RSS 是主路线（唯一能区分原创与转发的免登录路线），`x.com` 免登录 HTML 是回退（能判账号存在、能识别引用，但实测拿不到转发），探测入口供面板与 CLI 共用。链路中断时切 **canary 退避**：每轮只探第一个账号，探通则当轮立刻恢复全量，探不通就跳过其余账号——避免在代理挂掉时把整份名单的名额全烧在注定失败的请求上。所有 X 出网（含头像）走隧道，原生 fetch 用不了代理。
 
-- `src/sources/media/keyframe.ts` — `KeyframeCache`：在播直播间关键帧定时本地缓存（积累判定素材，供后续人工/LLM 对照分类正确性）。
-  - `consider(live)` 每轮由 live-status source 喂同一份在播数据：同步返回、内部 mapLimit(2) 异步下载，**绝不阻塞轮询**；同一场 (roomId, liveTime) 距上次**尝试**不足 intervalMs 跳过（失败也记，不重试轰炸）；下播场次清出内存表防无限增长。
-  - 下载 UA+Referer / 8s 超时 / 10MB 防御上限 / content-type 定扩展名；**内容 md5 去重**（与上一帧相同直接丢弃不写盘，不按 URL 判）；失败仅 log.debug。
-  - 落盘 `<dir>/<roomId>/<liveTime>/<ts>.jpg` + `insertSnapshot` 入库；**库内 path 存相对 `<dir>` 的相对路径，分隔符恒为正斜杠**（绝不用 join()，Windows 反斜杠换机后全 404；存量收敛用一次性命令 `migrate:snapshots-path`）。
-  - **开关/间隔事实来源 = settings（RuntimeConfig）**：`configure({enabled, intervalMs})` 热生效——关闭只是 consider no-op，去重/间隔记忆保留，重开不炸量。**暂不清理**，体积用户已接受。
+**平台解析要点。** B站动态的转发在解析层拼成 `//转发自 @原作者` 并把类型归一成转发，开播动态直接丢弃（噪音，开播信息归直播源）；微博的转发就是它的引用形态（折成转发并拼原文），图片字段有两种形态（数组与按 id 键控），长文需要二次请求、失败用截断兜底而不算错误。这些细节决定了「归档成功但字段恒空」这类静默故障，改动解析前先用真实响应核对。
 
-实现现状总览见 [../status.md](../status.md)；信号编排与归档分派在 [core 模块](core.md) 的 pipeline。
+**接口细节（边界文档未覆盖的部分，改动时仍要实测复核）：**
+
+- 微博时间线 `ajax/statuses/mymblog` 需要桌面 UA + `Referer: https://weibo.com/u/<uid>` + 全量 cookie；长文补全走 `ajax/statuses/longtext`（Referer 用站点首页）。
+- B站空间动态 `feed/space` 除 cookie / dm / Referer 组合（见 [boundaries §5](../boundaries.md)）外还需带 `features` 参数（opus 样式与大图开关），解析层依赖它拿 opus 字段与封面大图。
+- 头像落盘：B站与微博图床直连，X 取 RSS `channel` 的 image 或页面 `og:image` 再经隧道；文件名一律 md5，微博头像 URL 带签名且会变，因此只在还没有本地头像时下一次。
+
+## 关键帧缓存
+
+关键帧是判定素材，不是推送素材（推送用实时状态里的关键帧）。它的全部设计都围绕「永远不拖累轮询」：
+
+- 轮询循环只做便宜事，缓存是附带的下载，所以投递是同步的、下载在内部有界并发。
+- 节流锚点是**尝试时间**而非成功时间：失败若不记锚点，一张拉不到的图会被每一轮重试。
+- 去重必须按字节而不是按 URL：直播流关键帧的 URL 常常整场不变，内容却每帧都变。
+- 下播即清内存表：长跑进程不该为已结束的场次持续记账；关掉开关只是停止投递，记忆保留，重开不会补一堆积压帧。
+- 不做清理是刻意取舍：体积已被接受，换断点回看时的历史帧。
+
+## 凭据
+
+三套凭据各自独立：B站 `cookies.json`、微博 `weibo-cookies.json`、X 走代理 + 实例/免登录（无账号凭据）。两条要点：**写盘用 merge 语义**（新值覆盖、旧值兜底，扫码只返回部分字段时不能清空其余），**坏 JSON 启动即失败**（静默降级成「未登录」会把问题推到运行时才暴露）。cookie 与 key 不进日志、不进错误文本；错误信息在调用点脱敏。
+
+微博昵称↔UID 的匿名解析链有明确的能力上限：昵称→uid 可用，uid→昵称已被平台收紧，当前实质不可用（见 [boundaries.md](../boundaries.md) §5）。所以「只填 uid」的添加流程不做存在性校验——填错的表现是账号级抓取失败，而不是添加时报错。
+
+## 排障
+
+- **某一类源完全不跑**：先看监听开关与凭据是否存在（B站动态还依赖登录态，它同时是 B站登录态的唯一心跳来源），再看装配根是否因配置变化重启失败。
+- **整轮失败但网络正常**：多半是登录态掉线或风控；看账号级字段是否全空（说明没进到逐账号阶段）、日志里是 HTTP 层还是业务层错误。
+- **某账号长期抓不到**：面板账号卡的 `fetch_error` 就是源写入的原因；「抓不到」与「没新帖」的区别靠运行状态快照（`accounts` / `okAccounts` / `lastOkAt` / `lastError`）判断。
+- **帖子归档成功但没推送**：依次确认轮次（缺口轮默认静默）、B站动态是否在名单里（监听主播只归档）、规则范围是否覆盖该账号。
+- **关键帧缺帧**：确认缓存开关、间隔是否远大于实际变化频率、以及图上是否真的变了（字节去重会静默丢重复帧）。
+- **X 全灭**：先跑 `npm run probe-x` 分层定位（代理 / 实例 RSS / 免登录），不要在源里加临时重试绕过。
+
+实现现状见 [status.md](../status.md)，信号之后的编排见 [core.md](core.md)。

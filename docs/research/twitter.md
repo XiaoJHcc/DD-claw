@@ -2,7 +2,7 @@
 
 基准日 **2026-09-16**。目标：判断能否把指定 X 账号的推文（原创 / 转发 / 带图）作为独立于 B站的图文渠道推送到 QQ 群，可选经 LLM 判定与翻译。
 
-标记沿用 [README](README.md#溯源标记)：**[实测]** = 本机对真实端点发出过请求并附返回；**[文档]** = 读官方文档/源码，未亲跑；**[待验证]** = 第三方口径或未确认。
+标记沿用 [文档索引](../README.md)：**[实测]** = 本机对真实端点发出过请求并附返回；**[文档]** = 读官方文档/源码，未亲跑；**[待验证]** = 第三方口径或未确认。
 
 > 与子代理文档的关系：本页是唯一权威归档。此前两份分头调研（`x-twitter-2026.md`、`twitter-thirdparty-2026.md`）已合并进本页并删除——它们基于"本机无网络"的前提读文档，其中**「syndication 需要 cookie 才返回时间线」「免登录拉时间线不可行」两条已被本机实测推翻**。
 
@@ -184,25 +184,21 @@ function connectTunnel(proxy, host, port = 443) {
 
 ## 5. 与 DD-claw 的落点
 
-> **2026-09-16 修订**：本节原版按「X 挂在 B站主播下、与微博同构」写。用户已定 **X 是独立于 B站的一条路径**——**独立分页 + 独立名单（`x_accounts`，可选关联主播）+ 独立的图文帖规则表**，设置页保持开播语义不动。落点细节一律以 [plan/twitter-source.md](../plan/twitter-source.md) 为准；下表只留架构对应关系。
+> **历史说明**：本节原是按「X 挂在 B站主播下、与微博同构」写的实施建议，已由实现取代，不再作为待办。
+> 当时的落点设想（独立分页 `#view-x`、独立名单 `x_accounts`、独立图文规则表 `post_rules` + 账号选用）
+> 前半已落地、后半已被统一分类/推送模型取代。现行落点与文件职责以 [plan/twitter-source.md](../plan/twitter-source.md)
+> （决策与实现约定）、[mcp.md](../mcp.md)（能力面）、各级 `AGENTS.md`（代码地图）为准。
+> 下表只保留**调研结论对实现构成的约束**——它们不随落点变化，是这一页仍然有效的那部分。
 
-| 关注点 | 落点 | 说明 |
-|---|---|---|
-| 抓取 | 新增 `src/sources/twitter/{nitter,web,feed}.ts` | 模子 = `weibo/feed.ts`（源纪律照抄），但轮询对象是 `x_accounts` 而非 `streamers`；`platform='twitter'` |
-| 出网 | `settings` 代理项 + `core/proxy.ts` 隧道 fetch | **不能靠环境变量**；面板可填、可测（Node 22 fetch 不认代理） |
-| 归档 | 复用 `posts` 表 | `(platform,item_id)` UNIQUE 去重；`raw` 存原始 JSON；X 帖的 `uid` 存 screen_name |
-| 监听开关 | `core/listen.ts` 的 `ListenFeature` 加 `'twitter'` | 复用 `listen_<feature>` 机制，但 auto 判据从"登录态"换成"代理可用" |
-| 机械筛选（原创/转发/引用/带图） | 新的 `post_rules` 表 + `matchPostRules` | 与开播规则**平行**、互不影响；纯确定性层，不做成 LLM 判断 |
-| LLM 判定 + 翻译 | 新增 `analysis/tasks/translate.ts`（`LlmTask`，schema 进 JSON 出） | 走 `analysis/queue`（并发 2）；规则级开关，默认关，失败回退机械筛选 |
-| 推送 | `notify/dispatcher` → OneBot/Toast | 渠道**引用设置页那份** `push_channels`，不另建；**图片必须经代理下载后本地化**（`pbs.twimg.com` 直连超时 [实测]） |
-| 共享不复制 | NapCat / LLM 供应商 / 推送渠道 | 留在设置页；X 页只引用（settings 唯一信源） |
-| 失败纪律 | 照抄微博源 | 拉取失败**绝不能当成「没有新推文」**；连续失败告警、恢复复位 |
-
-**实现注意点**：
-
-1. **`feed_post` 目前不进管线**：`pipeline.ts` 只处理 `live_start` / `live_end` / `title_change` / `health_alert` → 图文帖推送需要新增一条平行分支，不是"改个字段"。
-2. **RT 的 item_id 取法**：Nitter RSS 的 `<link>` 指向**原作者**的 `/status/<id>`（`RT by @Watase_Yuzuki` 的 link 是 `/wstcg/status/…`），按 link 去重会把"转发同一条推文"折叠成一条——默认取折叠语义，若需"每次转发都推"必须另取 RT 自身 id [待验证]。
-3. **能力面收敛**：X 的连接设置、账号 CRUD、监听开关、`post_rules` CRUD 全部先进 `src/mcp/tools.ts` 注册表，否则轴 B 的"唯一能力信源"会被打破。
+| 约束 | 依据 |
+|---|---|
+| 出网必须自带隧道 fetch，不能靠环境变量 | §1 [实测]：Node 22 原生 fetch 不认代理，`curl -x` 同样打不通 |
+| 代理是可配置的运行时设置，且必须可测、可告警 | §1、§8：X 全部能力都压在代理上，代理挂 = 源全停 |
+| 抓取对象是独立账号名单，不是主播附属 | 账号模型与主播无关；关联只用于展示与文案 |
+| 图片必须经代理下载后本地化再发送 | §1 [实测]：`pbs.twimg.com` 直连超时 |
+| 「抓不到」与「没有新推文」必须可区分 | §8：业务上同形，必须独立健康检查，否则静默失效会被读成「没发推」 |
+| 按 link 去重会折叠同一推文的多条转发 | §2 [实测]：`<link>` 指向原作者；要「每次转发都推」须另取 RT 自身 id [待验证] |
+| 路线能力不能混同 | Nitter 可识别原创 / 转发，引用未知；HTML 回退取不到转发，但单推详情可识别引用。早期调研的字段局限不构成 UI 禁令，现行解析见 `src/sources/twitter/` |
 
 ## 6. 推荐组合与频率
 

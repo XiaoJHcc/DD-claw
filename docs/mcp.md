@@ -3,12 +3,13 @@
 DD-claw 的 Agent 能力面：挂在控制面板同一个端口上的 `/mcp` 端点（Streamable HTTP transport，
 `@modelcontextprotocol/sdk`），供 Claude Code 等 MCP Host 读写设置、查询数据库。
 
-**MaiBot 不直连本端点**（2026-09-15 定案：其 MCP 连接进程级共享、无法按群隔离）——
+**MaiBot 不直连本端点**（其 MCP 连接进程级共享、无法按群隔离）——
 群自助能力由 MaiBot 插件以 gateway 令牌调用本端点实现，见
 [plan/agent-access.md](plan/agent-access.md) P2 详案。
 
 定位：**工具的具体用法看工具自身的 description**（LLM 消费，随 tools/list 下发）；
-本文档只覆盖运维面——令牌、角色、接入配置、安全边界。
+本文档只覆盖运维面——令牌、角色、接入配置、安全边界。进程内的 WebUI Agent 与 NapCat 直连
+共用同一份工具注册表但不经过本端点；它们的接入契约见 [plan/agent-access.md](plan/agent-access.md)。
 
 ## 快速开始
 
@@ -42,7 +43,7 @@ claude mcp add --transport http dd-claw http://127.0.0.1:8787/mcp \
 | | admin | gateway |
 |---|---|---|
 | 典型持有者 | 主人本机（Claude Code / 其他 Agent） | MaiBot 插件（群里所有人间接调用） |
-| 只读查询 | ✔ 全部 | ✔ 全部 |
+| 只读查询 | ✔ 全部（含运维/审计只读） | ✔ 共享只读（admin 专属的运维配置与审计工具不存在） |
 | 撤销本调用域的变更（`undo_last_change`） | ✔ 全局栈 | ✔ 本渠道栈（未绑渠道拒绝） |
 | 设置/名单/规则/渠道/LLM 写 | ✔ | ✘（工具不存在） |
 | 群推送规则自助 | ✘（用全量规则 CRUD；指定渠道走 `upsert_push_rule` 的 `channels`） | ✔（受限，只限令牌绑定的渠道，见下） |
@@ -59,8 +60,8 @@ claude mcp add --transport http dd-claw http://127.0.0.1:8787/mcp \
 
 ### gateway 写/读的服务端强制（不信任调用方声明）
 
-**渠道 = 令牌绑定的调用域（scope），不是工具参数**（2026-09-22 落地，见
-[plan/agent-access.md](plan/agent-access.md)「能力层调用域」方案 A）：`mcp_tokens` 条目带可选
+**渠道 = 令牌绑定的调用域（scope），不是工具参数**（方案见
+[plan/agent-access.md](plan/agent-access.md)「能力层调用域」）：`mcp_tokens` 条目带可选
 `channelId`（`npm run mcp-token -- add <名字> gateway --channel <id>`，一渠道一条令牌），
 服务端由令牌解析 `scope.channelId`。**工具参数里根本没有渠道字段**——LLM 在参数里塞 `channelId`
 / `groupId` 也会被 zod 校验剥离（未知键不进 handler），能力层只读 `ctx.scope.channelId`。
@@ -96,35 +97,23 @@ admin 令牌没有 scope：管理侧指定渠道一直走 `upsert_push_rule` 的
 `undo_last_change` 的撤销栈同样由**令牌 scope** 决定（admin = 全局栈，gateway = 绑定渠道栈），
 未绑渠道的 gateway 一律 403——调用方声明不了自己的栈，也就撤不到别人的写；撤销自身不进变更记录。
 
-> **2026-09-16 定方案、2026-09-22 落地**：渠道从 LLM 可见参数改为令牌绑定的 scope，四处服务端改动
-> 全部完成——① `add_group_push_rule` 去掉 `channelId` 参数（admin 侧指定渠道走 `upsert_push_rule`）；
-> ② `remove_group_push_rule` 补渠道归属校验 + 多渠道规则 copy-on-write 拆分（非 mcp 规则只允许渠道级操作）；
-> ③ 读侧 `list_push_rules` / `list_channels` / `list_group_channels` 按 scope 在服务端裁剪；
-> ④ 写限流从「每令牌」改为「每渠道」。渠道类型同时从「仅群」放开到「群 + 私聊」。
-> 改造前那条「调用方理论上可给任意已启用群渠道加规则」的残留风险由此在**服务端**消除。
+渠道身份（scope）由令牌绑定，四处强制都在服务端：① `add_group_push_rule` 没有 `channelId` 参数（admin 侧指定渠道走 `upsert_push_rule` 的 `channels`）；② `remove_group_push_rule` 先校验渠道归属，多渠道规则走 copy-on-write 拆分（非 mcp 规则只允许渠道级操作）；③ 读侧 `list_push_rules` / `list_channels` / `list_group_channels` 按 scope 裁剪后才离开能力层；④ 写限流与审计按渠道。渠道类型是群与私聊，两者一视同仁。
 
-## 工具一览（细节以 tools/list 的 description 为准）
+## 工具一览
 
-- **只读（两角色共享）**：`get_status` / `get_live_now` / `get_schedule` / `list_streamers` /
-  `search_streamers` / `list_push_rules` / `list_categories` / `list_channels` / `search_posts` /
-  `list_x_accounts` / `list_weibo_accounts` / `list_bili_accounts`
-- **admin 只读审计**：`get_content_audit`——分类标准、模型尝试、规则命中与实际发送结果，见 [content-audit.md](content-audit.md)
-- **两角色共享的写（唯一一个）**：`undo_last_change`——撤**本调用域**的栈顶（admin = 全局栈，
-  gateway = 令牌绑定渠道的栈；未绑渠道直接拒绝，不回落），逐行比对后像与当前值，不一致则中止且一行不动；
-  撤完触发热生效（等同面板上改回来）。它自身**不进变更记录**（撤销不该可再撤，见 `UndoStore`）。
-- **admin 写**：`watch_streamer` / `unwatch_streamer` / `set_streamer` / `set_push_enabled` /
-  `set_llm_enabled` / `set_listen` / `set_chat_mode` / `set_chat_provider` / `update_runtime_config` / `upsert_category` / `delete_category` /
-  `upsert_push_rule` / `delete_push_rule` / `upsert_channel` / `delete_channel` /
-  `list_llm_providers` / `upsert_llm_provider` / `delete_llm_provider` / `set_llm_key` /
-  `get_x_config` / `update_x_config` / `upsert_x_account` / `delete_x_account` /
-  `upsert_weibo_account` / `delete_weibo_account` / `upsert_bili_account` / `delete_bili_account`
-- **gateway 自助**：`list_group_channels` / `add_group_push_rule` / `remove_group_push_rule`
-  ——渠道来自令牌绑定的 scope（参数里没有渠道字段；admin 令牌看不到这三个工具）
+**完整清单、参数与逐条用法以 `tools/list` 的 description 为准**（LLM 消费口径），本文只写可见性规则：
+工具只按角色注册，越权工具对 gateway 连接根本不存在。按能力类别：
 
-图文来源的工具与面板同一条校验：post_rules 是**平台无关的通用规则**（只定义筛选+渠道+推送词），
-账号经 `ruleIds` 选用规则（只校验规则存在，任意账号可选用任意规则）；quote 仅 X 帖可识别、
-`llmTranslate` 运行时仅对 X 帖生效；X 配置含代理地址与实例（运维面），故 `get_x_config`
-是 admin 专属，而三份账号名单是 shared。
+- **只读**：状态与实时在播、时间表、名单（主播与三份图文账号）、分类与规则、渠道、帖子检索——两角色共享。
+  运维/审计类只读（分类与推送过程回看 `get_content_audit`、LLM provider 名单、X 连接配置）**只对 admin 注册**。
+- **撤销**：`undo_last_change` 是两角色共享的唯一写工具——撤本调用域的栈顶，它自身不进变更记录。
+- **配置写**：名单与开关、运行时参数、分类与规则、渠道、LLM provider 与 key、X 连接与三份图文账号——admin。
+- **排序与测试**：`reorder_*` / `test_*` 同为 admin 写工具，进注册表是为了**统一校验与审计**，但**不进 agent 工具面**。
+  两者的撤销面不同：排序是 DB 写、走快照可撤销；测试推送与连通性探测**有对外副作用但不是 DB 写**（差分恒空，
+  不产生变更记录），**不可撤销**——它们是运维验证动作，不是配置变更。
+- **QQ 自助**：渠道清单与群规则增删三个工具——gateway 专属，渠道来自令牌绑定的 scope（参数里没有渠道字段）。
+
+分类与规则是两张统一表，两形态同表：分类用 `applies_to` 区分直播/图文，条件算子（关键词、分区、帖子类型、引用、带图）随类型可用；推送规则用 `subject_kind` 区分，`scope` 空 = 全部生效（live = 主播 uid，post = `twitter:账号` / `weibo:uid` / `bili:uid`）。旧 `uids` 字段与旧图文规则工具（`upsert_post_rule` 等）、账号工具的 `ruleIds` 入参均已退役——传 `uids` 会被明确拒绝而不是静默剥离。quote 仅 X 帖可识别、`llmTranslate` 运行时仅对 X 帖生效（门控在分析层，不在工具层）。
 
 写路径全部复用面板同款校验与热生效回调——经 MCP 改设置与在面板改完全等价
 （监听开关热启停源、运行时参数热生效、LLM 名单/key 热重建 router）。
@@ -132,24 +121,20 @@ admin 令牌没有 scope：管理侧指定渠道一直走 `upsert_push_rule` 的
 ## 边界与 v2 预留
 
 - **主人 QQ 私聊改设置**：v1 不做。私聊消息也走 MaiBot → 同样不可信；管理动作用 Claude Code 或面板
-- **MaiBot 群自助接入**：详案在 [plan/agent-access.md](plan/agent-access.md) P2 节——插件在事件层取真实
-  group_id（LLM 不可见该身份），按群选一条**渠道绑定**的 gateway 令牌调本端点；DD-claw 侧的四处
-  服务端前提（渠道类型放开 / copy-on-write 拆分 / 删除归属校验 / 限流审计按渠道）已落地（见上）。
+- **MaiBot 群自助接入**：详案在 [plan/agent-access.md](plan/agent-access.md)「P2 详案」——Host 在工具回调里注入运行时
+  group_id（**fill-only**，身份字段不进 LLM 参数），插件据此选一条**渠道绑定**的 gateway 令牌调本端点。
+  DD-claw 侧的四处服务端前提（渠道类型放开 / copy-on-write 拆分 / 删除归属校验 / 限流审计按渠道）已落地（见上）。
   HMAC 盖章留给「单入口跨权限域」（主人私聊提升 admin 权限）场景，届时才动 DD-claw 侧
 - **面板 token 管理卡**：v1 只有 CLI；token 纯文本存库（同 LLM key 的本机明文口径）
 - 只暴露 tools；MCP resources / prompts / SSE 服务端推送不实现
 
 ## 实现文件
 
-| 文件 | 职责 |
-|---|---|
-| `src/mcp/auth.ts` | token 模型：`mcp_tokens` settings 读写（含 gateway 令牌的 `channelId` 绑定）、`mintToken`（`ddc_` + 24B base64url）、`resolveMcpAuth`（Bearer → {name, role, scope}；无配置 = 'unconfigured' 503，无效 = null 401；非法渠道绑定视为未绑定；sha256 后 timingSafeEqual 比较；token 不进日志） |
-| `src/mcp/tools.ts` | 工具注册表（能力层）：shared 只读 + admin 写 + gateway 渠道自助；渠道只从 `ctx.scope.channelId` 读（身份字段不进 schema），读侧按 scope 服务端裁剪；`registerTools(server, deps, auth)` 按角色注册，写操作审计日志 |
-| `src/mcp/run-tool.ts` | 能力层唯一执行入口：zod 再校验 + 审计 + 错误归一 + 写快照接线；`scopeChannelId` / `undoScopeOf` / `toolChangeMeta`（调用域 = 撤销栈与审计渠道） |
-| `src/mcp/handler.ts` | `/mcp` 请求处理：Bearer 鉴权（→ 角色 + 调用域）→ 每请求新建 McpServer + StreamableHTTPServerTransport（`sessionIdGenerator: undefined` 无状态模式，无会话管理），GET/DELETE 由 SDK 回 405 |
-| `src/mcp/rate-limit.ts` | gateway 写操作滑动窗口限流（内存，**每渠道** 20 次/10min；`writeLimitBucket` 分桶键=scope 渠道，无 scope 回落令牌名）；`resetMcpWriteLimiter` 供测试隔离 |
-| `src/tools/mcp-token.ts` | `npm run mcp-token` CLI：list / add <名字> <admin\|gateway> [--channel <id>] / remove <名字>；token 只在 add 时打印一次 |
-| `src/core/push.ts` | `splitPushRuleChannel`：copy-on-write 拆分原语（多渠道规则拆出只含某渠道的一条，显式设定两侧 createdBy，同一事务） |
+逐文件职责见 [src/mcp/AGENTS.md](../src/mcp/AGENTS.md)（能力层代码地图与长期不变量）；本文不复制文件清单。
+本文件与之的分工：**本文 = 运维面**（令牌、Host 接入、角色、安全边界、排障），**AGENTS = 代码面**。
+
+与 MCP 相关但不在 `src/mcp/` 的两处：令牌 CLI 在 `src/tools/mcp-token.ts`（`npm run mcp-token`），
+多渠道规则拆分原语在 `src/core/push.ts`——两者的职责同见各级 `AGENTS.md`。
 
 ## 故障排查
 

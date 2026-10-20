@@ -1,81 +1,92 @@
-# 分析层（src/analysis/ + src/rules/）
+# 分析层：判决链、模型通道与匹配机制
 
-轴 A 的第二段：消费 signal 总线上的变更信号，LLM 只做**内容分类**（判定结果入 verdicts 表），matcher 把人填的推送规则确定性执行成推送目标。`src/rules/` 只剩**机械去重 / 防抖**（每场一次、场景切换去重、冷却），不再有用户可见护栏。总体架构见 `../design.md`，实现现状见 `../status.md`。
+`src/analysis` 回答两个问题：「这条内容属于哪些分类」（判定）与「按人填的规则该推给谁、推什么」（匹配）。前者的结论入 `verdicts`，完整过程入 `content_audit`；机械去重不在这里（见 [rules/AGENTS.md](../../src/rules/AGENTS.md)）。逐文件职责与长期不变量见 [analysis/AGENTS.md](../../src/analysis/AGENTS.md)。
 
-## 职责边界（改代码不要破坏）
+本页是**现行实现机制说明，不代表验收**：判决链的目标规格见 [统一计划](../plan/unify-classify-push.md) 附录 C，验收结论、未完成能力与进度只查 [status.md](../status.md)。
 
-- **LLM 即任务**：zod schema 进，JSON 出，中间可替换；换模型只动 providers。
-- **高峰并发原则**：所有 LLM 调用一律进 `analysis/queue`（信号量限流，并发 2），禁止在轮询循环里直接调。
-- **去重 / 防抖归属**：机械去重属于 `src/rules/` 这一层（不是用户偏好过滤），不要塞到 Classifier 之前；用户可见的静音名单 / 静默时段 / 定时推 /「不推」偏好**已放弃**（见 `../design.md` §11）。
-- **LLM 不参与偏好解释**：「推给谁、推什么」始终由人填的推送规则决定（matcher 确定性执行）；LLM 可用性不影响偏好链路，分类口径也是人填的（categories 表：LLM 提示词 + 确定性关键词/分区条件）。
+## 判决链
 
-## 接口契约
+判定按「档位」串联，每档返回**本档定案**（空 Map 也算定案：判否不落到下一档）或 `null`（本档不可用 / 不适用，交下一档）。链是纯函数式装配而不是 if-else 堆叠，目的是让新增判定方式只加一档、不动编排。
 
-| 接口 | 位置 | 约定 |
+| 档位 | 何时生效 | 产出 |
 |---|---|---|
-| `Classifier.classify(ctx)` | `src/analysis/types.ts` | 返回 `Classification[]`（非 live_start 返回 `[]`）；判定结果由实现自行入 verdicts 表。`LiveEvent.classifications` 仅 live_start 由分析队列填充，其余信号恒空，下游必须能处理空数组 |
-| `LlmTask<I,O>` | `src/analysis/types.ts` | zod schema 进，JSON 出（类型占位） |
-| `DecisionRule.decide(event, signal, classifications)` | `src/rules/types.ts` | 返回 `NotifyDecision`；第三参 `classifications: Classification[]` 可空数组 |
+| 确定性 | 无提示词的分类（永远）；有提示词分类的最后一档 | 条件算子命中 → `source='rule'`，`confidence` 为空 |
+| 决策模型 | 配置了客户端且就绪 | 高/低置信度定案 `source='decision'`；灰区升级下一档 |
+| LLM | 有 provider、总开关开 | 逐项定案（含判否）`source='llm'` |
 
-## analysis — 文件清单
+带提示词的分类先过**图文硬结构门禁**：勾了「只原创/只转发 / 须引用 / 须带图」且当前内容不满足，直接短路判否，不消耗任何模型 token。门禁只做客观属性，**关键词与分区不参与短路判真**——旧标题党与反串太常见，命中关键词不代表内容真是那个分类，它们只作模型参考特征与故障兜底。
 
-### `types.ts`
-`Classifier` / `Classification` / `AnalysisContext` / `LlmTask` 类型定义（仅类型）。
+两条容易误解的语义，理由都在「模型与确定性各自能证明什么」：
 
-### `classifier.ts` — RulesClassifier
-每场 live_start 对全部启用分类逐个判定，结果 `insertVerdict` 入库。
+- **模型档权威**：模型给了否定结论后再被关键词捞回来，等于模型判断白做，所以判否不回看确定性条件；回退只发生在模型**不可用**（无 provider / 开关关 / 调用失败 / 解析失败）时。
+- **确定性档只能证明「属于」**：条件不满足只是没命中，不是否定。这是直播侧只记正判的根源；图文侧的结构门禁与模型判否才是真正有依据的否定，因此落档。
 
-- **LLM 优先**：有 `llm_prompt` 的分类，在 router 可用且 LLM 总开关开时合并成一次 LLM 调用，LLM 判定权威——**判否不回看该分类的确定性条件**。
-- **回退路径**：LLM 关闭/熔断/调用失败/解析失败时，回退该分类的 `matchCategory` 确定性条件；**无提示词的分类永远走确定性**（verdicts `source='rule'`，confidence 记 NULL）。
-- **仅 live_start 烧 LLM**：live_end / title_change 不调分类（pipeline 保证）。
-- 对全部监听主播生效（旧 analyze 闸门已随主播三开关删除，streamers 表 analyze/notify 列为遗留、不再消费）。
-- 构造注入 `(db, getRouter, llmEnabled)`——router 是 getter、每轮取最新，面板热重建 router 不失效。
+**影子与激活。** 决策模型支持两档：`shadow` 只写审计（尝试记录与逐项概率带）不定案，用于零风险线上比对；`active` 用双阈值把结果分成 pass / reject / gray 三带，灰区才升级给 LLM。阈值、模型版本、图像契约都存 settings，与 LLM 的 key 池 / 熔断完全隔离——两条通道的计费与限流是两本账。
 
-### `queue.ts` — 分析队列
-包装 `Classifier`，`submit(ctx): Promise<Classification[]>`，信号量限流（并发 2）。预留：同房间触发合并、结果缓存、优先级。
+## 输入面：`ContentItem`
 
-### `providers.ts` — LLM provider 层
-OpenAI 兼容直连，无外部网关。
+直播场次与图文帖被投影成同一个 `ContentItem`：身份键、作者、正文、标签、视觉输入、链接、时间。判决链、prompt 构造、条件算子都只吃它，所以新增内容形态（弹幕、预告）时只需扩投影，不动判定逻辑。
 
-- **路由**：`LlmRouter.completeJson(req, parse?)` 按输入是否含图自动选 text/vision 路由（可显式覆盖），沿路由降级，全挂抛 `AllProvidersExhaustedError`。路由由 provider 名单自动推导（`deriveRoutes`）：名单顺序 = 优先级，text = 全部启用，vision = 启用且多模态。
-- **双协议**（`api` 字段）：chat-completions / responses（responses：system→instructions、部件 input_text/input_image、结构化输出走 text.format）。**Anthropic /messages 明确不接**。
-- **熔断**：连续失败阈值 + 冷却期跳过；任务层 zod parse 失败同等计入熔断。超时/熔断阈值/冷却由 RuntimeConfig（settings 表）提供，面板「LLM 卡 → 高级」管理，变化时重建 router 热生效。
-- **多 key 池轮询**：`needsAuth` 启发式——loopback 端点 = 无鉴权；其余端点无 key = 标「缺 key」跳过，不算配置错误。
-- **structuredOutput 三档**：schema / object / none（none 剥 ` ```json ` 围栏兜底）。
-- **key 安全**：只进 Authorization 头，绝不进日志/错误信息。
-- **settings 唯一信源**：provider 名单 = settings `llm_providers`（`listLlmProviders` / `saveLlmProviders`）；key = settings `llm_key:<providerName>`（逗号分隔多 key，`dbKeysOf`），无 .env 回退。保存后 `router.refreshKeys()` 热更新。
-- `router.ping(name)`：面板「测试」按钮用，绕熔断直连，结果计入熔断。
-- `createLlmRouter(cfg, keysOf?)`：装配入口，路由内部推导。
+标签的语义是刻意的：
 
-### `tasks/classify.ts` — 内容分类任务
-一次 live_start 对所有「启用且有 llm_prompt」的分类**合并成一次 LLM 调用**（成本与降级语义最简单）。
+- `type` 在投影时折叠成 `original` / `retweet`——三个平台各自的转发枚举（含 B站 `DYNAMIC_TYPE_FORWARD` 的归一）在 source 侧统一，matcher 只认这一个值。
+- `isQuote` 是三态：`true` / `false` / **`unknown`**。只有 X 的免登录回退路线能判定引用，其余来源不知道不等于没有——按「未知按未命中」处理，这是旧 quote 语义的延续。
+- `hasMedia` 决定视觉判定是否有输入；`platform` 决定文案措辞、quote 语义与翻译门控。
 
-- `buildClassifyRequest`：system 指令 + 主播/标题/分区 + 分类清单；`keyframe || cover` 非空时带图走 vision 路由；jsonSchema `{results:[{id,match,confidence,evidence}]}`。
-- `parseClassifyResults`：zod 校验 + 过滤 `match && confidence ≥ 0.5`；模型编造的未知分类 id 丢弃；parse 失败由 providers 层计入熔断 → 调用方回退确定性。
+视觉输入面统一是 Data URL：直播用关键帧（缺则封面），图文用本地化后的配图。**图床 URL 不能直接交给模型**——B站图床缺 Referer 会 403，X 图墙内不可达；所以判定前必须先落本地再转 base64，这一步在 pipeline 里完成，分析层只消费结果。
 
-### `matcher.ts` — 确定性匹配（零 LLM 依赖）
+## LLM 任务契约
 
-- `matchCategory(cat, event)` → `{matched, evidence}`：关键词组 vs 标题子串、分区组 vs areaName/parentAreaName 子串；大小写不敏感、**组内任一**、`condMode` and/or 控制**组间**关系、空组忽略、两组皆空不命中；evidence 记录命中词（入 verdicts）。
-- `matchPushRules(rules, event, matchedCategoryIds)`：命中 =（categoryId 空 = 任意开播，或 ∈ 判定集合）且（uids 空 = 全部主播，或含 event.uid）。**返回全部命中规则**（保持 sort 顺序），所有命中规则独立生效——调用方对渠道取并集去重（同一渠道只推一次），推送词 = sort 序首个非空 messageTemplate。无命中规则 = 不推送（「任意开播 × 全部主播」规则即兜底）。
-- `renderTemplate` 渲染 `{liver}`（原名）/ `{uname}` / `{title}`；推送词链 = 规则覆盖 > 内置默认。
+一次判定把所有「启用且有提示词」的分类**合并成一次调用**：每个分类一条清单项（id、名称、提示词、辅助关键词/分区），输出 `{results:[{id, match, confidence, evidence}]}`。合并而非逐分类调用，是为了成本与降级语义都保持最简——要么这次调用成功覆盖全部，要么整体回退。
 
-### 目标态待做
+解析对**完整性、id 唯一性与置信度区间**是硬约束，违规即整单判失败；采纳阈值是任务层常量，模型编造的未知分类 id 丢弃。`maxTokens` 随分类数扩展——长清单被截断会稳定表现为「结果不完整」。
 
-| 文件 | 规划职责 |
-|---|---|
-| `triggers.ts` | **分析触发**：哪些信号送进 LLM——现仅 live_start，目标任意时机按规则（开播 / 新动态 / 直播中抽查 / 定时全量） |
-| `context.ts` | 按房间聚合时间窗内多源数据 → 一份 context（喂给分类 prompt） |
-| `tasks/schedule-extract.ts` | 从动态/微博解析预告时间 → schedules 表（依赖 triggers 能消费 feed_post） |
+## Provider 层
 
-## rules — 机械去重（非用户偏好）
+- **路由由名单推导**：provider 名单顺序即优先级；text 路由收全部启用的，vision 路由只收多模态的。请求带图即走 vision，无图走 text；显式指定路由可覆盖。
+- **双协议**：chat-completions 与 responses（system→instructions、结构化输出走 `text.format`）。Anthropic `/messages` 明确不接。
+- **结构化输出三档**：`schema`（约束最强）/ `object`（只保证是 JSON）/ `none`（不带 response_format，解析时剥代码围栏兜底）。本地小模型与不支持的端点靠第三档活。
+- **两级失败语义不同**：传输层可重试失败（网络 / 超时 / 429 / 5xx / 正文不是合法 JSON）在 provider 内就地重试并轮换 key；任务层 schema 不符不重试，直接记熔断、降级到下一个 provider——重试同一个模型对「确定性不听话」没意义。
+- **缺 key 不是配置错误**：loopback 端点视为无鉴权；其余端点无 key 标「缺 key」跳过。这让「本地 LM Studio + 云端备用」可以共存。
+- **工具对话的模拟降级**：端点不支持原生 tools 时，用提示词让模型输出一个 JSON 再由我们拼成工具调用。这不记熔断（不是端点故障），但参数同样过能力层校验——模拟路径不是绕开 schema 的后门。
+- **含图但无就绪 vision provider 时剥图降级走 text**：硬着头皮带图会让整单在空路由上失败，把本可成功的纯文本判定一起拖死。
 
-| 文件 | 职责 | 状态 |
-|---|---|---|
-| `types.ts` | `DecisionRule` / `NotifyDecision` 类型 | ✅ 仅类型 |
-| `once-per-session.ts` | 每场直播推一次；目标演进：场景切换去重 + 冷却防抖 | ✅ 占位 |
+## 决策模型通道
 
-`preference.ts`（静音名单 / 静默时段 / 冷却窗口 / 状态跳变抑制）**已放弃**——推送规则已足够，未来只做**增加式**可选推送时机（见 `../design.md` §11）。
+`/v1/systemone` 的契约是**单次请求混装多题**：一道全局 `choice`（各分类 + `none`，给横向概率分布与主分类）+ N 道逐项 `noul`（是非题，给各分类独立的命中概率）。这样一次输入费拿到两类信息，也避免多分类之间互相截胡。
 
-## LLM 选型
+- **图片只引用一次**：`state.images` 存引用键，题目里只用反引号引用字段名——按题目重复塞资产会按次数重复计费。
+- **两种图像契约**：`assets`（TypeSafe 原生引用流，自动附危险区请求头并过滤不合规图片）与 `images_array`（顶层 `images[]` 扩展，供兼容服务端）。
+- **逐项概率必须完整且在 0–1**，缺项或越界即整单失败并交下一档——半份结果比没有结果更危险。
+- **审计带**：模式、模型、主分类与横向分布、逐项 `noul` 与分带、被跳过的图片原因都写进 `content_audit`，这是影子比对的唯一证据。
 
-调研结论（多模态硬要求、付费 API 主力 + 本地 LM Studio vision 降级位、gpt-5.6-luna 族配 `api: responses`、订阅反代不做）见 `../research/llm.md`。验证接线用 `npm run probe-llm`（列 provider 状态 + text 路由 ping）。
+## 视觉输入规范化
+
+图片在送模型前统一处理，因为单张坏图会炸掉整单：
+
+1. **URL 归一**：剥掉 B站的转码后缀、把 X 图床的 webp 改成 jpg，让图床直出静态大图。
+2. **字节头探测**：不盲信扩展名，直接读 JPEG / PNG / WebP / GIF 头部拿真实格式、宽高与动图标记。
+3. **门禁校验**：严格模式只收静态 JPEG/PNG、单边与总像素在给定区间、单图有体积上限。不合规的图在本地被拦下并记原因——否则服务端会用一次 400 拒绝整单。
+
+## 规则匹配
+
+匹配是纯确定性函数，可以离线推演，也因此是「为什么推了 / 为什么没推」最可靠的解释面。命中条件的定义在 [analysis/AGENTS.md](../../src/analysis/AGENTS.md)，这里只记设计取舍与算法：
+
+- `scope` 为空表示全部（含未来新增），取舍是「不为新账号反复改规则」；同理分类引用为空表示任意内容。
+- 多条规则同时命中时**叠着用**而不是互相取消：渠道取并集、推送词取排序后首个非空，于是「一条泛规则兜底 + 一条分类规则加权」能共存。
+- 没有内置兜底规则——「任意内容 × 全部主体」规则就是旧全局默认的等价物，需要的人自己建一条，避免沉默的默认行为。
+- 条件算子按内容类型注册，组间关系由且/或统辖；无有效组不命中，防止纯提示词分类被确定性路径误判成恒中。
+- 模板变量按定义序替换：直播 `{liver}`（原名优先，缺省回退简称）/ `{uname}` / `{title}`；帖子 `{author}` / `{screenName}` / `{text}` / `{url}` / `{liver}`（关联主播）。
+
+## 翻译
+
+翻译是规则层的附加动作，只对需要翻译的平台出现（当前仅 X），由命中规则聚合后的「任一条开了翻译」触发，每次推送最多调一次。失败原因进 `content_audit.translationWarning`，用户能看出「这条本该有译文」。
+
+## 排障
+
+- **判定没跑**：只有 `live_start` 与 `feed_post` 会进判定；`title_change` / `live_end` 不烧模型。`feed_post` 没有可用分类（`applies_to` 不匹配）时直接返回空。
+- **判定结果为空但分类看着该命中**：看 `content_audit.analysis.results` 的逐项 `evidence`（门禁原因 / 模型理由 / 「确定性条件未命中」）与 `fallbackReason`（为什么模型档没接手）。
+- **模型一直回退**：看 `attempts` 里每个 provider 的 skipped / failed 原因；`缺 key` 与 `熔断中` 是两种不同处置（补 key vs 等冷却）。
+- **带图判定失败**：确认 vision 路由是否有就绪 provider（无则已剥图降级），以及图片是否被门禁拦下（`skippedImages`）。
+- **两条规则都命中却只推到一个渠道**：渠道是并集，检查两个渠道是否指向同一个 QQ 目标。
+- **帖子判了「不属于」还想知道原因**：图文侧判否会落 `pass=0`，直播侧只记正判——两侧归档口径不对称是既有约定。

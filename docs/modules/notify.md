@@ -1,55 +1,74 @@
-# 推送层（src/notify/）
+# 推送层：路由、托管与平台陷阱
 
-轴 A 的第三段（通知执行）：**只执行，不解释语义**（`PushMessage` 边界）。载荷是 `PushMessage`——notify 不认识 `LiveEvent`；dispatcher 做路由 + fan-out + 通道级规则，通道实现 `Notifier` 即可增删。分析层见 [analysis.md](analysis.md)，装配见 [core.md](core.md) 的 index.ts；实现现状见 [../status.md](../status.md)。
+`src/notify` 是轴 A 的最后一米：拿到 `PushMessage` 就发，不解释分类、规则或偏好。逐文件职责与长期不变量见 [notify/AGENTS.md](../../src/notify/AGENTS.md)；装配级热替换与告警政策的上游判定见 [src/AGENTS.md](../../src/AGENTS.md) 与 [core.md](core.md)。
 
-## 文件
+## 一次广播发生了什么
 
-### `types.ts`
-`Notifier` 接口：`send(PushMessage)` + `capabilities` + `alert()`（可选，供健康告警；当前仅 toast 实现）。
+`dispatcher.broadcast(msg)` 做四件事：路由、扇出、记投递、给结论。
 
-### `message.ts`
-`liveEventToMessage()`：`LiveEvent → PushMessage`。纯文案不用 emoji——QQ iOS 气泡渲染会把增补平面 emoji 拆成两个方框；body 只留直播标题，分区 · 开播时间进 `attribution`，头像进 `icon`，刚开播无关键帧时通知仍有图。
+- **路由**以渠道表为准而不是以通道内部配置为准：用户在面板上选的渠道决定发到哪个群 / 私聊，通道本身没有独立启停。`msg.channels` 缺省的「全通道」只服务告警与 `--test-notify` 这类没有用户规则上下文的路径。
+- **扇出**逐通道并行，一个通道抛异常不影响其他通道——一个群禁言不该让另一个群的推送被记成失败。
+- **记投递**到 `notify_log`，用消息里的场次引用溯源；非直播消息（告警）写空引用。逐渠道逐目标的投递结果同时进 `content_audit`，pipeline 据此区分「部分成功」与「全失败」。
+- **未装配的通道要显式记账**：渠道行指向的 notifier 不在当前装配里（例如 NapCat 端点发现失败被降级跳过）时，记失败并给出原因，而不是静默丢消息——否则用户只会看到「规则命中但什么都没发」。
 
-### `dispatcher.ts`
-并行 fan-out、notify_log 用 `msg.ref` 溯源、任一通道成功即标记。
+`dryRun` 下不发任何请求，但走完同一条计算路径并打日志，让 `--dry-run` 能演练整条链路。
 
-- `msg.channels` 存在时渠道路由：查 `push_channels` 过滤「选中且启用」按 notifier 分组，onebot 组解析成 `msg.targets`，无选中渠道的 notifier 跳过；缺省走全通道旧行为。
-- `alertAll(title, body, qqTarget?)`：本机告警只派发到实现 `alert()` 的通道（当前仅 toast），`qqTarget` 存在时另走 `onebot.send` 私聊点对点。
-- `setNotifiers` 装配级替换（NapCat 配置热更新后重建，pipeline 引用不变；无通道级开关——通道启停走 `push_channels.enabled`）。
-- **通道级规则**（群×主播屏蔽、优先级阈值）：待产品方案，机制不预设。
+## 健康告警的两条腿
 
-### `onebot.ts`
-NapCat OneBot 11 HTTP；消息段数组；attribution 拼成正文第三行；图片失败降级纯文本；每目标串行 + 1.2s 间隔。
+告警不是推送的特例，因为可靠性要求相反：NapCat 掉线时 QQ 通道本身就是坏的，没法告诉你「监听坏了」。
 
-- 常规 `send` 只看 `msg.targets`（空 = 不发）。
-- **不实现 `alert()`**——次数阈值类健康告警不发 QQ；QQ 告警由 dispatcher 按 pipeline 判定带 `qqTarget` 走 `send` 私聊点对点。
-- `updateEndpoint()` 供 NapCat 看门狗热跟随端点。
-- `--test-notify` 的假消息取 `push_channels` 表的启用 QQ 渠道，可真实验证链路。
+- **本机腿**：派发给实现了 `alert()` 的通道（当前仅 toast）。
+- **QQ 腿**：只有「运行中登录掉线」与「故障持续满阈值的二次告警」两种情形值得发到手机，由 pipeline 判定后带目标传入、私聊点对点发出；目标留空 = 全不发。
 
-### `napcat.ts` — NapCat 通道 + 失活自动拉起（双平台）
+onebot 刻意不实现 `alert()`：否则每一次网络波动都会往群里发告警，而阈值级告警的正确渠道是用户自己的屏幕。
 
-- **dd-claw 专属条目自管**：`ensureNapcatEntry` 在 `onebot11_<uin>.json` 自建/修复 `name: "dd-claw"` 的 httpServers 条目（缺了选高位空闲端口〔41990 起扫〕创建、被禁用启用、端口被占自动换；只动这一条，http/3000 等其他条目原样保留）。
-- `readOnebotEndpoint` 按名匹配发现（无条目回落第一个启用条目；host `0.0.0.0`/`::` 归一化回环）。
-- `probeNapCat` 三态探测（连接拒绝 = down / TCP 通但非 OneBot = conflict / OneBot JSON = ok 再看 retcode 判登录态）。
-- `NapcatWatchdog` 状态机：`target` 回调每 tick 取生效 dir/uin、缺条目自建、conflict 自动换端口再拉起、**陈旧实例识别**（新端口 down 但 lastOk 旧端口仍 ok → 停旧再拉起让新配置生效）、down 冷却 10min 内拉起、3 次放弃告警、未登录只告警一次、恢复自动复位；**拉起由 `autoRestart` 开关 + `available` 能力双闸门控制**（开关关 = 只探测/告警/热跟随绝不拉起；能力不可用〔任务被删〕告警一次不拉起）。
-- 配置：`getNapcatConfig` / `saveNapcatConfig`（settings `napcat_enabled`〔使用 NapCat 通道〕/ `napcat_autorestart`〔失活自动拉起，缺省关〕/ `napcat_dir` / `napcat_uin` **唯一信源**，webui 管理；传空串 = 清空字段，无回落）；`getNapcatAlertQq` 读 settings `napcat_alert_qq`（健康告警 QQ 私聊目标，留空 = 不报，独立设置不进 NapcatConfig）。
-- **`napcatRelaunchDriver(platform)` 拉起能力抽象**：
-  - `win32` = schtasks（`setupNapcatTask` 一次 UAC 同建拉起 + 停止双任务：生成 `data/napcat-launch.cmd`〔先 `cd /d` 进一键包目录——launcher.bat 用 `%cd%` 拼 NAPCAT_* 路径〕+ `data/napcat-stop.cmd`〔`taskkill /F /IM /T`，高权限进程非提权杀不掉〕+ `data/napcat-setup.cmd` 提权 `schtasks /create`〔日志落 napcat-setup.log〕；**不经 `Start-Process -ArgumentList` 拼参**〔带空格元素不加引号的坑〕；`launchNapcatViaTask` / `stopNapcatViaTask` / `removeNapcatTask`）。
-  - `darwin` = `open -a QQ --args --no-sandbox --qq <uin>`（**快速登录**：`--qq` 进 `process.argv` 由 NapCat `shell/base.ts` 读走；`launchMacNapcat` / `stopMacNapcat`〔osascript quit〕；setup/remove 为 no-op——NapCat-Mac-Installer 已改 QQ 无需提权任务，`macNapcatInstalled` = `/Applications/QQ.app` 存在即能力就绪）。
-  - 探测/执行/时钟全可注入。
+## 渠道：QQ（onebot）
 
-### `toast.ts`
-powertoast 本机通知；**健康告警（health_alert → alertAll）的唯一通道**。构造可传 `aumid` + `cacheDir`；http 图先经 image-cache 本地化（Win32 身份不支持远程图），失败按无图发。icon = 左侧方形头像（`appLogoOverride`，不裁圆）、heroImg = 顶部关键帧大图、attribution = 底部分区 · 开播时间小灰字。macOS 走 mac-notifier（见下）。
+消息拼装成段数组：标题+正文 → 图片 → attribution 与链接。段序有语义——附图必须在收尾的时间行之前，否则时间戳会把图片和正文隔断。
 
-### `mac-notifier.ts` — macOS 原生 helper
-`scripts/mac-notify.swift` 用系统 `swiftc` 编译成 `DD-claw.app`（落 data 目录、每台机一次、幂等缓存）——正确的应用名 + 点击跳转 + 内容图；helper 发出通知后常驻 runloop 等待点击（点击打开 `--url`），超时退出避免僵尸进程。**swiftc 不可用 / 编译失败时回落 osascript**（身份固定为「脚本编辑器」、无点击跳转、无图，仅兜底）。
+两类图片来源的处理不同，且不能互换：
 
-### `aumid.ts`
-Win32 AUMID「DD-claw」自动注册：.lnk 缺失时调 `scripts/register-aumid.ps1`（PowerShell COM interop 写 AppUserModel.ID + 通知中心注册表，**必须 UTF-8 BOM + STGM_READWRITE**）；失败回落 Microsoft Store 默认身份，通知照发。
+- **公网可达的图床**直接给 URL，让 NapCat 自己拉，省一次下载与一次编码。
+- **本地文件**（X 图、关键帧缓存）必须读成 base64 内嵌：沙盒 QQ 对本进程的数据目录没有读权限，`file://` 直接被 `EPERM` 拒绝。
 
-### `image-cache.ts`
-toast 图片本地化：http 图下载到 `data/cache/toast/`（B站图床需 UA+Referer，3MB 上限，3 天清理），失败返回 null。
+**限速**：每个目标一条串行链 + 最小间隔，不同目标之间并行。官方给的群主动推送上限是分钟级的，多主播同时开播时并发轰同一个群必然撞墙。回执（QQ 渠道回复）走同一套 HTTP 实现与同一条串行链——群里推送与回执撞在一起同样会被限速。
 
-## 已放弃
+**降级**：带图失败降级纯文本重发，但只在请求真的到达 NapCat 时做。连接层失败说明 NapCat 压根不通，去掉图必然同样失败，白费一次请求。`retcode != 0` 即便 HTTP 200 也算失败——OneBot 的 `status: ok` 不足以判断。
 
-`ntfy.ts`（ntfy 兜底通道）**已放弃**：本机 Toast + NapCat 已覆盖（见 `../design.md` §11）。
+## 渠道：本机通知（toast）
+
+Win32 与 macOS 是两个完全不同的故事，共同点是「通知本身绝不能因为图片失败而丢」。
+
+**Windows**：走 powertoast，身份靠 AUMID。AUMID 的 `.lnk` 缺失时用 PowerShell COM 注册，脚本的编码与写模式两个条件缺一个都会**静默注册失败**——此时回落 Store 默认身份，通知照发但名字不对。Win32 身份不支持远程图，所以 http 图先本地化，失败按无图发。`icon` 是左侧方形头像（不裁圆），`heroImg` 是顶部大图，`attribution` 是底部小灰字行——刚开播没有关键帧时，头像保证通知仍然是「有图」的。
+
+**macOS**：osascript 的 `display notification` 身份固定是「脚本编辑器」、没有点击跳转、没有内容图，达不到产品化要求。改用系统 `swiftc` 把一个 Swift helper 编成带 bundle 的 `DD-claw.app`（落 data 目录、每机一次、幂等缓存），拿到正确应用名、点击跳转与内容图；helper 发出通知后常驻 runloop 等点击，超时退出避免僵尸进程。`swiftc` 不可用或编译失败才回落 osascript。能力声明随实现走（图片 / 点击跳转是否可用），dispatcher 不需要知道平台细节。
+
+## NapCat 托管
+
+这一块的复杂度全部来自一个事实：**NapCat 的端点配置是它自己的文件，我们没有所有权**。托管因此只做三件事：维护我们那一条条目、跟随它的端点、在它失活时按开关决定是否拉起。
+
+- **三态探测**而不是二态：连接被拒是 down，TCP 通但不是 OneBot 应答是 conflict（端口被别的进程占了），OneBot JSON 正常再看 `retcode` 判登录态。三种状态的动作完全不同——混成「可用/不可用」就无法自动修复。
+- **状态机**：ok 复位并记住端点；down 在冷却窗口内拉起，连续失败到上限就放弃并告警一次（避免无限拉起打满日志）；conflict 换端口再拉起；长期未登录只提示扫码一次。
+- **陈旧实例识别**：改了目录或端口后，新配置端口是 down 而旧端口仍 ok，说明有个旧实例还在跑。此时要停旧再拉新，否则新配置永远不会生效。
+- **拉起需要两道前置**：用户开了开关、且拉起能力真的就绪（计划任务 / 安装存在）。任一不满足都只探测、告警、热跟随端点，不拉起；能力被删（任务被移除）时告警一次后不再尝试，因为继续重试只会产生同样的失败。
+- **平台差异只在驱动里**：Windows 是两个最高权限计划任务（拉起 + 停止）——拉起命令需要切到一键包目录才能找到配置，而高权限拉起的进程非提权杀不掉，两条都不是一条 `cmd` 能写完的（实测细节与引号/工作目录陷阱见 [boundaries §5](../boundaries.md)）。macOS 不需要提权：拉起就是 `open -a QQ --args --no-sandbox --qq <uin>`，`--qq` 进 QQ 主进程 `argv`，NapCat 读取后走快速登录；停止是让 QQ 退出。
+- **首跑闸门**：NapCat 从未成功启动过时（配置目录不存在），拉起是空头支票——QQ 从未登录，快速登录无从谈起。此时只给指引，不发拉起命令。
+
+## 图片本地化
+
+toast 与 X 图共用同一套缓存实现，但出网方式不同：境内图床直连、X 图经隧道。两条细节值得记住：
+
+- **Referer 按图床选**（B站 / 微博各要自己的站点），且都要 UA，否则 403。
+- **按 URL 的 md5 落盘**、单图 3MB 上限（超出系统会丢图，不如主动放弃）、3 天清理，任何失败都返回 `null` 让调用方按「无图」继续——通知不能因为图挂掉。
+
+## 排障
+
+- **规则命中但没收到 QQ**：看 `content_audit.push.deliveries` 与 `notify_log`——是「渠道未装配」「鉴权失败」「retcode 非 0」还是「目标号非纯数字被跳过」（后者的日志会直接点明）。
+- **同一场推了两次 / 只推到一半**：先看渠道并集里是否有两个不同 id 指向同一目标（并集按 id 去重，不按目标去重），再看是否一个群禁言导致部分成功。
+- **只有本机通知没有 QQ**：查 NapCat 端点发现与看门狗状态；端点发现失败会降级为不装配 QQ 通道（没配 QQ 是正常状态，不是启动错误）。
+- **Win32 通知没有应用名 / 没有图**：AUMID 注册失败（检查脚本编码与写模式）会回落 Store 身份；远程图在 Win32 身份下永远不支持，只能是本地缓存文件。
+- **macOS 通知图标是「脚本编辑器」**：说明走了 osascript 回落，检查 `swiftc` 是否可用、helper 编译是否成功。
+- **QQ 图片发送失败但文字能发**：本地图读失败会跳过该图（日志有路径），远程图 403 多半是 Referer/UA；降级重发只在 NapCat 可达时发生。
+- **NapCat 反复重启**：看是 conflict（端口被占）还是 down（进程退出）；放弃告警之后不会再自动拉起，需要人工确认登录态。
+
+实现现状见 [status.md](../status.md)，推送过程归档的字段契约见 [content-audit.md](../content-audit.md)。

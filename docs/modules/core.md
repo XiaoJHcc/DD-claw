@@ -1,97 +1,88 @@
-# 核心、配置与装配（src/core/ + src/config/ + src/index.ts + src/tools/）
+# 核心与配置：机制、数据语义与排障
 
-轴 A 的中间层：`core` 定义领域类型、信号总线、状态机、归档与信号编排；`index.ts` 是唯一装配根（只 new 和接线，不含业务逻辑）。抓取层见 [sources.md](sources.md)，分析层见 [analysis.md](analysis.md)，推送层见 [notify.md](notify.md)。实现现状见 [../status.md](../status.md)。
+`src/core` 是轴 A 的中间层：领域类型、状态机、归档仓储、信号编排、撤销与运行时配置。设计理由与概念关系见 [design.md](../design.md) §1、§4；逐文件职责与长期约束见 [core/AGENTS.md](../../src/core/AGENTS.md)、[config/AGENTS.md](../../src/config/AGENTS.md)；装配根、CLI 与热生效矩阵见 [src/AGENTS.md](../../src/AGENTS.md)。本页只写跨模块时序、数据语义与排查路径。
 
-## 改前必知
+## 一次信号的处理时序
 
-- **import 方向**：`core` 不得 import 任何 `sources/` 下的类型（source 也不知道有 LLM，解耦点 1）。
-- **`core/pipeline.ts` 是信号编排唯一装配点**，不要把编排散到 source 或 index。
-- **运行时参数（间隔/阈值/开关）一律以 settings 表为唯一信源**，`config.json` 只剩 `panel` 段自举；生效值 = `withRuntimeConfig(默认值, settings)`。
-- **schema 迁移只有两种手段**：在线补列 `ensureColumn`（旧库缺列自动补齐）+ 一次性 CLI（如 `migrate:snapshots-path`）。**运行时 Db 构造绝不悄悄改库。**
+`pipeline.ts` 是唯一编排点，`source` 只负责把信号 emit 到总线。信号各自独立处理、互不等待（一场慢判定不挡住另一场的下播与告警），真正受限的是**推送发送**与**图片下载**两个全局限流器；`health_alert` 与 `feed_post` 走各自的分支。
 
-## core — 类型、总线、状态
+1. **归档分派**（同步前缀，抑制之前）：`live_start → recordSession`、`live_end → endSession`、`title_change → rotateSegment`。
+2. **冷启动抑制**：`first_run` / `restart_recovery` 共用「启动时已在播」开关，`new_subscription` 用另一个开关；两者都直读 settings、热生效。被抑制的信号**只跳过通知**，归档已在第 1 步完成。
+3. **推送总开关**：关 = 全局不推，追踪与归档照常。
+4. **判定**：仅 `live_start` 真跑分类（`live_end` / `title_change` 不烧模型）。
+5. **机械去重**（`rules/`）→ **规则匹配**（`analysis/matcher.ts`，纯确定性）→ **推送**（`dispatcher`）→ **审计落库**。
 
-### `types.ts`
-`LiveStatus`（平台无关；bili `RoomStatus` 是其扩展，含可选 face）/ `Signal`（含可选 `previousTitle`/`previousAreaName`，title_change 专用）/ `LiveEvent`（含可选 face、`classifications: Classification[]`）/ `PushMessage`（含可选 `icon` 头像、`attribution` 小灰字行、`channels` 渠道 id 数组、`ref` 溯源）、`toLiveEvent()`；`STREAK_QQ_ALERT_AFTER_SEC = 600`（连续失败持续告警阈值，source 与 pipeline 共享）。
+两条设计约束解释了顺序：
 
-### `bus.ts`
-类型化信号总线：emit 不 await，单 handler 异常记日志不影响其他。
+- **归档必须在抑制之前**：时间轴、面板实况、判定素材都要覆盖「冷启动时已在播」「用户关了推送」这些场次，否则事后再想看这段历史就永远缺一块。
+- **`endSession` 必须先于配对的 `live_start`**：下播与再开播可能落在同一轮信号里。`endSession` 按房间取 `first_seen` 最新的一场关闭，因此只有「先结束旧的、再记录新的」这个顺序才不会误关新场。
 
-### `state.ts`
-纯函数状态机 `diffRoom(prev, curr)` → Signal；`(room_id, live_time)` 是一场直播的身份；轮播（`live_status=2`）视为未开播；拉取失败不产 Signal；无 prev 也如实产 `live_start`（抑制政策在 pipeline）。**title_change = 标题/分区内容变更**（title / areaName / parentAreaName 任一变化、同一 liveTime 内，同时变只产一条；带 `previousTitle`，分区变带 `previousAreaName`）。
+**判定等待是规则级的**：只有当「引用了分类的启用规则」的 `scope` 覆盖本内容时才 `await` 判定；纯「任意内容」规则不等模型——先推后收，且因为分类规则只在匹配那一刻生效一次，不会产生双推。判定照跑，时间线与 `verdicts` 的回看面不受影响。
 
-### `scheduler.ts`
-`PeriodicTask`：通用周期任务器（间隔 + 抖动 + 自调度不重叠），不含业务逻辑。
+## 数据语义
 
-### `pipeline.ts` — 信号编排唯一装配点
-bus 信号按序走：**归档分派** → **冷启动抑制** → **分析触发 / 队列** → **机械去重（`rules.decide`）** → **推送规则匹配（`matcher`）** → **推送**。
+**直播场次与时间轴。** `live_sessions` 的主键是 `(room_id, live_time)`，这就是「一场直播」的身份。在播期间每轮刷新 `last_seen`（近似下播锚点，崩溃恢复也能给出近似终点）；`title_change` 在 `live_segments` 里切一段，段索引同样是 `(room_id, live_time)`。时间轴查询把场次、内容段与判定三张表归并：`endTs` 的取值规则是——`last_seen` 落在鲜度窗口内视为仍在播（`null`），超时或从未打点则退到 `last_seen ?? first_seen`。**这是崩溃错过 `live_end` 的兜底**；legacy 零长场次不画。
 
-- **归档分派**（位于抑制闸门之前，冷启动/静音场次照样留痕；在信号同步前缀按序执行）：`live_start → recordSession`（含首段）/ `live_end → endSession` / `title_change → rotateSegment`。
-- **分析**：`RulesClassifier` 内容分类，**仅 `live_start` 调用**（live_end / title_change 不烧 LLM）；判定入 verdicts 表并填 `LiveEvent.classifications`。
-- **推送规则 v2 匹配**（`matcher`）：categoryId 可空 = 任意开播、uids 空 = 全部主播；**全部命中规则独立生效**——渠道 = 命中规则 channels 并集去重、推送词 = sort 序首个非空覆盖；无命中规则 = 不推送。
-- **冷启动推送两开关**（`notify_on_first_run` / `notify_on_new_subscription`）直读 settings、热生效；信号处理并发 4。
-- **health_alert → `alertAll`**：payload 带 `message` 时用自定义文案；本机告警只派发到实现 `alert()` 的通道（当前仅 toast）。**QQ 告警政策**：`alertKind==='login_drop'`（运行中登录掉线）立即报、`durationAlert===true`（连续失败满 10 分钟 source 再发的一次）才报，目标 = settings `napcat_alert_qq`（留空 = 全不发），经 `onebot.send` 私聊点对点发出，其余告警不发 QQ。
+**状态表与展示列。** `room_state` 是「上一轮是什么状态」的持久化，同时携带面板要展示的列（分区、关键帧、封面、在线数、最后开播时间）。它是 `restore()` 的来源：恢复出来的旧状态进入冷启动观察期，于是启动后第一轮新出现的开播被标成 `restart_recovery` 而不是实时开播。
 
-### `db.ts` — better-sqlite3 十六表
-- `live_sessions`：时间轴列 `last_seen`（在播每轮刷新 = 近似下播锚点，崩溃恢复也有近似终点）/ `keyframe` / `cover`；方法 `recordSession`（扩展写快照 + 插首段）/ `touchLiveSessions` / `endSession(roomId, endTs)`（按房间 first_seen 最新一场关闭；liveTime 在 live_end 信号里不可靠）/ `rotateSegment` / `listTimeline`（时间轴三表归并）。`endTs` 语义：`last_seen` 鲜度窗口（10min）内 = 在播 null，超时/无打点 = `last_seen ?? first_seen`（崩溃错过 live_end 的兜底；legacy 场零长不画）。
-- `live_segments`：一场按内容变更切分的连续时间段，idx `(room_id, live_time)`。
-- `notify_log` / `room_state`：`room_state` 含展示列 `area_name/parent_area_name/keyframe/cover/online/last_live_at`（`ensureColumn` 自动补列）；`countLiveRooms()` / `listRoomStatesFull()` 供面板。
-- `streamers`：监听名单（事实来源，含 face）；`watch` 仍是名单机制（watch=0 退回关注列表候选、主列表不显示）；`analyze`/`notify` 为**遗留列**（v2 起面板三开关删除，classifier/pipeline 不再消费）；含 `weibo_nick`；`listWatchedUids()` 只回 watch=1 且**纯数字** uid（批量接口遇非数字 uid 会 65530 route_exception）。
-- `follows`：关注候选池，含 face。
-- `push_channels`：推送渠道（事实来源，面板管理）；含 `sort` 展示顺序（拖拽排序）。
-- `push_rules` v2：全局规则——`category_id` 可空 = 任意开播、`uids` JSON 数组空 = 全部主播（含未来新增）、`channels` 渠道 id 数组、`message_template` 可空 = 内置默认模板；`sort` 全局 = 匹配优先级；空名补「规则 N」；`created_by` 可空 = 面板/人工、`'mcp'` = MCP 群自助（权限隔离用）。
-- `categories`：分类规则——`llm_prompt` 空 = 纯确定性；keywords/areas JSON 数组 + `cond_mode` and/or、enabled/sort；空名补「分类 N」；删除前 `disablePushRulesByCategory` 级联停用引用它的推送规则。
-- `verdicts`：内容判定归档（直播场次 + 图文帖同表）——身份键 `(subject_type, subject_id)`（live = `room_id:live_time`、post = `platform:item_id`），`UNIQUE(subject_type, subject_id, category_id, rule_id)` 去重 `INSERT OR IGNORE`（category_id/rule_id 的 0 = 不适用哨兵，不用 NULL）；`pass` 1=属于/0=判定不通过（直播只记「属于」）、`category_name` 冗余、`source` llm/rule/decision、`confidence`（rule 路径 NULL）、`evidence` 命中说明。旧 `(room_id, live_time)` 表启动时自动重建搬迁（`migrateVerdictsSubjectKeys`）。
-- `settings`：kv（`push_enabled` 等总开关、`llm_providers`/`llm_key:*`、`napcat_*`、`mcp_tokens`…）。
-- `posts`：动态/微博/推文归档，`UNIQUE(platform, item_id)` 去重、raw 整 item 全留；`insertPosts`（返回新行下标）/ `listRecentPosts`（分组取近 N）/ `listRecentPostsMixed`（**主播卡第三栏**：B站动态按 uid + 关联微博账号的微博按 `weibo_accounts.bili_uid` 反查，混排后各截 perUid）/ `searchPosts`（供 MCP 与账号卡帖子段）。`uid` 语义：`bili_dynamic` = B站 uid、`weibo` = 微博账号 uid、`twitter` = screen name（**帖子归属 = 被抓账号自身**，不跨平台借 uid）。
-- `x_accounts` / `weibo_accounts` / `bili_accounts`：图文来源的独立账号名单（独立于 streamers/follows）；x/weibo 的 `bili_uid` 只是可选关联（展示、文案、第三栏混排），bili_accounts 自身即 B站 uid 无需关联列；`enabled` 启停、`rule_ids` 选用图文规则（见 `post_rules` 行）、`last_*` 增量游标与抓取健康（bili_accounts 无游标，去重靠 posts UNIQUE）、`avatar` 本地头像文件名。CRUD 在 `Db`；微博侧另有 `unlinkWeiboAccountsFromBili`（主播详情清空昵称时解关联、保留行）。
-- `post_rules`：图文帖规则（与 `push_rules` 平行）；**平台无关的通用规则——只定义筛选+渠道+推送词，生效范围在账号侧 `rule_ids`**（`account_ids` 列保留停用；`platform` 列保留停用，quote/翻译差异按帖子平台运行时生效：quote 仅 X 帖可识别、翻译仅 X 帖附加）；`filters` JSON（original/retweet 二选一、media、keywords、quote）；`llm_judge`/`judge_prompt`/`llm_translate` 规则级开关；`sort` 全局 = 匹配优先级。
-- **一次性数据搬家** `migrateWeiboAccounts`（settings 闸门 `migrated_weibo_accounts_v1`）：① `streamers.weibo_uid` → `weibo_accounts`（`enabled = watch`）；② 历史 `platform='weibo'` 帖的 `uid` 从 B站 uid 改写成微博 uid（面板第三栏改由关联反查，对用户透明）。幂等靠闸门（改写后条件本身也不再成立）。`migratePostRuleScopes`（闸门 `migrated_post_rule_scopes_v1`）：旧 post_rules.account_ids 展开写入账号 rule_ids（空 = 该平台全部现有账号）。
-- `snapshots`：关键帧缓存 room_id/live_time/ts/path/bytes，idx `(room_id, live_time, ts)`；`insertSnapshot`、`nearestSnapshot(roomId, liveTime, ts)` 按 `ABS(ts-?)` 取最近一帧（`/api/snapshot` 用）。**path 语义 = 相对 keyframe 目录、分隔符恒为正斜杠**（`<roomId>/<liveTime>/<ts>.ext`）——落库处（keyframe.ts）保证、绝不用 `join()`（Windows 反斜杠换机后全 404），读端读库时归一化反斜杠兜底，存量用 `migrate:snapshots-path` 一次性收敛。
-- **目标**：`schedules` 表（预告时间表）。`signals` 表已放弃（见 `../design.md` §11）。
+**判定归档（`verdicts`）。** 直播场次与图文帖同表，身份键 `(subject_type, subject_id)` 把两类内容分开。`category_id` / `rule_id` 的 `0` 表示「不适用」——用 NULL 会让 `UNIQUE` 去重失效，所以哨兵是刻意的。`source` 区分确定性条件、LLM、决策模型三条来源，`evidence` 存命中说明（关键词 / 分区 / 模型理由），是事后追「为什么被判成这个分类」的唯一依据。旧库的 `(room_id, live_time)` 形状由启动期迁移重建。
 
-### `streamers.ts`
-streamers / follows 两表的行类型与「行 ↔ 对象」映射（JSON 字段序列化集中在此）；监听名单 CRUD 是 `Db` 的方法。
+**判定与推送过程归档（`content_audit`）。** 与 `verdicts` 互补：`verdicts` 记结论，`content_audit` 记过程——判定当时的分类标准快照、逐模型尝试与回退原因、规则命中理由、图片与翻译告警、逐通道投递结果。它是「为什么这条没推 / 为什么推歪了」的排查面，也是面板分类与推送记录的来源，行为契约见 [content-audit.md](../content-audit.md)。
 
-### `push.ts`
-push_channels / categories / push_rules / verdicts 四表的行类型与「行 ↔ 对象」映射（JSON 数组字段序列化集中在此）；`isPushEnabled` / `setPushEnabled` 推送总开关；`PushRule` 含 `createdBy`。CRUD 是 `Db` 的方法。
+**帖子归属。** `posts.uid` 的解释域由 `platform` 决定：B站动态 = B站 uid，微博 = 微博账号 uid，X = screen name。**帖子归属永远是被抓账号自身**，不跨平台借 uid；「这条微博属于哪个主播」靠 `weibo_accounts.bili_uid` 的可选关联反查，所以没关联任何主播的独立博主不会串进主播卡混排。
 
-### `posts.ts`
-posts 表的行类型与「行 ↔ 对象」映射（pics JSON 序列化集中在此）；归档/查询是 `Db` 的方法。
+**关键帧快照路径。** `snapshots.path` 存相对 keyframe 目录的路径，分隔符恒为正斜杠（`<roomId>/<liveTime>/<ts>.ext`）。落库处刻意不用 `path.join`——Windows 上它会写反斜杠，同一份库换机后全部解析失败。读端读库时归一化反斜杠作为存量兜底，历史数据用 `npm run migrate:snapshots-path` 收敛。
 
-### `listen.ts`
-监听功能开关（面板「监听」卡）：settings 存 `listen_<feature>`——缺省 = auto（没登录默认关、登录成功自动开）、`'1'`/`'0'` = 手动（手动设置为准）。`isListenEnabled`（UI 有效态）、`shouldRunListen`（源是否运行：cookie 存在 &&（手动开 || auto），**无 config 闸门**，面板开关唯一信源；auto 下登录过期不自动停——源自己心跳跳过并告警、保留源以感知恢复）、`setListen`（与 auto 默认一致则回 auto〔删 key 不留空串〕）。
+**图文补推。** 一个账号的一轮抓取必然落在三种轮次之一（主动关闭恢复 / 缺口轮 / 正常轮），判定与挑选只在 [backlog.ts](../../src/core/backlog.ts) 定义。关键语义是「归档永不缺席」：三种轮次都先入库，差别只在发不发 `feed_post`。缺口轮即使开了补推也要受时间窗与每账号条数双封顶——停机一周后把上百条旧帖一次性轰炸出去是不可接受的。
 
-### `runtime-config.ts`
-运行时参数（**settings 表唯一信源**，面板按模块分散管理：监听卡「抓取设置」/ LLM 卡「高级」/ 推送渠道卡「推送设置」，`/api/advanced` 统一读写）：`RuntimeConfig` 十三项（poll 间隔/抖动、告警阈值、三源抓取间隔、LLM 超时/熔断/冷却、冷启动推送两开关、关键帧缓存开关 + 间隔〔60~3600s〕）；`NUM_SPECS`/`BOOL_SPECS` 规格表；`getRuntimeConfig`（非法/越界回落默认）/ `saveRuntimeConfig` / `withRuntimeConfig` / `isNotifyOnFirstRun` / `isNotifyOnNewSubscription`（pipeline 直读、热生效）。
+## 配置与生效链
 
-### `onboarding.ts`
-发布后首启默认值种入 `seedOnboardingDefaults(db)`（index.ts 装配处在 Db 创建后调用）——settings `onboarding_seeded` **一次性闸门**（用户清空默认值后不复活）；各项独立判空：push_channels 空 → 种「系统通知」toast 渠道、settings `llm_providers` 未设 → 种默认 provider 名单（只种名单不种 key）、categories 空 → 种默认分类、push_rules 空 → 种默认规则（分类按名映射回新 id、渠道重映射、uids 恒空）。
+运行参数只有一条来源链：代码底形（`defaultAppConfig`）→ settings 规格表（非法/越界回落默认）→ 合并成生效 `AppConfig`。`config.json` 只提供 `panel`（面板自举：面板不能改自己的端口）。参数按消费路径分三类，这决定了「改完要不要重启源」：
 
-### `onboarding-defaults.gen.ts`
-首启默认值数据（**构建期生成物，gitignore 防漂移，勿手改**）：由 `scripts/build-webui.mjs` 从 `webui/demo/defaults.json` 生成——defaults.json 是 LLM provider / 分类 / 推送规则的**唯一手工信源**（demo mock 与首启默认值共用同一份展示案例）。
+- **装配根合并后注入**：轮询间隔、抖动、抓取间隔、LLM 超时与熔断、关键帧开关——变化时由装配根重启对应源或重建 router。
+- **pipeline 直读**：冷启动两个开关，每次处理信号读一次，天生热生效。
+- **源内直读**：图文补推三参数，每轮读一次。
 
-### `concurrency.ts`
-`mapLimit` 有界并发工具。
+之所以全部收在 `settings`：面板、MCP、agent 与撤销栈都以库为事实来源，一旦允许文件侧覆盖，撤销一次改动就无法说清「现在到底是哪个值」。新增参数时只能扩展规格表——撤销后的热生效映射也从同一张规格表推导，两个信源漂移就会出现「撤了但没生效」。
 
-## config — 配置
+## 写快照与撤销
 
-- `index.ts`：读 `.env` + `config.json`（**全程可选**：文件不存在 = 全默认值启动；JSONC 注释、BOM 剥离，zod 启动即校验）。config.json 只有 `panel` 段被读取（面板自举），其余顶层字段一律无视（zod 剥离）；AppConfig 运行参数全部是代码默认值，生效值 = settings 叠加。
-- `schema.ts`：`configSchema` 只校验 `panel` 段（enabled/port，默认 8787 只绑 127.0.0.1）；`llmProviderSchema` 供面板 provider CRUD；`AppConfig` 手写字段接口（含 `keyframe` 底形）+ `defaultAppConfig()`。秘密只在 `.env`（DB_PATH/LOG_LEVEL）/ `cookies.json` / `weibo-cookies.json`；LLM key 在 settings（面板明文填写）。
-- `logger.ts`：极简结构化日志。console + 文件 sink 双写（`initFileSink(dir)` 装配在 index.ts，落 `data/logs/dd-claw-YYYY-MM-DD.log` 按天滚动、保留 7 天）；文件与 console 同一阈值，写盘/初始化失败静默（日志绝不影响主流程）。
+撤销的目标是「一次能力面写操作可整体回退」，不是数据库版本控制。
 
-## 装配根 `src/index.ts`
+- **参与范围**：配置表（含四张「配置 + 归档」混合表）进快照；归档表不进——回滚轮询数据没有意义。
+- **差分窗口**：同步写走事务版 `capture`；含 `await` 的写走 `track`，它把所有写调用串行化，因为 better-sqlite3 的事务不能跨 `await`。残留在「记录落库失败」这一种磁盘级故障上，方向是「写了却撤不掉」，错误会抛给调用方。
+- **混合表的列过滤**：轮询源会回写同一行的平台事实列与游标列。这些列既不进差分、也不进比对、也不被还原，三处共用同一个过滤函数——否则要么凭空产生变更记录，要么让一次配置写被误判成「已被其他入口修改」。
+- **冲突判定**：撤销前逐行比对后像。任一行已被别的入口改动就整体放弃（`reason='conflict'` 带行定位），绝不部分还原——部分还原会让用户无法预期「现在到底回到了哪个版本」。
+- **隐私例外只一条**：LLM key 不落明文，撤销后要求重填。判定用「键名前缀」这一条判据，写入与提示两处共用。
+- **撤销后的热生效**：`undoEffects` 只做纯分类（运行参数 / 监听开关 / LLM / notifier），真正的回调在装配根。撤销「与面板手写等价」是判据，所以回调绝不下沉到 `Db` 或 `UndoStore`。
 
-CLI：`--dry-run` / `--test-notify` / `--probe` / `--probe-llm` / `--force-uid` / `--napcat-setup`（一次性创建 NapCat 最高权限计划任务，弹一次 UAC，做完即退出）。
+名单均由来源每轮读库，不依赖构造时快照。装配根另外对 X / 微博名单做指纹比较，经 `reconcileListen` 就地重启以即时首拉并处理启停；B站动态每轮合并主播与动态名单，不套用相同的名单重启策略。撤销名单变更后应重放既有装配根回调，而不是在仓储中缓存名单。
 
-- onebot 端点只读跟随 NapCat 自己的 onebot11 配置（dd-claw 专属条目；发现失败 = **降级不装配 QQ 通道**，log 说明、不阻塞启动——没配 QQ 是正常状态）。
-- `reconcileNapcat` 统一看门狗启停（生效配置 enabled && onebot 已装配，双平台；`napcatRelaunchDriver` 按 platform 装配拉起能力、`autoRestart` 每 tick 读 settings 热生效；面板保存后重装配 + 立即 tick，dir/uin 热生效，**自动拉起开着时 dir/uin 变更自动重建拉起任务**——任务钉死建任务时的路径/QQ）。装配无通道级开关，通道启停走 `push_channels`。
-- **`eff = withRuntimeConfig(defaultAppConfig, settings)` 生效配置**：sources 的 `ctx.config` / llm router 重建全消费它；`reconcileRuntime`（`/api/advanced` 保存回调）间隔/阈值变化重启对应源、LLM 超时熔断变化重建 router。
-- follows 有 cookie 即跑（无开关）；dynamic/weibo 由 `reconcileListen` 按面板监听开关 + cookie 启停；`panel.enabled` 时起控制面板。
-- follows / dynamic / weibo 三 source 单独持有（有各自 cookie 才创建，扫码登录后 `onCookiesSaved` 热重启；shutdown 停最新实例）。live-status source 单独持有 `liveSrc`（轮询参数热更新时 stop + 新建 + start，restore 从库恢复状态不丢轨迹）；`KeyframeCache` 总是创建（dir = `data/cache/keyframes/`），开关/间隔走 `configure` 热更新、实例跨 liveSrc 重启复用；`snapshots: {dir}` 注入面板 `/api/snapshot`。`onLoginState` → 面板平台状态。
+## Schema 演进与一次性迁移
 
-## src/tools — 一次性脚本
+两种手段，没有第三种：在线补列（旧库缺列自动补齐）与带一次性 settings 闸门的数据搬家。**破坏性操作必须走受保护迁移**——`Db` 构造期执行的就是这些迁移（包括删表、重建），所以约束不是「不许迁移」，而是每一步都要有闸门、幂等、按前像保数据、有迁移用例；改列与删列一律「建新表 → 拷全列 → DROP → RENAME」，重建时漏一列就是丢数据。
 
-- `migrate-snapshot-paths.ts`：`npm run migrate:snapshots-path`，把 `snapshots.path` 旧绝对/反斜杠相对路径收敛为正斜杠相对 keyframe 目录（幂等可重复，换机后各跑一次）。**只作为 CLI 直接运行时执行 main**（入口守卫），测试导入导出的 `migrateSnapshotPaths(db)` 不触发。
-- `dump-demo-fixtures.ts`：`npm run demo:fixtures`，读真实库 → 写 `webui/demo/fixtures.json`（**随仓库发布**）。只导三个数据型卡片的固定名单节选：demo 主播 12 位 enrich（含 live/posts）+ 关注 18 位 + 近 14 天时间表（北京 06:00 日界，随带 `meta.exportedAt` 冻结点）；**其余卡片一律不导**（LLM/分类/推送规则 = defaults.json 手工案例；渠道/NapCat/监听态 = mock-data.js 手写）；导出内容全是公开数据、cookie 绝不读取；头像/关键帧本地化随仓库发布。**防覆盖**：已存在须 `--force`。形状与 `GET /api/streamers`（enrich 去 rules）/ `GET /api/schedule` entry 同构。
-- `mcp-token.ts`：见 [../mcp.md](../mcp.md) 实现文件节。
+搬家之间有依赖，顺序在构造函数里显式排列：
+
+| 搬做什么 | 为什么需要 / 为什么在这个位置 |
+|---|---|
+| 主播的微博附加字段 → 独立微博名单；历史微博帖 uid 改写 | 微博从「主播附属数据源」升级为独立来源；改写后面板靠关联反查，对用户透明 |
+| 旧图文规则的范围展开到账号侧 | 范围语义演进的第一步 |
+| 清理历史开播动态（`LIVE_RCMD`） | 该类型已彻底舍弃；只清旧行，新行在解析层就丢弃 |
+| `verdicts` 身份键重建 | 直播场次与图文帖要同表归档 |
+| `push_rules.uids → scope` 整表重建 | 规则泛化成「主体引用列表」；必须早于规则搬家，否则搬进旧形状 |
+| 旧图文规则搬家成「分类 + 推送规则」后 DROP 原表 | 判定口径上移进分类、推送并入统一规则表 |
+| 三张账号表删 `rule_ids` | 范围反向勾选退役，scope 成为唯一信源 |
+
+一次性闸门存 settings，**幂等靠闸门 + 搬家条件本身也不再成立**双保险。备份还原回旧 schema 的库能再次迁移，这是刻意保留的性质。
+
+## 排障
+
+- **某场直播没出现在时间轴**：先看 `live_sessions` 有没有行（没有 = 信号未产生或归档前异常），再看 `last_seen` 与 `first_seen`（零长或全空会被判为 legacy 不画），最后确认 `live_time` 是否连续变更（轮播被折叠成未开播）。
+- **某场没推**：按 `content_audit.push.status / reason` 走——`skipped` 的 reason 会直接写明是「未命中规则」「规则未选渠道」「推送总开关关闭」还是冷启动恢复设置。判定侧看 `content_audit.analysis`（含 `fallbackReason` 与逐模型尝试）。
+- **改了参数没生效**：确认改的是 settings 规格表里的键（`isRuntimeConfigKey` 为假 = 存了也没人读），再确认消费路径是装配根注入型（需重启对应源）还是直读型（立刻生效）。
+- **撤销说冲突**：读 `detail` 里的表与主键，说明该行在当前时点与快照后像不一致；先补齐那次改动再做撤销。
+- **快照图全 404**：查 `snapshots.path` 是否含反斜杠或绝对路径，跑一次 `npm run migrate:snapshots-path`；换机后这是必跑项。
+- **撤销清单里出现 `post_rules` 的行**：那是历史记录，原表已 DROP，撤销不到——只作展示。
+
+实现现状见 [status.md](../status.md)，MCP / 面板侧的撤销入口见 [mcp.md](../mcp.md)。

@@ -1,65 +1,59 @@
 # DD-claw 文档索引
 
-B站关注列表全员监听（直播间 + 动态 + 微博）→ 持续追踪 → LLM 内容判定与预告解析 → 按偏好子句路由推送。
+按问题选择入口，不必先通读全部文档。项目定义和跨模块约束从 [根 AGENTS](../AGENTS.md) 开始；文档维护分工见 [docs/AGENTS](AGENTS.md)。
 
-## 文档结构
+## 设计与现行契约
 
-| 文档 | 内容 |
+| 想了解 | 阅读 |
 |---|---|
-| [design.md](design.md) | 项目设计：两条正交轴（运行时数据流 / 能力面接入）、数据结构、里程碑 M1-M5、待定项、已放弃清单 |
-| [status.md](status.md) | **实现现状**：里程碑（M1 起）与模块两视图 + 未实现清单 |
-| [boundaries.md](boundaries.md) | **能力边界**：什么能做、什么做不到、代价是什么 + 已知踩坑清单 |
-| [mcp.md](mcp.md) | **MCP 接口**：Agent 接入（令牌/角色权限/Claude Code 等 Host 配置/安全边界；MaiBot 不直连） |
-| [content-audit.md](content-audit.md) | **分类与推送记录**：WebUI 入口、模型回退与发送失败、历史快照、升级边界 |
+| 为什么这样分层、核心概念、什么明确不做 | [design.md](design.md) |
+| 哪些已经实现、哪些还需验收或开发 | [status.md](status.md) |
+| 外部平台能做什么、凭据要求、接口与平台坑 | [boundaries.md](boundaries.md) |
+| MCP 接入、令牌、角色、渠道隔离与撤销 | [mcp.md](mcp.md) |
+| 分类与推送过程如何回看、历史快照边界 | [content-audit.md](content-audit.md) |
 
-### 实施计划
+## 修改代码：先模块约束，再深入机制
 
-| 文档 | 内容 |
+模块 AGENTS 管代码地图与设计约束，专题只展开机制，不重复文件清单。
+
+| 模块入口 | 深入阅读 |
 |---|---|
-| [plan/agent-access.md](plan/agent-access.md) | **多前端接入统一计划**：一个能力面 N 种接线（Web UI / MCP / WebUI Agent / MaiBot 插件 / NapCat 直连），信任模型矩阵 + 共享组件 + 分期 **P0-P3** + 能力层调用域（scope，已定令牌绑定渠道）+ 拍板记录 |
-| [plan/twitter-source.md](plan/twitter-source.md) | **X/推特图文来源计划**：免登录路线（Nitter RSS 主 + 免登录 HTML 备）、面板可配代理、机械筛选与可选 LLM 判定/翻译，分期 P0-P3 |
-| [plan/weibo-source.md](plan/weibo-source.md) | **微博图文来源计划**：把微博从「主播附属数据源」升级为独立来源（独立名单 / platform 分流 / 单墙混排），已落地 |
-| [plan/bili-dynamic-posts.md](plan/bili-dynamic-posts.md) | **B站动态图文来源 + 图文规则重构**：规则卡 + 每账号选用，已落地 |
+| [装配](../src/AGENTS.md) / [配置](../src/config/AGENTS.md) / [工具](../src/tools/AGENTS.md) | [数据、恢复与撤销](modules/core.md) |
+| [core](../src/core/AGENTS.md) | [持久化与时间轴语义](modules/core.md) |
+| [sources](../src/sources/AGENTS.md) | [来源恢复与平台差异](modules/sources.md)、[外部证据](boundaries.md) |
+| [analysis](../src/analysis/AGENTS.md) / [rules](../src/rules/AGENTS.md) | [分类与回退机制](modules/analysis.md) |
+| [notify](../src/notify/AGENTS.md) | [通知平台与托管排障](modules/notify.md) |
+| [panel](../src/panel/AGENTS.md) / [webui](../webui/AGENTS.md) / [scripts](../scripts/AGENTS.md) | [前后端、demo 与内嵌契约](modules/panel.md) |
+| [mcp](../src/mcp/AGENTS.md) / [agent](../src/agent/AGENTS.md) | [MCP 契约](mcp.md) |
+| [qqbot](../src/qqbot/AGENTS.md) | [QQ 接入与配置](modules/qqbot.md) |
 
-（M1 落地计划已完成使命并归档删除，实施经验折叠进 boundaries.md 第 5 节；后续里程碑的实施计划在动手前按同样格式补写。）
+## 实施计划与决策依据
 
-### 模块实现笔记
+计划保留原路径以供代码与文档引用。历史实施方式不覆盖现行设计与契约；是否完成以 status 为准，原验收合同仍需保留。
 
-| 文档 | 内容 |
+| 文档 | 适用范围 |
 |---|---|
-| [modules/core.md](modules/core.md) | core + config + logger + tools + index.ts 装配 |
-| [modules/sources.md](modules/sources.md) | B站（直播间/关注/动态）/ 微博 / 媒体关键帧 |
-| [modules/analysis.md](modules/analysis.md) | analysis + rules：触发 / 分类管线、LLM provider、matcher、机械去重 |
-| [modules/notify.md](modules/notify.md) | notify：dispatcher / onebot / NapCat 托管 / toast（含 macOS helper） |
-| [modules/panel.md](modules/panel.md) | panel 路由契约 + webui + 构建内嵌 + demo 契约 |
+| [unify-classify-push](plan/unify-classify-push.md) | 统一分类 / 推送模型依据、视觉与决策模型实施和验收合同 |
+| [agent-access](plan/agent-access.md) | 多入口接入、信任模型与调用域方案依据；Agent 真机验收口径 |
+| [twitter-source](plan/twitter-source.md) | X 来源建设历史、代理与链路回归口径 |
+| [weibo-source](plan/weibo-source.md) | 微博独立来源与历史迁移依据 |
+| [bili-dynamic-posts](plan/bili-dynamic-posts.md) | B站独立动态来源、监听边界与迁移依据 |
 
-### 模块调研
+## 研究与外部证据
 
-| 文档 | 结论一句话 |
+研究回答外部能力是否可行，不代表项目已实现。各篇自行记录基准日期、版本与来源，平台风控、模型额度和服务可用性需重新确认。
+
+| 研究 | 范围 |
 |---|---|
-| [research/live-status.md](research/live-status.md) | 开播状态匿名可查，批量接口一次覆盖所有关注对象 |
-| [research/danmaku.md](research/danmaku.md) | 弹幕 WS 匿名可连，只需 WBI 签名 + UA |
-| [research/media-capture.md](research/media-capture.md) | keyframe 白嫖；需音频时走 FLV + ffmpeg 合并命令 |
-| [research/feeds.md](research/feeds.md) | 动态/微博匿名全灭，必须 cookie 或浏览器 |
-| [research/twitter.md](research/twitter.md) | 推特免登录能拿最新推文（**代理是硬前提**）；Nitter RSS 仍有活口且最适合机械筛选 |
-| [research/auth-cookie.md](research/auth-cookie.md) | 自动读 Chrome cookie 已死，手动导出是唯一正路 |
-| [research/llm.md](research/llm.md) | 文本为主路径；免费视觉首选 Gemini，备选 GLM-4V-Flash |
-| [research/notify.md](research/notify.md) | QQ 只剩 NapCat 一条活路；本机 Toast 走 powertoast |
-| [research/ts-stack.md](research/ts-stack.md) | TS 全项可行，唯一短板中文 OCR，隔离成独立服务 |
+| [live-status](research/live-status.md) | 批量直播状态与匿名接口 |
+| [danmaku](research/danmaku.md) | 弹幕 WS、签名与接入条件 |
+| [media-capture](research/media-capture.md) | 关键帧、流媒体与采样能力 |
+| [feeds](research/feeds.md) | B站动态、微博与登录要求 |
+| [twitter](research/twitter.md) | Nitter、免登录回退、代理与时效 |
+| [auth-cookie](research/auth-cookie.md) | 凭据获取的可行性与安全边界 |
+| [llm](research/llm.md) | 模型路由、协议与成本评估 |
+| [decision-models](research/decision-models.md) | 枚举判断模型、图像输入与 API 证据 |
+| [notify](research/notify.md) | QQ 与系统通知可行性 |
+| [ts-stack](research/ts-stack.md) | 技术栈能力与替代方案评估 |
 
-## 溯源标记
-
-调研结论按可信度分三级，全文统一使用：
-
-- **[实测]** — 本次调研期间真实发出过请求 / 跑过代码，附返回码或输出。绝大多数由 subagent 在 2026-07-29 执行。
-- **[文档]** — 来自公开文档或源码阅读，未亲自跑通。
-- **[待验证]** — 传闻、社区经验、或 agent 自己标注不确定的内容。**不要当事实用**。
-
-时效性：所有结论基于 **2026-07-29**。B站/微博风控与各家免费额度政策变动频繁，标注 [待验证] 的部分实现前需重新确认。
-
-## 一句话现状
-
-匿名可拿：开播状态（批量）、标题、分区、开播时间、keyframe 预览图、弹幕流、直播流截图与音频。
-需要凭据：关注列表（SESSDATA）、B站空间动态、微博时间线。
-故开播检测与弹幕内容分析可完全匿名运行；**cookie 是「规模化」（关注列表同步）与「预告时间表」的前置条件**。
-X/推特另开一路：**免登录即可拿到最新推文**（详见 research/twitter.md），但**必须先有可用代理**——境内直连 x.com 与图片 CDN 均不可达。
+溯源标记统一含义：**[实测]** 有实际请求或运行证据；**[文档]** 来自公开资料或源码但未亲测；**[待验证]** 尚不能当作实现事实。证据时效与具体例外在原文维护，不在索引重复结论。

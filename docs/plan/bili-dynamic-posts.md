@@ -1,48 +1,48 @@
-# B站动态图文来源 + 图文规则「规则卡 + 每账号选用」
+# B站动态图文来源 + 图文规则重构
 
-2026-09（紧随 weibo-source）。两件事一起做，因为它们共用同一处账号墙与规则模型。
+> **状态**：已落地。本文件前半是「B站动态成为第三条图文来源」的决策与现行约定；
+> 后半的「图文规则重构」分两步：先是「规则卡 + 每账号选用」，随后**整体并入统一分类/推送模型**
+> （分类 `applies_to=post` + 推送规则 `subject_kind`/`scope`，空范围 = 全部生效）。
+> 因而凡提到 `post_rules` / 账号 `rule_ids` 的段落都是**历史方案**，现行契约见 [统一计划](unify-classify-push.md)
+> 与 [mcp.md](../mcp.md)；进度见 [status.md](../status.md)。
 
 ## 需求
 
-1. 图文页支持 B站动态监听：「小日向美香的传声筒」这类不开播的动态型 UP 主，不在监听主播名单里，之前 DynamicSource 只轮监听主播（`listWatchedUids()`），动态只归档展示在主播卡第三栏，feed_post 信号被 pipeline 白名单丢弃。
-2. 图文规则从「规则内嵌 account_ids、按账号卡就近建规则」改为「**通用规则设置卡 + 每博主选用已有规则**」（类似直播推送规则的集中卡片，但图文不拆分类表——不分类入库，filters 保持结构化内联）。
+1. 图文页支持 B站动态监听：「小日向美香的传声筒」这类不开播的动态型 UP 主不在监听主播名单里，之前动态源只轮监听主播，动态只归档展示在主播卡第三栏，`feed_post` 信号被 pipeline 白名单丢弃。
+2. 图文推送规则从「规则内嵌账号集合、按账号卡就近建规则」收敛为集中管理的主体范围（先是「每账号选用规则」，后统一为「规则侧 scope」）。
 
 ## 已确认的取舍
 
-- **纯按账号选用**：规则不保留「空账号 = 全部账号（含未来新增）」语义；迁移时把旧 account_ids 展开写到账号 rule_ids（空 → 该平台现有全部账号）；新增账号默认不推。
-- **监听主播的动态维持只归档不推送**；想推就把该 uid 加进动态名单（主播卡不加规则选用 UI）。
+- ~~纯按账号选用：规则不保留「空账号 = 全部账号（含未来新增）」语义；新增账号默认不推。~~
+  **已被统一计划取代**：范围回到规则侧 `scope`，**空 = 全部生效（含未来新增）**，与直播规则同一心智。
+- **监听主播的动态维持只归档不推送**（仍有效）：想推就把该 uid 加进动态名单；主播卡不提供反向勾选入口。
 
-## 方案与落地
+## 现行落地
 
-| 层 | 改动 | 要点 |
-|---|---|---|
-| 数据 | 新表 `bili_accounts`（第 17 张）；`x_accounts`/`weibo_accounts` 补列 `rule_ids`；`post_rules.account_ids` 列保留停用 | bili_accounts 比照 weibo_accounts，差异：无 biliUid（自身即 B站 uid）、无 lastPostId 游标（去重靠 posts UNIQUE + 首轮静默）；一次性迁移 `migratePostRuleScopes`（settings 闸门） |
-| core | `core/bili-accounts.ts`（新）；`post-rules.ts` 删 accountIds、PostPlatform 加 `bili_dynamic` | platformLabel 'B站'；quote/translate 仅 X |
-| 抓取 | `dynamic.ts` 轮询对象 = 监听主播 ∪ bili_accounts(enabled)；名单账号回写 uname/last_ok_at + 顺手抠 face 头像落 `cache/bili-avatars`（新 `bili/avatar.ts`，直连 hdslb） | 名单变化每轮自并，无需热重启；监听主播的信号由 pipeline 丢弃（debug 不刷屏） |
-| 分析/推送 | `matchPostRules` 命中 = 平台相同 && `post.ruleIds.includes(id)` && 机械筛选；pipeline 接 bili_dynamic（type 归一 FORWARD→retweet；图片直连本地化；{liver} 按 account.uid 查 streamers） | message/post-analysis 文案加「动态」分支 |
-| 面板 | `/api/bili/accounts` 全套（恒挂载无 dep 门）+ `/api/bili-avatar`；x/weibo 账号端点加 ruleIds（跨平台 400）；删规则连带清扫三份名单 ruleIds | 校验集中在 http-util `checkAccountRuleIds` |
-| MCP | 新增 `list/upsert/delete_bili_account`；`upsert_post_rule` 删 account_ids；x/weibo upsert 加 ruleIds | 角色与 weibo 三工具一致 |
-| 前端 | 图文页：三张来源卡（加 B站动态，监听开关复用 listen_dynamic）+「图文规则」卡（拖拽/启停/平台 tag）+ 账号浮窗「选用规则」勾选列表 + B站账号卡与平台筛选胶囊 | 规则浮窗新建选平台、编辑只读；B站不出「引用」「附译文」 |
+| 层 | 要点 |
+|---|---|
+| 名单 | `bili_accounts`（第三条独立名单，比照微博名单；自身即 B站 uid，无独立游标——去重靠 `posts` 唯一键 + 首轮静默） |
+| 抓取 | `DynamicSource` 轮询对象 = 监听主播 ∪（图文开关开着时的）动态名单启用账号；名单账号回写 uname / 最近成功时间 / 头像（直连落本地） |
+| 分析/推送 | 转发类型在 source 归一成三平台共用的 `retweet`；图片直连本地化；`{liver}` 变量按账号 uid 反查主播；推送文案加「动态」分支 |
+| 面板 | `/api/bili/accounts` 全套 + 头像端点；图文页三张来源卡 + 分类规则 + 推送规则 + 账号卡（身份段 / 生效规则 / 帖子段）；平台筛选胶囊 |
+| 能力面 | `list_bili_accounts`（shared）、`upsert_bili_account` / `delete_bili_account`（admin） |
 
-## 修订（2026-09，规则通用化）
+## 历史方案（规则模型演进，供理解旧数据）
 
-用户随后要求**取消规则必须绑定平台的设计**：post_rules 连 `platform` 维度也去掉（列保留停用），规则成为平台无关的通用规则——任何账号可选用任何规则，`checkAccountRuleIds` 只校验存在；quote/翻译差异从「按规则平台保存时拒绝」改为「按帖子平台运行时生效」（quote 仅 X 帖可识别、`llmTranslate` 仅对 X 帖附加，门控在 post-analyzer）。前端规则卡删平台 tag 与浮窗平台行，chip 恒定显示附小字提示。上表中「platform 分流」「跨平台 400」「新建选平台」以此节为准作废。
+1. **规则内嵌账号集合**：旧图文规则表带 `account_ids`，按规则指定账号。
+2. **通用规则 + 每账号选用**：`account_ids` 删除、三张名单加 `rule_ids`，账号卡勾选选用；纯按账号选用语义（空 = 该账号不推）。
+3. **统一模型**：`rule_ids` 删列、`post_rules` 一次性搬为「分类 + 规则」（无账号选用的规则 `enabled=0` 落地以保持行为）、规则改 `subject_kind` + 平台前缀 scope。迁移语义见 [统一计划附录 A](unify-classify-push.md)。
 
-## 修订（2026-09-21，审查后五项收口）
+## 审查后五项收口（现行契约）
 
-架构审查后的修正与拆分，上表与本文件中与之冲突的描述以此节为准：
+1. **监听开关拆分**：监听主播的空间动态归档**随 B站登录常开、无开关**（直播预告分析等要用）；`listen_dynamic` 只管 **动态账号名单**的轮询——源每轮经回调读开关，热切换免重启；关 = 名单账号不进轮询、不发信号、添加账号时也不即时首拉。设置页监听卡不再有「监听动态」开关，开关只在图文页 B站动态卡。
+2. **`feed_post` 只对名单账号发**：不再「监听主播每轮也发信号、pipeline 丢弃」，改为 source 侧只对名单内且开关开着的账号发信号（pipeline 的名单查不到分支降级为防御）。连带修掉一个洞：停用的名单账号即使在监听名单里也不再推送。
+3. **开播动态（`DYNAMIC_TYPE_LIVE_RCMD`）彻底舍弃**：解析时直接跳过（不归档不发信号），旧库残留行一次性清理，主播卡第三栏的展示层过滤同步删除。开播信息由直播状态源负责。
+4. **帖子类型在 source 归一**：`DYNAMIC_TYPE_FORWARD` → 三平台共用的 `'retweet'`，其余类型原样入库（原始枚举恒在 `raw`）；图文页帖子行对 B站转发帖正确标「转发」。
+5. **三平台账号的 ID 与平台昵称锁定为平台事实**：X 的 `screenName`、微博的 `uid`、B站的 `uid` 与各自昵称一律不可改（面板编辑态只读、REST 按未知字段 400、MCP 更新显式拒绝）——要换账号就删除重加，改了只会让 `posts.uid` 历史孤立或昵称错位。X 昵称由添加时校验种入、抓取回写；B站 uname 只由抓取回写；微博昵称仅在**新建时**作为解析键。
 
-1. **监听开关拆分**：上表「监听开关复用 listen_dynamic」作废。监听主播的空间动态归档**随 B站登录常开、无开关**（直播预告分析等要用；添加监听直播永远附赠动态归档）；`listen_dynamic` 只管 **bili_accounts（动态账号名单）**的轮询——`DynamicSource` 经 `biliAccountsEnabled` 回调每轮读取，开关热切换免重启，关 = 名单账号不进轮询、不发信号、`kickAccount` 也跳过。设置页监听卡的「监听动态」开关已删，开关只在图文页 B站动态卡。
-2. **`feed_post` 只对名单账号发**：原先「监听主播每轮也发信号、pipeline 丢弃」改为 source 侧就只对名单内且开关开着的账号发信号（pipeline 的名单查不到分支降级为防御）。连带修掉一个洞：停用的名单账号即使在监听名单里也不再推送（enabled 同时控制进轮询名单与发信号）。
-3. **开播动态（DYNAMIC_TYPE_LIVE_RCMD）彻底舍弃**：`parseDynamicItem` 直接跳过（不归档不发信号），`picsOf`/`textOf` 的 LIVE_RCMD 分支与 `livePlayInfo` 删除；旧库残留行由 `Db.dropLiveRcmdPosts` 一次性清理（settings 闸门）；主播卡第三栏的展示层过滤同步删除。开播信息由 live-status 源负责。
-4. **帖子 type 在 source 归一**：DYNAMIC_TYPE_FORWARD → 三平台共用的 `'retweet'`（原在 pipeline 归一），其余 DYNAMIC_TYPE_* 原样入库（主播卡细分标签用，原始枚举恒在 raw）；图文页帖子行对 B站转发帖也正确标「转发」。
-5. **三平台账号的 ID 与平台昵称锁定为平台事实**：X 的 `screenName`、微博的 `uid`、B站的 `uid` 与各自昵称/用户名一律不可改（面板编辑态只读、REST PUT 按未知字段 400、MCP 更新显式拒绝）——要换账号就删除重加，改了只会让 `posts.uid` 历史孤立或昵称错位。X 的昵称不再收手填：添加时 verify 从 og:title 顺手种入、免登录抓取路线回写（Nitter RSS 给不了显示名，靠 verify 兜底）；B站 uname 同理只由抓取回写；微博昵称仅在**新建时**作为解析键（填昵称 → 解析链补 uid）。`BiliAccountInput` 删 `uname`、`parse*Patch` 键分裂（POST/PUT 分开白名单）。
+## 验收条款
 
-同批顺手修：`shutdown()` 漏停 X 源、X 源告警阈值不热更（reconcileRuntime 补重启）、`search_posts` 描述两处不准（LIKE 对 ASCII 大小写不敏感 / 微博 uid 已是独立名单）、`web.test.ts` 不在 npm test 清单。
-
-**验证**：`npx tsc --noEmit` 零错误；`npm test` 595/595（含新增：LIVE_RCMD 舍弃、FORWARD 归一、图文开关门语义、LIVE_RCMD 迁移幂等、X 昵称 touch 语义、og:title 解析、三平台锁定字段的 400 路径）；`npm run build` 通过；mock 同构（PUT 锁定字段 400、X POST 昵称种入、B站 POST/PUT 拒 uname）。
-
-## 验证
-
-- `npx tsc --noEmit` 零错误；`npm test` 581/581；`npm run build` 通过。
-- demo mock（`?demo=1`）与真实后端同构：post-rules 无 accountIds、bili/accounts 全套、ruleIds 跨平台 400、删规则清扫。
+1. `npm run typecheck && npm test && npm run build` 全绿；关键行为有测试覆盖：LIVE_RCMD 舍弃、FORWARD 归一、图文开关门语义、旧行清理迁移幂等、X 昵称回写语义、三平台锁定字段的 400 路径。
+2. mock（`?demo=1`）与真实后端同构：无 `accountIds`、`/api/bili/accounts` 全套、跨类型引用 400、改锁定字段 400、删分类级联停用。
+3. 开播路径零回归：设置页、时间表、主播列表行为不变。
