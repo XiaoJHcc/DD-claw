@@ -3,8 +3,8 @@
 > **状态与适用范围**：产品模型（统一分类 + 统一推送规则）与底层抽象**已落地**，取代了旧的「图文规则内嵌筛选 + 账号选用」模型；现行契约见
 > [mcp.md](../mcp.md)、[content-audit.md](../content-audit.md)、[modules/](../modules/)，进度与待验收见 [status.md](../status.md)。
 > 本文件保留**决策依据与执行规格**：
-> **附录 A（P2 逐条执行规格）与附录 B（P3 验收纠偏）是历史方案**——结论已融入代码，当作依据读，不要当作待办；
-> **附录 C（P4 视觉分类与决策模型）是未完成合同，仍然有效**。
+> **附录 A（P2 逐条执行规格）与附录 B（P3 验收纠偏）是历史方案**——结论已融入代码，当作依据读，不要当作待办。
+> 决策模型通道的具体接入方案另行制定，不在本文件内。
 
 ## 〇、为什么统一
 
@@ -43,7 +43,7 @@
 1. **ContentItem 内容项抽象**（`src/analysis/content.ts`）：`{ subjectType, subjectId, uid/accountId, text, tags, pics, url, ts }`——直播场次与图文帖都投影成它；分类判定与模型 prompt 构造只吃它。**输入带图**（直播封面/关键帧、图文配图）。
 2. **条件算子注册表**（`src/analysis/matcher.ts`）：关键词/分区/帖子类型/引用/带图都是「条件组 + 且/或」，按内容类型注册，替代两个写死的 matcher。
 3. **verdicts 身份键通用化**：`(room_id, live_time)` → `(subject_type, subject_id)`；`source` 枚举预留 `'decision'`。
-4. **判决链接口**（`src/analysis/classifier.ts` 的 `JudgeStage`）：确定性 → （决策模型档，P4 未接）→ LLM → 确定性兜底的级联形状已就位，各档可插拔。
+4. **判决链接口**（`src/analysis/classifier.ts` 的 `JudgeStage`）：确定性 → 决策模型（预留档，未接入）→ LLM → 确定性兜底的级联形状已就位，各档可插拔。
 5. **聚合与模板收敛**：`aggregateRuleHits`（渠道并集去重、首个非空模板、空并集不推）两形态共用；`renderTemplate` / `renderPostTemplate` 按内容类型提供变量集。
 6. **「推送是否等待判定」规则级化**（`src/core/pipeline.ts` 的 `hasCoveringCategoryRule`）：只有「引用了分类且 scope 覆盖本内容」的规则才等判定；纯「任意内容」规则立即推，避免通知被无关分析阻塞，也不产生双推。
 
@@ -71,7 +71,8 @@
 | P1 verdicts 通用化 | 身份键迁移 + 图文判定归档 + 面板判定回看入口 | 已落地 |
 | P2 模型合并 | ContentItem + 算子注册表 + 判决链接口；categories/push_rules 三表合并为目标模型 + 一次性数据搬家（D2）；pipeline 两分支后半段合流；「推送等不等判定」规则级化 | 已落地，规格见附录 A |
 | P3 产品层对齐 | 两页分别提供分类与推送双规则、共用组件与范围选择；类型边界在能力层校验 | 初版未过验收，按附录 B 纠偏后落地 |
-| P4 决策模型通道与视觉分类实测 | 直播关键帧/封面本地化 Data URL + 图片规范化 + 多模态 LLM 实测；再接 `DecisionProvider`（`/v1/systemone` 主契约，`choice` + `noul` 混装） | **未完成**，合同见附录 C |
+
+决策模型通道不在本计划的分期项内：`decision` 档位与 `source` 枚举只是预留，接入方案另行制定。
 
 每期验收：`npm run typecheck && npm test && npm run build` 全绿 + `--dry-run` / `--force-uid` 全链路手动验证；P3 另需 `?demo=1` mock 目检两页。
 
@@ -166,54 +167,3 @@ P0–P2 的核心复用仍然成立：ContentItem 投影、条件算子、分类
 - 模型结果必须完整覆盖分类且每项唯一，置信度范围限定 0–1；违规结果按既有 provider 降级和确定性回退处理，批量输出额度随分类数扩展。
 - WebUI 两形态共用「分类与推送记录」，独立展示分类结论与实际发送，归档当时的标准和规则快照、provider 失败/回退及通道结果。范围、升级与历史数据边界见 [content-audit.md](../content-audit.md)。
 
-## 附录 C：视觉分类打通与决策模型（P4）实施计划
-
-> **未完成合同**，仍然有效：本节是目标规格与验收假设，**不代表当前代码状态**——已落地什么、哪些改动尚未验收只查 [status.md](../status.md)，不要从本节推断实现进度。
-
-### C.1 基线假设与待补接缝
-
-1. **已就绪基建**：
-   - `ContentItem` 统一投影（`src/analysis/content.ts`）、条件算子注册表（`src/analysis/matcher.ts`）、可插拔判决链 `JudgeStage`（`src/analysis/classifier.ts`）、规则级等待判定 `hasCoveringCategoryRule`（`src/core/pipeline.ts`）、以及全链路可观测的 `content_audit`（WebUI「分类与推送记录」弹窗）。
-2. **进入视觉与决策模型实测前需补的 3 个工程接缝**：
-   - **直播视觉输入本地化**：图文帖在 pipeline 已先经 `localizeImage` 下载并转 `data:image/...;base64,...`；但直播 `live_start` 目前在 `fromLiveEvent` 直接塞了 B站远程 URL（`event.keyframe || event.cover`）。`hdslb.com` 缺 `Referer: https://live.bilibili.com/` 会 403，且 `/v1/systemone` 只收随请求附带的字节。直播分类前须补齐带 Referer 本地化 → Data URL。
-   - **图片规范化（`image-prep`）**：B站/微博/X 图床常返回 WebP 或超长图/小表情，而 `jev-1.14.0`（Danger Zone Images）拒收 WebP/GIF 且要求单边 `256~1568 px`、总像素 `≥ 78,400`（`256×256` 直接 400 整单拒收），服务端不自动缩放或旋转。送模型前需统一规范化。
-   - **`DecisionProvider` 独立通道**：与 `LlmRouter` 平行，独立管理 key、限流与熔断，主协议对齐 `POST /v1/systemone`。
-
-### C.2 核心规则与判决链逻辑
-
-1. **多分类解耦 vs 优先级展示（`noul` + `choice` 双轨并存）**：
-   - **推送规则触发（用逐项 `noul` 是非判断）**：不同推送规则考虑的分类域不同（如规则 A 关注「歌回」，规则 B 关注「联动」或「带图自拍」）。每个分类独立产出 `pass: boolean`，允许多分类同时命中，**各规则按所引用的分类独立匹配、互不截胡**。同一内容命中多条推送规则时，仍由 `aggregateRuleHits` 按推送规则拖拽优先级取第一条非空推送词模板、渠道取并集。
-   - **标签展示与横向主次（用 `choice` 概率分布 + 置信度排序）**：命中的多个分类标签按置信度从高到低排序展示；`choice` 产出的横向概率分布（各分类 + `none` 概率和为 1）一并记入 `content_audit`，既供面板直观查看主分类归属，也可在后续需要时对 `noul` 的「Yes 偏置」做交叉校准。
-   - **优先级归属原则**：绝不把「分类上下拖拽优先级」塞进模型 prompt（避免多跳逻辑退化与拖动顺序导致客观判定漂移）；任何需要按分类优先级截断的逻辑一律在代码侧按 `categories` 顺序确定性裁决。
-2. **分类内部条件分工与判决链级联**：
-   - **纯确定性分类（`llmPrompt` 为空）**：100% 走 `deterministicJudge`（算子注册表）。
-   - **带提示词分类（`llmPrompt` 非空）**：
-     1. **硬结构门禁预筛（仅图文客观属性）**：若分类勾选了 `post_types`（只原/只转）、`require_quote`、`require_media`，不满足的直接短路判 `pass=false`，不耗模型 token。（注：`keywords`/`areas` 因存在旧标题党与反串，有提示词时不直接短路判 `true`，仅作模型参考特征与故障兜底。）
-     2. **DecisionJudge（System 1，`/v1/systemone`）**：高置信度（`p ≥ T_high` 判真 / `p ≤ T_low` 判假）直接定案（`source='decision'`）；落入灰区（`T_low < p < T_high`）或通道未启用/失败的分类，升级交下一档。
-     3. **LlmJudge（System 2，VLM/LLM）**：对灰区或未决分类调多模态 LLM 定案（`source='llm'`）。
-     4. **DeterministicJudge（兜底回退）**：模型通道均不可用或报错时，回退 `keywords` / `areas` 等确定性条件组兜底（`source='rule'`）。
-
-### C.3 模型输入输出契约
-
-1. **System One（`/v1/systemone`）单次请求混装契约**：
-   - **一次请求、一笔输入费**：`questions` map 原生支持混装不同题型。同一次请求内同时下发 **1 道全局 `choice`（含全部待判分类 + `none` 兜底项）** 与 **N 道逐分类 `noul`（是非题）**。
-   - **图片单次挂载**：图片在 `state.images`（或顶层 `images[]`）中只放一次，各题 `instructions` 用反引号引用字段名，避免按引用次数重复计费及撑爆请求体上限。
-   - **防注入结构化 `state`**：抓取到的标题/正文放入 `state` 子字段，指令明确要求只依据客观内容与画面判断，忽略正文中任何试图指定分类结果的文本。
-   - **证据合成**：决策模型无自由文本输出，由代码将 `noul` 概率与 `choice` 占比合成为可读 `evidence`（如 `"决策判定 p=0.91（横向占比 0.78，模型 jev-1.14.0）"`），落入 `verdicts` 与 `content_audit`。
-2. **LLM（System 2）输入微调**：
-   - 在 `src/analysis/tasks/classify.ts` 中将分类配置的 `keywords` / `areas` 作为辅助参考一并附入分类说明；
-   - 在直播系统提示词中明确「当直播间标题与实际关键帧画面明显不符（如挂旧标题打其他游戏）时，以关键帧画面为准」。
-
-### C.4 验证策略与分步施工清单
-
-**验证策略**：不预先搭建重型离线评测工具；直接依托已落地的 **WebUI「分类与推送记录」（`content_audit`）+ `npm start -- --force-uid <uid> --dry-run`** 在真机面板上看图、看分类结论与置信度分布，遇到具体误判再针对性调整。
-
-1. **Step 1：打通直播视觉输入 + 图片规范化 + 多标签置信度排序（可直接开工）**
-   - `live_start` 分析前将 `keyframe || cover` 经带 B站 Referer 的本地缓存下载并转 Data URL 送入 `ContentItem.imageUrls`；
-   - 新增轻量图片规范化（保证 JPEG/PNG 静态图、尺寸合规）；
-   - `classifier.ts` 产出的命中分类按置信度降序排列（同置信度保持面板 `sort` 序）。
-2. **Step 2：现有多模态 LLM 带图分类真机实测**
-   - 零新增配置，直接用现有 vision 路由跑通带关键帧的直播分类与带配图的图文分类，在面板记录弹窗核验效果。
-3. **Step 3：接入 `DecisionProvider`（`/v1/systemone`，`choice` + `noul` 同请求）**
-   - 实现 `DecisionProvider`（支持 TypeSafe `/v1/systemone` 原生 `assets` 与 `d3`/Clef `images[]` 扩展，预留 `pplx-decider` 薄适配）；
-   - 接入 `classifier.ts` 的 `decision` 档位（支持影子对比与置信度阈值分流），将 `noul` 结论与 `choice` 概率分布完整呈现在 `content_audit` 记录中。

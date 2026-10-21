@@ -38,7 +38,6 @@
 - **WebUI Agent / QQ 入口真机验收**：P1 验收口径 = ≥20 条本机自然语言请求（读/写/撤销/能力边界四类）、工具选择正确率 ≥90%、参数正确率 ≥90%、误写 0（「写前询问」模式下未经确认的写）、能力边界 100% 不臆造 id 或 uid。口径见 [plan/agent-access.md](plan/agent-access.md)「P1」。
 - **`completeChat` 的 responses 分支**：`function_call_output` + `call_id` 往返只有离线测试，首次接真端点时先跑一次单轮工具往返再放量。
 - **LLM 分类真机验收与调优**：含带图（vision 路由）路径与 provider 结构化输出兼容（部分 provider 对 schema 请求返 400、由路由降级接住，需按其支持的模式单独复验）。
-- **视觉分类与决策模型通道（P4）**：关键帧本地化 / 图片规范化 / `DecisionProvider` / 审计决策明细在工作区有未提交改动，**仅有离线测试，未验收，不算已落地**；合同见 [plan/unify-classify-push.md](plan/unify-classify-push.md) 附录 C。
 - **QQ 通道复验**：统一规则升级后未实发 QQ（当次验收本机缺机器人配置，只走了本机 toast）；下次改动推送链路时一并复验群/私聊实发。
 - **MaiBot 插件适配统一规则模型**：插件（独立仓库）仍按旧 `uids` 读取规则范围，需改为读 `subjectKind` / `scope` 并覆盖图文规则显示与筛选；未适配前其「规则范围显示」「按主播查删」不可信，改动也不在本仓。
 - **X 源待验证项**：转发去重语义（要「每次转发都推」须另取 RT 自身 id）、免登录路线的长期稳定性等，见 [research/twitter.md](research/twitter.md) §7 与 [plan/twitter-source.md](plan/twitter-source.md)。
@@ -62,4 +61,4 @@
 - **弹幕抓取**（含 L1 本地信号：弹幕词频、帧间差异）。
 - **可选推送时机**：延迟到有封面 / 换标题 / 内容实际变更（只增不减，面板怎么配未定）。
 - **优先级**：`PushMessage.priority` 无消费者，等产品方案再定（不做屏蔽类偏好，见 [design](design.md) §11）。
-- **决策模型通道（P4）**：`/v1/systemone` 主端点、`choice` + `noul` 混装契约、灰区升级与独立计费/熔断档位，合同见统一计划附录 C。
+- **决策模型通道**：未接入。`/v1/systemone` 契约、候选模型与接入约束见 [research/decision-models.md](research/decision-models.md)，具体接入方案待另行制定；直播关键帧本地化与图片规范化同样未实现，属于接入前置。
