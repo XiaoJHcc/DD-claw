@@ -163,7 +163,7 @@ src/mcp/tools.ts（schema + handler + role）
 
 成本决定组合方式，不是实现进度表：确定性条件最便宜，是无提示词分类的独立路径，也是模型失败的兜底；多源文本与已有画面提供语义证据；更贵的判断不得侵入来源轮询。
 
-缓存可在内容无显著变化时复用结果；队列可按触发合并与优先级调度。二者均是留缝，不是当前行为保证。决策模型通道尚未接入（`decision` 档位与 `source` 枚举只是预留），接入方案待另行制定；研究证据见 [decision-models](research/decision-models.md)，验收状态只见 status。
+缓存可在内容无显著变化时复用结果；队列可按触发合并与优先级调度。二者均是留缝，不是当前行为保证。决策模型通道的**管理面已就绪**（独立供应商名单与 key），但判定档位尚未接入判决链（`decision` 档位与 `source` 枚举只是预留）；协议选型与判定合同见 [decision-model](plan/decision-model.md)，研究证据见 [decision-models](research/decision-models.md)，验收状态只见 status。
 
 ## 8. 里程碑
 

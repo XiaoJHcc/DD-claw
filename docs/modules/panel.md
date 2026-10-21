@@ -48,7 +48,7 @@ webui (api) → /api/* 路由（挂载门 + 形状映射）
 | 层 | 文件 | 说明 |
 |---|---|---|
 | 真实数据夹具 | `demo/fixtures.json` | `npm run demo:fixtures` 一次性从真实库导出后人工节选维护，已存在须 `--force`；`meta.exportedAt` 是时间冻结点，何时打开 demo 都按导出瞬间渲染；头像 / 关键帧本地化随仓库发布（时间表取色要 canvas 读头像，本地图天然同源） |
-| 手工展示案例 | `demo/defaults.json` | LLM provider / 分类 / 推送规则的**唯一手工信源**，demo mock 与首启默认值（onboarding）共用 |
+| 手工展示案例 | `demo/defaults.json` | LLM / 决策模型 provider、分类、推送规则的**唯一手工信源**；LLM 与规则同时供 onboarding 种入，决策模型只作 demo 展示（不种入） |
 | 手写最简态 | `demo/mock-data.js` | 渠道 / NapCat / 高级设置等设置卡片的占位假号、SVG 占位图、时间冻结 |
 
 契约：`demo/mock-api.js`（fetch 拦截器，内存实现整张 `/api/*`，含 PUT/POST/DELETE 与拖拽排序）与 `server.ts` 的 `/api/*` **完全同构**——改路由必须同步改 mock，否则 demo 展示的是旧契约。

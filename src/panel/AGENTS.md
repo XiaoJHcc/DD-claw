@@ -6,10 +6,10 @@
 
 - **写路由一律经注册表**：`/api/*` 的写走 `runPanelTool` → `runToolTracked(..., 'panel')`，zod 校验、审计、撤销快照全在能力层；路由只做挂载门、响应形状与状态码映射（201 vs 200、`{id}` vs `{ok:true}`、webui 认的键名差异）。
 - **唯一例外是撤销执行器 `POST /api/undo`**：它的写由 UndoStore 完成、自身不入快照，路由直接调 `deps.undoLast`，热生效回调在装配根。
-- **`order` 路由必须先于 `:id` / `:name` 通配匹配**（channels / categories / rules / LLM providers 都是），否则 `order` 会被当成 id 或名字。
+- **`order` 路由必须先于 `:id` / `:name` 通配匹配**（channels / categories / rules / LLM providers / 决策模型 providers 都是），否则 `order` 会被当成 id 或名字。
 - **写路径清单是测试不是文档**：新增或删改写路由要同步 `write-path-inventory.test.ts` 的 INVENTORY——「能否回滚」与「是否暴露给 agent」是两个独立问题，各自登记。接口是否存在以本目录源码与注册表为准，文档不抄全量 API 表。
 - **鉴权口径**：只绑 `127.0.0.1`，`/api/*` 即主人（admin）；`/mcp` 永远要令牌（零令牌 503、缺失/无效 401，不设回环免 token）；`POST /onebot` 刻意不在 `/api` 下——它是消息入口，不是主人能力面。
-- **敏感值**：cookie 值不进任何响应与日志；唯一显式例外是 LLM key 在本机面板明文回显/编辑（明示决策，不做掩码），审计日志里 key 一律打码。
+- **敏感值**：cookie 值不进任何响应与日志；唯一显式例外是模型 key（LLM / 决策模型）在本机面板明文回显/编辑（明示决策，不做掩码），审计日志里 key 一律打码。
 - **挂载门**：路由组按 `PanelDeps` 的 dep 存在与否条件挂载（无 dep = 该组 404）。新增路由先决定它归属哪个 dep。
 - **缓存文件读取要守目录边界**：数据库中的快照路径也不可信；规范化分隔符并 `resolve` 后必须仍位于注入的缓存目录内，否则 404。内嵌资产的安全性不能代替磁盘媒体端点的路径校验。
 - **静态资产只来自构建期内嵌快照**：命中即 200 + content-type + `cache-control: no-store`；纯 map 查键、运行时绝不读磁盘、天然无路径穿越，且判断排在 `/api/*` 之前。

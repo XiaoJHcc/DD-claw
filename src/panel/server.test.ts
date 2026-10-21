@@ -9,7 +9,8 @@ import { join } from 'node:path';
 import { Db } from '../core/db.js';
 import { createPanelServer, type PanelDeps, type PanelStatus } from './server.js';
 import { createLlmRouter, listLlmProviders, saveLlmProviders, setLlmEnabled, dbKeysOf, type LlmRouter, type FetchLike } from '../analysis/providers.js';
-import type { LlmProviderConfig } from '../config/schema.js';
+import { listDecisionProviders, saveDecisionProviders } from '../analysis/decision-providers.js';
+import type { DecisionProviderConfig, LlmProviderConfig } from '../config/schema.js';
 import { saveNapcatConfig } from '../notify/napcat.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
@@ -63,6 +64,11 @@ async function setup(
       };
     };
     llmFetch?: FetchLike;
+    /** 注入 decision dep（/api/decision*）；缺省不注入（404）。probe 缺省返回固定回声 */
+    decision?: {
+      providers: DecisionProviderConfig[];
+      probe?: PanelDeps['decision']['probe'];
+    };
     /** 注入 listen dep；缺省不注入（/api/listen* 404）。twitter 可传函数 = 动态判据（代理配置会变） */
     listen?: { bili?: boolean; weibo?: boolean; twitter?: boolean | (() => boolean) };
     /** 注入 napcat dep；缺省不注入（/api/napcat* 404） */
@@ -131,6 +137,17 @@ async function setup(
     dep.onProvidersChanged = () => { dep.router = build(); };
     llm = dep;
   }
+  let decision: PanelDeps['decision'];
+  if (opts.decision) {
+    saveDecisionProviders(db, opts.decision.providers);
+    decision = {
+      store: {
+        list: () => listDecisionProviders(db),
+        save: (ps) => saveDecisionProviders(db, ps),
+      },
+      probe: opts.decision.probe ?? (async () => ({ ms: 7, model: 'jev-1.13.0' })),
+    };
+  }
   const undoStore = opts.undo ? new UndoStore(db.raw) : undefined;
   undoStore?.migrate();
   const chatStore = opts.chat ? new ChatStore(db.raw) : undefined;
@@ -160,6 +177,7 @@ async function setup(
     auth: opts.auth,
     weiboAuth: opts.weiboAuth,
     llm,
+    decision,
     napcat: opts.napcat,
     advanced: opts.advanced,
     snapshots: opts.snapshots,
@@ -228,13 +246,13 @@ async function api(
 
 // ---- 页面 ----
 
-test('GET / 返回内嵌页面，包含主要卡片与视图导航（时间表/主播/图文/设置、监听/LLM供应商/推送/关注列表）', async (t) => {
+test('GET / 返回内嵌页面，包含主要卡片与视图导航（时间表/主播/图文/设置、监听/LLM供应商/决策模型/推送/关注列表）', async (t) => {
   const { base } = await setup(t);
   const res = await fetch(base + '/', { headers: { connection: 'close' } });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type') ?? '', /text\/html/);
   const html = await res.text();
-  for (const marker of ['监听', 'LLM 供应商', '推送', 'id="schedule-body"', 'data-view="streamers"', '关注列表', 'id="view-schedule"', 'id="view-streamers"', 'id="view-x"', 'id="view-settings"']) {
+  for (const marker of ['监听', 'LLM 供应商', '决策模型', '推送', 'id="schedule-body"', 'data-view="streamers"', '关注列表', 'id="view-schedule"', 'id="view-streamers"', 'id="view-x"', 'id="view-settings"', 'id="card-decision"']) {
     assert.ok(html.includes(marker), `页面应包含「${marker}」`);
   }
   // 关注列表是独立卡片（不再嵌在主播列表里），且带搜索框
@@ -257,6 +275,10 @@ test('静态资产路由：/style.css、/js/core.js、demo 资产命中并带正
 
   const mock = await fetch(base + '/demo/mock-data.js', { headers: { connection: 'close' } });
   assert.equal(mock.status, 200, 'demo 资产也应内嵌（真实部署 ?demo=1 可演示）');
+
+  const decisionJs = await fetch(base + '/js/decision.js', { headers: { connection: 'close' } });
+  assert.equal(decisionJs.status, 200, '决策模型卡片模块应内嵌');
+  assert.ok((await decisionJs.text()).includes('add-decision'), 'decision.js 应注册新增动作');
 });
 
 test('静态资产路由：未知路径与路径穿越尝试 404', async (t) => {
@@ -1386,6 +1408,158 @@ test('PUT 启停影响路由推导；DELETE 移除；onProvidersChanged 重建 r
   const after = await api(base, '/api/llm');
   assert.deepEqual(after.json.providers, [], '删除后名单为空（router 已随 onProvidersChanged 重建）');
   assert.equal((await api(base, '/api/llm/providers/ds', 'DELETE')).status, 404);
+});
+
+// ---- 决策模型供应商（System One 管理面，与 LLM 通道隔离）----
+
+const DECISION_CFG: DecisionProviderConfig[] = [{
+  name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0',
+  protocol: 'systemone', enabled: true,
+}];
+
+test('GET /api/decision：provider 与 key 状态（本机面板，key 值明文回显）', async (t) => {
+  const { base } = await setup(t, { decision: { providers: DECISION_CFG } });
+  const r = await api(base, '/api/decision');
+  assert.equal(r.status, 200);
+  const p = (r.json.providers as Array<Record<string, unknown>>)[0]!;
+  assert.equal(p.name, 'jev');
+  assert.equal(p.protocol, 'systemone');
+  assert.deepEqual(p.key, { source: 'unset', count: 0, value: null });
+});
+
+test('POST /api/decision/providers：新增即出现在 GET；协议缺省 systemone；重名/非法 → 400', async (t) => {
+  const { base } = await setup(t, { decision: { providers: [] } });
+  const added = await api(base, '/api/decision/providers', 'POST', {
+    name: 'local', baseURL: 'http://127.0.0.1:8080/v1', model: 'clef-flash',
+  });
+  assert.equal(added.status, 201);
+
+  const info = await api(base, '/api/decision');
+  const providers = info.json.providers as Array<{ name: string; protocol: string }>;
+  assert.deepEqual(providers.map((p) => p.name), ['local']);
+  assert.equal(providers[0]!.protocol, 'systemone', '缺省协议回显');
+
+  assert.equal((await api(base, '/api/decision/providers', 'POST', {
+    name: 'local', baseURL: 'https://x.com/v1', model: 'm',
+  })).status, 400, '重名 400');
+  const bad = await api(base, '/api/decision/providers', 'POST', { name: 'x', baseURL: 'not-a-url', model: 'm' });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.error!, /baseURL/);
+  assert.equal((await api(base, '/api/decision/providers', 'POST', {
+    name: 'p2', baseURL: 'https://x.com/v1', model: 'm', protocol: 'decisions',
+  })).status, 400, '当前只支持 systemone');
+});
+
+test('决策 provider 表单可携带 key：POST/PUT 直接保存，GET 明文回显，删除保留 key 设置项', async (t) => {
+  const { base, db } = await setup(t, { decision: { providers: DECISION_CFG } });
+  assert.equal((await api(base, '/api/decision/providers', 'POST', {
+    name: 'add', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0', key: 'sk-d1',
+  })).status, 201);
+  let info = await api(base, '/api/decision');
+  const added = (info.json.providers as Array<{ name: string; key: { value: string } }>)
+    .find((p) => p.name === 'add')!;
+  assert.deepEqual(added.key, { source: 'panel', count: 1, value: 'sk-d1' });
+
+  await api(base, '/api/decision/providers/add', 'PUT', { key: 'sk-d2' });
+  info = await api(base, '/api/decision');
+  assert.equal((info.json.providers as Array<{ name: string; key: { value: string } }>)
+    .find((p) => p.name === 'add')!.key.value, 'sk-d2', 'PUT 带 key 更新');
+  await api(base, '/api/decision/providers/add', 'PUT', { model: 'jev-1.13.0' });
+  info = await api(base, '/api/decision');
+  assert.equal((info.json.providers as Array<{ name: string; key: { value: string } }>)
+    .find((p) => p.name === 'add')!.key.value, 'sk-d2', '不带 key 的 PUT 不动现有 key');
+
+  assert.equal((await api(base, '/api/decision/providers/add', 'DELETE')).status, 200);
+  assert.equal(db.getSetting('decision_key:add'), 'sk-d2', '删除 provider 不动 key 设置项（与 LLM 同语义）');
+});
+
+test('PUT /api/decision/providers/order：整体重排；名单不对应/重复 → 400', async (t) => {
+  const { base } = await setup(t, { decision: { providers: DECISION_CFG } });
+  await api(base, '/api/decision/providers', 'POST', {
+    name: 'second', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.13.0',
+  });
+  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { names: ['second', 'jev'] })).status, 200);
+  const info = await api(base, '/api/decision');
+  assert.deepEqual((info.json.providers as Array<{ name: string }>).map((p) => p.name), ['second', 'jev']);
+  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { names: ['second'] })).status, 400, '缺一个');
+  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { names: ['second', 'second'] })).status, 400, '重复');
+  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { names: ['second', 'ghost'] })).status, 400, '不存在');
+});
+
+test('PUT 启停 / DELETE 移除；不存在 404', async (t) => {
+  const { base } = await setup(t, { decision: { providers: DECISION_CFG } });
+  assert.equal((await api(base, '/api/decision/providers/jev', 'PUT', { enabled: false })).status, 200);
+  const info = await api(base, '/api/decision');
+  assert.equal((info.json.providers as Array<{ enabled: boolean }>)[0]!.enabled, false);
+  assert.equal((await api(base, '/api/decision/providers/nope', 'PUT', { enabled: false })).status, 404);
+  assert.equal((await api(base, '/api/decision/providers/jev', 'DELETE')).status, 200);
+  assert.deepEqual((await api(base, '/api/decision')).json.providers, []);
+  assert.equal((await api(base, '/api/decision/providers/jev', 'DELETE')).status, 404);
+});
+
+test('POST /api/decision/providers/:name/test：缺 key 400、真实 probe 200、失败 502 且不含 key', async (t) => {
+  let probeSpec: DecisionProviderConfig | null = null;
+  let probeKey: string | null = null;
+  const ok = await setup(t, {
+    decision: {
+      providers: DECISION_CFG,
+      probe: async (spec, key) => {
+        probeSpec = spec;
+        probeKey = key;
+        return { ms: 12, model: 'jev-1.13.0' };
+      },
+    },
+  });
+  assert.equal((await api(ok.base, '/api/decision/providers/nope/test', 'POST')).status, 404, '不存在 404');
+  assert.equal((await api(ok.base, '/api/decision/providers/jev/test', 'POST')).status, 400, '缺 key 400');
+  await api(ok.base, '/api/decision/providers/jev', 'PUT', { key: 'sk-decision-1' });
+  const r = await api(ok.base, '/api/decision/providers/jev/test', 'POST');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { ok: true, ms: 12, model: 'jev-1.13.0' });
+  assert.equal(probeSpec!.name, 'jev');
+  assert.equal(probeKey, 'sk-decision-1');
+
+  const fail = await setup(t, {
+    decision: {
+      providers: DECISION_CFG,
+      probe: async () => { throw new Error('HTTP 401: invalid api key'); },
+    },
+  });
+  await api(fail.base, '/api/decision/providers/jev', 'PUT', { key: 'sk-secret-xyz' });
+  const bad = await api(fail.base, '/api/decision/providers/jev/test', 'POST');
+  assert.equal(bad.status, 502);
+  assert.equal(bad.json.ok, false);
+  assert.match(bad.json.error!, /401/);
+  assert.ok(!JSON.stringify(bad.json).includes('sk-secret-xyz'), '错误信息不含 key');
+});
+
+test('无 decision dep 时 /api/decision* 一律 404', async (t) => {
+  const { base } = await setup(t);
+  assert.equal((await api(base, '/api/decision')).status, 404);
+  assert.equal((await api(base, '/api/decision/providers', 'POST', {})).status, 404);
+  assert.equal((await api(base, '/api/decision/providers/jev/test', 'POST')).status, 404);
+});
+
+test('变更历史结构化：决策模型 key 行同样 refill，明文不进历史', async (t) => {
+  const { db, base } = await setup(t, { undo: true, decision: { providers: DECISION_CFG } });
+
+  assert.equal((await api(base, '/api/decision/providers/jev', 'PUT', { key: 'sk-dec-refill' })).status, 200);
+  const c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  assert.equal(c[0]!.title, '保存决策模型供应商');
+  assert.equal(c[0]!.headline, '设置了 jev 的决策模型密钥');
+  assert.deepEqual(c[0]!.detail, [{
+    label: '决策模型密钥（jev）',
+    action: 'created',
+    changes: [],
+  }]);
+  assert.equal(c[0]!.undoNote, 'refill', '涉及 decision_key:* → 撤销 = 清空、需重填');
+  assert.ok(!JSON.stringify(c[0]).includes('sk-dec-refill'), '明文 key 绝不进历史');
+
+  const u = await api(base, '/api/undo', 'POST');
+  assert.equal(u.status, 200);
+  assert.equal(u.json.title, '保存决策模型供应商');
+  assert.deepEqual(u.json.refill, ['settings.(key=decision_key:jev)']);
+  assert.equal(db.getSetting('decision_key:jev'), null, '撤销 = 清空该行（值本来就没落库）');
 });
 
 // ---- NapCat 托管 ----

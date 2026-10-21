@@ -137,6 +137,18 @@ const INVENTORY: InventoryEntry[] = [
     coverage: 'registry', tool: 'delete_llm_provider', toolStatus: 'exists', exposeToAgent: true,
   },
   {
+    method: 'POST', path: '/api/decision/providers', label: 'POST /api/decision/providers',
+    coverage: 'registry', tool: 'upsert_decision_provider', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'PUT', path: String.raw`^\/api\/decision\/providers\/([^/]+)$`, label: 'PUT /api/decision/providers/:name',
+    coverage: 'registry', tool: 'upsert_decision_provider', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
+    method: 'DELETE', path: String.raw`^\/api\/decision\/providers\/([^/]+)$`, label: 'DELETE /api/decision/providers/:name',
+    coverage: 'registry', tool: 'delete_decision_provider', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
     method: 'POST', path: '/api/categories', label: 'POST /api/categories',
     coverage: 'registry', tool: 'upsert_category', toolStatus: 'exists', exposeToAgent: true,
   },
@@ -246,6 +258,11 @@ const INVENTORY: InventoryEntry[] = [
     reason: '同上',
   },
   {
+    method: 'PUT', path: '/api/decision/providers/order', label: 'PUT /api/decision/providers/order',
+    coverage: 'registry', tool: 'reorder_decision_providers', toolStatus: 'exists', exposeToAgent: false,
+    reason: '同上',
+  },
+  {
     method: 'POST', path: '/api/push/test', label: 'POST /api/push/test',
     coverage: 'registry', tool: 'test_push', toolStatus: 'exists', exposeToAgent: false,
     reason: '有对外副作用（真发一条消息）、不可撤销 → 不暴露给 agent',
@@ -254,6 +271,12 @@ const INVENTORY: InventoryEntry[] = [
     method: 'POST', path: String.raw`^\/api\/llm\/providers\/([^/]+)\/test$`, label: 'POST /api/llm/providers/:name/test',
     coverage: 'registry', tool: 'test_llm_provider', toolStatus: 'exists', exposeToAgent: false,
     reason: '网络探测 + 失败计熔断，非 DB 写 → 不暴露给 agent',
+  },
+  {
+    method: 'POST', path: String.raw`^\/api\/decision\/providers\/([^/]+)\/test$`,
+    label: 'POST /api/decision/providers/:name/test',
+    coverage: 'registry', tool: 'test_decision_provider', toolStatus: 'exists', exposeToAgent: false,
+    reason: '网络探测（真实 systemone 请求），非 DB 写 → 不暴露给 agent',
   },
 
   // ---- 撤销执行器（唯一不进快照的写面：它就是回滚动作本身）----

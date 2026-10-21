@@ -42,7 +42,7 @@
 - `x-config.ts` — X 连接配置与探测状态快照（settings 唯一信源）。
 - `onboarding.ts` — 首启默认值种入（一次性闸门 + 各项独立判空）。
 - `onboarding-defaults.gen.ts` — 构建期生成物（勿手改，源在 `webui/demo/defaults.json`）。
-- `undo.ts` — 写快照与撤销：`capture`（同步）/ `track`（异步串行）、忽略列、逐行冲突、每渠道一栈、LLM key 脱敏、`undoEffects` 纯分类。
+- `undo.ts` — 写快照与撤销：`capture`（同步）/ `track`（异步串行）、忽略列、逐行冲突、每渠道一栈、模型 key 脱敏、`undoEffects` 纯分类。
 
 **输入口径 · 出网 · 遗留**
 - `csv.ts` — 逗号分隔列表的拆分与写库归一。

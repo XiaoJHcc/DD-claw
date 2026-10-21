@@ -27,8 +27,9 @@ import {
 import {
   fetchWeiboSelf, loadWeiboCookies, saveWeiboCookies, weiboCookieHeader, type WeiboSelfInfo,
 } from '../sources/weibo/auth.js';
-import type { LlmProviderConfig } from '../config/schema.js';
+import type { DecisionProviderConfig, LlmProviderConfig } from '../config/schema.js';
 import { deriveRoutes, getChatProvider, isLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
+import { decisionKeySetting } from '../analysis/decision-providers.js';
 import { isListenEnabled, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
 import {
   getRuntimeConfig,
@@ -118,6 +119,20 @@ export interface PanelDeps {
     };
     /** store.save 后调用：装配处重建 router，名单改动热生效 */
     onProvidersChanged?: () => void;
+  };
+  /**
+   * 决策模型供应商（System One 通道的管理面）：不注入则 /api/decision* 一律 404。
+   * 与 LLM provider 完全隔离：独立名单、独立 key（`decision_key:<name>`）、独立协议。
+   * key 在本机面板明文回显/编辑（与 LLM key 同一决策，只绑 127.0.0.1）；key 不进日志。
+   */
+  decision?: {
+    /** provider 名单管理（settings 表是唯一信源） */
+    store: {
+      list(): DecisionProviderConfig[];
+      save(providers: DecisionProviderConfig[]): void;
+    };
+    /** 面板「测试」：对指定 provider 发一次最小 systemone 请求（key = null 表示无鉴权端点） */
+    probe: (spec: DecisionProviderConfig, key: string | null) => Promise<{ ms: number; model: string }>;
   };
   /**
    * 监听功能开关（面板「监听」卡片）；不注入则 /api/listen* 一律 404。
@@ -806,6 +821,54 @@ async function handle(
       return;
     }
   }
+  // ---- 决策模型 provider 与 key 管理（decision dep 存在才挂；与 LLM 通道完全隔离）----
+  if (deps.decision && method === 'GET' && path === '/api/decision') {
+    sendJson(res, 200, decisionInfo(deps));
+    return;
+  }
+  if (deps.decision?.store && method === 'POST' && path === '/api/decision/providers') {
+    const body = asBodyObject(await readJsonBody(req));
+    // 与 LLM 同一裁决：REST 拒绝重名（webui 契约）；工具按名 upsert（MCP 契约）
+    if (typeof body.name === 'string' && deps.decision.store.list().some((p) => p.name === body.name)) {
+      throw new HttpError(400, `provider name 重复: ${body.name}`);
+    }
+    await callTool(deps, res, 'upsert_decision_provider', body, { status: 201 });
+    return;
+  }
+  // 排序路由必须在 :name 通配之前匹配，否则 'order' 会被当成 provider 名
+  if (deps.decision?.store && method === 'PUT' && path === '/api/decision/providers/order') {
+    await callTool(deps, res, 'reorder_decision_providers', asBodyObject(await readJsonBody(req)));
+    return;
+  }
+  const dpt = path.match(/^\/api\/decision\/providers\/([^/]+)\/test$/);
+  if (deps.decision && dpt && method === 'POST') {
+    const r = await runPanelTool(deps, 'test_decision_provider', {}, {
+      pathArgs: { name: decodeURIComponent(dpt[1]!) },
+    });
+    if (r.ok) {
+      sendJson(res, 200, r.data);
+      return;
+    }
+    // 与 LLM 测试同形状：网络/端点失败 502 { ok:false, error }（不是 4xx 业务错）
+    if (r.status === 502) {
+      sendJson(res, 502, { ok: false, error: r.error });
+      return;
+    }
+    throwToolFailure(r);
+  }
+  const dpm = path.match(/^\/api\/decision\/providers\/([^/]+)$/);
+  if (deps.decision?.store && dpm) {
+    const name = decodeURIComponent(dpm[1]!);
+    if (method === 'PUT') {
+      if (!deps.decision.store.list().some((p) => p.name === name)) throw new HttpError(404, 'provider 不存在');
+      await callTool(deps, res, 'upsert_decision_provider', asBodyObject(await readJsonBody(req)), { pathArgs: { name } });
+      return;
+    }
+    if (method === 'DELETE') {
+      await callTool(deps, res, 'delete_decision_provider', {}, { pathArgs: { name } });
+      return;
+    }
+  }
   // ---- 分类规则（全局定义：LLM 提示词 + 确定性条件，归类结果入 verdicts）----
   if (method === 'GET' && path === '/api/categories') {
     sendJson(res, 200, { categories: db.listCategories() });
@@ -1008,7 +1071,7 @@ async function handle(
     // 中文操作名与「需重填」提示都由后端给（与 /api/undo/history 逐条字段同源，见 panel/undo-view.ts）。
     // **主形状是 change 里的那份**（与历史端点的 title/undoNote 对称）；顶层再放一份同样的值，
     // 是为了让「读 res.title / res.refill」与「读 res.change.title / res.change.refill」两种写法都成立
-    // （UI 与本接口并行开发，不做猜谜）。refill 只在隐私例外（LLM key）撤销时出现。
+    // （UI 与本接口并行开发，不做猜谜）。refill 只在隐私例外（LLM / 决策模型 key）撤销时出现。
     const payload = {
       ok: true,
       change: {
@@ -1453,6 +1516,34 @@ function llmInfo(deps: PanelDeps): unknown {
       // 与 loop 的 chatBlockedReason 同一判据（ProviderStatus.ready）
       ready: described.get(p.name)?.ready ?? false,
       key: llmKeySource(deps.db, p),
+    })),
+  };
+}
+
+// ---- 决策模型 provider 展示（settings 表 decision_providers / decision_key:<name>）----
+
+/** key 来源、池子大小与值本身（与 LLM 同口径：本机面板明文回显供编辑）。 */
+function decisionKeySource(
+  db: Db,
+  p: DecisionProviderConfig,
+): { source: 'panel' | 'unset'; count: number; value: string | null } {
+  const panel = db.getSetting(decisionKeySetting(p.name));
+  if (panel && panel.trim()) {
+    const v = panel.trim();
+    return { source: 'panel', count: splitCsvText(v).length, value: v };
+  }
+  return { source: 'unset', count: 0, value: null };
+}
+
+function decisionInfo(deps: PanelDeps): unknown {
+  return {
+    providers: (deps.decision?.store.list() ?? []).map((p) => ({
+      name: p.name,
+      baseURL: p.baseURL,
+      model: p.model,
+      protocol: p.protocol,
+      enabled: p.enabled,
+      key: decisionKeySource(deps.db, p),
     })),
   };
 }

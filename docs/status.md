@@ -22,6 +22,7 @@
 | 三类图文来源 | X（免登录路线，`x_accounts`）· 微博（`weibo_accounts`）· B站动态（`bili_accounts`，监听主播 ∪ 名单账号）；各自独立名单、运行状态与账号级故障标记，`feed_post` 只对名单账号发 |
 | 补推语义 | 三平台统一的恢复/补推判定（静默轮、未运行期间按开关与时间窗/条数封顶补推），权威定义在 `src/core/backlog.ts` |
 | LLM 接线 | text/vision 路由、熔断、多 key 池、结构化输出多档、chat-completions / responses 双协议；`completeChat` 透传 tools |
+| 决策模型管理面 | System One 供应商名单 + 独立 key + 启停 / 排序 + `systemone` 探活；与 LLM 通道隔离，判定档位尚未接入 |
 | 内容判定与归档 | 统一分类 + 可插拔判决链（模型优先、确定性兜底）→ `verdicts`；判定与推送过程入 `content_audit`，面板可回看（行为契约见 [content-audit.md](content-audit.md)） |
 | 推送规则与执行 | 一张 `push_rules` 覆盖直播与图文两形态，确定性匹配出渠道与文案，dispatcher 按渠道发送（模型见 [统一计划](plan/unify-classify-push.md)、机制见 [modules/analysis.md](modules/analysis.md)） |
 | 面板与前端 | 五视图（时间表 / 主播 / 图文 / 设置 / Agent）+ 分类与推送记录回看 + 设置页底部变更历史；demo mock 与后端同构 |
@@ -61,4 +62,4 @@
 - **弹幕抓取**（含 L1 本地信号：弹幕词频、帧间差异）。
 - **可选推送时机**：延迟到有封面 / 换标题 / 内容实际变更（只增不减，面板怎么配未定）。
 - **优先级**：`PushMessage.priority` 无消费者，等产品方案再定（不做屏蔽类偏好，见 [design](design.md) §11）。
-- **决策模型通道**：未接入。`/v1/systemone` 契约、候选模型与接入约束见 [research/decision-models.md](research/decision-models.md)，具体接入方案待另行制定；直播关键帧本地化与图片规范化同样未实现，属于接入前置。
+- **决策模型通道**：管理面已接入（供应商名单 / 独立 key / 启停 / 排序 / `systemone` 探活）；判定档位未接入判决链。协议选型与判定合同见 [plan/decision-model.md](plan/decision-model.md)，外部证据见 [research/decision-models.md](research/decision-models.md)；直播关键帧本地化与图片规范化同样未实现，属于判定接入的前置。

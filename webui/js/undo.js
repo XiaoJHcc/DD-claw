@@ -10,7 +10,7 @@
 //   headline  一句话操作描述（值感知：「停用了推送规则「杂谈-开播」」「设置了 DeepSeek 的 LLM 密钥」）
 //   detail[]  { label 中文对象名, action: created|updated|deleted,
 //               changes: [{ field, from, to, bool? }] —— 值已格式化（布尔=开/关、JSON 数组=顿号、数值带单位）；
-//               值不可示人（LLM key / MCP 令牌）= { field, redacted: true } }
+//               值不可示人（LLM / 决策模型 key、MCP 令牌）= { field, redacted: true } }
 //   undoneAt  撤销时刻（秒，可空）→ meta 显示「已于 HH:MM 撤销」
 // 展示纪律：数据库实现细节（N 张表 · M 行、表名）不进界面——表名只留撤销后的刷新路由。
 //
@@ -277,7 +277,7 @@ ACTIONS['undo-change'] = function (el) {
     const title = (res && res.title) || (res && res.change && res.change.title) || titleOf(id);
     const refill = (res && res.refill) || [];
     if (refill.length) {
-      toast('已撤销：' + title + '；请重新填写 LLM 密钥：' + refill.join('、'));
+      toast('已撤销：' + title + '；请重新填写模型密钥：' + refill.join('、'));
     } else {
       toast('已撤销：' + title);
     }

@@ -13,4 +13,4 @@
 ## 文件地图
 
 - `index.ts` — `loadConfig()`：读 `.env`（不引 dotenv）→ 剥 BOM / JSONC 注释 → zod 校验 → 返回 `{ app, secrets }`；`projectRoot` 解析；`ConfigError`；测试用注释剥离导出。
-- `schema.ts` — `configSchema`（只校验 `panel`：enabled / port，默认 8787 只绑回环）、`llmProviderSchema`（面板 provider CRUD 校验）、`AppConfig` 字段接口与 `defaultAppConfig()`（所有运行参数的代码默认值）。
+- `schema.ts` — `configSchema`（只校验 `panel`：enabled / port，默认 8787 只绑回环）、`llmProviderSchema` / `decisionProviderSchema`（面板 provider CRUD 校验）、`AppConfig` 字段接口与 `defaultAppConfig()`（所有运行参数的代码默认值）。

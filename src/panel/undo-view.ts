@@ -12,8 +12,8 @@
  *   `undoNote` 撤销后的注意事项（`refill` = 该行是 LLM key 隐私例外，撤销 = 清空、需重填）
  *
  * 三条口径纪律：
- * - `undoNote` 的 refill 判定与 `core/undo.ts` 的隐私例外**同源**（`isLlmKeySetting`），别处不再写
- *   第二份 `llm_key:` 前缀判断。
+ * - `undoNote` 的 refill 判定与 `core/undo.ts` 的隐私例外**同源**（`isSecretKeySetting`），
+ *   别处不再写第二份 `llm_key:` / `decision_key:` 前缀判断。
  * - `changes` 的列集合与快照差分**同源**（`DEFAULT_IGNORE_COLUMNS`）：轮询回写列（游标/心跳/头像/
  *   平台昵称/updated_at）既不算差分也不列进说明，否则「保存主播别名」会顺带说“改了更新时间”。
  *   纯配置表（categories / push_rules / …）的 `updated_at` 不在忽略表、确实每次写都变，
@@ -25,10 +25,10 @@
  *    changes: [{ field: '关键词', from: '唱、歌', to: '唱、歌、演唱会' }] }`；
  * `changes` 只在 `action='updated'` 时非空（其余恒为 `[]`，键始终存在，前端不必判 undefined）；
  * 布尔开关变化带 `bool: true`（from/to 恒为 开/关，供前端省略冗余字段名）；
- * 值不可示人的变化（LLM key、MCP 令牌）给 `{ field, redacted: true }`，无 from/to。
+ * 值不可示人的变化（LLM / 决策模型 key、MCP 令牌）给 `{ field, redacted: true }`，无 from/to。
  */
 import {
-  DEFAULT_IGNORE_COLUMNS, changeTables, isLlmKeySetting,
+  DEFAULT_IGNORE_COLUMNS, changeTables, isDecisionKeySetting, isLlmKeySetting, isSecretKeySetting,
   type ChangeRecord, type RowImage, type Row,
 } from '../core/undo.js';
 
@@ -55,6 +55,7 @@ const TOOL_TITLES: Record<string, string> = {
   list_bili_accounts: '列出 B站动态账号',
   list_post_rules: '列出图文规则',
   list_llm_providers: '列出 LLM 供应商',
+  list_decision_providers: '列出决策模型供应商',
   get_x_config: '查看 X 连接设置',
   list_group_channels: '列出群渠道',
   // 开关与运行时参数
@@ -91,6 +92,11 @@ const TOOL_TITLES: Record<string, string> = {
   upsert_llm_provider: '保存 LLM 供应商',
   delete_llm_provider: '删除 LLM 供应商',
   reorder_llm_providers: '调整供应商顺序',
+  // 决策模型供应商（System One 通道，独立于 LLM）
+  upsert_decision_provider: '保存决策模型供应商',
+  delete_decision_provider: '删除决策模型供应商',
+  reorder_decision_providers: '调整决策模型供应商顺序',
+  test_decision_provider: '测试决策模型供应商',
   update_x_config: '修改 X 连接设置',
   // agent 会话设置（两个开关都不进 agent 工具面，只由主人从面板改）
   set_chat_mode: '设置写模式',
@@ -114,14 +120,15 @@ export function undoToolTitle(tool: string | null | undefined): string {
 
 /**
  * settings 键 → 中文设置项名。键名单以代码为准（`runtime-config.ts` 的 NUM_SPECS / BOOL_SPECS、
- * `x-config.ts`、`listen.ts`、`qqbot/settings.ts`、`napcat.ts`、`providers.ts`、`system-prompt.ts`）；
- * 精确名单之外按前缀兜底，再之外回退键原名。
+ * `x-config.ts`、`listen.ts`、`qqbot/settings.ts`、`napcat.ts`、`providers.ts`、
+ * `decision-providers.ts`、`system-prompt.ts`）；精确名单之外按前缀兜底，再之外回退键原名。
  */
 const SETTING_NAMES: Record<string, string> = {
   // 总开关
   push_enabled: '推送总开关',
   llm_enabled: 'LLM 总开关',
   llm_providers: 'LLM 供应商名单',
+  decision_providers: '决策模型供应商名单',
   chat_write_mode: 'Agent 写模式',
   chat_provider: 'Agent 模型选择',
   mcp_tokens: 'MCP 令牌',
@@ -165,10 +172,11 @@ const SETTING_NAMES: Record<string, string> = {
   qqbot_trigger_prefix: 'QQ 唤起前缀',
 };
 
-/** settings 行 → 中文设置项名（键名 + 前缀兜底 + 原名回退；`llm_key:*` 用同一份隐私判据） */
+/** settings 行 → 中文设置项名（键名 + 前缀兜底 + 原名回退；两类 key 用同一份隐私判据） */
 function settingLabel(key: unknown): string {
   const k = typeof key === 'string' ? key : String(key ?? '');
   if (isLlmKeySetting(k)) return `LLM 密钥（${k.slice('llm_key:'.length)}）`;
+  if (isDecisionKeySetting(k)) return `决策模型密钥（${k.slice('decision_key:'.length)}）`;
   const exact = SETTING_NAMES[k];
   if (exact !== undefined) return exact;
   if (k.startsWith('napcat_')) return `NapCat 设置（${k}）`;
@@ -509,10 +517,13 @@ export function undoChangeHeadline(c: ChangeRecord): string {
   if (primary === null) return `${undoToolTitle(c.tool)}（${c.rows.length} 项变更）`;
   const label = undoRowLabel(primary);
   const action = undoRowAction(primary);
-  // LLM key 行（created/updated 都可能，redacted 无值可比）与 settings 布尔键
+  // 模型 key 行（created/updated 都可能，redacted 无值可比）与 settings 布尔键
   // （首次手动关开关 = created 行）都能给值感知句式，优先于按动作组句
   if (primary.table === 'settings' && isLlmKeySetting(primary.pk.key)) {
     return `设置了 ${String(primary.pk.key).slice('llm_key:'.length)} 的 LLM 密钥`;
+  }
+  if (primary.table === 'settings' && isDecisionKeySetting(primary.pk.key)) {
+    return `设置了 ${String(primary.pk.key).slice('decision_key:'.length)} 的决策模型密钥`;
   }
   if (primary.table === 'settings') {
     const boolHeadline = boolVerbHeadline(primary);
@@ -526,13 +537,13 @@ export function undoChangeHeadline(c: ChangeRecord): string {
 }
 
 /**
- * 撤销这条记录时要在界面上说的注意事项：`refill` = 该记录涉及 LLM key 隐私例外
+ * 撤销这条记录时要在界面上说的注意事项：`refill` = 该记录涉及模型 key 隐私例外
  * （值本来就没落库），撤销动作 = 清空该行、需要主人重新填写。
- * 判定与 `core/undo.ts` 同源（工具名 + `isLlmKeySetting`），不另造口径。
+ * 判定与 `core/undo.ts` 同源（工具名 + `isSecretKeySetting`），不另造口径。
  */
 export function undoChangeNote(c: ChangeRecord): 'refill' | null {
   if (c.tool === 'set_llm_key') return 'refill';
-  const keyRow = c.rows.some((r) => r.table === 'settings' && isLlmKeySetting(r.pk.key));
+  const keyRow = c.rows.some((r) => r.table === 'settings' && isSecretKeySetting(r.pk.key));
   return keyRow ? 'refill' : null;
 }
 

@@ -13,7 +13,8 @@
  *    （better-sqlite3 的 `transaction()` 支持嵌套：写路径内部再开事务会退化成 savepoint，故可直接套在
  *    现有的 `Db.upsertXxx` 外面）；写抛错则事务回滚，写入与记录一起不落库。
  * ② 快照粒度 = 受影响行的前像 → 见上。
- * ③ 唯一隐私例外 = LLM key（`settings` 的 `llm_key:<provider>`）：**不落明文**，撤销 = 清空并要求重填。
+ * ③ 唯一隐私例外 = 模型 key（`settings` 的 `llm_key:<provider>` 与 `decision_key:<provider>`）：
+ *    **不落明文**，撤销 = 清空并要求重填。
  *
  * 撤销语义：栈式逆序（只撤最近一次、可连续撤、不跳序）、**每来源渠道一条独立栈**（面板 admin 另有全局栈）、
  * 逐行比对「后像 == 当前值」不等则**中止且一行都不动**（宁中止不丢写）、历史全量保留（只标记 undone，不删记录）。
@@ -144,16 +145,25 @@ export const DEFAULT_IGNORE_COLUMNS: Record<string, readonly string[]> = {
 };
 
 /**
- * 该 settings 键是否属于隐私例外（LLM key）。**键即判据**：`redactLlmKey` 与入口层的
- * 「撤销后需重填」提示都从这一个函数出发，两处口径不会漂移（`llm_key:<provider>` 一行一个键）。
+ * 该 settings 键是否属于隐私例外（LLM key / 决策模型 key）。**键即判据**：
+ * `redactSecretSettings` 与入口层的「撤销后需重填」提示都从这三个函数出发，
+ * 两处口径不会漂移（`llm_key:<provider>` / `decision_key:<provider>` 一行一个键）。
  */
 export function isLlmKeySetting(key: unknown): boolean {
   return typeof key === 'string' && key.startsWith('llm_key:');
 }
 
-/** 隐私例外（计划里的唯一一条）：LLM key 不落明文 */
-export const redactLlmKey: RedactPredicate = (table, column, row) =>
-  table === 'settings' && column === 'value' && isLlmKeySetting(row.key);
+export function isDecisionKeySetting(key: unknown): boolean {
+  return typeof key === 'string' && key.startsWith('decision_key:');
+}
+
+export function isSecretKeySetting(key: unknown): boolean {
+  return isLlmKeySetting(key) || isDecisionKeySetting(key);
+}
+
+/** 隐私例外（两条独立通道的 key 都不落明文） */
+export const redactSecretSettings: RedactPredicate = (table, column, row) =>
+  table === 'settings' && column === 'value' && isSecretKeySetting(row.key);
 
 export function adminScope(): string {
   return 'admin';
@@ -196,7 +206,7 @@ export interface UndoStoreOptions {
   ignoreColumns?: Record<string, readonly string[]>;
   /** 时钟（测试可注入） */
   now?: () => number;
-  /** 隐私例外判定；缺省 redactLlmKey */
+  /** 隐私例外判定；缺省 redactSecretSettings */
   redact?: RedactPredicate;
 }
 
@@ -214,7 +224,7 @@ export class UndoStore {
     this.tables = opts.tables ?? DEFAULT_CONFIG_TABLES;
     if (this.tables.includes(TABLE)) throw new Error(`${TABLE} 不能作为快照表（记录自身不该被记录）`);
     this.now = opts.now ?? (() => Date.now());
-    this.redact = opts.redact ?? redactLlmKey;
+    this.redact = opts.redact ?? redactSecretSettings;
     this.ignore = new Map(
       Object.entries(opts.ignoreColumns ?? DEFAULT_IGNORE_COLUMNS).map(([t, cols]) => [t, new Set(cols)]),
     );
@@ -544,6 +554,9 @@ export function changeSettingKeys(rec: ChangeRecord): string[] {
  *                  变化在装配处也是走同一个启停入口）
  * - `llm`       → 重建 llm router（`settings.llm_providers` / `llm_key:*`；撤 key = 清空 + 重填提示）
  * - `notifiers` → `rebuildNotifiers`（`push_channels` 行；`napcat_*` 配置同面板保存后的重装配口径）
+ *
+ * 决策模型管理面（`decision_providers` / `decision_key:*`）目前没有运行期缓存：名单与 key 都由
+ * 判定接入层按需直读 settings，故撤销后不需要热生效回调（接入出缓存时在此加 `decision`）。
  *
  * 混合表里唯一**不需要**回调的是 `streamers`：监听名单（含 watch 开关）由 live-status 与动态源
  * **每轮直读 `listWatchedUids()`**，撤销一次别名 / watch 改动下一轮即生效，不需要重启任何源。

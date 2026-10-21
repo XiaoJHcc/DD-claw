@@ -92,7 +92,7 @@ admin 令牌没有 scope：管理侧指定渠道一直走 `upsert_push_rule` 的
 
 - 单渠道自助规则 ≤ 20 条；写操作限流 20 次/10 分钟——**按渠道分桶**（同一渠道的多条令牌共桶，
   一个吵的群不拖累别的渠道；admin 侧回落按令牌名）
-- 全部写操作落审计日志：`[mcp] MCP 写操作 [角色:令牌名 #ch<渠道>] 工具 参数`（llm key 打码）
+- 全部写操作落审计日志：`[mcp] MCP 写操作 [角色:令牌名 #ch<渠道>] 工具 参数`（模型 key 打码）
 
 `undo_last_change` 的撤销栈同样由**令牌 scope** 决定（admin = 全局栈，gateway = 绑定渠道栈），
 未绑渠道的 gateway 一律 403——调用方声明不了自己的栈，也就撤不到别人的写；撤销自身不进变更记录。
@@ -125,7 +125,7 @@ admin 令牌没有 scope：管理侧指定渠道一直走 `upsert_push_rule` 的
   group_id（**fill-only**，身份字段不进 LLM 参数），插件据此选一条**渠道绑定**的 gateway 令牌调本端点。
   DD-claw 侧的四处服务端前提（渠道类型放开 / copy-on-write 拆分 / 删除归属校验 / 限流审计按渠道）已落地（见上）。
   HMAC 盖章留给「单入口跨权限域」（主人私聊提升 admin 权限）场景，届时才动 DD-claw 侧
-- **面板 token 管理卡**：v1 只有 CLI；token 纯文本存库（同 LLM key 的本机明文口径）
+- **面板 token 管理卡**：v1 只有 CLI；token 纯文本存库（同模型 key 的本机明文口径）
 - 只暴露 tools；MCP resources / prompts / SSE 服务端推送不实现
 
 ## 实现文件

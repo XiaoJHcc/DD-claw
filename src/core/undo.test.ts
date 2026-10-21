@@ -291,7 +291,22 @@ test('隐私例外：新增 key 的撤销也只做清空（值没落库）', (t)
   assert.equal(db.prepare(`SELECT value FROM settings WHERE key = 'llm_key:q'`).get(), undefined);
 });
 
-test('非隐私 settings 正常还原（隐私判定只认 llm_key: 前缀）', (t) => {
+test('隐私例外：决策模型 key 同样不落明文，撤销 = 清空并要求重填', (t) => {
+  const { db, store } = setup(t);
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('decision_key:jev', 'sk-dec-old')`).run();
+  store.capture(META, () => db.prepare(`UPDATE settings SET value = 'sk-dec-new' WHERE key = 'decision_key:jev'`).run());
+  const rec = store.peek(adminScope())!;
+  const dumped = JSON.stringify(rec.rows);
+  assert.ok(!dumped.includes('sk-dec-old') && !dumped.includes('sk-dec-new'), '快照不得落明文');
+  assert.equal(rec.rows[0]!.redacted, true);
+
+  const r = store.undo(adminScope());
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.refill, ['settings.(key=decision_key:jev)']);
+  assert.equal(db.prepare(`SELECT value FROM settings WHERE key = 'decision_key:jev'`).get(), undefined, '撤销 = 清空该 key');
+});
+
+test('非隐私 settings 正常还原（隐私判定只认模型 key 前缀）', (t) => {
   const { db, store } = setup(t);
   db.prepare(`INSERT INTO settings (key, value) VALUES ('push_enabled', '1')`).run();
   store.capture(META, () => db.prepare(`UPDATE settings SET value = '0' WHERE key = 'push_enabled'`).run());
@@ -657,6 +672,9 @@ test('undoEffects：受影响表 / settings 键 → 热生效标签（P0 判据 
   assert.deepEqual(undoEffects({ settingKeys: ['listen_dynamic'] }), ['listen']);
   assert.deepEqual(undoEffects({ settingKeys: ['llm_providers'] }), ['llm']);
   assert.deepEqual(undoEffects({ settingKeys: ['llm_key:p1'] }), ['llm']);
+  // 决策模型管理面暂无运行期缓存（名单与 key 按需直读 settings），撤销后不需要热生效回调
+  assert.deepEqual(undoEffects({ settingKeys: ['decision_providers'] }), []);
+  assert.deepEqual(undoEffects({ settingKeys: ['decision_key:jev'] }), []);
   assert.deepEqual(undoEffects({ settingKeys: ['napcat_enabled'] }), ['notifiers']);
   assert.deepEqual(undoEffects({ settingKeys: ['push_enabled'] }), []);
   // 表：三张图文名单 = 源名单变化 → 同一个启停入口；渠道行 → 装配级重同步；其余无回调

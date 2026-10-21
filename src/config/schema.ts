@@ -34,6 +34,25 @@ export const llmProviderSchema = z.object({
 
 export type LlmProviderConfig = z.infer<typeof llmProviderSchema>;
 
+/**
+ * 决策模型 provider：System One 端点（当前只有 `POST /v1/systemone`）。
+ * 名单存 settings 表（面板决策模型卡片管理），本 schema 供面板 CRUD 校验。
+ *
+ * `protocol` 是协议下拉框的落点：现在只允许 `systemone`（Jev / Clef / vLLM-SR /
+ * llama.cpp / Ollaya 同一套 `state + questions` 线格式）。OpenAI 与 Perplexity 的
+ * `/v1/decisions` 形状不同，等真正接入时再作为新枚举值扩展，不在业务代码里分支。
+ */
+export const decisionProviderSchema = z.object({
+  name: z.string().min(1),
+  baseURL: z.url('baseURL 必须是合法 URL'),
+  model: z.string().min(1),
+  /** 端点协议：systemone = POST /systemone（baseURL 写到 /v1 这一层） */
+  protocol: z.enum(['systemone']).default('systemone'),
+  enabled: z.boolean().default(true),
+});
+
+export type DecisionProviderConfig = z.infer<typeof decisionProviderSchema>;
+
 /** config.json 只校验 panel 段；其余顶层字段无视（zod 非 strict，未知键剥离） */
 export const configSchema = z.object({
   panel: z.object({

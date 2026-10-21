@@ -2,7 +2,7 @@
 
 轴 A 的第二段：把一次内容（直播场次 / 图文帖）判成「属于哪些分类」，再由 `analysis/matcher.ts` 用**人填的推送规则**做纯确定性匹配。判定结果入 `core` 的 `verdicts` 与 `content_audit`。机械去重（每场一次 / 防抖）不在这里，见 [../rules/AGENTS.md](../rules/AGENTS.md)。
 
-架构与产品口径见 [docs/design.md](../../docs/design.md)；实现现状与验收结论只查 [docs/status.md](../../docs/status.md)。机制细节、输入面语义与排障见 [docs/modules/analysis.md](../../docs/modules/analysis.md)。决策模型接入方案另行制定，研究证据见 [docs/research/decision-models.md](../../docs/research/decision-models.md)。
+架构与产品口径见 [docs/design.md](../../docs/design.md)；实现现状与验收结论只查 [docs/status.md](../../docs/status.md)。机制细节、输入面语义与排障见 [docs/modules/analysis.md](../../docs/modules/analysis.md)。决策模型协议选型、分期与判定合同见 [docs/plan/decision-model.md](../../docs/plan/decision-model.md)，外部证据见 [docs/research/decision-models.md](../../docs/research/decision-models.md)。
 
 ## 长期不变量
 
@@ -27,6 +27,7 @@
 - `classifier.ts` — `RulesClassifier` + **判决链**：`JudgeStage` 接口、`deterministicJudge` / `llmJudge`、`runJudgeChain`；按内容类型取启用分类，判定入 `verdicts` 与 `content_audit`。
 - `queue.ts` — 分析队列：并发 2 的信号量与通用 `run()` 入口（图文翻译等非分类任务同走这条路）。
 - `providers.ts` — LLM provider 层与 `LlmRouter`：路由推导、双协议、结构化输出三档、可重试失败就地重试、熔断、多 key 池、point-named 严格路由、工具对话与 JSON 模拟降级；`createLlmRouter` 装配入口与 settings 读写 helper。
+- `decision-providers.ts` — 决策模型 provider 层：System One（`state + questions` → typed answers）线格式、协议分派、最小探活、settings 名单与独立 key 前缀；判定档位尚未接入判决链。
 - `tasks/classify.ts` — 单次批量分类任务：直播与图文各自的 system / user 文本、JSON schema、结果解析（完整性与唯一性、置信度阈值）。
 - `tasks/post-analysis.ts` — 图文翻译任务（只产出译文）。
 - `post-analyzer.ts` — 翻译编排与降级（LLM 不可用 / 失败 → 不附译文）。

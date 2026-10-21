@@ -17,6 +17,7 @@ import { resetMcpWriteLimiter } from '../mcp/rate-limit.js';
 import { runTool } from '../mcp/run-tool.js';
 import { allToolDefs } from '../mcp/tools.js';
 import { saveLlmProviders, listLlmProviders } from '../analysis/providers.js';
+import { listDecisionProviders, saveDecisionProviders } from '../analysis/decision-providers.js';
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { UndoStore, adminScope, channelScope, undoEffects, type UndoEffect } from '../core/undo.js';
@@ -103,6 +104,13 @@ async function setup(
         },
         refreshKeys: () => {},
       } as unknown as NonNullable<PanelDeps['llm']>['router'],
+    },
+    decision: {
+      store: { list: () => listDecisionProviders(db), save: (ps) => saveDecisionProviders(db, ps) },
+      probe: async (spec) => {
+        if (spec.name === 'Broken') throw new Error('connect ECONNREFUSED');
+        return { ms: 9, model: spec.model };
+      },
     },
     x: {
       info: () => ({ config: getXConfig(db), status: { proxy: { ok: false, message: '尚未测试', checkedAt: null }, instances: [], web: { ok: false, message: '尚未测试', checkedAt: null }, feed: emptyXFeedSnapshot(), updatedAt: null } }),
@@ -958,6 +966,50 @@ test('reorder_llm_providers：names 全排列，保存后名单顺序即路由�
   await assert.rejects(call(adm, 'reorder_llm_providers', { names: ['TestLLM'] }), /一一对应/);
   await assert.rejects(call(adm, 'reorder_llm_providers', { names: ['TestLLM', 'TestLLM'] }), /names 有重复/);
   await assert.rejects(call(adm, 'reorder_llm_providers', { names: ['TestLLM', 'Nope'] }), /一一对应/);
+});
+
+test('决策模型工具：名单/新增/排序/测试/删除走注册表，与 LLM 通道独立', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  assert.deepEqual(await call(adm, 'list_decision_providers'), { providers: [] });
+
+  await call(adm, 'upsert_decision_provider', {
+    name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0',
+  });
+  await call(adm, 'upsert_decision_provider', {
+    name: 'local', baseURL: 'http://127.0.0.1:8080/v1', model: 'clef-flash', protocol: 'systemone',
+  });
+  let list = (await call(adm, 'list_decision_providers')) as { providers: Array<{ name: string; protocol: string; keyCount: number }> };
+  assert.deepEqual(list.providers.map((p) => p.name), ['jev', 'local']);
+  assert.deepEqual(list.providers.map((p) => p.protocol), ['systemone', 'systemone'], '缺省协议 systemone');
+  assert.deepEqual(list.providers.map((p) => p.keyCount), [0, 0]);
+
+  await assert.rejects(call(adm, 'upsert_decision_provider', {
+    name: 'bad', baseURL: 'not-a-url', model: 'm',
+  }), /baseURL/);
+  await assert.rejects(call(adm, 'upsert_decision_provider', {
+    name: 'bad2', baseURL: 'https://x.com/v1', model: 'm', protocol: 'decisions',
+  }));
+
+  await call(adm, 'reorder_decision_providers', { names: ['local', 'jev'] });
+  assert.deepEqual(listDecisionProviders(f.db).map((p) => p.name), ['local', 'jev']);
+  await assert.rejects(call(adm, 'reorder_decision_providers', { names: ['local'] }), /一一对应/);
+
+  await assert.rejects(call(adm, 'test_decision_provider', { name: 'Nope' }), /provider 不存在/);
+  await assert.rejects(call(adm, 'test_decision_provider', { name: 'jev' }), /缺 key/);
+  f.db.setSetting('decision_key:jev', 'sk-decision');
+  const ping = (await call(adm, 'test_decision_provider', { name: 'jev' })) as { ok: boolean; ms: number; model: string };
+  assert.deepEqual(ping, { ok: true, ms: 9, model: 'jev-1.14.0' });
+
+  // 本地 loopback 无鉴权：不需要 key 也能测
+  const local = (await call(adm, 'test_decision_provider', { name: 'local' })) as { ok: boolean; model: string };
+  assert.equal(local.model, 'clef-flash');
+
+  await call(adm, 'delete_decision_provider', { name: 'local' });
+  assert.deepEqual(listDecisionProviders(f.db).map((p) => p.name), ['jev']);
+  await assert.rejects(call(adm, 'delete_decision_provider', { name: 'local' }), /provider 不存在/);
+  assert.equal(f.db.getSetting('decision_key:jev'), 'sk-decision', '删除 provider 不动 key 设置项');
 });
 
 test('test_push：走装配的测试推送链路并回传统计', async (t) => {

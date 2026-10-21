@@ -84,6 +84,7 @@ const store = {
   categories: demoCategories,
   rules: demoRules,
   llmProviders: clone(defaults?.llmProviders ?? []),
+  decisionProviders: clone(defaults?.decisionProviders ?? []),
   advanced: { ...M.mockAdvanced },
   napcat: clone(M.mockNapcat),
   x: clone(M.mockX),
@@ -328,7 +329,7 @@ const undoAt = () => Math.floor(Date.now() / 1000);
 // 参与快照的状态切片（与真实后端 DEFAULT_CONFIG_TABLES 对应的那几张表 + 开关）
 const SNAPSHOT_KEYS = [
   'channels', 'categories', 'rules', 'streamers', 'xAccounts',
-  'weiboAccounts', 'biliAccounts', 'llmProviders', 'pushEnabled', 'llmEnabled',
+  'weiboAccounts', 'biliAccounts', 'llmProviders', 'decisionProviders', 'pushEnabled', 'llmEnabled',
   'listenSettings', 'napcat', 'x',
 ];
 function snapshotStore() {
@@ -353,7 +354,6 @@ function undoRecord(rec) {
   const snap = undoReverts.get(rec.id);
   if (snap) { restoreStore(snap); undoReverts.delete(rec.id); }
 }
-const refillNames = () => store.llmProviders.filter((p) => p.enabled).map((p) => p.name);
 
 /** 写路径 → 记录文案（demo 口径：够读即可，真实文案由后端工具给；形状 = 新契约 headline + changes） */
 function writeMeta(method, path, b) {
@@ -376,6 +376,25 @@ function writeMeta(method, path, b) {
       headline: del ? `删除了 LLM 供应商「${name}」` : (path === '/api/llm/providers' ? `新增了 LLM 供应商「${name}」` : `修改了 LLM 供应商「${name}」`),
       tables: ['settings'],
       detail: [{ label: `供应商「${name}」`, action: del ? 'deleted' : (path === '/api/llm/providers' ? 'created' : 'updated'),
+        changes: withKey ? [{ field: 'API key', redacted: true }] : [] }],
+      // 填了 key 的写：撤销 = 清空密钥需重填（与后端 undoNote 同语义）
+      undoNote: withKey ? 'refill' : undefined,
+      refill: withKey ? [name] : undefined,
+    };
+  }
+  if (path === '/api/decision/providers/order') {
+    return { tool: 'reorder_decision_providers', title: '调整决策模型顺序', headline: '调整了决策模型供应商顺序', tables: ['settings'],
+      detail: [{ label: '决策模型供应商名单', ...upd, changes: [{ field: '决策模型供应商名单', to: '顺序已调整' }] }] };
+  }
+  if (path === '/api/decision/providers' || /^\/api\/decision\/providers\/[^/]+$/.test(path)) {
+    const name = path === '/api/decision/providers' ? b.name : decodeURIComponent(path.split('/').pop());
+    const withKey = !del && !!(b.key && String(b.key).trim());
+    return {
+      tool: del ? 'delete_decision_provider' : 'upsert_decision_provider',
+      title: del ? '删除决策模型供应商' : (path === '/api/decision/providers' ? '新增决策模型供应商' : '保存决策模型供应商'),
+      headline: del ? `删除了决策模型供应商「${name}」` : (path === '/api/decision/providers' ? `新增了决策模型供应商「${name}」` : `修改了决策模型供应商「${name}」`),
+      tables: ['settings'],
+      detail: [{ label: `供应商「${name}」`, action: del ? 'deleted' : (path === '/api/decision/providers' ? 'created' : 'updated'),
         changes: withKey ? [{ field: 'API key', redacted: true }] : [] }],
       // 填了 key 的写：撤销 = 清空密钥需重填（与后端 undoNote 同语义）
       undoNote: withKey ? 'refill' : undefined,
@@ -468,6 +487,7 @@ function recordWrite(method, path, rawBody, snap) {
     tables: meta.tables, rows: meta.detail.length,
     title: meta.title, headline: meta.headline ?? meta.title, detail: meta.detail,
     ...(meta.undoNote ? { undoNote: meta.undoNote } : {}),
+    ...(meta.refill ? { refill: meta.refill } : {}),
   };
   store.undoHistory.unshift(rec);
   undoReverts.set(rec.id, snap);
@@ -477,7 +497,7 @@ function recordWrite(method, path, rawBody, snap) {
 // 前端只在配置写成功后刷变更历史，mock 也只在配置写成功后记一条，两边才不会打架）。
 // 注意 /api/chat 只列 mode / provider 两条真配置写（都进变更历史），聊天回合与 reset 不算。
 const MOCK_WRITE_PREFIXES = [
-  '/api/llm', '/api/advanced', '/api/categories', '/api/rules', '/api/channels',
+  '/api/llm', '/api/decision', '/api/advanced', '/api/categories', '/api/rules', '/api/channels',
   '/api/streamers', '/api/follows', '/api/listen', '/api/push',
   '/api/x', '/api/weibo', '/api/bili', '/api/napcat', '/api/chat/mode', '/api/chat/provider',
 ];
@@ -1237,6 +1257,55 @@ for (const p of store.twitterPosts) {
     }
   }
 
+  // ---- 决策模型供应商（System One 管理面；与 LLM 完全隔离）----
+  if (path === '/api/decision' && method === 'GET') {
+    return ok({
+      providers: store.decisionProviders.map((p) => ({
+        ...p,
+        key: { source: 'unset', count: 0, value: null },
+      })),
+    });
+  }
+  if (path === '/api/decision/providers/order' && method === 'PUT') {
+    const names = body().names || [];
+    store.decisionProviders.sort((a, b) => names.indexOf(a.name) - names.indexOf(b.name));
+    return ok({ ok: true });
+  }
+  {
+    const tm = path.match(/^\/api\/decision\/providers\/([^/]+)\/test$/);
+    if (tm && method === 'POST') {
+      const p = store.decisionProviders.find((x) => x.name === decodeURIComponent(tm[1]));
+      if (!p) return err(404, 'provider 不存在');
+      return ok({ ok: true, ms: 38, model: p.model });
+    }
+  }
+  if (path === '/api/decision/providers' && method === 'POST') {
+    const b = body();
+    if (store.decisionProviders.some((p) => p.name === b.name)) return err(400, `provider name 重复: ${b.name}`);
+    store.decisionProviders.push({
+      name: b.name, baseURL: b.baseURL || '', model: b.model || '',
+      protocol: b.protocol || 'systemone', enabled: true,
+    });
+    return created({ name: b.name });
+  }
+  {
+    const pm = path.match(/^\/api\/decision\/providers\/([^/]+)$/);
+    if (pm) {
+      const name = decodeURIComponent(pm[1]);
+      const p = store.decisionProviders.find((x) => x.name === name);
+      if (!p) return err(404, 'provider 不存在');
+      if (method === 'PUT') {
+        const b = body();
+        for (const k of ['baseURL', 'model', 'protocol', 'enabled']) if (b[k] !== undefined) p[k] = b[k];
+        return ok({ ok: true, name });
+      }
+      if (method === 'DELETE') {
+        store.decisionProviders = store.decisionProviders.filter((x) => x.name !== name);
+        return ok({ ok: true });
+      }
+    }
+  }
+
   // ---- 变更历史与撤销（P0b 撤销的用户面）：与 /api/undo* 逐字同构 ----
   // 历史新→旧全量（只标 undone 不删行）；POST /api/undo 撤「最新一条未撤销的」（mock 只演成功路径：
   // 点撤销把栈顶标 undone + 还原写前快照，并回 title / refill 两个新字段；把记录都撤完后再点已无按钮，
@@ -1248,7 +1317,7 @@ for (const p of store.twitterPosts) {
     const top = store.undoHistory.find((c) => !c.undone);
     if (!top) return err(404, '没有可撤销的变更');
     undoRecord(top);
-    const refill = top.undoNote === 'refill' ? refillNames() : undefined;
+    const refill = top.undoNote === 'refill' ? (top.refill || []) : undefined;
     return ok({
       ok: true, change: { id: top.id, tool: top.tool }, title: top.title || top.tool,
       ...(refill ? { refill } : {}),

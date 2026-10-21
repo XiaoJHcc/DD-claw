@@ -11,6 +11,15 @@
       "api": "chat-completions"
     }
   ],
+  "decisionProviders": [
+    {
+      "name": "Jev",
+      "baseURL": "https://api.typesafe.ai/v1",
+      "model": "jev-1.14.0",
+      "protocol": "systemone",
+      "enabled": true
+    }
+  ],
   "categories": [
     {
       "name": "歌回",

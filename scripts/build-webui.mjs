@@ -89,6 +89,7 @@ console.log(`build-webui: ${files.length} 资产 → src/panel/webui-assets.gen.
 
 // ---- 首启默认值：webui/demo/defaults.json 是 LLM provider / 分类规则 / 推送规则的
 // 唯一手工信源（demo mock 与发布后首启默认值共用），此处生成后端消费的 TS。
+// 决策模型 provider 只作 demo 展示，不生成 onboarding 默认值（判定通道尚未接入）。
 // 规则按名引用分类、渠道不落盘，种入时由 core/onboarding.ts 重映射。
 const defaults = JSON.parse(readFileSync(DEFAULTS_IN, 'utf8'));
 const defaultsLines = [

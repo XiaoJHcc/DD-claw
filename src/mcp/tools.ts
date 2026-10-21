@@ -31,7 +31,10 @@ import { setChatWriteMode, type ChatWriteMode } from '../agent/system-prompt.js'
 import { X_INTERVAL_MAX, X_INTERVAL_MIN } from '../core/x-config.js';
 import { getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS } from '../core/runtime-config.js';
 import { hasLlmProvider, isLlmEnabled, setChatProvider, setLlmEnabled } from '../analysis/providers.js';
-import { llmProviderSchema } from '../config/schema.js';
+import {
+  dbDecisionKeysOf, decisionKeySetting, decisionNeedsAuth,
+} from '../analysis/decision-providers.js';
+import { decisionProviderSchema, llmProviderSchema } from '../config/schema.js';
 import type { StreamerInput } from '../core/streamers.js';
 import { mcpWriteLimiter, writeLimitBucket } from './rate-limit.js';
 import { runToolTracked, scopeChannelId, undoScopeOf } from './run-tool.js';
@@ -935,6 +938,72 @@ const adminTools: McpToolDef[] = [
       return { ok: true, provider: name };
     },
   },
+  // ---- 决策模型供应商（System One 通道管理面；与 LLM provider 完全隔离）----
+  {
+    name: 'list_decision_providers',
+    description: '决策模型供应商名单（key 只显示个数，不回显值；协议目前只有 systemone）',
+    schema: {},
+    role: 'admin',
+    handler: (deps) => ({
+      providers: (deps.decision?.store.list() ?? []).map((p) => ({
+        ...p,
+        keyCount: dbDecisionKeysOf(deps.db)(p).length,
+      })),
+    }),
+  },
+  {
+    name: 'upsert_decision_provider',
+    description: '新增/更新决策模型供应商（按 name 定位，name 不可改）。新建需 name+baseURL+model；'
+      + 'protocol 目前只有 systemone（Jev /v1/systemone 线格式）。可顺带传 key；保存后管理面立即生效',
+    schema: {
+      name: z.string().min(1),
+      baseURL: z.string().optional(),
+      model: z.string().optional(),
+      protocol: z.enum(['systemone']).optional().describe('端点协议；当前只有 systemone'),
+      enabled: z.boolean().optional(),
+      key: z.string().optional().describe('API key（多个用逗号分隔，中英文逗号均可）；空串 = 清除'),
+    },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const store = deps.decision?.store;
+      if (!store) throw new HttpError(400, '决策模型供应商管理未装配');
+      const list = store.list();
+      const prev = list.find((p) => p.name === (args.name as string));
+      const patch = pickBody(args, ['baseURL', 'model', 'protocol', 'enabled']);
+      const merged = prev ? { ...prev, ...patch } : { name: args.name, ...patch };
+      const parsed = decisionProviderSchema.safeParse(merged);
+      if (!parsed.success) {
+        const msg = parsed.error.issues
+          .map((i) => `${i.path.length ? i.path.join('.') : '(根)'}: ${i.message}`).join('；');
+        throw new HttpError(400, `provider 校验失败：${msg}`);
+      }
+      const provider = parsed.data;
+      store.save(prev
+        ? list.map((p) => (p.name === provider.name ? provider : p))
+        : [...list, provider]);
+      // key 与 LLM 同款：随表单一并提交，空串 = 清除，中文逗号归一成英文逗号落库
+      if (typeof args.key === 'string') {
+        deps.db.setSetting(decisionKeySetting(provider.name), normalizeCsvText(args.key.trim()));
+      }
+      return { ok: true, name: provider.name };
+    },
+  },
+  {
+    name: 'delete_decision_provider',
+    description: '删除决策模型供应商（不动已存的 key 设置项）',
+    schema: { name: z.string().min(1) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const store = deps.decision?.store;
+      if (!store) throw new HttpError(400, '决策模型供应商管理未装配');
+      const list = store.list();
+      if (!list.some((p) => p.name === args.name)) throw new HttpError(404, 'provider 不存在');
+      store.save(list.filter((p) => p.name !== args.name));
+      return { ok: true };
+    },
+  },
   // ---- 排序与测试类（P0 补齐：与对应 REST 路由同一套校验与 Db 调用；
   // 进注册表是为纳入回滚覆盖/审计，agent 工具面由 AGENT_EXCLUDED_TOOLS 排除）----
   {
@@ -995,6 +1064,49 @@ const adminTools: McpToolDef[] = [
       store.save(names.map((n) => byName.get(n)!));
       deps.llm?.onProvidersChanged?.();
       return { ok: true };
+    },
+  },
+  {
+    name: 'reorder_decision_providers',
+    description: '决策模型供应商排序：names 必须是现有 provider 名单的一个排列（长度一致/无重复/无增删）；顺序 = 后续判定通道的调用优先级',
+    schema: { names: z.array(z.string().min(1)) },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      const store = deps.decision?.store;
+      if (!store) throw new HttpError(400, '决策模型供应商管理未装配');
+      const names = args.names as string[];
+      if (new Set(names).size !== names.length) throw new HttpError(400, 'names 有重复');
+      const list = store.list();
+      const byName = new Map(list.map((p) => [p.name, p]));
+      if (names.length !== list.length || names.some((n) => !byName.has(n))) {
+        throw new HttpError(400, 'names 必须与现有 provider 名单一一对应');
+      }
+      store.save(names.map((n) => byName.get(n)!));
+      return { ok: true };
+    },
+  },
+  {
+    name: 'test_decision_provider',
+    description: '测试某个决策模型供应商：发一次最小 systemone 请求，返回毫秒耗时与响应回显的模型版本；失败 502',
+    schema: { name: z.string().min(1) },
+    role: 'admin',
+    write: true,
+    handler: async (deps, args) => {
+      const dep = deps.decision;
+      if (!dep) throw new HttpError(400, '决策模型供应商管理未装配');
+      const name = args.name as string;
+      const spec = dep.store.list().find((p) => p.name === name);
+      if (!spec) throw new HttpError(404, 'provider 不存在');
+      const key = dbDecisionKeysOf(deps.db)(spec)[0] ?? null;
+      if (key === null && decisionNeedsAuth(spec)) throw new HttpError(400, '缺 key，请先填写');
+      try {
+        const r = await dep.probe(spec, key);
+        return { ok: true, ms: r.ms, model: r.model };
+      } catch (e) {
+        // 错误信息只含 HTTP 状态/对端响应摘要，不含 key
+        throw new HttpError(502, e instanceof Error ? e.message : String(e));
+      }
     },
   },
   {

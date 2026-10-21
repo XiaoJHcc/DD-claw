@@ -10,7 +10,7 @@
 - **gateway 自助在服务端强制**：渠道必须是已启用的 onebot 群/私聊（私聊一视同仁）；主播必须在监听名单；同主播同分类去重；单渠道自助规则 ≤20 条；规则打 `createdBy='mcp'`；删除先校验渠道归属；多渠道规则先 copy-on-write 拆出只含本渠道的一条（拆分与后续写同一事务，原规则内容一行不动）；读侧按 scope 裁剪；写限流按渠道分桶。
 - **写一律经 `runToolTracked`**：zod 再校验 + 审计 + 撤销快照 + 错误归一都在能力层。`undo_last_change` 是唯一 `track: false` 的写工具——它的写是回写已记录的前像，入栈会把自己变成下一条可撤销记录。
 - **撤销栈由调用域决定**：admin 全局栈；gateway 绑定渠道栈，未绑渠道拒绝。撤销自身不进变更记录。
-- **审计与凭据**：写操作记「角色:令牌名 #渠道 + 工具 + 参数」，LLM key 打码；token 只进 `Authorization` 头，绝不进日志与错误信息（比较走 sha256 + timingSafeEqual）。
+- **审计与凭据**：写操作记「角色:令牌名 #渠道 + 工具 + 参数」，模型 key（LLM / 决策）打码；token 只进 `Authorization` 头，绝不进日志与错误信息（比较走 sha256 + timingSafeEqual）。
 - **工具清单不进文档表**：具体用法以 `tools/list` 的 description 为准（LLM 消费口径）；暴露面由 `agent/tool-schema.ts` 的排除名单与 `write-path-inventory.test.ts` 互锁，文档只写运维面与不变量。
 
 ## 文件地图

@@ -33,7 +33,8 @@
 
 | 文档 | 适用范围 |
 |---|---|
-| [unify-classify-push](plan/unify-classify-push.md) | 统一分类 / 推送模型依据、视觉与决策模型实施和验收合同 |
+| [unify-classify-push](plan/unify-classify-push.md) | 统一分类 / 推送模型依据与历史验收合同 |
+| [decision-model](plan/decision-model.md) | 决策模型协议选型、分期边界与判定档位验收合同 |
 | [agent-access](plan/agent-access.md) | 多入口接入、信任模型与调用域方案依据；Agent 真机验收口径 |
 | [twitter-source](plan/twitter-source.md) | X 来源建设历史、代理与链路回归口径 |
 | [weibo-source](plan/weibo-source.md) | 微博独立来源与历史迁移依据 |

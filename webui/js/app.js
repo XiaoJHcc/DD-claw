@@ -3,6 +3,7 @@
 import { ACTIONS } from './core.js';
 import './listen.js';
 import './llm.js';
+import './decision.js';
 import './categories.js';
 import './content-audit.js';
 import './push.js';

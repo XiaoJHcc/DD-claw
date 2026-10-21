@@ -26,7 +26,7 @@ export function splitCsv(v) {
 // （set_chat_mode / set_chat_provider）落库，是**真配置写**，会进变更历史，故按整条路径列进来。
 // 轮询一律是 GET，天然被挡在门外。
 const CONFIG_WRITE_PREFIXES = [
-  '/api/llm', '/api/advanced', '/api/categories', '/api/rules', '/api/channels',
+  '/api/llm', '/api/decision', '/api/advanced', '/api/categories', '/api/rules', '/api/channels',
   '/api/streamers', '/api/follows', '/api/listen', '/api/push',
   '/api/x', '/api/weibo', '/api/bili', '/api/napcat', '/api/chat/mode', '/api/chat/provider',
 ];

@@ -149,7 +149,7 @@ Jev 1.14 与 1.13 都收图，但要带 `TypeSafe-Danger-Zone-Images: true`；`b
 
 - 判定链已有可插拔形状：`JudgeStage.name` 的三值是 `deterministic | decision | llm`（`src/analysis/classifier.ts:30`），但只注册了 `deterministicJudge` 与 `llmJudge`；有提示词的分类实际链序是 `[llmJudge, deterministicJudge]`（`src/analysis/classifier.ts:146`），**decision 档不在链上**。也没有结构短路层：`postTypes` / `requireQuote` / `requireMedia` 只在 LLM 不可用时由确定性档兜底，不构成判定前的预筛。
 - `Classification.source` 与 `verdicts.source` 的 CHECK 约束已经允许 `'decision'`（`src/analysis/types.ts:11`、`src/core/db.ts:55`），但没有任何生产者。
-- 没有决策模型的配置面：settings 无相关字段，`/api/*` 无决策路由，WebUI 无对应卡片；`content_audit` 只有 provider 级 `attempts`（`src/core/content-audit.ts:25`），没有决策模式的概率分布、分带结果或被跳过的图片原因。
+- **决策模型管理面已落地**：settings `decision_providers` 存名单、`decision_key:<name>` 存独立 key，面板「决策模型」卡与 `/api/decision/*`、MCP `*_decision_provider` 工具提供增删改、启停、排序与 `systemone` 探活。判定档位仍未接入：`decision` 档不在链上，也没有任何分类会调用该通道；`content_audit` 尚无决策模式的概率分布、分带结果或被跳过的图片原因。
 - 视觉输入：图文侧由 pipeline 落盘后转 data URL（上限 9 张，`src/core/pipeline.ts:527`），直播侧直接用 keyframe/cover 的远程 URL；全链路无缩放、无转码。
 - 分析入口只有 `live_start` 与 `feed_post`，都过并发 2 的 `AnalysisQueue`；轮询与推送链路不直接调模型。
 
@@ -170,7 +170,7 @@ Jev 1.14 与 1.13 都收图，但要带 `TypeSafe-Danger-Zone-Images: true`；`b
 3. **判定语义**。决策档定案即权威（判否不回看确定性），与现有「模型档权威」语义一致；灰区与失败才落到 LLM，LLM 不可用再落确定性。
 4. **通道隔离**。独立 key、独立熔断、独立限流与计费，不与 LLM 通道共用额度。
 
-具体接入方式（主端点、模型选择、请求打包、审计字段与配置面）另行制定，本文不规定。
+配置面（供应商名单、独立 key、协议枚举与探活）已落地；判定接入方式（请求打包、阈值分带、审计字段与图片门禁）见 [plan/decision-model.md](../plan/decision-model.md)。
 
 ### 7.4 验收口径
 

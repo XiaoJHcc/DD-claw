@@ -50,7 +50,16 @@
 
 ## 决策模型通道
 
-尚未接入：`JudgeStage` 的 `decision` 档与 `source='decision'` 只是预留。`/v1/systemone` 的契约、候选模型与接入约束见 [research/decision-models.md](../research/decision-models.md)，具体接入方案另行制定。
+**管理面已接入，判定档位尚未接入**。`JudgeStage` 的 `decision` 档与 `source='decision'` 仍是预留；面板「决策模型」卡可以维护供应商名单（独立 key、启停、排序）并按 `POST <baseURL>/systemone` 发最小 `noul` 探活，但没有任何分类判定会调用它。
+
+已定下的线格式与配置口径：
+
+- **只认 System One 的 `state + questions → answers`**：当前协议枚举只有 `systemone`（Jev / Clef / vLLM-SR / llama.cpp / Ollaya 同线格式）。OpenAI / Perplexity 的 `/v1/decisions` 形状不同，接入时再加协议值，不把厂商字段带进业务代码。
+- **独立通道**：名单在 settings `decision_providers`，key 在 `decision_key:<name>`，与 LLM 的 `llm_providers` / `llm_key:*` 互不共享；面板探活不经过 `LlmRouter` 的熔断与路由。
+- **模型版本看响应回显**：测试返回响应里的 `model`（别名会漂），不用请求里写的字符串冒充实际回答者。
+- **接入顺序**：先做 `classifier.ts` 的 `decision` 档（多标签用逐分类 `noul`，另加一道 `choice` 拿横向分布），再按研究文档做阈值标定与图片门禁；判定档位接入前不提供无效的总开关。
+
+`/v1/systemone` 的请求/响应细节、候选模型与硬约束见 [research/decision-models.md](../research/decision-models.md)；协议选型、分期与判定验收合同见 [plan/decision-model.md](../plan/decision-model.md)。
 
 ## 视觉输入规范化
 

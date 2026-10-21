@@ -10,6 +10,9 @@ import { toLiveEvent } from './core/types.js';
 import { AnalysisQueue } from './analysis/queue.js';
 import { RulesClassifier } from './analysis/classifier.js';
 import { createLlmRouter, listLlmProviders, saveLlmProviders, isLlmEnabled, dbKeysOf } from './analysis/providers.js';
+import {
+  listDecisionProviders, pingDecisionProvider, saveDecisionProviders,
+} from './analysis/decision-providers.js';
 import { OncePerSessionRule } from './rules/once-per-session.js';
 import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
@@ -270,6 +273,17 @@ async function main(): Promise<void> {
     );
   };
   llmDep.onProvidersChanged();
+
+  // 决策模型：名单与 key 的唯一信源同样是 settings 表（`decision_providers` /
+  // `decision_key:<name>`）。管理阶段只提供名单与协议探活，判定通道尚未进判决链；
+  // key 的解析与协议调用都在 analysis/decision-providers.ts，面板只转发。
+  const decisionDep: NonNullable<PanelDeps['decision']> = {
+    store: {
+      list: () => listDecisionProviders(db),
+      save: (ps) => saveDecisionProviders(db, ps),
+    },
+    probe: (spec, key) => pingDecisionProvider(spec, key),
+  };
 
   // 运行时参数（轮询间隔/告警阈值/冷启动推送/LLM 超时熔断）：
   // settings 表唯一信源（面板各模块卡：监听「抓取设置」/ LLM「高级」/ 推送渠道「推送设置」）；
@@ -693,6 +707,7 @@ async function main(): Promise<void> {
       chat: chatStore,
       weiboResolver: createWeiboResolver(),
       llm: llmDep,
+      decision: decisionDep,
       status: () => {
         // state 推导：无 cookie=none；有 cookie 还没心跳=imported；
         // isLogin true=ok / false=expired（mid 随心跳带出）
