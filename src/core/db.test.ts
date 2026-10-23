@@ -136,11 +136,12 @@ test('categories A.1 列迁移：旧表补 applies_to/post_types/require_quote/r
   }
 
   db = new Db(path);
-  for (const col of ['applies_to', 'post_types', 'require_quote', 'require_media']) {
+  for (const col of ['applies_to', 'post_types', 'require_quote', 'require_media', 'is_primary']) {
     assert.ok(columns(path, 'categories').includes(col), `categories 应补列 ${col}`);
   }
   const old = db.listCategories().find((c) => c.name === '歌回')!;
   assert.equal(old.appliesTo, 'live', '旧行默认直播分类');
+  assert.equal(old.primary, false, '旧行默认不进主分类组');
   assert.deepEqual(old.postTypes, []);
   assert.equal(old.requireQuote, false);
   assert.equal(old.requireMedia, false);
@@ -192,7 +193,7 @@ test('verdicts 身份键迁移：老行搬迁成 subject_type=live / subject_id=
   raw = new Database(path);
 
   const vcols = columns(path, 'verdicts');
-  for (const col of ['subject_type', 'subject_id', 'rule_id', 'pass']) {
+  for (const col of ['subject_type', 'subject_id', 'rule_id', 'pass', 'effective']) {
     assert.ok(vcols.includes(col), `重建后应有 ${col}`);
   }
   assert.ok(!vcols.includes('room_id') && !vcols.includes('live_time'), '重建后无 room_id/live_time 列');
@@ -200,31 +201,33 @@ test('verdicts 身份键迁移：老行搬迁成 subject_type=live / subject_id=
   const rows = raw.prepare('SELECT * FROM verdicts ORDER BY id').all() as Array<{
     id: number; subject_type: string; subject_id: string; uid: string;
     category_id: number; rule_id: number; category_name: string;
-    source: string; pass: number; confidence: number | null;
+    source: string; pass: number; confidence: number | null; effective: number;
   }>;
   assert.equal(rows.length, 3, '三行老判定全部搬迁');
   assert.deepEqual(
-    rows.map((r) => [r.id, r.subject_type, r.subject_id, r.category_id, r.rule_id, r.pass]),
+    rows.map((r) => [r.id, r.subject_type, r.subject_id, r.category_id, r.rule_id, r.pass, r.effective]),
     [
-      [1, 'live', '80397:1785310737', 3, 0, 1],
-      [2, 'live', '80397:1785310737', 4, 0, 1],
-      [3, 'live', '80397:99', 3, 0, 1],
+      [1, 'live', '80397:1785310737', 3, 0, 1, 1],
+      [2, 'live', '80397:1785310737', 4, 0, 1, 1],
+      [3, 'live', '80397:99', 3, 0, 1, 1],
     ],
-    'subject_id 拼 room_id:live_time；rule_id 取 0 哨兵、pass 取 1；id 原样保留',
+    'subject_id 拼 room_id:live_time；rule_id 取 0 哨兵、pass/effective 取 1；id 原样保留',
   );
   assert.equal(rows[0]!.confidence, 0.9);
   assert.equal(rows[1]!.confidence, null, 'rule 路径 NULL 置信度原样保留');
 
   assert.equal(db.listVerdicts('live', '80397:1785310737').length, 2);
   assert.equal(db.listVerdicts('live', '80397:99').length, 1);
-  // 迁移后的新键去重照常：同分类同哨兵 rule_id=0 重复插不进，换 rule_id 另占一行
+  // 唯一键 = (主体, 分类, 规则, 来源)：同分类同来源重复插不进，换来源/规则另占一行
   db.insertVerdict({
     subjectType: 'live', subjectId: '80397:1785310737', uid: '1',
-    categoryId: 3, ruleId: 0, categoryName: '歌回', source: 'rule', evidence: '重复',
+    categoryId: 3, ruleId: 0, categoryName: '歌回', source: 'llm', confidence: null,
+    evidence: '重复', effective: false,
   });
   db.insertVerdict({
     subjectType: 'live', subjectId: '80397:1785310737', uid: '1',
-    categoryId: 3, ruleId: 5, categoryName: '歌回', source: 'rule', evidence: '规则级',
+    categoryId: 3, ruleId: 5, categoryName: '歌回', source: 'rule', confidence: null,
+    evidence: '规则级', effective: false,
   });
   assert.equal(db.listVerdicts('live', '80397:1785310737').length, 3);
 });
@@ -255,9 +258,107 @@ test('verdicts 身份键迁移：幂等重跑不搬两次；空老表 / 无老�
   db.insertVerdict({
     subjectType: 'post', subjectId: 'twitter:1', uid: 'u',
     categoryId: 0, ruleId: 7, categoryName: '图文规则', source: 'decision', pass: false,
-    confidence: 0.5, evidence: '决策模型判否',
+    confidence: 0.5, evidence: '决策模型判否', effective: true,
   });
   assert.equal(db.listVerdicts('post', 'twitter:1').length, 1, '迁移后新键插入正常');
+});
+
+/** 手工建一个「单档时代」的 verdicts 表：身份键已通用，但没有 effective 列、唯一键不含 source */
+function makePreEffectiveVerdictsDb(path: string): void {
+  const raw = new Database(path);
+  raw.exec(`
+    CREATE TABLE verdicts (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      subject_type  TEXT    NOT NULL CHECK(subject_type IN ('live','post')),
+      subject_id    TEXT    NOT NULL,
+      uid           TEXT    NOT NULL,
+      category_id   INTEGER NOT NULL DEFAULT 0,
+      rule_id       INTEGER NOT NULL DEFAULT 0,
+      category_name TEXT    NOT NULL,
+      source        TEXT    NOT NULL CHECK(source IN ('llm','rule','decision')),
+      pass          INTEGER NOT NULL DEFAULT 1,
+      confidence    REAL,
+      evidence      TEXT    NOT NULL DEFAULT '',
+      created_at    INTEGER NOT NULL,
+      UNIQUE(subject_type, subject_id, category_id, rule_id)
+    );
+    INSERT INTO verdicts (subject_type, subject_id, uid, category_id, rule_id, category_name, source, pass, confidence, evidence, created_at)
+      VALUES ('live', '80397:1785310737', '1', 3, 0, '歌回', 'llm', 1, NULL, '在唱歌', 1800000000),
+             ('post', 'twitter:9001', 'u', 0, 4, '直播预告', 'rule', 0, NULL, '关键词未命中', 1800000001);
+  `);
+  raw.close();
+}
+
+test('verdicts 判据列迁移：老行 effective=1、唯一键加 source，重跑幂等', (t) => {
+  let db: Db | undefined;
+  let raw: Database.Database | undefined;
+  const path = join(tmpdir_(t, () => { db?.close(); raw?.close(); }), 'vmig3.db');
+  makePreEffectiveVerdictsDb(path);
+  db = new Db(path);
+  raw = new Database(path);
+
+  const vcols = columns(path, 'verdicts');
+  assert.ok(vcols.includes('effective'), '重建后应有 effective 列');
+  const rows = raw.prepare('SELECT * FROM verdicts ORDER BY id').all() as Array<{
+    id: number; subject_type: string; subject_id: string; category_name: string;
+    source: string; pass: number; effective: number;
+  }>;
+  assert.deepEqual(
+    rows.map((r) => [r.id, r.subject_type, r.subject_id, r.source, r.pass, r.effective]),
+    [
+      [1, 'live', '80397:1785310737', 'llm', 1, 1],
+      [2, 'post', 'twitter:9001', 'rule', 0, 1],
+    ],
+    '老行全部补 effective=1（单档时代每行都是生效结论），pass/source/id 原样',
+  );
+
+  // 新唯一键：同分类同规则但不同来源可以并存（逐档落库）
+  db.insertVerdict({
+    subjectType: 'live', subjectId: '80397:1785310737', uid: '1',
+    categoryId: 3, ruleId: 0, categoryName: '歌回', source: 'llm', confidence: null,
+    evidence: '重复', effective: true,
+  });
+  db.insertVerdict({
+    subjectType: 'live', subjectId: '80397:1785310737', uid: '1',
+    categoryId: 3, ruleId: 0, categoryName: '歌回', source: 'rule', confidence: null,
+    evidence: '确定性', effective: false,
+  });
+  assert.equal(db.listVerdicts('live', '80397:1785310737').length, 2);
+
+  // 幂等重跑：effective 列已在 → 跳过重建，行数与内容不变
+  db.close();
+  db = new Db(path);
+  assert.equal(db.listVerdicts('live', '80397:1785310737').length, 2, '重跑不搬两次');
+  assert.equal(db.listVerdicts('post', 'twitter:9001')[0]!.effective, true);
+});
+
+test('primary_verdicts：新库建表、按来源去重、主分类行往返一致', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'primary.db');
+  db = new Db(path);
+  assert.ok(columns(path, 'primary_verdicts').length > 0, 'primary_verdicts 表由 SCHEMA 建出');
+  assert.deepEqual(db.listPrimaryVerdicts('live', 'r1:100'), [], '无记录 = 空数组');
+
+  db.insertPrimaryVerdict({
+    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 7, name: '歌回',
+    source: 'llm', distribution: null, evidence: '整场都在唱', effective: true,
+  });
+  db.insertPrimaryVerdict({
+    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 8, name: '游戏',
+    source: 'llm', distribution: null, evidence: '重复判定不覆盖', effective: false,
+  });
+  db.insertPrimaryVerdict({
+    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 0, name: '其他',
+    source: 'rule', distribution: { 歌回: 0.2, 其他: 0.8 }, evidence: '确定性回退', effective: false,
+  });
+  const rows = db.listPrimaryVerdicts('live', 'r1:100');
+  assert.deepEqual(
+    rows.map((r) => [r.source, r.categoryId, r.name, r.effective]),
+    [['llm', 7, '歌回', true], ['rule', 0, '其他', false]],
+    'UNIQUE(subject_type, subject_id, source) 去重',
+  );
+  assert.deepEqual(rows[1]!.distribution, { 歌回: 0.2, 其他: 0.8 }, '分布 JSON 往返');
+  assert.deepEqual(db.listPrimaryVerdicts('post', 'r1:100'), [], '主体类型命名空间隔离');
 });
 
 test('saveRoomState / loadRoomStates 新字段往返一致', (t) => {
@@ -461,14 +562,22 @@ test('listTimeline：场次 + 段 + verdicts + 主播信息归并；旧场次无
   raw.prepare('UPDATE live_sessions SET first_seen = 1000, last_seen = 9000 WHERE live_time = 100').run();
   raw.prepare('UPDATE live_segments SET start_ts = 1000 WHERE live_time = 100').run();
   db.rotateSegment('r1', 100, 5000, { title: '唱歌', areaName: '虚拟Singer', parentAreaName: '虚拟主播' });
+  // 生效属于的行才进时间线；未生效行与非 pass 行都不进
   db.insertVerdict({
     subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1, ruleId: 0,
-    categoryName: '歌回', source: 'llm', confidence: 0.9, evidence: '在唱歌',
+    categoryName: '歌回', source: 'llm', confidence: 0.9, evidence: '在唱歌', effective: true,
   });
-  // pass=0（判定不通过）不进时间线
+  db.insertVerdict({
+    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1, ruleId: 0,
+    categoryName: '歌回', source: 'rule', confidence: null, evidence: '命中关键词「歌」', effective: false,
+  });
   db.insertVerdict({
     subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 2, ruleId: 0,
-    categoryName: '游戏', source: 'llm', confidence: 0.3, evidence: '不像游戏', pass: false,
+    categoryName: '游戏', source: 'llm', confidence: 0.3, evidence: '不像游戏', pass: false, effective: true,
+  });
+  db.insertPrimaryVerdict({
+    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1,
+    name: '歌回', source: 'llm', distribution: null, evidence: '整场都在唱', effective: true,
   });
   // 旧场次：手工插入，无 segment（模拟 segments 表建立前归档的场次）
   raw.prepare(
@@ -491,9 +600,12 @@ test('listTimeline：场次 + 段 + verdicts + 主播信息归并；旧场次无
   assert.deepEqual(
     e1.verdicts.map((v) => [v.categoryName, v.source, v.confidence]),
     [['歌回', 'llm', 0.9]],
+    '只返回生效且属于的行（未生效的 rule 行与 pass=0 的 llm 行都不进）',
   );
+  assert.deepEqual(e1.primary, { categoryName: '歌回', source: 'llm' }, '生效主分类随场次返回');
   const e2 = entries.find((e) => e.roomId === 'r2')!;
   assert.equal(e2.name, '主播2', '不在监听名单用 uname');
+  assert.equal(e2.primary, null, '没有主分类行 = null');
   assert.deepEqual(
     e2.segments,
     [{ startTs: 2000, endTs: 8000, title: '旧场', areaName: '网游', parentAreaName: '' }],

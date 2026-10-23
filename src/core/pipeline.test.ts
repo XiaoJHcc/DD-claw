@@ -128,7 +128,10 @@ function postRule(over: Partial<PushRule> = {}): PushRule {
 }
 
 function classification(categoryId: number): Classification {
-  return { categoryId, name: `分类 ${categoryId}`, source: 'rule', confidence: null, evidence: '' };
+  return {
+    categoryId, name: `分类 ${categoryId}`, source: 'rule', confidence: null, evidence: '',
+    pass: true, effective: true,
+  };
 }
 
 // ---- X / 图文帖 fixture ----
@@ -656,7 +659,10 @@ test('真实图文链路归档模型失败、确定性负判、规则命中和�
   const groupId = db.upsertPushChannel({ name: '测试群', notifier: 'onebot', targetType: 'group', targetId: '123', enabled: true });
   db.upsertPushRule({ name: '自拍规则', subjectKind: 'post', categoryId, channels: [groupId] });
   const anyId = db.upsertPushRule({ name: '任意帖', subjectKind: 'post', channels: [toastId, groupId] });
-  const classifier = new RulesClassifier(db, () => ({ completeJson: async () => { throw new Error('模型网络超时'); } }) as never, () => true);
+  const classifier = new RulesClassifier(db, {
+    getRouter: () => ({ completeJson: async () => { throw new Error('模型网络超时'); } }) as never,
+    llmEnabled: () => true,
+  });
   const capabilities = { image: true, clickThrough: true };
   const dispatcher = new NotifyDispatcher([
     { name: 'toast', capabilities, send: async () => [{ ok: true }] },

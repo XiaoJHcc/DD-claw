@@ -553,16 +553,18 @@ export function changeSettingKeys(rec: ChangeRecord): string[] {
  * - `listen`    → `reconcileListen`（`listen_*` 开关；三张图文账号名单同路——它们的「源名单」
  *                  变化在装配处也是走同一个启停入口）
  * - `llm`       → 重建 llm router（`settings.llm_providers` / `llm_key:*`；撤 key = 清空 + 重填提示）
+ * - `decision`  → 重建决策模型 router（`settings.decision_providers` / `decision_key:*`；
+ *                 判定档总开关 `decision_enabled` 每轮直读，不需要回调）
  * - `notifiers` → `rebuildNotifiers`（`push_channels` 行；`napcat_*` 配置同面板保存后的重装配口径）
  *
- * 决策模型管理面（`decision_providers` / `decision_key:*`）目前没有运行期缓存：名单与 key 都由
- * 判定接入层按需直读 settings，故撤销后不需要热生效回调（接入出缓存时在此加 `decision`）。
+ * 决策模型的超时 / 熔断参数属于运行参数（`decision_*`，走 `runtime`）——它们与名单一起
+ * 决定 router 的形状，但键的分组只认「谁写这一列」：参数键归 runtime，名单 / key 归 decision。
  *
  * 混合表里唯一**不需要**回调的是 `streamers`：监听名单（含 watch 开关）由 live-status 与动态源
  * **每轮直读 `listWatchedUids()`**，撤销一次别名 / watch 改动下一轮即生效，不需要重启任何源。
  * 图文账号名单不同——微博 / X 的源在构造时快照名单，故要经 `reconcileListen` 就地重启。
  */
-export type UndoEffect = 'runtime' | 'listen' | 'llm' | 'notifiers';
+export type UndoEffect = 'runtime' | 'listen' | 'llm' | 'decision' | 'notifiers';
 
 const FEED_TABLES = new Set(['x_accounts', 'weibo_accounts', 'bili_accounts']);
 
@@ -571,6 +573,7 @@ export function undoEffects(r: Pick<UndoResult, 'tables' | 'settingKeys'>): Undo
   for (const key of r.settingKeys ?? []) {
     if (key.startsWith('listen_')) out.add('listen');
     else if (key === 'llm_providers' || key.startsWith('llm_key:')) out.add('llm');
+    else if (key === 'decision_providers' || key.startsWith('decision_key:')) out.add('decision');
     else if (key.startsWith('napcat_')) out.add('notifiers');
     else if (isRuntimeConfigKey(key)) out.add('runtime');
   }

@@ -88,3 +88,36 @@ test('getPostBacklogConfig：默认关/24h/10 条；settings 覆盖后直读生�
   saveRuntimeConfig(db, { backlogPushEnabled: true, backlogMaxAgeHours: 48, backlogMaxPerAccount: 3 });
   assert.deepEqual(getPostBacklogConfig(db), { enabled: true, maxAgeSec: 172800, maxPerAccount: 3 });
 });
+
+test('决策模型参数：默认值 / 落库回读 / 越界回落 / 叠加进 AppConfig 的 decision 段', (t) => {
+  const db = memDb(t);
+  let rc = getRuntimeConfig(db);
+  assert.deepEqual(
+    [rc.decisionGrayLowPct, rc.decisionGrayHighPct, rc.decisionPrimaryMinPct,
+      rc.decisionRequestTimeoutMs, rc.decisionCircuitThreshold, rc.decisionCircuitCooldownMs],
+    [20, 80, 60, 30_000, 3, 600_000],
+  );
+
+  saveRuntimeConfig(db, {
+    decisionGrayLowPct: 15, decisionGrayHighPct: 85, decisionPrimaryMinPct: 70,
+    decisionRequestTimeoutMs: 45_000, decisionCircuitThreshold: 5, decisionCircuitCooldownMs: 900_000,
+  });
+  rc = getRuntimeConfig(db);
+  assert.deepEqual(
+    [rc.decisionGrayLowPct, rc.decisionGrayHighPct, rc.decisionPrimaryMinPct,
+      rc.decisionRequestTimeoutMs, rc.decisionCircuitThreshold, rc.decisionCircuitCooldownMs],
+    [15, 85, 70, 45_000, 5, 900_000],
+  );
+  assert.equal(db.getSetting('decision_gray_low_pct'), '15', 'settings 存整数百分数（无小数）');
+
+  db.setSetting('decision_primary_min_pct', '101'); // 越界
+  db.setSetting('decision_gray_high_pct', '0.8'); // 非整数
+  rc = getRuntimeConfig(db);
+  assert.equal(rc.decisionPrimaryMinPct, 60, '越界回落默认');
+  assert.equal(rc.decisionGrayHighPct, 80, '非整数回落默认');
+
+  const eff = withRuntimeConfig(defaultAppConfig(), rc);
+  assert.deepEqual(eff.decision, {
+    requestTimeoutMs: 45_000, circuitThreshold: 5, circuitCooldownMs: 900_000,
+  }, '超时/熔断叠加进 AppConfig（灰区与主分类门槛由判定档直读）');
+});

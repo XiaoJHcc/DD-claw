@@ -30,30 +30,40 @@ if (fixtures?.meta?.exportedAt) M.freezeTime(fixtures.meta.exportedAt);
 const nowSec = Math.floor(Date.now() / 1000);
 
 // ---- defaults.json → 卡片行（补 id/时间戳；规则渠道 = 全部渠道，分类按名映射回 id）----
+// 主分类组（primary）是分类自身的字段：defaults.json 同时是首启默认值的源、不能塞 demo 专用值，
+// 故进来后在下面按名单补标——demo 需要主分类组非空，时间表 hover 与内容记录才有主分类可展示。
+const DEMO_PRIMARY = new Set(['歌回', '带图原创']);
 const demoCategories = (defaults?.categories ?? []).map((c, i) => ({
   id: i + 1, name: c.name, llmPrompt: c.llmPrompt ?? null,
   keywords: c.keywords ?? [], areas: c.areas ?? [],
   appliesTo: 'live', postTypes: [], requireQuote: false, requireMedia: false,
-  condMode: c.condMode ?? 'and',
+  condMode: c.condMode ?? 'and', primary: DEMO_PRIMARY.has(c.name),
   enabled: true, createdAt: nowSec, updatedAt: nowSec,
 })).concat([
+  // 直播分类补充（判定描述 + 确定性条件各一档，主分类组只放歌回）
+  {
+    id: 2, name: '杂谈', llmPrompt: '以聊天为主的直播，典型特征是画面没有游戏或歌词，主播在看弹幕或念留言',
+    keywords: ['杂谈', '聊天'], areas: [], appliesTo: 'live', postTypes: [],
+    requireQuote: false, requireMedia: false, condMode: 'or', primary: false,
+    enabled: true, createdAt: nowSec, updatedAt: nowSec,
+  },
   // 图文分类（判定口径上移进分类：原图文规则的 filters/judgePrompt）
   {
     id: 101, name: '带图原创', llmPrompt: '只推与直播预告、新曲发布相关的推文',
     keywords: [], areas: [], appliesTo: 'post', postTypes: ['original'],
-    requireQuote: false, requireMedia: true, condMode: 'and',
+    requireQuote: false, requireMedia: true, condMode: 'and', primary: DEMO_PRIMARY.has('带图原创'),
     enabled: true, createdAt: nowSec, updatedAt: nowSec,
   },
   {
     id: 102, name: '转发/live', llmPrompt: null,
     keywords: ['live'], areas: [], appliesTo: 'post', postTypes: ['retweet'],
-    requireQuote: false, requireMedia: false, condMode: 'and',
+    requireQuote: false, requireMedia: false, condMode: 'and', primary: false,
     enabled: true, createdAt: nowSec, updatedAt: nowSec,
   },
   {
     id: 103, name: '预告词', llmPrompt: null,
     keywords: ['预告', '直播'], areas: [], appliesTo: 'post', postTypes: ['original'],
-    requireQuote: false, requireMedia: false, condMode: 'and',
+    requireQuote: false, requireMedia: false, condMode: 'and', primary: false,
     enabled: true, createdAt: nowSec, updatedAt: nowSec,
   },
 ]);
@@ -79,7 +89,12 @@ demoRules.push({
 const store = {
   streamers: clone(fixtures?.streamers ?? []),
   follows: clone(fixtures?.follows ?? []),
-  schedule: clone(fixtures?.schedule ?? []),
+  // 夹具是真实库导出（可能早于主分类契约）：缺 primary 时按主分类组里首个属于的 verdict 推一个，与后端确定性主分类同口径
+  schedule: clone(fixtures?.schedule ?? []).map(function (entry) {
+    if (entry.primary !== undefined) return entry;
+    const hit = (entry.verdicts || []).find(function (v) { return DEMO_PRIMARY.has(v.categoryName); });
+    return { ...entry, primary: hit ? { categoryName: hit.categoryName, source: hit.source } : null };
+  }),
   channels: clone(M.mockChannels),
   categories: demoCategories,
   rules: demoRules,
@@ -101,6 +116,7 @@ const store = {
   postVerdicts: clone(M.mockPostVerdicts),
   pushEnabled: true,
   llmEnabled: true,
+  decisionEnabled: true,
   undoHistory: clone(M.mockUndoHistory),
   chat: { mode: M.mockChat.mode, provider: M.mockChat.provider, messages: clone(M.mockChat.messages) },
   chatPending: null,   // 挂起的「等你确认」写操作（写前询问模式：确认后才回报已执行）
@@ -111,12 +127,26 @@ const store = {
   weiboQrStep: 0,
 };
 
+// 内容记录（analysis 区）与后端同构：results 同一分类可有多行（确定性行 + 决策行 + 模型行），
+// 每个分类恰一行 effective；primary 为各来源的主分类结论（至多一行 effective）。
+// 首个示例额外造一条非生效的确定性行 + 一条决策主分类（含概率分布），让 demo 能看到分组次要行与主分类区。
 const demoContentAudits = Object.fromEntries(Object.entries(store.postVerdicts).map(function ([subjectId, verdicts], index) {
   const results = verdicts.map(function (entry) {
     const category = demoCategories.find(function (item) { return item.name === entry.ruleName; });
     return { categoryId: category?.id ?? 0, name: entry.ruleName, pass: entry.pass,
-      evidence: entry.evidence, source: entry.source, confidence: entry.source === 'llm' ? 0.91 : null };
+      evidence: entry.evidence, source: entry.source,
+      confidence: entry.source === 'decision' ? (entry.pass ? 0.87 : 0.12) : null, effective: true };
   });
+  if (index === 0 && results[0]) {
+    // 同一分类的前档确定性行：命中但未定案，交模型定案 → 非生效
+    results.unshift({ categoryId: results[0].categoryId, name: results[0].name, pass: true,
+      evidence: '关键词与带图条件命中，交模型判定', source: 'rule', confidence: null, effective: false });
+  }
+  const primary = index === 0 ? [{
+    source: 'decision', categoryId: results[0]?.categoryId ?? 101, name: results[0]?.name ?? '带图原创',
+    distribution: { 带图原创: 0.72, '转发/live': 0.19, 预告词: 0.09 },
+    evidence: '最像直播预告', effective: true,
+  }] : [];
   const matchedRules = clone(demoRules.filter(function (rule) { return rule.subjectKind === 'post'; }));
   const post = [...store.twitterPosts, ...store.weiboPosts, ...store.biliPosts]
     .find(function (entry) { return entry.platform + ':' + entry.itemId === subjectId; });
@@ -143,8 +173,11 @@ const demoContentAudits = Object.fromEntries(Object.entries(store.postVerdicts).
   return ['post:' + subjectId, {
     subjectType: 'post', subjectId, updatedAt: nowSec,
     analysis: { status: 'done', categories: clone(demoCategories.filter(function (category) { return category.appliesTo === 'post'; })),
-      results, imageCount: 1, durationMs: 850,
-      attempts: [{ provider: '演示模型', model: 'demo-vision', status: 'success' }] },
+      results, ...(primary.length ? { primary } : {}), imageCount: 1, durationMs: 850,
+      attempts: [
+        { channel: 'decision', provider: 'Jev', model: 'jev-1.14.0', status: 'success' },
+        { channel: 'llm', provider: '演示模型', model: 'demo-vision', status: 'success' },
+      ] },
     push: { status: !pass ? 'skipped' : succeeded === 0 ? 'failed' : succeeded < deliveries.length ? 'partial' : 'sent',
       reason: pass ? `发送完成：${succeeded}/${deliveries.length} 成功` : '无命中规则或没有启用的发送渠道',
       rules,
@@ -330,7 +363,7 @@ const undoAt = () => Math.floor(Date.now() / 1000);
 const SNAPSHOT_KEYS = [
   'channels', 'categories', 'rules', 'streamers', 'xAccounts',
   'weiboAccounts', 'biliAccounts', 'llmProviders', 'decisionProviders', 'pushEnabled', 'llmEnabled',
-  'listenSettings', 'napcat', 'x',
+  'decisionEnabled', 'listenSettings', 'napcat', 'x',
 ];
 function snapshotStore() {
   const snap = {};
@@ -362,6 +395,10 @@ function writeMeta(method, path, b) {
   if (path === '/api/llm/enabled') {
     return { tool: 'set_llm_enabled', title: '开关 LLM', headline: b.enabled ? '开启了 LLM 总开关' : '关闭了 LLM 总开关', tables: ['settings'],
       detail: [{ label: 'LLM 总开关', ...upd, changes: [{ field: 'LLM 总开关', from: b.enabled ? '关' : '开', to: b.enabled ? '开' : '关', bool: true }] }] };
+  }
+  if (path === '/api/decision/enabled') {
+    return { tool: 'set_decision_enabled', title: '开关决策模型', headline: b.enabled ? '开启了决策模型判定' : '关闭了决策模型判定', tables: ['settings'],
+      detail: [{ label: '决策模型判定总开关', ...upd, changes: [{ field: '决策模型判定总开关', from: b.enabled ? '关' : '开', to: b.enabled ? '开' : '关', bool: true }] }] };
   }
   if (path === '/api/llm/providers/order') {
     return { tool: 'reorder_llm_providers', title: '调整供应商顺序', headline: '调整了 LLM 供应商顺序', tables: ['settings'],
@@ -517,7 +554,7 @@ function categoryError(category) {
   if (kind === 'post' && (category.areas || []).length) return '图文分类不能配置直播分区条件';
   if (!(category.llmPrompt || '').trim() && !(category.keywords || []).length
     && !(category.areas || []).length && !(category.postTypes || []).length
-    && !category.requireQuote && !category.requireMedia) return '至少配置 LLM 提示词或一组确定性条件（关键词/分区/帖子类型/引用/带图）';
+    && !category.requireQuote && !category.requireMedia) return '至少配置判定描述或一组确定性条件（关键词/分区/帖子类型/引用/带图）';
   return null;
 }
 
@@ -555,12 +592,23 @@ function handle(method, path, q, rawBody) {
     if (!['live', 'post'].includes(subjectType) || !subjectId || subjectId.length > 256) {
       return json(400, { error: '内容类型或身份键不合法' });
     }
-    return ok({ audit: demoContentAudits[subjectType + ':' + subjectId] || null,
+    const audit = demoContentAudits[subjectType + ':' + subjectId] || null;
+    const liveEntry = subjectType === 'live' ? store.schedule
+      .find(function (entry) { return entry.roomId + ':' + entry.liveTime === subjectId; }) : null;
+    const catIdOf = function (name) { return demoCategories.find(function (c) { return c.name === name; })?.id ?? 0; };
+    return ok({ audit,
       verdicts: subjectType === 'post' ? (store.postVerdicts[subjectId] || []).map(function (entry) {
-        return { categoryName: entry.ruleName, source: entry.source, pass: entry.pass, evidence: entry.evidence, confidence: null };
-      }) : store.schedule.flatMap(function (day) { return day.entries || []; })
-        .filter(function (entry) { return entry.roomId + ':' + entry.liveTime === subjectId; })
-        .flatMap(function (entry) { return entry.verdicts || []; }).map(function (entry) { return { ...entry, pass: true }; }) });
+        return { categoryId: catIdOf(entry.ruleName), categoryName: entry.ruleName, source: entry.source, pass: entry.pass,
+          evidence: entry.evidence, confidence: null, effective: true };
+      }) : (liveEntry?.verdicts || []).map(function (entry) {
+        return { ...entry, categoryId: catIdOf(entry.categoryName), pass: true, effective: true };
+      }),
+      primary: (audit?.analysis?.primary || []).map(function (p) {
+        return { categoryId: p.categoryId, categoryName: p.name, source: p.source, distribution: p.distribution,
+          evidence: p.evidence, effective: p.effective };
+      }).concat(!audit && liveEntry?.primary ? [{ categoryId: catIdOf(liveEntry.primary.categoryName),
+        categoryName: liveEntry.primary.categoryName, source: liveEntry.primary.source, distribution: null,
+        evidence: '', effective: true }] : []) });
   }
 
   // ---- 扫码登录（演示循环：waiting → scanned → confirmed）----
@@ -671,6 +719,10 @@ for (const p of store.twitterPosts) {
   }
   if (path === '/api/advanced' && method === 'PUT') {
     const b = body();
+    // 跨字段校验与后端一致：灰区下界必须低于上界（合并后比对，只改一端也检查）
+    const low = b.decisionGrayLowPct !== undefined ? b.decisionGrayLowPct : store.advanced.decisionGrayLowPct;
+    const high = b.decisionGrayHighPct !== undefined ? b.decisionGrayHighPct : store.advanced.decisionGrayHighPct;
+    if (low >= high) return err(400, `决策灰区下界（${low}%）必须小于上界（${high}%）`);
     Object.assign(store.advanced, b);
     return ok({ ok: true, ...store.advanced });
   }
@@ -1097,7 +1149,7 @@ for (const p of store.twitterPosts) {
       appliesTo: b.appliesTo || 'live',
       postTypes: b.postTypes || [],
       requireQuote: !!b.requireQuote, requireMedia: !!b.requireMedia,
-      condMode: b.condMode || 'and', enabled: b.enabled !== false,
+      condMode: b.condMode || 'and', primary: b.primary === true, enabled: b.enabled !== false,
       createdAt: Date.now(), updatedAt: Date.now(),
     });
     return created({ id });
@@ -1122,7 +1174,7 @@ for (const p of store.twitterPosts) {
         }
         const error = categoryError({ ...c, ...b });
         if (error) return err(400, error);
-        for (const k of ['name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia', 'condMode']) if (b[k] !== undefined) c[k] = b[k];
+        for (const k of ['name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia', 'condMode', 'primary']) if (b[k] !== undefined) c[k] = b[k];
         if (typeof b.enabled === 'boolean') c.enabled = b.enabled;
         return ok({ ok: true });
       }
@@ -1260,11 +1312,17 @@ for (const p of store.twitterPosts) {
   // ---- 决策模型供应商（System One 管理面；与 LLM 完全隔离）----
   if (path === '/api/decision' && method === 'GET') {
     return ok({
+      enabled: store.decisionEnabled,
       providers: store.decisionProviders.map((p) => ({
         ...p,
         key: { source: 'unset', count: 0, value: null },
       })),
     });
+  }
+  if (path === '/api/decision/enabled' && method === 'PUT') {
+    const b = body();
+    store.decisionEnabled = !!b.enabled;
+    return ok({ ok: true, enabled: store.decisionEnabled });
   }
   if (path === '/api/decision/providers/order' && method === 'PUT') {
     const names = body().names || [];
@@ -1284,7 +1342,7 @@ for (const p of store.twitterPosts) {
     if (store.decisionProviders.some((p) => p.name === b.name)) return err(400, `provider name 重复: ${b.name}`);
     store.decisionProviders.push({
       name: b.name, baseURL: b.baseURL || '', model: b.model || '',
-      protocol: b.protocol || 'systemone', enabled: true,
+      protocol: b.protocol || 'systemone', vision: !!b.vision, enabled: true,
     });
     return created({ name: b.name });
   }
@@ -1296,7 +1354,7 @@ for (const p of store.twitterPosts) {
       if (!p) return err(404, 'provider 不存在');
       if (method === 'PUT') {
         const b = body();
-        for (const k of ['baseURL', 'model', 'protocol', 'enabled']) if (b[k] !== undefined) p[k] = b[k];
+        for (const k of ['baseURL', 'model', 'protocol', 'vision', 'enabled']) if (b[k] !== undefined) p[k] = b[k];
         return ok({ ok: true, name });
       }
       if (method === 'DELETE') {

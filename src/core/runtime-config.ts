@@ -8,6 +8,8 @@
  *   传给 SourceContext；参数变化时 reconcile 重启对应 source 刷新。
  * - 冷启动推送开关：pipeline 每次处理信号经 isNotifyOnFirstRun 等 helper 直读 settings。
  * - LLM 超时/熔断：createLlmRouter 重建时取 withRuntimeConfig 合并结果。
+ * - 决策模型超时/熔断：createDecisionRouter 重建时直读本表；判定门槛（灰区/主分类）
+ *   由判定档每次直读，改完即生效。
  */
 import type { Db } from './db.js';
 import type { AppConfig } from '../config/schema.js';
@@ -22,6 +24,13 @@ export interface RuntimeConfig {
   llmRequestTimeoutMs: number;
   llmCircuitThreshold: number;
   llmCircuitCooldownMs: number;
+  /** 决策模型的是非灰区与主分类门槛（settings 存整数百分数，消费时 /100） */
+  decisionGrayLowPct: number;
+  decisionGrayHighPct: number;
+  decisionPrimaryMinPct: number;
+  decisionRequestTimeoutMs: number;
+  decisionCircuitThreshold: number;
+  decisionCircuitCooldownMs: number;
   notifyOnFirstRun: boolean;
   notifyOnNewSubscription: boolean;
   keyframeIntervalSec: number;
@@ -55,6 +64,13 @@ export const NUM_SPECS: NumSpec[] = [
   { key: 'llm_request_timeout_ms', field: 'llmRequestTimeoutMs', label: 'LLM 请求超时', def: 60_000, min: 1000, max: 600_000 },
   { key: 'llm_circuit_threshold', field: 'llmCircuitThreshold', label: 'LLM 熔断阈值', def: 3, min: 1, max: 20 },
   { key: 'llm_circuit_cooldown_ms', field: 'llmCircuitCooldownMs', label: 'LLM 熔断冷却', def: 600_000, min: 10_000, max: 3_600_000 },
+  // 决策模型判定档：阈值存整数百分数（settings 只认整数），消费时 /100 成 0–1 概率
+  { key: 'decision_gray_low_pct', field: 'decisionGrayLowPct', label: '决策灰区下界（%）', def: 20, min: 0, max: 100 },
+  { key: 'decision_gray_high_pct', field: 'decisionGrayHighPct', label: '决策灰区上界（%）', def: 80, min: 0, max: 100 },
+  { key: 'decision_primary_min_pct', field: 'decisionPrimaryMinPct', label: '主分类定案门槛（%）', def: 60, min: 0, max: 100 },
+  { key: 'decision_request_timeout_ms', field: 'decisionRequestTimeoutMs', label: '决策模型请求超时', def: 30_000, min: 1000, max: 600_000 },
+  { key: 'decision_circuit_threshold', field: 'decisionCircuitThreshold', label: '决策模型熔断阈值', def: 3, min: 1, max: 20 },
+  { key: 'decision_circuit_cooldown_ms', field: 'decisionCircuitCooldownMs', label: '决策模型熔断冷却', def: 600_000, min: 10_000, max: 3_600_000 },
   { key: 'keyframe_interval_sec', field: 'keyframeIntervalSec', label: '关键帧缓存间隔', def: 300, min: 60, max: 3600 },
   { key: 'backlog_max_age_hours', field: 'backlogMaxAgeHours', label: '补推时间限制（小时）', def: 6, min: 1, max: 168 },
   { key: 'backlog_max_per_account', field: 'backlogMaxPerAccount', label: '补推账号条数限制（1~50）', def: 3, min: 1, max: 50 },
@@ -159,6 +175,12 @@ export function withRuntimeConfig(app: AppConfig, rc: RuntimeConfig): AppConfig 
       requestTimeoutMs: rc.llmRequestTimeoutMs,
       circuitThreshold: rc.llmCircuitThreshold,
       circuitCooldownMs: rc.llmCircuitCooldownMs,
+    },
+    decision: {
+      ...app.decision,
+      requestTimeoutMs: rc.decisionRequestTimeoutMs,
+      circuitThreshold: rc.decisionCircuitThreshold,
+      circuitCooldownMs: rc.decisionCircuitCooldownMs,
     },
   };
 }

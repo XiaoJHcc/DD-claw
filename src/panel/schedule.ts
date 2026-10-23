@@ -48,7 +48,7 @@ export function scheduleInfo(db: Db, from: string | null, to: string | null): un
       kind: 'live', // kind 预留：schedule（预告）后续加入
       roomId: e.roomId, liveTime: e.liveTime, uid: e.uid, name: e.name, face: e.face,
       startTs: e.startTs, endTs: e.endTs, keyframe: e.keyframe, cover: e.cover,
-      segments: e.segments, verdicts: e.verdicts,
+      segments: e.segments, verdicts: e.verdicts, primary: e.primary,
     });
     byDay.set(k, list);
   }

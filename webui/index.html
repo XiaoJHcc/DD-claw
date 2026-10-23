@@ -102,10 +102,15 @@
 </section>
 
 <section class="card set-card acc-cyan" id="card-decision">
-<div class="card-head"><span class="card-ic" data-icon="shield"></span><h2>决策模型</h2></div>
+<div class="card-head"><span class="card-ic" data-icon="shield"></span><h2>决策模型</h2>
+<div class="card-head-end">
+<label class="switch"><input type="checkbox" id="decision-enabled" data-change="toggle-decision"><span class="knob"></span></label>
+</div>
+</div>
 <div id="decision-list">加载中…</div>
 <div class="card-actions">
 <button class="btn btn-ghost" data-action="add-decision"><span data-icon="plus"></span>新增供应商</button>
+<button class="btn btn-line" data-action="open-decision-advanced"><span data-icon="sliders"></span>高级</button>
 </div>
 </section>
 

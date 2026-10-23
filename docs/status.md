@@ -22,8 +22,9 @@
 | 三类图文来源 | X（免登录路线，`x_accounts`）· 微博（`weibo_accounts`）· B站动态（`bili_accounts`，监听主播 ∪ 名单账号）；各自独立名单、运行状态与账号级故障标记，`feed_post` 只对名单账号发 |
 | 补推语义 | 三平台统一的恢复/补推判定（静默轮、未运行期间按开关与时间窗/条数封顶补推），权威定义在 `src/core/backlog.ts` |
 | LLM 接线 | text/vision 路由、熔断、多 key 池、结构化输出多档、chat-completions / responses 双协议；`completeChat` 透传 tools |
-| 决策模型管理面 | System One 供应商名单 + 独立 key + 启停 / 排序 + `systemone` 探活；与 LLM 通道隔离，判定档位尚未接入 |
-| 内容判定与归档 | 统一分类 + 可插拔判决链（模型优先、确定性兜底）→ `verdicts`；判定与推送过程入 `content_audit`，面板可回看（行为契约见 [content-audit.md](content-audit.md)） |
+| 决策模型判定档 | System One 供应商名单 + 独立 key + 启停 / 排序 + `vision` 标记 + `systemone` 探活；判决链第一档（每分类 `noul` 得概率、主分类一道 `choice`，灰区不定案），独立路由 / 熔断 / key 轮换 / 超时门槛参数，与 LLM 通道隔离 |
+| 内容判定与归档 | 统一分类 + 判决链（确定性先跑、模型档按序、逐来源落库并标生效）→ `verdicts`；主分类组单选 → `primary_verdicts`（时间表展示）；判定与推送过程入 `content_audit`，面板可回看（契约见 [plan/decision-model.md](plan/decision-model.md)「二」与 [content-audit.md](content-audit.md)） |
+| 视觉输入规范化 | 直播关键帧 / 封面与图文配图先落本地，再经 `sharp` 统一转合规 JPEG；被拦图片逐张记原因 |
 | 推送规则与执行 | 一张 `push_rules` 覆盖直播与图文两形态，确定性匹配出渠道与文案，dispatcher 按渠道发送（模型见 [统一计划](plan/unify-classify-push.md)、机制见 [modules/analysis.md](modules/analysis.md)） |
 | 面板与前端 | 五视图（时间表 / 主播 / 图文 / 设置 / Agent）+ 分类与推送记录回看 + 设置页底部变更历史；demo mock 与后端同构 |
 | 时间轴统计 | `live_segments` 内容变更切段 + `/api/schedule`（北京 06:00 日界）+ 五天滑动窗口泳道 |
@@ -38,7 +39,7 @@
 
 - **WebUI Agent / QQ 入口真机验收**：P1 验收口径 = ≥20 条本机自然语言请求（读/写/撤销/能力边界四类）、工具选择正确率 ≥90%、参数正确率 ≥90%、误写 0（「写前询问」模式下未经确认的写）、能力边界 100% 不臆造 id 或 uid。口径见 [plan/agent-access.md](plan/agent-access.md)「P1」。
 - **`completeChat` 的 responses 分支**：`function_call_output` + `call_id` 往返只有离线测试，首次接真端点时先跑一次单轮工具往返再放量。
-- **LLM 分类真机验收与调优**：含带图（vision 路由）路径与 provider 结构化输出兼容（部分 provider 对 schema 请求返 400、由路由降级接住，需按其支持的模式单独复验）。
+- **LLM 分类真机验收与调优**：真流量下看结构化输出失败率、带图请求确实携带规范化图片（直播与图文各至少一例）、内容记录逐来源回看；provider 结构化输出兼容（部分 provider 对 schema 请求返 400、由路由降级接住，需按其支持的模式单独复验）。口径见 [plan/decision-model.md](plan/decision-model.md)「五」。
 - **QQ 通道复验**：统一规则升级后未实发 QQ（当次验收本机缺机器人配置，只走了本机 toast）；下次改动推送链路时一并复验群/私聊实发。
 - **MaiBot 插件适配统一规则模型**：插件（独立仓库）仍按旧 `uids` 读取规则范围，需改为读 `subjectKind` / `scope` 并覆盖图文规则显示与筛选；未适配前其「规则范围显示」「按主播查删」不可信，改动也不在本仓。
 - **X 源待验证项**：转发去重语义（要「每次转发都推」须另取 RT 自身 id）、免登录路线的长期稳定性等，见 [research/twitter.md](research/twitter.md) §7 与 [plan/twitter-source.md](plan/twitter-source.md)。
@@ -62,4 +63,4 @@
 - **弹幕抓取**（含 L1 本地信号：弹幕词频、帧间差异）。
 - **可选推送时机**：延迟到有封面 / 换标题 / 内容实际变更（只增不减，面板怎么配未定）。
 - **优先级**：`PushMessage.priority` 无消费者，等产品方案再定（不做屏蔽类偏好，见 [design](design.md) §11）。
-- **决策模型通道**：管理面已接入（供应商名单 / 独立 key / 启停 / 排序 / `systemone` 探活）；判定档位未接入判决链。协议选型与判定合同见 [plan/decision-model.md](plan/decision-model.md)，外部证据见 [research/decision-models.md](research/decision-models.md)；直播关键帧本地化与图片规范化同样未实现，属于判定接入的前置。
+- **决策档实战验收**：离线契约已闭合（[plan/decision-model.md](plan/decision-model.md) M1–M4），但没有真流量数据——p95 延迟、请求失败率、灰区比例、四条回退路径的实际表现都要上线后再看；外部证据见 [research/decision-models.md](research/decision-models.md)。

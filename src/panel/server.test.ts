@@ -27,13 +27,15 @@ interface Fixture {
   undoFired?: Record<UndoEffect, number>;
   /** 注入 chat dep 时（opts.chat）可取到，验证会话落库 / reset 语义 */
   chat?: ChatStore;
+  /** 注入 decision dep 时：名单 / key 写完后重建决策 router 的回调被调用了几次 */
+  decisionChanges?: () => number;
 }
 
 test('内容审计 REST 验证身份键并返回真实过程记录，旧内容明确无记录', async (t) => {
   const fixture = await setup(t);
   const response = await fetch(fixture.base + '/api/content-audit?subjectType=post&subjectId=twitter%3A9001');
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { audit: null, verdicts: [] });
+  assert.deepEqual(await response.json(), { audit: null, verdicts: [], primary: [] });
   fixture.db.recordContentAudit('post', 'twitter:9001', 'push', {
     status: 'failed', reason: '发送失败', rules: [], channels: [],
     deliveries: [{ channel: 'onebot', ok: false, error: 'connect ECONNREFUSED' }],
@@ -138,6 +140,7 @@ async function setup(
     llm = dep;
   }
   let decision: PanelDeps['decision'];
+  let decisionChanges = 0;
   if (opts.decision) {
     saveDecisionProviders(db, opts.decision.providers);
     decision = {
@@ -146,6 +149,8 @@ async function setup(
         save: (ps) => saveDecisionProviders(db, ps),
       },
       probe: opts.decision.probe ?? (async () => ({ ms: 7, model: 'jev-1.13.0' })),
+      // 生产装配：名单 / key 写完重建决策 router（这里计数即可）
+      onProvidersChanged: () => { decisionChanges++; },
     };
   }
   const undoStore = opts.undo ? new UndoStore(db.raw) : undefined;
@@ -154,7 +159,7 @@ async function setup(
   chatStore?.migrate();
   // 撤销执行器（生产装配形状：撤栈顶 + 按 core/undo.ts 的 undoEffects 触发热生效回调）。
   // 回调闭包在 index.ts，测试里用计数桩代替——映射函数本身是生产代码，不是测试自己的复刻。
-  const undoFired: Record<UndoEffect, number> = { runtime: 0, listen: 0, llm: 0, notifiers: 0 };
+  const undoFired: Record<UndoEffect, number> = { runtime: 0, listen: 0, llm: 0, decision: 0, notifiers: 0 };
   const undoLast = undoStore === undefined
     ? undefined
     : (scope?: string): UndoResult => {
@@ -213,6 +218,7 @@ async function setup(
     db, base: `http://127.0.0.1:${port}`, llmRouter: llm?.router,
     ...(undoStore ? { undo: undoStore, undoFired } : {}),
     ...(chatStore ? { chat: chatStore } : {}),
+    ...(opts.decision ? { decisionChanges: () => decisionChanges } : {}),
   };
 }
 
@@ -678,11 +684,12 @@ test('category CRUD：POST → GET → PUT → DELETE', async (t) => {
   const list = await api(base, '/api/categories');
   const cats = list.json['categories'] as Array<{
     id: number; name: string; llmPrompt: string | null;
-    keywords: string[]; condMode: string; enabled: boolean;
+    keywords: string[]; condMode: string; primary: boolean; enabled: boolean;
   }>;
   assert.equal(cats.length, 2);
   assert.deepEqual(cats[0]!.keywords, ['歌回']);
   assert.equal(cats[0]!.llmPrompt, null, '未传 llmPrompt 缺省 null（纯确定性分类）');
+  assert.equal(cats[0]!.primary, false, '未传 primary 缺省不进主分类组');
   assert.equal(cats[1]!.llmPrompt, '在打游戏');
   assert.equal(cats[1]!.enabled, false);
 
@@ -692,6 +699,17 @@ test('category CRUD：POST → GET → PUT → DELETE', async (t) => {
   assert.equal(c.condMode, 'or');
   assert.deepEqual(c.areas, ['虚拟Singer']);
   assert.equal(c.name, '歌回', '未提供字段保留');
+
+  // 主分类勾选：POST 收 primary，PUT 只改 primary 时不碰条件
+  const primary = await api(base, '/api/categories', 'POST', categoryBody({ name: '杂谈', primary: true }));
+  assert.equal(primary.status, 201);
+  const primaryId = (primary.json as { id: number }).id;
+  assert.equal(db.listCategories().find((x) => x.id === primaryId)!.primary, true);
+  assert.equal((await api(base, `/api/categories/${primaryId}`, 'PUT', { primary: false })).status, 200);
+  const off = db.listCategories().find((x) => x.id === primaryId)!;
+  assert.equal(off.primary, false);
+  assert.deepEqual(off.keywords, ['歌回'], '只改 primary 时条件原样');
+  assert.equal((await api(base, `/api/categories/${primaryId}`, 'PUT', { primary: 'yes' })).status, 400);
 
   assert.equal((await api(base, `/api/categories/${id}`, 'DELETE')).status, 200);
   assert.equal((await api(base, `/api/categories/${id}`, 'DELETE')).status, 404, '重复删除 404');
@@ -721,7 +739,7 @@ test('category 校验：三条件皆空 400（POST 与 PUT 合并后）/ condMod
 
   const empty = await api(base, '/api/categories', 'POST', { name: '空的' });
   assert.equal(empty.status, 400, 'llmPrompt/keywords/areas 皆空 400');
-  assert.match(empty.json.error ?? '', /至少配置 LLM 提示词或一组确定性条件/);
+  assert.match(empty.json.error ?? '', /至少配置判定描述或一组确定性条件/);
 
   const badMode = await api(base, '/api/categories', 'POST', categoryBody({ condMode: 'xor' }));
   assert.equal(badMode.status, 400);
@@ -1414,17 +1432,49 @@ test('PUT 启停影响路由推导；DELETE 移除；onProvidersChanged 重建 r
 
 const DECISION_CFG: DecisionProviderConfig[] = [{
   name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0',
-  protocol: 'systemone', enabled: true,
+  protocol: 'systemone', vision: false, enabled: true,
 }];
 
-test('GET /api/decision：provider 与 key 状态（本机面板，key 值明文回显）', async (t) => {
+test('GET /api/decision：provider 与 key 状态（本机面板，key 值明文回显）+ 总开关与多模态标记', async (t) => {
   const { base } = await setup(t, { decision: { providers: DECISION_CFG } });
   const r = await api(base, '/api/decision');
   assert.equal(r.status, 200);
+  assert.equal(r.json.enabled, false, '总开关缺省关');
   const p = (r.json.providers as Array<Record<string, unknown>>)[0]!;
   assert.equal(p.name, 'jev');
   assert.equal(p.protocol, 'systemone');
+  assert.equal(p.vision, false, 'vision 缺省假，面板按它显示多模态标记');
   assert.deepEqual(p.key, { source: 'unset', count: 0, value: null });
+});
+
+test('PUT /api/decision/enabled：总开关落 settings，GET 回显', async (t) => {
+  const { base, db } = await setup(t, { decision: { providers: DECISION_CFG } });
+  assert.equal((await api(base, '/api/decision/enabled', 'PUT', { enabled: true })).status, 200);
+  assert.equal(db.getSetting('decision_enabled'), '1');
+  assert.equal((await api(base, '/api/decision')).json.enabled, true);
+  await api(base, '/api/decision/enabled', 'PUT', { enabled: false });
+  assert.equal(db.getSetting('decision_enabled'), '0');
+  assert.equal((await api(base, '/api/decision')).json.enabled, false);
+  // 挂载门：没有 decision dep 就没有这条路由
+  const bare = await setup(t);
+  assert.equal((await api(bare.base, '/api/decision/enabled', 'PUT', { enabled: true })).status, 404);
+});
+
+test('决策名单 / key 写完立刻重建 router（vision 随表单落库）', async (t) => {
+  const { base, decisionChanges } = await setup(t, { decision: { providers: [] } });
+  assert.equal((await api(base, '/api/decision/providers', 'POST', {
+    name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0', vision: true, key: 'sk-a',
+  })).status, 201);
+  assert.equal(decisionChanges!(), 1, '新增后重建（新 key 生效）');
+  const p = (await api(base, '/api/decision')).json.providers as Array<{ vision: boolean }>;
+  assert.equal(p[0]!.vision, true, 'vision 落库并回显');
+
+  await api(base, '/api/decision/providers/jev', 'PUT', { vision: false });
+  assert.equal(decisionChanges!(), 2, '编辑后重建');
+  await api(base, '/api/decision/providers/order', 'PUT', { names: ['jev'] });
+  assert.equal(decisionChanges!(), 3, '排序后重建（顺序 = 优先级）');
+  await api(base, '/api/decision/providers/jev', 'DELETE');
+  assert.equal(decisionChanges!(), 4, '删除后重建');
 });
 
 test('POST /api/decision/providers：新增即出现在 GET；协议缺省 systemone；重名/非法 → 400', async (t) => {
@@ -1775,7 +1825,13 @@ test('/api/schedule：日界归属 + 空日期占位 + segments/verdicts 组装'
   ).run(startA + 3600);
   db.insertVerdict({ subjectType: 'live', subjectId: 'rA:1001', uid: '1',
     categoryId: 1, ruleId: 0, categoryName: '歌回',
-    source: 'llm', confidence: 0.9, evidence: '在唱歌' });
+    source: 'llm', confidence: 0.9, evidence: '在唱歌', effective: true });
+  // 未生效行与非属于行都不进时间线
+  db.insertVerdict({ subjectType: 'live', subjectId: 'rA:1001', uid: '1',
+    categoryId: 1, ruleId: 0, categoryName: '歌回',
+    source: 'rule', confidence: null, evidence: '命中关键词「歌」', effective: false });
+  db.insertPrimaryVerdict({ subjectType: 'live', subjectId: 'rA:1001', uid: '1',
+    categoryId: 1, name: '歌回', source: 'llm', distribution: null, evidence: '整场都在唱', effective: true });
 
   // B：08-10 06:01 开播 —— 归 08-10（06:00 后开播算当天）
   insertSession(raw, { roomId: 'rB', liveTime: 1002, uid: '1', title: '早场',
@@ -1804,6 +1860,7 @@ test('/api/schedule：日界归属 + 空日期占位 + segments/verdicts 组装'
   assert.deepEqual(a['verdicts'], [
     { categoryName: '歌回', source: 'llm', confidence: 0.9, evidence: '在唱歌' },
   ]);
+  assert.deepEqual(a['primary'], { categoryName: '歌回', source: 'llm' }, '生效主分类');
 
   const dayB = days[1]!.entries;
   assert.equal(dayB.length, 1);
@@ -2298,32 +2355,40 @@ test('账号端点：帖子附判定行 verdicts（ruleId/ruleName/pass/evidence
   db.insertVerdict({
     subjectType: 'post', subjectId: 'twitter:1', uid: '1', categoryId: 0, ruleId: 7,
     categoryName: '带图原创', source: 'llm', pass: false, confidence: null, evidence: '不是预告',
+    effective: false,
   });
   db.insertVerdict({
     subjectType: 'post', subjectId: 'twitter:1', uid: '1', categoryId: 0, ruleId: 8,
     categoryName: '备用规则', source: 'rule', pass: true, confidence: null,
-    evidence: 'LLM 不可用/失败，回退机械筛选放行（LLM 未启用）',
+    evidence: 'LLM 不可用/失败，回退机械筛选放行（LLM 未启用）', effective: true,
+  });
+  // 同一分类的模型行也落库，但只有生效行进帖子标记
+  db.insertVerdict({
+    subjectType: 'post', subjectId: 'twitter:1', uid: '1', categoryId: 0, ruleId: 9,
+    categoryName: '同分类模型结论', source: 'llm', pass: false, confidence: null,
+    evidence: '模型说不是', effective: false,
   });
   db.insertVerdict({
     subjectType: 'post', subjectId: 'weibo:5', uid: '2', categoryId: 0, ruleId: 3,
     categoryName: '微博预告', source: 'llm', pass: true, confidence: 0.9, evidence: '是预告',
+    effective: true,
   });
   // live 主体与别帖的判定都不串进本帖
   db.insertVerdict({
-    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1,
+    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1, ruleId: 0,
     categoryName: '游戏', source: 'llm', pass: true, confidence: 0.8, evidence: '在打 APEX',
+    effective: true,
   });
 
   type PostView = { itemId: string; verdicts: unknown[] };
   const x = (await api(base, '/api/x/accounts')).json.accounts as Array<{ posts: PostView[] }>;
   const x1 = x[0]!.posts.find((p) => p.itemId === '1')!;
   assert.deepEqual(x1.verdicts, [
-    { ruleId: 7, ruleName: '带图原创', pass: false, evidence: '不是预告', source: 'llm' },
     {
       ruleId: 8, ruleName: '备用规则', pass: true,
       evidence: 'LLM 不可用/失败，回退机械筛选放行（LLM 未启用）', source: 'rule',
     },
-  ], '同一帖多条判定按行回看');
+  ], '同一帖多条判定只回看生效行');
   assert.deepEqual(
     x[0]!.posts.find((p) => p.itemId === '2')!.verdicts, [],
     '无判定行 = 空数组（live 主体的判定不串进帖子）',
@@ -2792,7 +2857,7 @@ test('撤销端点：写 → history 可见 → undo 还原并触发热生效回
   });
   assert.equal(db.getSetting('listen_weibo'), null, '撤销 = 回到 auto（key 被删，区别于写值）');
   assert.equal(undoFired!.listen, 1, '撤 listen 开关要跑 reconcileListen');
-  assert.equal(undoFired!.runtime + undoFired!.llm + undoFired!.notifiers, 0);
+  assert.equal(undoFired!.runtime + undoFired!.llm + undoFired!.decision + undoFired!.notifiers, 0);
 
   // 历史全量保留（只标记 undone）；撤销自身不入栈
   const h2 = await api(base, '/api/undo/history');
@@ -2838,7 +2903,7 @@ test('撤销中止：后像 ≠ 当前值 → 409 且一行不动、不触发回
   assert.equal(r.json.error, '该设置已被其他入口修改，无法撤销本次');
   assert.equal(db.getSetting('poll_interval_sec'), '45', '中止时一行都不动');
   assert.equal(undo!.history()[0]!.undoneAt, null, '中止不得把记录标记为已撤销');
-  assert.deepEqual(undoFired, { runtime: 0, listen: 0, llm: 0, notifiers: 0 }, '中止不触发热生效');
+  assert.deepEqual(undoFired, { runtime: 0, listen: 0, llm: 0, decision: 0, notifiers: 0 }, '中止不触发热生效');
 
   // 冲突解除后仍可撤（栈没被动过）
   db.setSetting('poll_interval_sec', '30');

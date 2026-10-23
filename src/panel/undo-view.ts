@@ -61,6 +61,7 @@ const TOOL_TITLES: Record<string, string> = {
   // 开关与运行时参数
   set_push_enabled: '开关推送',
   set_llm_enabled: '开关 LLM',
+  set_decision_enabled: '开关决策模型',
   set_listen: '监听开关',
   update_runtime_config: '修改运行时参数',
   set_llm_key: '设置 LLM 密钥',
@@ -127,6 +128,7 @@ const SETTING_NAMES: Record<string, string> = {
   // 总开关
   push_enabled: '推送总开关',
   llm_enabled: 'LLM 总开关',
+  decision_enabled: '决策模型总开关',
   llm_providers: 'LLM 供应商名单',
   decision_providers: '决策模型供应商名单',
   chat_write_mode: 'Agent 写模式',
@@ -146,6 +148,12 @@ const SETTING_NAMES: Record<string, string> = {
   llm_request_timeout_ms: 'LLM 请求超时',
   llm_circuit_threshold: 'LLM 熔断阈值',
   llm_circuit_cooldown_ms: 'LLM 熔断冷却',
+  decision_gray_low_pct: '决策灰区下界',
+  decision_gray_high_pct: '决策灰区上界',
+  decision_primary_min_pct: '主分类定案门槛',
+  decision_request_timeout_ms: '决策模型请求超时',
+  decision_circuit_threshold: '决策模型熔断阈值',
+  decision_circuit_cooldown_ms: '决策模型熔断冷却',
   keyframe_interval_sec: '关键帧缓存间隔',
   keyframe_enabled: '关键帧缓存',
   notify_on_first_run: '启动时已在播也推送',
@@ -240,7 +248,7 @@ export function undoRowLabel(img: RowImage): string {
 const COLUMN_NAMES: Record<string, Record<string, string>> = {
   settings: { key: '键名', value: '值' },
   categories: {
-    name: '名称', llm_prompt: 'LLM 提示词', keywords: '关键词', areas: '分区',
+    name: '名称', llm_prompt: '判定描述', keywords: '关键词', areas: '分区',
     applies_to: '适用内容', post_types: '帖子类型', require_quote: '必须引用', require_media: '必须带图',
     cond_mode: '条件关系', enabled: '启用', sort: '位置',
   },
@@ -347,9 +355,9 @@ const BOOL_COLUMNS: Record<string, readonly string[]> = {
 
 /** 值为 '1'/'0' 的布尔 settings 键（listen_* 按前缀兜底；与 listen.ts / runtime-config.ts 的存储口径一致） */
 const BOOL_SETTING_KEYS: readonly string[] = [
-  'push_enabled', 'llm_enabled', 'napcat_enabled', 'napcat_autorestart', 'qqbot_enabled',
-  'x_fallback_html', 'keyframe_enabled', 'notify_on_first_run', 'notify_on_new_subscription',
-  'backlog_push_enabled',
+  'push_enabled', 'llm_enabled', 'decision_enabled', 'napcat_enabled', 'napcat_autorestart',
+  'qqbot_enabled', 'x_fallback_html', 'keyframe_enabled', 'notify_on_first_run',
+  'notify_on_new_subscription', 'backlog_push_enabled',
 ];
 
 /** JSON 数组列 → 顿号连接（存的是 JSON 文本；解析失败回退原文截断） */

@@ -29,7 +29,7 @@ import {
 } from '../sources/weibo/auth.js';
 import type { DecisionProviderConfig, LlmProviderConfig } from '../config/schema.js';
 import { deriveRoutes, getChatProvider, isLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
-import { decisionKeySetting } from '../analysis/decision-providers.js';
+import { decisionKeySetting, isDecisionEnabled } from '../analysis/decision-providers.js';
 import { isListenEnabled, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
 import {
   getRuntimeConfig,
@@ -133,6 +133,8 @@ export interface PanelDeps {
     };
     /** 面板「测试」：对指定 provider 发一次最小 systemone 请求（key = null 表示无鉴权端点） */
     probe: (spec: DecisionProviderConfig, key: string | null) => Promise<{ ms: number; model: string }>;
+    /** 名单 / key 写完后的回调：装配处重建决策 router（判定档下一轮即用新名单） */
+    onProvidersChanged?: () => void;
   };
   /**
    * 监听功能开关（面板「监听」卡片）；不注入则 /api/listen* 一律 404。
@@ -826,6 +828,10 @@ async function handle(
     sendJson(res, 200, decisionInfo(deps));
     return;
   }
+  if (deps.decision && method === 'PUT' && path === '/api/decision/enabled') {
+    await callTool(deps, res, 'set_decision_enabled', asBodyObject(await readJsonBody(req)));
+    return;
+  }
   if (deps.decision?.store && method === 'POST' && path === '/api/decision/providers') {
     const body = asBodyObject(await readJsonBody(req));
     // 与 LLM 同一裁决：REST 拒绝重名（webui 契约）；工具按名 upsert（MCP 契约）
@@ -869,7 +875,7 @@ async function handle(
       return;
     }
   }
-  // ---- 分类规则（全局定义：LLM 提示词 + 确定性条件，归类结果入 verdicts）----
+  // ---- 分类规则（全局定义：判定描述 + 确定性条件，归类结果入 verdicts）----
   if (method === 'GET' && path === '/api/categories') {
     sendJson(res, 200, { categories: db.listCategories() });
     return;
@@ -1398,15 +1404,18 @@ function listenInfo(deps: PanelDeps): unknown {
 
 /**
  * 账号卡帖子段的数据形状（X / 微博 / B站动态三平台共用的定义处）：Post 去掉 raw +
- * 该帖的判定行 `verdicts`（P1b 判定回看，`ruleId/ruleName/pass/evidence/source`）。
- * ruleName 取 verdicts.category_name 冗余（规则删除后历史仍可读）；无判定行 = 空数组。
+ * 该帖的判定行 `verdicts`（判定回看：`ruleId/ruleName/pass/evidence/source`）。
+ * ruleName 取 verdicts.category_name 冗余（规则删除后历史仍可读）；只取生效行（effective=1），
+ * 无判定行 = 空数组。
  */
 function accountPosts(db: Db, platform: string, uid: string, limit = 3): unknown[] {
   return db.searchPosts({ platform, uid, limit }).map(({ raw: _raw, ...p }) => ({
     ...p,
-    verdicts: db.listVerdicts('post', postVerdictSubjectId(p.platform, p.itemId)).map((v) => ({
-      ruleId: v.ruleId, ruleName: v.categoryName, pass: v.pass, evidence: v.evidence, source: v.source,
-    })),
+    verdicts: db.listVerdicts('post', postVerdictSubjectId(p.platform, p.itemId))
+      .filter((v) => v.effective)
+      .map((v) => ({
+        ruleId: v.ruleId, ruleName: v.categoryName, pass: v.pass, evidence: v.evidence, source: v.source,
+      })),
   }));
 }
 
@@ -1537,11 +1546,13 @@ function decisionKeySource(
 
 function decisionInfo(deps: PanelDeps): unknown {
   return {
+    enabled: isDecisionEnabled(deps.db),
     providers: (deps.decision?.store.list() ?? []).map((p) => ({
       name: p.name,
       baseURL: p.baseURL,
       model: p.model,
       protocol: p.protocol,
+      vision: p.vision === true,
       enabled: p.enabled,
       key: decisionKeySource(deps.db, p),
     })),

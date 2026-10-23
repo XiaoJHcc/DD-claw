@@ -17,6 +17,7 @@
       "baseURL": "https://api.typesafe.ai/v1",
       "model": "jev-1.14.0",
       "protocol": "systemone",
+      "vision": true,
       "enabled": true
     }
   ],

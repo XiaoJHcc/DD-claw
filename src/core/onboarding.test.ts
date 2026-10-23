@@ -32,6 +32,7 @@ test('首启：空库种入「系统通知」渠道 + 默认分类 + 默认规�
   const cats = db.listCategories();
   assert.equal(cats.length, ONBOARDING_CATEGORIES.length);
   assert.deepEqual(cats.map((c) => c.name), ONBOARDING_CATEGORIES.map((c) => c.name));
+  assert.deepEqual(cats.map((c) => c.primary), ONBOARDING_CATEGORIES.map(() => false), '默认分类不进主分类组');
 
   const rules = db.listPushRules();
   assert.equal(rules.length, ONBOARDING_RULES.length);

@@ -7,6 +7,8 @@ export interface CategoryMatch {
   matched: boolean;
   /** 命中的关键词/分区说明（入 verdicts.evidence，供事后追溯） */
   evidence: string;
+  /** 该分类对本内容类型是否有可用条件组（false = 纯模型分类 / 死分类，确定性无从判定） */
+  hasConditions: boolean;
 }
 
 // ---- 条件算子注册表：分类条件组的确定性判定按算子注册（图文 filters 的算子 P2b 接入）----
@@ -88,6 +90,7 @@ function testOperator(op: ConditionOperator, condValue: string[], item: ContentI
  * - condMode 控制组间关系：'and' 都中 / 'or' 任一中
  * - 无有效组 → 不命中（纯 LLM 分类不该被确定性路径误判为恒中）
  * - evidence = 命中的组证据按组序拼「命中关键词「xx」、分区「yy」」（部分组命中也照记）
+ * - hasConditions = 至少一组在**本内容类型**上可判定（不适用的算子不算条件）
  */
 function matchByGroups(
   groups: ReadonlyArray<{ op: ConditionOperator; values: string[] }>,
@@ -95,12 +98,14 @@ function matchByGroups(
   condMode: CondMode,
 ): CategoryMatch {
   const active = groups.filter((g) => g.values.length > 0);
-  if (active.length === 0) return { matched: false, evidence: '' };
+  const applicable = active.filter((g) => g.op.appliesTo.includes(item.subjectType));
+  const hasConditions = applicable.length > 0;
+  if (active.length === 0) return { matched: false, evidence: '', hasConditions };
   const hits = active
     .map((g) => testOperator(g.op, g.values, item))
     .filter((s): s is string => s !== null);
   const matched = condMode === 'or' ? hits.length > 0 : hits.length === active.length;
-  return { matched, evidence: hits.length > 0 ? `命中${hits.join('、')}` : '' };
+  return { matched, evidence: hits.length > 0 ? `命中${hits.join('、')}` : '', hasConditions };
 }
 
 /** 分类判定的内容项入口（matchCategory 的 ContentItem 形态）：keywords/areas/post_types/require_quote/require_media 五组 */

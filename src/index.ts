@@ -11,8 +11,10 @@ import { AnalysisQueue } from './analysis/queue.js';
 import { RulesClassifier } from './analysis/classifier.js';
 import { createLlmRouter, listLlmProviders, saveLlmProviders, isLlmEnabled, dbKeysOf } from './analysis/providers.js';
 import {
-  listDecisionProviders, pingDecisionProvider, saveDecisionProviders,
+  listDecisionProviders, pingDecisionProvider, saveDecisionProviders, isDecisionEnabled,
 } from './analysis/decision-providers.js';
+import { createDecisionRouter, type DecisionRouter } from './analysis/decision-router.js';
+import type { DecisionThresholds } from './analysis/tasks/decide.js';
 import { OncePerSessionRule } from './rules/once-per-session.js';
 import { NotifyDispatcher } from './notify/dispatcher.js';
 import { OneBotNotifier } from './notify/onebot.js';
@@ -275,14 +277,31 @@ async function main(): Promise<void> {
   llmDep.onProvidersChanged();
 
   // 决策模型：名单与 key 的唯一信源同样是 settings 表（`decision_providers` /
-  // `decision_key:<name>`）。管理阶段只提供名单与协议探活，判定通道尚未进判决链；
-  // key 的解析与协议调用都在 analysis/decision-providers.ts，面板只转发。
+  // `decision_key:<name>`），超时/熔断来自运行时参数。判定档按「名单顺序 + vision 优先」
+  // 路由候选，名单 / key / 超时熔断任一变化都要重建 router（onProvidersChanged），
+  // 而灰区与主分类门槛由判定档每轮直读 settings，不需要重建。
   const decisionDep: NonNullable<PanelDeps['decision']> = {
     store: {
       list: () => listDecisionProviders(db),
       save: (ps) => saveDecisionProviders(db, ps),
     },
     probe: (spec, key) => pingDecisionProvider(spec, key),
+  };
+  let decisionRouter: DecisionRouter | null = null;
+  const rebuildDecisionRouter = (): void => {
+    decisionRouter = createDecisionRouter(db, getRuntimeConfig(db));
+  };
+  decisionDep.onProvidersChanged = rebuildDecisionRouter;
+  rebuildDecisionRouter();
+
+  // 决策档门槛（0–1）：settings 存整数百分数，这里每次判定换算
+  const decisionThresholds = (): DecisionThresholds => {
+    const rc = getRuntimeConfig(db);
+    return {
+      low: rc.decisionGrayLowPct / 100,
+      high: rc.decisionGrayHighPct / 100,
+      primaryMin: rc.decisionPrimaryMinPct / 100,
+    };
   };
 
   // 运行时参数（轮询间隔/告警阈值/冷启动推送/LLM 超时熔断）：
@@ -370,7 +389,13 @@ async function main(): Promise<void> {
     db,
     config: eff,
     queue: new AnalysisQueue(
-      new RulesClassifier(db, () => llmDep.router ?? null, () => isLlmEnabled(db)), 2,
+      new RulesClassifier(db, {
+        getRouter: () => llmDep.router ?? null,
+        llmEnabled: () => isLlmEnabled(db),
+        getDecisionRouter: () => decisionRouter,
+        decisionEnabled: () => isDecisionEnabled(db),
+        decisionThresholds,
+      }), 2,
     ),
     rule: new OncePerSessionRule(db),
     dispatcher,
@@ -640,6 +665,13 @@ async function main(): Promise<void> {
       llmDep.onProvidersChanged!();
       log.info('LLM 超时/熔断参数已热更新（router 已重建）');
     }
+    // 决策档：超时/熔断进 router（要重建），灰区与主分类门槛由判定档每轮直读，无需重建
+    if (prev.decision.requestTimeoutMs !== eff.decision.requestTimeoutMs
+      || prev.decision.circuitThreshold !== eff.decision.circuitThreshold
+      || prev.decision.circuitCooldownMs !== eff.decision.circuitCooldownMs) {
+      rebuildDecisionRouter();
+      log.info('决策模型超时/熔断参数已热更新（router 已重建）');
+    }
   };
 
   // 装配级重建：NapCat 配置热更新（面板保存）后重跑一次，让 onebot notifier 跟随
@@ -656,6 +688,7 @@ async function main(): Promise<void> {
       if (e === 'runtime') reconcileRuntime();
       else if (e === 'listen') reconcileListen();
       else if (e === 'llm') llmDep.onProvidersChanged?.();
+      else if (e === 'decision') rebuildDecisionRouter();
       else if (e === 'notifiers') void rebuildNotifiers();
     }
   };

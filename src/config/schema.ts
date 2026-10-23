@@ -48,6 +48,8 @@ export const decisionProviderSchema = z.object({
   model: z.string().min(1),
   /** 端点协议：systemone = POST /systemone（baseURL 写到 /v1 这一层） */
   protocol: z.enum(['systemone']).default('systemone'),
+  /** 是否可接含图请求（带图内容先交给 vision 供应商，纯文本供应商只作兜底） */
+  vision: z.boolean().default(false),
   enabled: z.boolean().default(true),
 });
 
@@ -83,6 +85,12 @@ export interface AppConfig {
     circuitThreshold: number;
     circuitCooldownMs: number;
   };
+  /** 决策模型通道的超时/熔断（底形；生效值 = RuntimeConfig 叠加。灰区与主分类门槛只走 RuntimeConfig） */
+  decision: {
+    requestTimeoutMs: number;
+    circuitThreshold: number;
+    circuitCooldownMs: number;
+  };
 }
 
 /** 代码内默认值（settings 无覆盖时的底） */
@@ -100,6 +108,11 @@ export function defaultAppConfig(): AppConfig {
     panel: { enabled: true, port: 8787 },
     llm: {
       requestTimeoutMs: 60_000,
+      circuitThreshold: 3,
+      circuitCooldownMs: 600_000,
+    },
+    decision: {
+      requestTimeoutMs: 30_000,
       circuitThreshold: 3,
       circuitCooldownMs: 600_000,
     },

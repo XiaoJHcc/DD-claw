@@ -124,6 +124,10 @@ const INVENTORY: InventoryEntry[] = [
     coverage: 'registry', tool: 'set_llm_enabled', toolStatus: 'exists', exposeToAgent: true,
   },
   {
+    method: 'PUT', path: '/api/decision/enabled', label: 'PUT /api/decision/enabled',
+    coverage: 'registry', tool: 'set_decision_enabled', toolStatus: 'exists', exposeToAgent: true,
+  },
+  {
     method: 'POST', path: '/api/llm/providers', label: 'POST /api/llm/providers',
     coverage: 'registry', tool: 'upsert_llm_provider', toolStatus: 'exists', exposeToAgent: true,
     reason: '待裁决：REST 拒绝重名 vs upsert_llm_provider 按名更新，收敛前须统一口径',

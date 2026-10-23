@@ -665,16 +665,20 @@ test('撤销结果带 tables / settingKeys / tool（入口层据此触发热生�
 });
 
 test('undoEffects：受影响表 / settings 键 → 热生效标签（P0 判据 6 的映射表）', () => {
-  // settings 键：运行参数 → reconcileRuntime；listen_* → reconcileListen；llm_* → 重建 router；
+  // settings 键：运行参数 → reconcileRuntime；listen_* → reconcileListen；llm_* / decision_* → 重建对应 router；
   // napcat_* → 重装配通道；其余（推送总开关等由 pipeline 逐条读表）无回调
   assert.deepEqual(undoEffects({ settingKeys: ['poll_interval_sec'] }), ['runtime']);
   assert.deepEqual(undoEffects({ settingKeys: ['notify_on_first_run'] }), ['runtime']);
   assert.deepEqual(undoEffects({ settingKeys: ['listen_dynamic'] }), ['listen']);
   assert.deepEqual(undoEffects({ settingKeys: ['llm_providers'] }), ['llm']);
   assert.deepEqual(undoEffects({ settingKeys: ['llm_key:p1'] }), ['llm']);
-  // 决策模型管理面暂无运行期缓存（名单与 key 按需直读 settings），撤销后不需要热生效回调
-  assert.deepEqual(undoEffects({ settingKeys: ['decision_providers'] }), []);
-  assert.deepEqual(undoEffects({ settingKeys: ['decision_key:jev'] }), []);
+  // 决策模型名单 / key 在 router 构造时快照，撤销后要重建 router
+  assert.deepEqual(undoEffects({ settingKeys: ['decision_providers'] }), ['decision']);
+  assert.deepEqual(undoEffects({ settingKeys: ['decision_key:jev'] }), ['decision']);
+  // 决策档总开关由判定档每轮直读 settings，不需要回调
+  assert.deepEqual(undoEffects({ settingKeys: ['decision_enabled'] }), []);
+  // 决策的超时 / 熔断是运行参数（走 reconcileRuntime 里的 router 重建）
+  assert.deepEqual(undoEffects({ settingKeys: ['decision_circuit_threshold'] }), ['runtime']);
   assert.deepEqual(undoEffects({ settingKeys: ['napcat_enabled'] }), ['notifiers']);
   assert.deepEqual(undoEffects({ settingKeys: ['push_enabled'] }), []);
   // 表：三张图文名单 = 源名单变化 → 同一个启停入口；渠道行 → 装配级重同步；其余无回调

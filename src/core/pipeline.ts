@@ -1,5 +1,4 @@
 import { makeLogger } from '../logger.js';
-import { readFile } from 'node:fs/promises';
 import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage, postToMessage } from '../notify/message.js';
 import {
@@ -10,6 +9,7 @@ import {
 import { isPushEnabled, liveVerdictSubjectId, postVerdictSubjectId, postSubjectRef, type PushRule, type SubjectKind } from './push.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 import { localizeImage, localizeImageViaProxy } from '../notify/image-cache.js';
+import { prepareImageFiles, type PreparedImages } from '../analysis/image-prep.js';
 import { createLimiter, mapLimit } from './concurrency.js';
 import type { PushAudit } from './content-audit.js';
 import type { BroadcastOutcome } from '../notify/dispatcher.js';
@@ -169,9 +169,13 @@ export class Pipeline {
 
   private analyze(context: AnalysisContext): Promise<Classification[]> {
     const subject = this.auditSubject(context.signal);
-    if (subject) this.deps.db.recordContentAudit(subject.kind, subject.id, 'analysis', {
-      status: 'pending', categories: [], results: [], imageCount: context.post?.imageDataUrls?.length,
-    });
+    if (subject) {
+      const skipped = context.images?.skipped ?? [];
+      this.deps.db.recordContentAudit(subject.kind, subject.id, 'analysis', {
+        status: 'pending', categories: [], results: [], imageCount: context.images?.dataUrls.length,
+        ...(skipped.length > 0 ? { skippedImages: skipped } : {}),
+      });
+    }
     return this.deps.queue.submit(context).catch((error: unknown) => {
       if (subject) {
         const previous = this.deps.db.getContentAudit(subject.kind, subject.id)?.analysis;
@@ -182,6 +186,31 @@ export class Pipeline {
       log.error('内容分析异常', error);
       return [];
     });
+  }
+
+  /**
+   * live_start 的判定入口：关键帧（缺则封面）的下载与规范化在**判定这条 promise 里**完成，
+   * 所以取图再慢也不挡「任意内容」规则的推送（见 handle 的 needsWait）。
+   * 图床 URL 只在这里落本地，绝不进判定输入；失败 = 无图 + 审计原因。
+   */
+  private async analyzeLive(event: LiveEvent, signal: Signal): Promise<Classification[]> {
+    return this.analyze({ event, signal, images: await this.liveImages(event) });
+  }
+
+  private async liveImages(event: LiveEvent): Promise<PreparedImages> {
+    const url = event.keyframe || event.cover;
+    const ref = event.keyframe ? 'keyframe' : 'cover';
+    const cacheDir = this.deps.imageCacheDir;
+    // 没配缓存目录就不下图（与推送带图同一条前提）
+    if (!url || !cacheDir) return { dataUrls: [], skipped: [] };
+    try {
+      const path = await this.imageLimited(() => localizeImage(url, cacheDir));
+      if (!path) return { dataUrls: [], skipped: [{ ref, reason: '下载失败' }] };
+      return await prepareImageFiles([path]);
+    } catch (e) {
+      log.debug(`直播取图异常（按无图判定）: ${(e as Error).message}`);
+      return { dataUrls: [], skipped: [{ ref, reason: '下载失败' }] };
+    }
   }
 
   private auditRules(signal: Signal, kind: SubjectKind, ref: string, matched: Set<number>, rules: PushRule[]): PushAudit {
@@ -282,7 +311,7 @@ export class Pipeline {
     // 的回看面不变），不等时先推后收——绝不产生双推（分类规则只在匹配那一刻生效一次）。
     const rules = db.listPushRules();
     const clsPromise = signal.kind === 'live_start'
-      ? this.analyze({ event, signal })
+      ? this.analyzeLive(event, signal)
       : Promise.resolve([] as Classification[]);
     const needsWait = hasCoveringCategoryRule(rules.filter((entry) => entry.enabled), 'live', event.uid);
     const classifications = needsWait ? await clsPromise : [];
@@ -433,12 +462,12 @@ export class Pipeline {
 
     // 图片先落本地文件：推送要带图，分类判定也要看图（「只推自拍」这类标准只看文字判不出来）。
     // X 图床（pbs.twimg.com）墙内直连不通，NapCat / LLM provider 都拉不到远程 URL ——
-    // 唯一可行形态是先经代理隧道下载到本地，推送发本地文件、LLM 发 base64 data URL。
+    // 唯一可行形态是先经代理隧道下载到本地，推送发本地文件、判定吃规范化后的 data URL。
     // 有图的帖全图都下，每张独立容错、失败的单张跳过；全部失败按无图走，不阻塞通知。
     // 微博图床（sinaimg.cn）与B站图床（hdslb.com）境内直连可达 → 普通 fetch，不给代理链路添无关流量。
-    // （判定分类制后判定也吃配图，故本地化提到判定之前；条件与容错纪律不变）
+    // 落本地后由 prepareImageFiles 统一规范化（转码 / 限边 / 限体积 / 去动图），图床 URL 不进模型。
     let images: string[] | undefined;
-    let imageDataUrls: string[] | undefined;
+    let prepared: PreparedImages | undefined;
     if (post.pics.length > 0 && this.deps.imageCacheDir) {
       const proxyUrl = getXConfig(db).proxyUrl;
       const downloaded = await mapLimit(post.pics, 3, (pic) => this.imageLimited(() =>
@@ -448,7 +477,7 @@ export class Pipeline {
       const ok = downloaded.filter((p): p is string => p != null);
       if (ok.length > 0) {
         images = ok;
-        imageDataUrls = await toDataUrls(ok);
+        prepared = await prepareImageFiles(ok);
       }
     }
 
@@ -459,7 +488,7 @@ export class Pipeline {
     const rules = allRules.filter((entry) => entry.enabled);
     const subjectRef = postSubjectRef(platform, post.screenName);
     const needsWait = hasCoveringCategoryRule(rules, 'post', subjectRef);
-    const clsPromise = this.analyze({ signal, post: { post, imageDataUrls } });
+    const clsPromise = this.analyze({ signal, post: { post }, ...(prepared ? { images: prepared } : {}) });
     const matched = needsWait
       ? new Set((await clsPromise).map((c) => c.categoryId))
       : new Set<number>();
@@ -467,7 +496,7 @@ export class Pipeline {
     const hits = matchRules(rules, { subjectType: 'post' }, matched, subjectRef);
     const audit = this.auditRules(signal, 'post', subjectRef, matched, allRules);
     if ((images?.length ?? 0) < post.pics.length) {
-      audit.imageWarning = `帖子有 ${post.pics.length} 张图片，本地化成功 ${images?.length ?? 0} 张；分类视觉输入 ${imageDataUrls?.length ?? 0} 张`;
+      audit.imageWarning = `帖子有 ${post.pics.length} 张图片，本地化成功 ${images?.length ?? 0} 张；分类视觉输入 ${prepared?.dataUrls.length ?? 0} 张`;
       this.auditPush(signal, audit);
     }
     if (hits.length === 0) {
@@ -521,20 +550,4 @@ export class Pipeline {
       qqTarget || undefined,
     );
   }
-}
-
-/** 一次喂给 vision 模型的配图上限（微博/B站动态最多 9 张，全带） */
-const MAX_VISION_IMAGES = 9;
-
-/** 本地图片 → base64 data URL（LLM provider 拉不到墙内/外的远程图床，只认随请求带过去的字节）；读失败的单张跳过 */
-async function toDataUrls(paths: string[]): Promise<string[]> {
-  const out: string[] = [];
-  for (const p of paths.slice(0, MAX_VISION_IMAGES)) {
-    try {
-      const buf = await readFile(p);
-      const mime = p.endsWith('.png') ? 'image/png' : p.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
-      out.push(`data:${mime};base64,${buf.toString('base64')}`);
-    } catch { /* 单张读失败跳过，剩下的照常带 */ }
-  }
-  return out;
 }

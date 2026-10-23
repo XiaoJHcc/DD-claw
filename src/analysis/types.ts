@@ -1,27 +1,28 @@
 import type { LiveEvent, Signal } from '../core/types.js';
+import type { PreparedImages } from './image-prep.js';
 import type { PostCandidate } from './matcher.js';
 
-/** 一份内容被判属于/不属于某分类的结果（入 verdicts 表） */
+/** 一份内容被判属于/不属于某分类的结果（入 verdicts 表；每档每来源一行） */
 export interface Classification {
   categoryId: number;
   /** 冗余存名（= categories.name），分类删除后历史仍可读 */
   name: string;
-  /** llm = LLM 判定（权威路径）；rule = 确定性条件（无提示词分类 / LLM 不可用时的回退）；
-   *  decision = 决策模型通道（占位预留，暂无生产者） */
+  /** llm = LLM 判定（权威路径）；rule = 确定性条件（无提示词分类 / 模型档不可用时的回退）；
+   *  decision = 决策模型通道（判决链第一档，带 P(属于)） */
   source: 'llm' | 'rule' | 'decision';
-  /** LLM 路径置信度（0-1），rule 路径为 null */
+  /** 仅决策模型的 P(属于)，其余来源 null（LLM 自报数字没有校准意义，不采信） */
   confidence: number | null;
   /** LLM 证据 / 命中的关键词·分区说明 */
   evidence: string;
-  /** 判定结论（缺省 true = 属于）。false 只由 LLM 档产出（判否入档：post 侧落 pass=0 供
-   *  「为什么没推」回看）；classify() 对外只返回属于（pass=true）的条目 */
-  pass?: boolean;
+  /** 判定结论：true = 属于。判否也要入档（「为什么没推」可回看；直播与图文一致） */
+  pass: boolean;
+  /** 是否为本分类的生效结论（判决链编排器最终填写；消费方只读生效行） */
+  effective: boolean;
 }
 
-/** 图文帖的分析输入：帖子投影 + 已本地化的配图（data URL，vision 输入面） */
+/** 图文帖的分析输入：帖子投影（视觉输入走 ctx.images，不在这里） */
 export interface PostAnalysisInput {
   post: PostCandidate;
-  imageDataUrls?: string[];
 }
 
 /**
@@ -34,12 +35,14 @@ export interface AnalysisContext {
   signal: Signal;
   /** 图文帖（feed_post 判定入口）；直播判定不带 */
   post?: PostAnalysisInput;
+  /** 视觉输入（两种内容共用）：判定前已规范化的基线 JPEG data URL + 被拦下的图与原因 */
+  images?: PreparedImages;
 }
 
 export interface Classifier {
   readonly name: string;
   /** live_start → 按直播分类判定；feed_post → 按图文分类判定；其余返回 []。
-   *  判定结果由实现自行入 verdicts 表。 */
+   *  判定结果由实现自行入 verdicts / primary_verdicts 表；返回值只含生效且属于的分类。 */
   classify(ctx: AnalysisContext): Promise<Classification[]>;
 }
 

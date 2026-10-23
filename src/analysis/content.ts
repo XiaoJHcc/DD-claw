@@ -1,7 +1,8 @@
 /**
  * ContentItem 内容项抽象：直播场次与图文帖的统一投影。
  * 分类判定与 LLM prompt 构造只吃它（判决链的统一输入面）；
- * 输入面自带图（直播封面/关键帧、图文配图 data URL），决策模型的识图默认要求钉在这里。
+ * 输入面自带图，但只吃**判定前已规范化**的基线 JPEG data URL（见 image-prep），
+ * 图床远程 URL 绝不进这里——两个判定通道共用同一份视觉输入。
  */
 import { liveVerdictSubjectId, postVerdictSubjectId } from '../core/push.js';
 import type { LiveEvent } from '../core/types.js';
@@ -22,7 +23,7 @@ export interface ContentItem {
   text: string;
   /** 内容标签：live=area/parentArea；post=type/isQuote/hasMedia/platform */
   tags: Record<string, string>;
-  /** 视觉输入：live=keyframe||cover（有则一张）/ post=配图 data URL（可空） */
+  /** 视觉输入：已规范化的 JPEG data URL（直播关键帧 / 图文配图；可空 = 无图或全被拦） */
   imageUrls: string[];
   /** 直播间链接 / 帖子链接 */
   url: string;
@@ -30,9 +31,12 @@ export interface ContentItem {
   ts: number;
 }
 
-/** LiveEvent → 内容项投影（分类判定 / LLM prompt 构造的直播输入面） */
-export function fromLiveEvent(event: LiveEvent): ContentItem {
-  const image = event.keyframe || event.cover;
+/**
+ * LiveEvent → 内容项投影（分类判定 / LLM prompt 构造的直播输入面）。
+ * 关键帧 / 封面在这里只是「哪张图的来源」，实际喂给模型的图片由 pipeline 先落本地、
+ * 再经 image-prep 规范化成 data URL 传进来；不传 = 无图（远程 URL 绝不回流）。
+ */
+export function fromLiveEvent(event: LiveEvent, imageDataUrls?: string[]): ContentItem {
   return {
     subjectType: 'live',
     subjectId: liveVerdictSubjectId(event.roomId, event.liveTime),
@@ -40,7 +44,7 @@ export function fromLiveEvent(event: LiveEvent): ContentItem {
     authorName: event.uname || event.alias,
     text: event.title,
     tags: { area: event.areaName, parentArea: event.parentAreaName },
-    imageUrls: image ? [image] : [],
+    imageUrls: imageDataUrls ?? [],
     url: event.roomUrl,
     ts: event.liveTime,
   };
@@ -49,7 +53,7 @@ export function fromLiveEvent(event: LiveEvent): ContentItem {
 /**
  * PostCandidate → 内容项投影。type 在投影时折叠成 original/retweet——
  * matcher「转发只认 type==='retweet'，其余一律原创」的语义在这里归一。
- * imageDataUrls = 配图的 data URL（本地化后的视觉输入），与帖子自带的图床 URL 不同。
+ * imageDataUrls = 配图规范化后的 data URL（与帖子自带的图床 URL 不同）。
  */
 export function fromPostCandidate(post: PostCandidate, imageDataUrls?: string[]): ContentItem {
   return {

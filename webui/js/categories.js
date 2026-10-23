@@ -1,8 +1,9 @@
 // 面板前端 · 卡片「分类规则」：分类列表（拖拽把手/启停勾/名称/条件摘要标签/编辑/删除）
-// + 底部新增按钮。分类 = LLM 提示词 + 确定性条件组，归类结果供推送规则引用。
+// + 底部新增按钮。分类 = 判定描述（同时喂 LLM 与决策模型）+ 确定性条件组 + 是否进主分类组，
+// 归类结果供推送规则引用。
 // 新增/编辑走一级 sheet，保存报错内联在按钮行；删除分类会级联停用引用它的推送规则（先 confirm 告知）。
-// 摘要标签格式两形态统一：LLM（有提示词）+ 条件摘要（关键词 N / 分区 N / 只原·只转 / 须引用 / 须带图）。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, field, makeSortable, mergeVisibleOrder, openSheet, closeSheet, splitCsv, dropdownHtml, onTableRefresh } from './core.js';
+// 摘要标签格式两形态统一：主分类（进主分类组）+ 模型（有判定描述）+ 条件摘要（关键词 N / 分区 N / 只原·只转 / 须引用 / 须带图）。
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, checkRowHtml, iconBtn, field, makeSortable, mergeVisibleOrder, openSheet, closeSheet, splitCsv, dropdownHtml, onTableRefresh } from './core.js';
 import { notifyRulesChanged } from './rules.js';
 
 let catCache = [];
@@ -12,10 +13,10 @@ function catById(id) {
   return null;
 }
 
-// 摘要标签（两形态统一的 tag 语言）：LLM 紫 / 关键词蓝 / 分区·帖子形态·引用·带图 mint
+// 摘要标签（两形态统一的 tag 语言）：模型紫 / 关键词蓝 / 分区·帖子形态·引用·带图 mint / 主分类琥珀（末位，窄卡溢出时先让出）
 function catSummaryTags(c) {
   let tags = '';
-  if (c.llmPrompt) tags += '<span class="tag tag-purple">LLM</span>';
+  if (c.llmPrompt) tags += '<span class="tag tag-purple">模型</span>';
   if (c.keywords.length) tags += `<span class="tag tag-blue">关键词 ${c.keywords.length}</span>`;
   if (c.appliesTo !== 'post' && c.areas.length) tags += `<span class="tag tag-mint">分区 ${c.areas.length}</span>`;
   if (c.appliesTo === 'post') {
@@ -24,6 +25,7 @@ function catSummaryTags(c) {
     if (c.requireQuote) tags += '<span class="tag tag-mint">须引用</span>';
     if (c.requireMedia) tags += '<span class="tag tag-mint">须带图</span>';
   }
+  if (c.primary) tags += '<span class="tag tag-amber">主分类</span>';
   return tags;
 }
 
@@ -119,8 +121,10 @@ function openCategorySheet(id, kind) {
   openSheet(c ? '编辑分类' : '新增分类',
     field('名称', `<input class="inp" id="cg-name" placeholder="如：歌回；留空自动命名" value="` +
       (c ? esc(c.name) : '') + '">') +
-    field('LLM 提示词', '<textarea class="inp" id="cg-prompt" rows="4" placeholder="留空仅使用确定性条件">' +
+    field('判定描述', '<textarea class="inp" id="cg-prompt" rows="4" placeholder="留空仅使用确定性条件">' +
       (c && c.llmPrompt ? esc(c.llmPrompt) : '') + '</textarea>') +
+    // 主分类组勾选：v2 表单布尔 = 多选行形态（左文字右勾点，.field 内 check-row 恒 ctl-h 高）
+    '<div class="field">' + checkRowHtml('id="cg-primary"', !!(c && c.primary), '主分类') + '</div>' +
     // 确定性条件区：按适用内容渲染可用算子（同一组件、同一交互语言）
     `<div class="field" id="cg-cond-area">${condAreaHtml()}</div>` +
     '<div class="sheet-foot"><span id="category-err" class="form-err"></span>' +
@@ -165,12 +169,14 @@ ACTIONS['save-category'] = function (el) {
   if (err) err.textContent = '';
   const prompt = document.getElementById('cg-prompt').value.trim();
   const name = document.getElementById('cg-name').value.trim();
+  const primary = document.getElementById('cg-primary').checked;
   captureCatDraft();
   const isPost = catDraft.kind === 'post';
   // name 空则不提交该字段：POST 由后端自动补「分类 N」，PUT 保留原名（显式空串会 400）
   const body = {
     appliesTo: catDraft.kind,
     llmPrompt: prompt || null,
+    primary: primary,
     keywords: splitCsv(catDraft.keywords),
     areas: isPost ? [] : splitCsv(catDraft.areas),
     postTypes: isPost ? catDraft.postTypes : [],

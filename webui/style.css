@@ -177,6 +177,13 @@ h2{font-size:var(--fs-xl);font-weight:600;margin:0}
 .tag-amber{background:rgba(232,161,58,.14);color:var(--amber)}
 .tag-pink{background:rgba(255,92,138,.10);color:var(--pink)}
 .tag-gray{background:var(--fill);color:var(--text-2)}
+/* 实色档：同一套色档但底色取实色、字取白——只给需要压过同组浅底标签的那一枚（时间表主分类） */
+.tag-solid{color:#fff}
+.tag-solid.tag-blue{background:var(--blue)}
+.tag-solid.tag-mint{background:var(--mint)}
+.tag-solid.tag-purple{background:var(--purple)}
+.tag-solid.tag-amber{background:var(--amber)}
+.tag-solid.tag-pink{background:var(--pink)}
 
 /* ---- 按钮：统一 36 高圆角矩形（--r-md）。按钮文字标准 = 13px + 600 加粗（比正文小一档、更挺括）。
    语义与配色同 v1：

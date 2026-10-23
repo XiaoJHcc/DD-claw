@@ -9,9 +9,10 @@ import {
   type Follow, type FollowRow, type Streamer, type StreamerInput, type StreamerRow,
 } from './streamers.js';
 import {
-  rowToCategory, rowToChannel, rowToRule, rowToVerdict,
+  rowToCategory, rowToChannel, rowToPrimaryVerdict, rowToRule, rowToVerdict,
   type Category, type CategoryInput, type CategoryRow, type NewCategory,
-  type NewPushChannel, type NewPushRule, type NewVerdict,
+  type NewPrimaryVerdict, type NewPushChannel, type NewPushRule, type NewVerdict,
+  type PrimaryVerdict, type PrimaryVerdictRow,
   type PushChannel, type PushChannelInput, type PushChannelRow,
   type PushRule, type PushRuleInput, type PushRuleRow,
   type Verdict, type VerdictRow, type VerdictSubjectType,
@@ -39,9 +40,10 @@ import {
 const log = makeLogger('core/db');
 
 /**
- * verdicts 建表 DDL（SCHEMA 首建与身份键迁移重建共用，表名参数化防两处漂移）。
+ * verdicts 建表 DDL（SCHEMA 首建与两次重建迁移共用，表名参数化防多处漂移）。
  * 身份键 = (subject_type, subject_id)：live = `room_id:live_time`、post = `platform:item_id`；
  * category_id / rule_id 的 0 是「不适用」哨兵（不用 NULL——SQLite UNIQUE 对 NULL 不去重）。
+ * 唯一键带 source：同一分类的确定性结论与模型结论各自留痕，`effective` 标出生效的那一条。
  */
 const verdictsDdl = (name: string) => `
 CREATE TABLE IF NOT EXISTS ${name} (
@@ -56,8 +58,30 @@ CREATE TABLE IF NOT EXISTS ${name} (
   pass          INTEGER NOT NULL DEFAULT 1,
   confidence    REAL,
   evidence      TEXT    NOT NULL DEFAULT '',
+  effective     INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
-  UNIQUE(subject_type, subject_id, category_id, rule_id)
+  UNIQUE(subject_type, subject_id, category_id, rule_id, source)
+)`;
+
+/**
+ * primary_verdicts 建表 DDL：主分类判定（单选）。
+ * UNIQUE(subject_type, subject_id, source) —— 同一主体的每个来源至多一条，`effective` 标出展示用的那一条；
+ * category_id 的 0 = 「其他」（主分类组里都不像）。
+ */
+const primaryVerdictsDdl = `
+CREATE TABLE IF NOT EXISTS primary_verdicts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_type  TEXT    NOT NULL CHECK(subject_type IN ('live','post')),
+  subject_id    TEXT    NOT NULL,
+  uid           TEXT    NOT NULL,
+  category_id   INTEGER NOT NULL DEFAULT 0,
+  category_name TEXT    NOT NULL DEFAULT '',
+  source        TEXT    NOT NULL CHECK(source IN ('llm','rule','decision')),
+  distribution  TEXT,
+  evidence      TEXT    NOT NULL DEFAULT '',
+  effective     INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL,
+  UNIQUE(subject_type, subject_id, source)
 )`;
 
 /**
@@ -213,12 +237,14 @@ CREATE TABLE IF NOT EXISTS categories (
   require_quote INTEGER NOT NULL DEFAULT 0,
   require_media INTEGER NOT NULL DEFAULT 0,
   cond_mode     TEXT    NOT NULL DEFAULT 'and' CHECK(cond_mode IN ('and','or')),
+  is_primary    INTEGER NOT NULL DEFAULT 0,
   enabled       INTEGER NOT NULL DEFAULT 1,
   sort          INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
 ${verdictsDdl('verdicts')};
+${primaryVerdictsDdl};
 ${pushRulesDdl('push_rules')};
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
@@ -337,12 +363,15 @@ export interface TimelineEntry {
   keyframe: string | null;
   cover: string | null;
   segments: TimelineSegment[];
+  /** 生效且属于的分类结论（判否与未生效行不进时间线） */
   verdicts: Array<{
     categoryName: string;
     source: 'llm' | 'rule' | 'decision';
     confidence: number | null;
     evidence: string;
   }>;
+  /** 生效主分类（「其他」或无生效行 = null） */
+  primary: { categoryName: string; source: 'llm' | 'rule' | 'decision' } | null;
 }
 
 export class Db {
@@ -388,6 +417,8 @@ export class Db {
     this.ensureColumn('categories', 'post_types', "post_types TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn('categories', 'require_quote', 'require_quote INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('categories', 'require_media', 'require_media INTEGER NOT NULL DEFAULT 0');
+    // 分类「主分类」勾选（主分类判定的候选集；旧库在线补列，默认 0 = 不进主分类组）
+    this.ensureColumn('categories', 'is_primary', 'is_primary INTEGER NOT NULL DEFAULT 0');
     // x_accounts 头像（抓取时顺手抠 X 头像 → 代理下载到 cache/x-avatars，存文件名；旧库在线补列）
     this.ensureColumn('x_accounts', 'avatar', 'avatar TEXT');
     // x_accounts 昵称（X 的 display name，与自定义显示名 display_name 分开；旧库的
@@ -420,12 +451,14 @@ export class Db {
     // weibo_accounts 本身由 SCHEMA 的 CREATE TABLE IF NOT EXISTS 建出；这里只做数据搬家。
     // 迁移次序有依赖（都幂等，详见各方法注释）：
     //   weibo 名单种入 → post_rules 生效范围搬账号侧（老中途库）→ LIVE_RCMD 清理
-    //   → verdicts 身份键 → push_rules uids→scope 重建 → post_rules 搬家成分类+规则
+    //   → verdicts 身份键（→ 老形状的中间态）→ verdicts 判据列（唯一键 + effective）
+    //   → push_rules uids→scope 重建 → post_rules 搬家成分类+规则
     //   → 账号表 rule_ids 列删除（须在搬家之后——搬家要反查 rule_ids）
     this.migrateWeiboAccounts();
     this.migratePostRuleScopes();
     this.dropLiveRcmdPosts();
     this.migrateVerdictsSubjectKeys();
+    this.migrateVerdictsEffective();
     this.migratePushRuleScopeShape();
     this.migratePostRulesToCategories();
     this.migrateAccountRuleIdsDrop();
@@ -576,7 +609,7 @@ export class Db {
   }
 
   /**
-   * verdicts 身份键通用化（P1a）：`(room_id, live_time)` → `(subject_type, subject_id)`，
+   * verdicts 身份键通用化：`(room_id, live_time)` → `(subject_type, subject_id)`，
    * 为图文判定归档铺路。SQLite 改不了约束，走「建新表 + 拷数据 + 改名」重建：
    * 老行一律搬成 subject_type='live'、subject_id = `room_id || ':' || live_time`，
    * rule_id 取 0 哨兵、pass 取 1（老语义只记「属于」）；id 原样保留（排序/历史引用不变）。
@@ -594,9 +627,9 @@ export class Db {
         .prepare(
           `INSERT OR IGNORE INTO verdicts_v2
              (id, subject_type, subject_id, uid, category_id, rule_id,
-              category_name, source, pass, confidence, evidence, created_at)
+              category_name, source, pass, confidence, evidence, effective, created_at)
            SELECT id, 'live', room_id || ':' || live_time, uid, category_id, 0,
-              category_name, source, 1, confidence, evidence, created_at
+              category_name, source, 1, confidence, evidence, 1, created_at
              FROM verdicts`,
         )
         .run();
@@ -605,6 +638,36 @@ export class Db {
     });
     const moved = tx();
     log.info(`verdicts 身份键迁移：${moved} 行老判定搬迁为 subject_type='live'`);
+  }
+
+  /**
+   * verdicts 判据列重建：唯一键补上 `source` + 新增 `effective`（逐档落库后，同一分类的确定性结论
+   * 与模型结论各占一行，生效结论由 effective 标出）。SQLite 改不了约束，走「建新表 + 拷全列 + 改名」：
+   * 老行一律 effective=1——单档时代的每一行都是当时的生效结论；id 原样保留。
+   *
+   * 幂等靠列存在性检测而不是 settings 闸门（重建后 effective 列就在，重跑是空操作）。
+   * **必须排在 migrateVerdictsSubjectKeys 之后**：老身份键库先搬成 subject_type 形状，
+   * 那一轮已按新 DDL 建表并写 effective=1，这里随列检测跳过。
+   */
+  private migrateVerdictsEffective(): void {
+    if (!this.tableExists('verdicts') || this.columnExists('verdicts', 'effective')) return;
+    const tx = this.db.transaction(() => {
+      this.db.exec(`DROP TABLE IF EXISTS verdicts_v3; ${verdictsDdl('verdicts_v3')}`);
+      const moved = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO verdicts_v3
+             (id, subject_type, subject_id, uid, category_id, rule_id,
+              category_name, source, pass, confidence, evidence, effective, created_at)
+           SELECT id, subject_type, subject_id, uid, category_id, rule_id,
+              category_name, source, pass, confidence, evidence, 1, created_at
+             FROM verdicts`,
+        )
+        .run();
+      this.db.exec('DROP TABLE verdicts; ALTER TABLE verdicts_v3 RENAME TO verdicts;');
+      return moved.changes;
+    });
+    const moved = tx();
+    log.info(`verdicts 判据列迁移：${moved} 行判定补 effective=1（唯一键加 source）`);
   }
 
   /**
@@ -987,7 +1050,7 @@ export class Db {
 
   /**
    * 时间轴组装（/api/schedule）：first_seen 落在 [fromTs, toTs) 的场次 + 其 segments +
-   * verdicts + 主播信息（alias/uname/face）。三表各查一次（join 场次过滤），JS 按
+   * verdicts + 主分类 + 主播信息（alias/uname/face）。四表各查一次（join 场次过滤），JS 按
    * (room_id, live_time) 归并，无 N+1。endTs 语义：在播（last_seen 鲜度窗口内）= null；
    * 已下播 = last_seen，兜底关闭开口段；legacy 无打点场次 = first_seen（零长，前端不画）。
    */
@@ -1011,19 +1074,33 @@ export class Db {
       )
       .all(fromTs, toTs) as LiveSegmentRow[];
     // verdicts 身份键 = (subject_type, subject_id)：live 行以 `room_id:live_time` 对场次；
-    // pass=0（判定不通过）不进时间线——这里展示的是「属于哪些分类」
+    // 只取生效行（effective=1）且 pass=1——这里展示的是「属于哪些分类」，每分类恰一行
     const verdictRows = this.db
       .prepare(
         `SELECT v.subject_id, v.category_name, v.source, v.confidence, v.evidence
          FROM verdicts v
          JOIN live_sessions ls
            ON v.subject_type = 'live' AND v.subject_id = ls.room_id || ':' || ls.live_time
-         WHERE ls.first_seen >= ? AND ls.first_seen < ? AND v.pass = 1
+         WHERE ls.first_seen >= ? AND ls.first_seen < ? AND v.effective = 1 AND v.pass = 1
          ORDER BY v.id`,
       )
       .all(fromTs, toTs) as Array<{
         subject_id: string; category_name: string;
         source: 'llm' | 'rule' | 'decision'; confidence: number | null; evidence: string;
+      }>;
+    // 主分类：同一轮 join 取生效行（category_id=0「其他」不进展示）
+    const primaryRows = this.db
+      .prepare(
+        `SELECT p.subject_id, p.category_id, p.category_name, p.source
+         FROM primary_verdicts p
+         JOIN live_sessions ls
+           ON p.subject_type = 'live' AND p.subject_id = ls.room_id || ':' || ls.live_time
+         WHERE ls.first_seen >= ? AND ls.first_seen < ? AND p.effective = 1
+         ORDER BY p.id`,
+      )
+      .all(fromTs, toTs) as Array<{
+        subject_id: string; category_id: number; category_name: string;
+        source: 'llm' | 'rule' | 'decision';
       }>;
     const streamerByUid = new Map(this.listStreamers().map((s) => [s.uid, s]));
 
@@ -1047,6 +1124,11 @@ export class Db {
         confidence: v.confidence, evidence: v.evidence,
       });
       verdictsBySession.set(k, list);
+    }
+    const primaryBySession = new Map<string, NonNullable<TimelineEntry['primary']>>();
+    for (const p of primaryRows) {
+      if (p.category_id === 0) continue; // 「其他」= 没有组内主分类，前端不展示
+      primaryBySession.set(p.subject_id, { categoryName: p.category_name, source: p.source });
     }
 
     return sessions.map((s) => {
@@ -1075,6 +1157,7 @@ export class Db {
         keyframe: s.keyframe, cover: s.cover,
         segments,
         verdicts: verdictsBySession.get(key(s.room_id, s.live_time)) ?? [],
+        primary: primaryBySession.get(key(s.room_id, s.live_time)) ?? null,
       };
     });
   }
@@ -1261,7 +1344,7 @@ export class Db {
     return this.db.prepare('DELETE FROM push_channels WHERE id = ?').run(id).changes > 0;
   }
 
-  // ---- categories：分类规则（全局；LLM 提示词 + 确定性条件，归类结果入 verdicts）----
+  // ---- categories：分类规则（全局；判定描述 + 确定性条件，归类结果入 verdicts）----
 
   /** 面板用：全量分类（含 disabled），排序（sort, id）。判定消费请用 listEnabledCategories。 */
   listCategories(): Category[] {
@@ -1295,18 +1378,19 @@ export class Db {
       requireMedia: input.requireMedia ?? prev?.requireMedia ?? false,
       appliesTo: input.appliesTo ?? prev?.appliesTo ?? 'live',
       condMode: input.condMode ?? prev?.condMode ?? 'and',
+      primary: input.primary ?? prev?.primary ?? false,
       enabled: input.enabled ?? prev?.enabled ?? true,
     };
     if (prev) {
       this.db
         .prepare(
           `UPDATE categories SET name=?, llm_prompt=?, keywords=?, areas=?, post_types=?,
-             require_quote=?, require_media=?, applies_to=?, cond_mode=?, enabled=?, updated_at=?
+             require_quote=?, require_media=?, applies_to=?, cond_mode=?, is_primary=?, enabled=?, updated_at=?
            WHERE id=?`,
         )
         .run(c.name, c.llmPrompt, JSON.stringify(c.keywords), JSON.stringify(c.areas),
           JSON.stringify(c.postTypes), c.requireQuote ? 1 : 0, c.requireMedia ? 1 : 0,
-          c.appliesTo, c.condMode, c.enabled ? 1 : 0, now(), prev.id);
+          c.appliesTo, c.condMode, c.primary ? 1 : 0, c.enabled ? 1 : 0, now(), prev.id);
       return prev.id;
     }
     const t = now();
@@ -1317,12 +1401,12 @@ export class Db {
     const info = this.db
       .prepare(
         `INSERT INTO categories (name, llm_prompt, keywords, areas, post_types,
-           require_quote, require_media, applies_to, cond_mode, enabled, sort, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           require_quote, require_media, applies_to, cond_mode, is_primary, enabled, sort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(c.name, c.llmPrompt, JSON.stringify(c.keywords), JSON.stringify(c.areas),
         JSON.stringify(c.postTypes), c.requireQuote ? 1 : 0, c.requireMedia ? 1 : 0,
-        c.appliesTo, c.condMode, c.enabled ? 1 : 0, m, t, t);
+        c.appliesTo, c.condMode, c.primary ? 1 : 0, c.enabled ? 1 : 0, m, t, t);
     const id = Number(info.lastInsertRowid);
     if (!c.name) {
       this.db.prepare('UPDATE categories SET name = ?, updated_at = ? WHERE id = ?').run(`分类 ${id}`, t, id);
@@ -1429,28 +1513,52 @@ export class Db {
     return this.db.prepare('DELETE FROM push_rules WHERE id = ?').run(id).changes > 0;
   }
 
-  // ---- verdicts：内容判定归档（UNIQUE(subject_type, subject_id, category_id, rule_id) 去重）----
+  // ---- verdicts：内容判定归档（UNIQUE(subject_type, subject_id, category_id, rule_id, source) 去重）----
 
-  /** INSERT OR IGNORE：同一主体同一分类/规则重复判定静默跳过（0 哨兵参与唯一键）。 */
+  /** INSERT OR IGNORE：同一主体同一分类/规则同一来源重复判定静默跳过（0 哨兵参与唯一键）。 */
   insertVerdict(v: NewVerdict): void {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO verdicts
            (subject_type, subject_id, uid, category_id, rule_id,
-            category_name, source, pass, confidence, evidence, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            category_name, source, pass, confidence, evidence, effective, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(v.subjectType, v.subjectId, v.uid, v.categoryId, v.ruleId,
         v.categoryName, v.source, v.pass === false ? 0 : 1,
-        v.confidence, v.evidence, now());
+        v.confidence, v.evidence, v.effective ? 1 : 0, now());
   }
 
-  /** 一个主体（直播场次 / 图文帖）的全部判定结果（面板/调试用）。 */
+  /** 一个主体（直播场次 / 图文帖）的全部判定结果，含未生效行（面板/审计回看用）。 */
   listVerdicts(subjectType: VerdictSubjectType, subjectId: string): Verdict[] {
     const rows = this.db
       .prepare('SELECT * FROM verdicts WHERE subject_type = ? AND subject_id = ? ORDER BY id')
       .all(subjectType, subjectId) as VerdictRow[];
     return rows.map(rowToVerdict);
+  }
+
+  // ---- primary_verdicts：主分类判定归档（UNIQUE(subject_type, subject_id, source) 去重）----
+
+  /** INSERT OR IGNORE：同一主体同一来源的主分类只留首次判定。 */
+  insertPrimaryVerdict(v: NewPrimaryVerdict): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO primary_verdicts
+           (subject_type, subject_id, uid, category_id, category_name, source,
+            distribution, evidence, effective, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(v.subjectType, v.subjectId, v.uid, v.categoryId, v.name, v.source,
+        v.distribution === null ? null : JSON.stringify(v.distribution),
+        v.evidence, v.effective ? 1 : 0, now());
+  }
+
+  /** 一个主体的全部主分类判定行（含未生效行；展示方只读 effective=1 的那条）。 */
+  listPrimaryVerdicts(subjectType: VerdictSubjectType, subjectId: string): PrimaryVerdict[] {
+    const rows = this.db
+      .prepare('SELECT * FROM primary_verdicts WHERE subject_type = ? AND subject_id = ? ORDER BY id')
+      .all(subjectType, subjectId) as PrimaryVerdictRow[];
+    return rows.map(rowToPrimaryVerdict);
   }
 
   recordContentAudit(subjectType: VerdictSubjectType, subjectId: string, section: 'analysis', value: AnalysisAudit): void;

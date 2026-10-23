@@ -187,7 +187,25 @@ test('内容审计只暴露给 admin，gateway 工具面不可见', async (t) =>
   const gateway = await mcpClient(fixture, GATEWAY_TOKEN);
   assert.ok((await admin.listTools()).tools.some((tool) => tool.name === 'get_content_audit'));
   assert.ok(!(await gateway.listTools()).tools.some((tool) => tool.name === 'get_content_audit'));
-  assert.deepEqual(await call(admin, 'get_content_audit', { subjectType: 'post', subjectId: 'twitter:missing' }), { audit: null, verdicts: [] });
+  assert.deepEqual(
+    await call(admin, 'get_content_audit', { subjectType: 'post', subjectId: 'twitter:missing' }),
+    { audit: null, verdicts: [], primary: [] },
+    '回看面 = 审计 + 全部判定行（含未生效）+ 主分类行',
+  );
+  fixture.db.insertVerdict({
+    subjectType: 'post', subjectId: 'twitter:9001', uid: 'u', categoryId: 3, ruleId: 0,
+    categoryName: '直播预告', source: 'llm', pass: true, confidence: null, evidence: '是预告',
+    effective: true,
+  });
+  fixture.db.insertPrimaryVerdict({
+    subjectType: 'post', subjectId: 'twitter:9001', uid: 'u', categoryId: 3, name: '直播预告',
+    source: 'llm', distribution: null, evidence: '最像预告', effective: true,
+  });
+  const audited = (await call(admin, 'get_content_audit', {
+    subjectType: 'post', subjectId: 'twitter:9001',
+  })) as { verdicts: Array<{ categoryName: string; effective: boolean }>; primary: Array<{ name: string; effective: boolean }> };
+  assert.deepEqual(audited.verdicts.map((v) => [v.categoryName, v.effective]), [['直播预告', true]]);
+  assert.deepEqual(audited.primary.map((p) => [p.name, p.effective]), [['直播预告', true]]);
 });
 
 /** 预置：一群渠道 + 一 toast 渠道 + 一分类 + 一主播 */
@@ -547,6 +565,27 @@ test('admin：update_runtime_config 校验 + 热生效回调；set_listen 回调
   assert.equal(l.enabled, false);
   assert.equal(l.setting, '0');
   assert.equal(f.listenChanged.count, 1);
+
+  // 决策档运行参数：整数百分数落 settings；灰区下界必须小于上界（跨字段在合并后校验）
+  const d = (await call(adm, 'update_runtime_config', {
+    decisionGrayLowPct: 25, decisionGrayHighPct: 75, decisionPrimaryMinPct: 55,
+    decisionRequestTimeoutMs: 20_000, decisionCircuitThreshold: 4, decisionCircuitCooldownMs: 120_000,
+  })) as Record<string, number>;
+  assert.deepEqual(
+    [d.decisionGrayLowPct, d.decisionGrayHighPct, d.decisionPrimaryMinPct,
+      d.decisionRequestTimeoutMs, d.decisionCircuitThreshold, d.decisionCircuitCooldownMs],
+    [25, 75, 55, 20_000, 4, 120_000],
+  );
+  assert.equal(f.db.getSetting('decision_gray_low_pct'), '25');
+  await assert.rejects(
+    call(adm, 'update_runtime_config', { decisionGrayLowPct: 80 }),
+    /下界（80%）必须小于上界（75%）/,
+    '只改一端也要拿现状另一端比对',
+  );
+  await assert.rejects(
+    call(adm, 'update_runtime_config', { decisionGrayHighPct: 25 }),
+    /下界（25%）必须小于上界（25%）/,
+  );
 });
 
 test('admin：set_llm_key 存 settings 且不回显值', async (t) => {
@@ -796,10 +835,24 @@ test('分类 + 图文规则工具：applies_to/post 条件组、引用校验、s
     /图文分类不能配置直播分区/,
   );
 
-  // 死分类拒绝：所有条件组皆空且无 LLM 提示词
+  // 死分类拒绝：所有条件组皆空且无判定描述
   await assert.rejects(
     () => call(adm, 'upsert_category', { name: '死分类', appliesTo: 'post' }),
     /至少配置/,
+  );
+
+  // 主分类勾选：可写可读，且不改变「至少一组条件或描述」的校验口径
+  const primary = (await call(adm, 'upsert_category', {
+    name: '歌回', primary: true, keywords: ['歌'],
+  })) as { id: number };
+  const primaryCats = (await call(adm, 'list_categories')) as Array<{ id: number; primary: boolean }>;
+  assert.equal(primaryCats.find((c) => c.id === primary.id)!.primary, true);
+  await call(adm, 'upsert_category', { id: primary.id, primary: false });
+  assert.equal(
+    ((await call(adm, 'list_categories')) as Array<{ id: number; primary: boolean }>)
+      .find((c) => c.id === primary.id)!.primary,
+    false,
+    '补丁未提供条件时保留原条件与 primary 新值',
   );
 
   // 图文规则：引用该分类 + 渠道
@@ -975,14 +1028,17 @@ test('决策模型工具：名单/新增/排序/测试/删除走注册表，与 
   assert.deepEqual(await call(adm, 'list_decision_providers'), { providers: [] });
 
   await call(adm, 'upsert_decision_provider', {
-    name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0',
+    name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0', vision: true,
   });
   await call(adm, 'upsert_decision_provider', {
     name: 'local', baseURL: 'http://127.0.0.1:8080/v1', model: 'clef-flash', protocol: 'systemone',
   });
-  let list = (await call(adm, 'list_decision_providers')) as { providers: Array<{ name: string; protocol: string; keyCount: number }> };
+  let list = (await call(adm, 'list_decision_providers')) as {
+    providers: Array<{ name: string; protocol: string; vision: boolean; keyCount: number }>;
+  };
   assert.deepEqual(list.providers.map((p) => p.name), ['jev', 'local']);
   assert.deepEqual(list.providers.map((p) => p.protocol), ['systemone', 'systemone'], '缺省协议 systemone');
+  assert.deepEqual(list.providers.map((p) => p.vision), [true, false], 'vision 落库并可回读（缺省假）');
   assert.deepEqual(list.providers.map((p) => p.keyCount), [0, 0]);
 
   await assert.rejects(call(adm, 'upsert_decision_provider', {
@@ -1010,6 +1066,19 @@ test('决策模型工具：名单/新增/排序/测试/删除走注册表，与 
   assert.deepEqual(listDecisionProviders(f.db).map((p) => p.name), ['jev']);
   await assert.rejects(call(adm, 'delete_decision_provider', { name: 'local' }), /provider 不存在/);
   assert.equal(f.db.getSetting('decision_key:jev'), 'sk-decision', '删除 provider 不动 key 设置项');
+});
+
+test('set_decision_enabled：决策档总开关落 settings（缺省关），与 LLM 开关互不影响', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  assert.equal(f.db.getSetting('decision_enabled'), null, '缺省没有这行 = 关');
+  const on = (await call(adm, 'set_decision_enabled', { enabled: true })) as { ok: boolean; enabled: boolean };
+  assert.deepEqual(on, { ok: true, enabled: true });
+  assert.equal(f.db.getSetting('decision_enabled'), '1');
+  assert.equal(f.db.getSetting('llm_enabled'), null, '不动 LLM 开关');
+  const off = (await call(adm, 'set_decision_enabled', { enabled: false })) as { enabled: boolean };
+  assert.equal(off.enabled, false);
+  assert.equal(f.db.getSetting('decision_enabled'), '0');
 });
 
 test('test_push：走装配的测试推送链路并回传统计', async (t) => {

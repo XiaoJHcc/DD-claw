@@ -1,5 +1,5 @@
 /**
- * push_channels / categories / push_rules / verdicts / settings 各表的行类型与
+ * push_channels / categories / push_rules / verdicts / primary_verdicts / settings 各表的行类型与
  * 「行 ↔ 对象」映射。类型与 JSON 字段的序列化集中在这里，同 streamers.ts 惯例；
  * 表结构见 db.ts SCHEMA 与 design.md。
  */
@@ -86,6 +86,8 @@ export interface CategoryRow {
   /** 必须带图 */
   require_media: number;
   cond_mode: CondMode;
+  /** 是否属于主分类组（单选展示用：时间表等取「最像的一个」） */
+  is_primary: number;
   enabled: number;
   /** 面板拖拽排序（展示顺序）；行对象不暴露 */
   sort: number;
@@ -110,8 +112,10 @@ export interface Category {
   requireMedia: boolean;
   /** 分类服务的内容类型（live / post） */
   appliesTo: SubjectKind;
-  /** 各条件组之间的关系（空组忽略；全部条件组皆空且无 LLM 提示词 = 死分类） */
+  /** 各条件组之间的关系（空组忽略；全部条件组皆空且无判定描述 = 死分类） */
   condMode: CondMode;
+  /** 属于主分类组：主分类判定的候选集（时间表等展示用的单选分类，不参与确定性条件） */
+  primary: boolean;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
@@ -131,6 +135,7 @@ export function rowToCategory(r: CategoryRow): Category {
     requireMedia: r.require_media === 1,
     appliesTo: r.applies_to,
     condMode: r.cond_mode,
+    primary: r.is_primary === 1,
     enabled: r.enabled === 1,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
@@ -259,7 +264,11 @@ export function splitPushRuleChannel(
   };
 }
 
-// ---- verdicts：内容判定归档（直播场次与图文帖同表，身份键 = subject_type + subject_id）----
+// ---- verdicts / primary_verdicts：内容判定归档（直播场次与图文帖同表，身份键 = subject_type + subject_id）----
+//
+// 两种判定各一张表：verdicts 存「属于 / 不属于每个分类」（推送规则只读生效行），
+// primary_verdicts 存「最像主分类组里的哪一个」（时间表等展示只读生效行）。
+// 判决链每档的结论都落库，`effective` 标记哪一行是最终生效结论。
 
 export type VerdictSubjectType = SubjectKind;
 
@@ -281,17 +290,19 @@ export interface VerdictRow {
   uid: string;
   /** 分类引用；0 = 不适用哨兵（规则级判定只填 rule_id） */
   category_id: number;
-  /** 图文规则级判定引用（P1b）；0 = 不适用哨兵（分类级判定） */
+  /** 规则级判定的规则引用（旧图文规则级判定遗留）；0 = 不适用哨兵（分类级判定） */
   rule_id: number;
   /** 冗余存名，分类删除后历史仍可读 */
   category_name: string;
   source: 'llm' | 'rule' | 'decision';
-  /** 1 = 判定通过（属于）；0 = 判定不通过（P1b 图文规则级判定用） */
+  /** 1 = 判定通过（属于）；0 = 判定不通过 */
   pass: number;
-  /** LLM 路径置信度，rule 路径为 NULL */
+  /** 仅决策模型的 P(属于)；其余来源 NULL */
   confidence: number | null;
-  /** LLM 证据 / 命中的关键词·分区说明 */
+  /** 确定性命中说明 / LLM 理由 / 决策回答者 */
   evidence: string;
+  /** 1 = 该分类本条为生效结论（每个主体每个分类恰一行；消费方只读这些行） */
+  effective: number;
   created_at: number;
 }
 
@@ -309,10 +320,11 @@ export interface Verdict {
   pass: boolean;
   confidence: number | null;
   evidence: string;
+  effective: boolean;
   createdAt: number;
 }
 
-/** 判定入参：pass 缺省 true（直播现存语义 = 只记「属于」） */
+/** 判定入参：pass 缺省 true；effective 必填（调用方必须明确这一行是否为生效结论） */
 export type NewVerdict = Omit<Verdict, 'id' | 'createdAt' | 'pass'> & { pass?: boolean };
 
 export function rowToVerdict(r: VerdictRow): Verdict {
@@ -320,6 +332,59 @@ export function rowToVerdict(r: VerdictRow): Verdict {
     id: r.id, subjectType: r.subject_type, subjectId: r.subject_id, uid: r.uid,
     categoryId: r.category_id, ruleId: r.rule_id, categoryName: r.category_name,
     source: r.source, pass: r.pass === 1,
-    confidence: r.confidence, evidence: r.evidence, createdAt: r.created_at,
+    confidence: r.confidence, evidence: r.evidence, effective: r.effective === 1,
+    createdAt: r.created_at,
+  };
+}
+
+/**
+ * 主分类判定（时间表等展示用的单选分类）：与是非判定互不约束，
+ * 只回答「最像主分类组里的哪一个」。`categoryId = 0` = 「其他」。
+ */
+export interface PrimaryJudgement {
+  source: 'llm' | 'rule' | 'decision';
+  /** 0 = 「其他」（组内都不像） */
+  categoryId: number;
+  name: string;
+  /** 各选项概率分布（仅决策模型有值） */
+  distribution: Record<string, number> | null;
+  evidence: string;
+  /** 是否为本主体的生效主分类（每个主体至多一行） */
+  effective: boolean;
+}
+
+export interface PrimaryVerdictRow {
+  id: number;
+  subject_type: VerdictSubjectType;
+  subject_id: string;
+  uid: string;
+  /** 0 = 「其他」 */
+  category_id: number;
+  /** 冗余存名，分类删除后历史仍可读 */
+  category_name: string;
+  source: 'llm' | 'rule' | 'decision';
+  /** JSON：选项 → 概率（仅决策模型） */
+  distribution: string | null;
+  evidence: string;
+  effective: number;
+  created_at: number;
+}
+
+export interface PrimaryVerdict extends PrimaryJudgement {
+  id: number;
+  subjectType: VerdictSubjectType;
+  subjectId: string;
+  uid: string;
+  createdAt: number;
+}
+
+export type NewPrimaryVerdict = Omit<PrimaryVerdict, 'id' | 'createdAt'>;
+
+export function rowToPrimaryVerdict(r: PrimaryVerdictRow): PrimaryVerdict {
+  return {
+    id: r.id, subjectType: r.subject_type, subjectId: r.subject_id, uid: r.uid,
+    categoryId: r.category_id, name: r.category_name, source: r.source,
+    distribution: r.distribution ? JSON.parse(r.distribution) as Record<string, number> : null,
+    evidence: r.evidence, effective: r.effective === 1, createdAt: r.created_at,
   };
 }

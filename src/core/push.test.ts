@@ -24,7 +24,7 @@ function category(over: Partial<NewCategory> = {}): NewCategory {
   return {
     name: '歌回', llmPrompt: null, keywords: ['歌回'], areas: ['虚拟Singer'],
     postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live',
-    condMode: 'and', enabled: true,
+    condMode: 'and', primary: false, enabled: true,
     ...over,
   };
 }
@@ -41,7 +41,7 @@ function verdict(over: Partial<NewVerdict> = {}): NewVerdict {
   return {
     subjectType: 'live', subjectId: 'r1:1785310737', uid: '1',
     categoryId: 1, ruleId: 0, categoryName: '歌回',
-    source: 'rule', confidence: null, evidence: '关键词「歌回」',
+    source: 'rule', confidence: null, evidence: '关键词「歌回」', effective: true,
     ...over,
   };
 }
@@ -100,8 +100,21 @@ test('categories CRUD：JSON 数组字段往返 / 部分更新保留原值 / dis
   assert.equal(db.deleteCategory(id), false);
 });
 
-test('分类名称：不传自动补「分类 N」，传了存自定义名', (t) => {
+test('分类主分类标记：缺省 false、可勾选、补丁未提供保留原值', (t) => {
   const db = memDb(t);
+  const plain = db.upsertCategory(category());
+  assert.equal(db.listCategories().find((x) => x.id === plain)!.primary, false, '缺省不进主分类组');
+
+  const primary = db.upsertCategory(category({ name: '歌回', primary: true }));
+  assert.equal(db.listCategories().find((x) => x.id === primary)!.primary, true);
+  db.upsertCategory({ id: primary, keywords: ['歌'] });
+  assert.equal(db.listCategories().find((x) => x.id === primary)!.primary, true, '未提供的字段保留原值');
+
+  db.upsertCategory({ id: primary, primary: false });
+  assert.equal(db.listCategories().find((x) => x.id === primary)!.primary, false);
+});
+
+test('分类名称：不传自动补「分类 N」，传了存自定义名', (t) => {  const db = memDb(t);
   const id = db.upsertCategory(category({ name: '' }));
   assert.equal(db.listCategories().find((x) => x.id === id)!.name, `分类 ${id}`);
   const id2 = db.upsertCategory(category({ name: '杂谈' }));
@@ -253,7 +266,7 @@ test('splitPushRuleChannel：单渠道就地不拆；本渠道不在规则里则
 
 // ---- verdicts ----
 
-test('verdicts：插入 / UNIQUE(subject_type, subject_id, category_id, rule_id) 去重 / 按主体查询', (t) => {
+test('verdicts：插入 / UNIQUE(主体, 分类, 规则, 来源) 去重 / 按主体查询', (t) => {
   const db = memDb(t);
   assert.equal(liveVerdictSubjectId('r1', 1_785_310_737), 'r1:1785310737', 'live 身份键 = room_id:live_time');
   assert.equal(postVerdictSubjectId('twitter', '9001'), 'twitter:9001', 'post 身份键 = platform:item_id');
@@ -271,9 +284,20 @@ test('verdicts：插入 / UNIQUE(subject_type, subject_id, category_id, rule_id)
   assert.equal(list[0]!.source, 'rule');
   assert.equal(list[0]!.confidence, null, 'rule 路径置信度为 null');
   assert.equal(list[0]!.evidence, '关键词「歌回」', '首插生效，重复插入不覆盖');
+  assert.equal(list[0]!.effective, true, 'effective 落库并可读回');
   assert.equal(list[1]!.categoryName, '游戏');
   assert.equal(list[1]!.source, 'llm');
   assert.equal(list[1]!.confidence, 0.9);
+
+  // 唯一键含来源：同一分类的确定性行与模型行各自留痕，生效标记区分
+  db.insertVerdict(verdict({ source: 'llm', evidence: '模型也判属于', effective: false }));
+  db.insertVerdict(verdict({ source: 'llm', evidence: '重复', effective: false }));
+  const mixed = db.listVerdicts('live', 'r1:1785310737').filter((v) => v.categoryId === 1);
+  assert.deepEqual(
+    mixed.map((v) => [v.source, v.effective, v.evidence]),
+    [['rule', true, '关键词「歌回」'], ['llm', false, '模型也判属于']],
+    '同分类多来源各一行，同来源重复插入被 IGNORE',
+  );
 
   assert.equal(db.listVerdicts('live', 'r1:999').length, 0, '另一场直播互不影响');
 });

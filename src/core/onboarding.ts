@@ -41,7 +41,7 @@ export function seedOnboardingDefaults(db: Db): void {
     for (const c of ONBOARDING_CATEGORIES) {
       db.upsertCategory({
         name: c.name, llmPrompt: c.llmPrompt, keywords: c.keywords, areas: c.areas,
-        condMode: c.condMode, enabled: true,
+        condMode: c.condMode, primary: false, enabled: true,
       });
     }
   }

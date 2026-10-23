@@ -32,7 +32,7 @@ import { X_INTERVAL_MAX, X_INTERVAL_MIN } from '../core/x-config.js';
 import { getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS } from '../core/runtime-config.js';
 import { hasLlmProvider, isLlmEnabled, setChatProvider, setLlmEnabled } from '../analysis/providers.js';
 import {
-  dbDecisionKeysOf, decisionKeySetting, decisionNeedsAuth,
+  dbDecisionKeysOf, decisionKeySetting, decisionNeedsAuth, isDecisionEnabled, setDecisionEnabled,
 } from '../analysis/decision-providers.js';
 import { decisionProviderSchema, llmProviderSchema } from '../config/schema.js';
 import type { StreamerInput } from '../core/streamers.js';
@@ -224,7 +224,7 @@ const sharedTools: McpToolDef[] = [
   },
   {
     name: 'list_categories',
-    description: '内容分类定义：LLM 提示词 + 确定性条件组（condMode 且/或）；appliesTo=live=直播分类 / post=图文分类',
+    description: '内容分类定义：判定描述（llmPrompt，喂给 LLM 与决策模型）+ 确定性条件组（condMode 且/或）；appliesTo=live=直播分类 / post=图文分类',
     schema: {},
     role: 'shared',
     handler: (deps) => deps.db.listCategories(),
@@ -235,7 +235,8 @@ const sharedTools: McpToolDef[] = [
     schema: { subjectType: z.enum(['live', 'post']), subjectId: z.string().min(1).max(256) },
     role: 'admin',
     handler: (deps, args) => ({ audit: deps.db.getContentAudit(args.subjectType as 'live' | 'post', args.subjectId as string),
-      verdicts: deps.db.listVerdicts(args.subjectType as 'live' | 'post', args.subjectId as string) }),
+      verdicts: deps.db.listVerdicts(args.subjectType as 'live' | 'post', args.subjectId as string),
+      primary: deps.db.listPrimaryVerdicts(args.subjectType as 'live' | 'post', args.subjectId as string) }),
   },
   {
     name: 'list_channels',
@@ -420,6 +421,17 @@ const adminTools: McpToolDef[] = [
     },
   },
   {
+    name: 'set_decision_enabled',
+    description: '决策模型判定总开关（关 = 判决链跳过决策档，未定案项直接交 LLM）',
+    schema: { enabled: z.boolean() },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      setDecisionEnabled(deps.db, args.enabled as boolean);
+      return { ok: true, enabled: isDecisionEnabled(deps.db) };
+    },
+  },
+  {
     name: 'set_listen',
     description: '监听功能开关（dynamic=B站动态 / weibo=微博时间线 / twitter=X 推特）。与 auto 默认一致时回 auto，否则落手动值；保存即热启停对应源',
     schema: {
@@ -480,6 +492,14 @@ const adminTools: McpToolDef[] = [
     write: true,
     handler: (deps, args) => {
       const patch = parseRuntimePatch(args);
+      // 跨字段校验在合并后做：只改一端也要拿现状的另一端比对（灰区下界必须低于上界）
+      const merged = { ...getRuntimeConfig(deps.db), ...patch };
+      if (merged.decisionGrayLowPct >= merged.decisionGrayHighPct) {
+        throw new HttpError(
+          400,
+          `决策灰区下界（${merged.decisionGrayLowPct}%）必须小于上界（${merged.decisionGrayHighPct}%）`,
+        );
+      }
       saveRuntimeConfig(deps.db, patch);
       deps.advanced?.onChanged();
       return { ok: true, ...getRuntimeConfig(deps.db) };
@@ -679,12 +699,12 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'upsert_category',
-    description: '新建/更新内容分类（LLM 提示词 + 确定性条件组，至少一项非空）。带 id = 更新（未传字段保留原值），不带 = 新建。'
+    description: '新建/更新内容分类（判定描述 + 确定性条件组，至少一项非空）。带 id = 更新（未传字段保留原值），不带 = 新建。'
       + 'appliesTo=live（默认）：关键词/分区条件；appliesTo=post：关键词/帖子类型/引用/带图条件（图文 filters 已上移进分类）',
     schema: {
       id: idSchema.optional(),
       name: z.string().optional(),
-      llmPrompt: z.string().nullable().optional().describe('LLM 判定提示词；null/空串 = 纯确定性分类'),
+      llmPrompt: z.string().nullable().optional().describe('判定描述（定义句，同时喂给 LLM 与决策模型）；null/空串 = 纯确定性分类'),
       keywords: z.array(z.string()).optional().describe('标题/正文关键词，命中任一即可'),
       areas: z.array(z.string()).optional().describe('分区（仅直播分类）'),
       appliesTo: z.enum(['live', 'post']).optional().describe('分类服务的内容类型：live=直播场次 / post=图文帖；新建后不可更改'),
@@ -693,6 +713,7 @@ const adminTools: McpToolDef[] = [
       requireQuote: z.boolean().optional().describe('必须是引用帖（仅图文分类；只有 X 帖可能命中）'),
       requireMedia: z.boolean().optional().describe('必须带图（仅图文分类）'),
       condMode: z.enum(['and', 'or']).optional().describe('各条件组之间的关系：and=都中 / or=任一中'),
+      primary: z.boolean().optional().describe('是否加入主分类组（时间表等展示用的单选分类）'),
       enabled: z.boolean().optional(),
     },
     role: 'admin',
@@ -700,7 +721,7 @@ const adminTools: McpToolDef[] = [
     handler: (deps, args) => {
       const keys = [
         'name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia',
-        'condMode', 'enabled',
+        'condMode', 'primary', 'enabled',
       ] as const;
       if (args.id === undefined) {
         const c = parseNewCategory(pickBody(args, keys));
@@ -954,12 +975,14 @@ const adminTools: McpToolDef[] = [
   {
     name: 'upsert_decision_provider',
     description: '新增/更新决策模型供应商（按 name 定位，name 不可改）。新建需 name+baseURL+model；'
-      + 'protocol 目前只有 systemone（Jev /v1/systemone 线格式）。可顺带传 key；保存后管理面立即生效',
+      + 'protocol 目前只有 systemone（Jev /v1/systemone 线格式）；vision = 该端点能否接含图请求'
+      + '（带图内容优先交给 vision 供应商）。可顺带传 key；保存后判定路由立即重建',
     schema: {
       name: z.string().min(1),
       baseURL: z.string().optional(),
       model: z.string().optional(),
       protocol: z.enum(['systemone']).optional().describe('端点协议；当前只有 systemone'),
+      vision: z.boolean().optional().describe('可接含图请求（带图内容优先交给它）'),
       enabled: z.boolean().optional(),
       key: z.string().optional().describe('API key（多个用逗号分隔，中英文逗号均可）；空串 = 清除'),
     },
@@ -970,7 +993,7 @@ const adminTools: McpToolDef[] = [
       if (!store) throw new HttpError(400, '决策模型供应商管理未装配');
       const list = store.list();
       const prev = list.find((p) => p.name === (args.name as string));
-      const patch = pickBody(args, ['baseURL', 'model', 'protocol', 'enabled']);
+      const patch = pickBody(args, ['baseURL', 'model', 'protocol', 'vision', 'enabled']);
       const merged = prev ? { ...prev, ...patch } : { name: args.name, ...patch };
       const parsed = decisionProviderSchema.safeParse(merged);
       if (!parsed.success) {
@@ -986,6 +1009,8 @@ const adminTools: McpToolDef[] = [
       if (typeof args.key === 'string') {
         deps.db.setSetting(decisionKeySetting(provider.name), normalizeCsvText(args.key.trim()));
       }
+      // 名单与 key 都在 router 构造时快照：写完立刻重建，判定档下一轮就用新名单
+      deps.decision?.onProvidersChanged?.();
       return { ok: true, name: provider.name };
     },
   },
@@ -1001,6 +1026,7 @@ const adminTools: McpToolDef[] = [
       const list = store.list();
       if (!list.some((p) => p.name === args.name)) throw new HttpError(404, 'provider 不存在');
       store.save(list.filter((p) => p.name !== args.name));
+      deps.decision?.onProvidersChanged?.();
       return { ok: true };
     },
   },
@@ -1068,7 +1094,7 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'reorder_decision_providers',
-    description: '决策模型供应商排序：names 必须是现有 provider 名单的一个排列（长度一致/无重复/无增删）；顺序 = 后续判定通道的调用优先级',
+    description: '决策模型供应商排序：names 必须是现有 provider 名单的一个排列（长度一致/无重复/无增删）；顺序 = 判定档的调用优先级（带图内容先试 vision 供应商，再按名单序试纯文本供应商）',
     schema: { names: z.array(z.string().min(1)) },
     role: 'admin',
     write: true,
@@ -1083,6 +1109,7 @@ const adminTools: McpToolDef[] = [
         throw new HttpError(400, 'names 必须与现有 provider 名单一一对应');
       }
       store.save(names.map((n) => byName.get(n)!));
+      deps.decision?.onProvidersChanged?.();
       return { ok: true };
     },
   },

@@ -189,7 +189,7 @@ export function parseChannelPatch(body: unknown): PushChannelInput {
 
 const CATEGORY_KEYS = [
   'name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia',
-  'condMode', 'enabled',
+  'condMode', 'primary', 'enabled',
 ] as const;
 const COND_MODES = ['and', 'or'] as const;
 const SUBJECT_KINDS = ['live', 'post'] as const;
@@ -221,12 +221,14 @@ function parseCategoryFields(o: Record<string, unknown>, p: CategoryInput): void
   if ('requireQuote' in o) p.requireQuote = asBoolean(o.requireQuote, 'requireQuote');
   if ('requireMedia' in o) p.requireMedia = asBoolean(o.requireMedia, 'requireMedia');
   if ('condMode' in o) p.condMode = asEnum(o.condMode, 'condMode', COND_MODES);
+  if ('primary' in o) p.primary = asBoolean(o.primary, 'primary');
   if ('enabled' in o) p.enabled = asBoolean(o.enabled, 'enabled');
 }
 
 /**
- * 分类条件可用性：所有非 LLM 条件组皆空且无 LLM 提示词 = 死分类（确定性无从判定、LLM 也没口径）。
+ * 分类条件可用性：所有确定性条件组皆空且无判定描述 = 死分类（确定性无从判定、LLM 也没口径）。
  * POST 对缺省合并后的形状调，PUT 对合并后形状调。
+ * 「主分类」勾选不是条件（只决定它是否进主分类判定的候选集），不参与这里的最小配置校验。
  */
 export function checkCategoryConditions(c: {
   appliesTo?: 'live' | 'post';
@@ -246,7 +248,7 @@ export function checkCategoryConditions(c: {
     && !c.requireQuote
     && !c.requireMedia;
   if (!prompt && noCond) {
-    throw new HttpError(400, '至少配置 LLM 提示词或一组确定性条件（关键词/分区/帖子类型/引用/带图）');
+    throw new HttpError(400, '至少配置判定描述或一组确定性条件（关键词/分区/帖子类型/引用/带图）');
   }
 }
 
@@ -266,6 +268,7 @@ export function parseNewCategory(body: unknown): NewCategory {
     requireMedia: p.requireMedia ?? false,
     appliesTo: p.appliesTo ?? 'live',
     condMode: p.condMode ?? 'and',
+    primary: p.primary ?? false,
     enabled: p.enabled ?? true,
   };
   checkCategoryConditions(c);

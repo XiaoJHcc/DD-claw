@@ -35,24 +35,25 @@ function category(over: Partial<Category> = {}): Category {
 // ---- fromLiveEvent 投影 ----
 
 test('fromLiveEvent：字段映射（身份键 / 展示名 / 标签 / 图 / 时间戳）', () => {
-  assert.deepEqual(fromLiveEvent(event()), {
+  assert.deepEqual(fromLiveEvent(event(), ['data:image/jpeg;base64,AAA']), {
     subjectType: 'live',
     subjectId: 'r1:1785310737',
     uid: 'u1',
     authorName: '主播1',
     text: '标题',
     tags: { area: '虚拟Gamer', parentArea: '虚拟主播' },
-    imageUrls: ['k.jpg'],
+    imageUrls: ['data:image/jpeg;base64,AAA'],
     url: 'https://live.bilibili.com/r1',
     ts: 1_785_310_737,
   } satisfies ContentItem);
 });
 
-test('fromLiveEvent：uname 空回退简称；图 keyframe||cover 兜底、都无图为空', () => {
+test('fromLiveEvent：uname 空回退简称；图只认传入的 data URL，不回退远程关键帧/封面', () => {
   assert.equal(fromLiveEvent(event({ uname: '' })).authorName, '阿梓', '展示名口径 = uname 缺省回退简称');
-  assert.deepEqual(fromLiveEvent(event({ keyframe: '', cover: 'c.jpg' })).imageUrls, ['c.jpg'], '无关键帧用封面兜底');
-  assert.deepEqual(fromLiveEvent(event({ keyframe: '', cover: '' })).imageUrls, [], '都无图 = 空');
-  assert.deepEqual(fromLiveEvent(event({ keyframe: 'k.jpg', cover: 'c.jpg' })).imageUrls, ['k.jpg'], '有则一张：关键帧优先');
+  assert.deepEqual(fromLiveEvent(event({ keyframe: 'k.jpg', cover: 'c.jpg' })).imageUrls, [],
+    '关键帧 / 封面是图床 URL，没经 image-prep 规范化就不进判定输入');
+  assert.deepEqual(fromLiveEvent(event(), ['data:image/jpeg;base64,AAA']).imageUrls,
+    ['data:image/jpeg;base64,AAA'], '有图 = 调用方规范化后的 data URL（一张）');
 });
 
 // ---- fromPostCandidate 投影 ----
@@ -102,7 +103,7 @@ test('fromPostCandidate：isQuote 三态 / hasMedia / platform 标签', () => {
   assert.equal(fromPostCandidate(post({ platform: 'bili_dynamic', itemId: '9' })).tags.platform, 'bili_dynamic');
 });
 
-test('fromPostCandidate：imageUrls 取配图 data URL（可空），与帖子图床 URL 分开', () => {
+test('fromPostCandidate：imageUrls 取配图规范化后的 data URL（可空），与帖子图床 URL 分开', () => {
   assert.deepEqual(fromPostCandidate(post({ pics: ['https://pbs.twimg.com/media/a.jpg'] })).imageUrls, [], '不带 data URL 就为空');
   assert.deepEqual(
     fromPostCandidate(post({ pics: ['https://pbs.twimg.com/media/a.jpg'] }), ['data:image/jpeg;base64,x']).imageUrls,

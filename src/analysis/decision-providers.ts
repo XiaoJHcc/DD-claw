@@ -5,10 +5,10 @@ import type { FetchLike } from './providers.js';
 
 /**
  * 决策模型 provider 层（System One）：`POST <baseURL>/systemone`，请求体是
- * `state + questions`，响应是同 id 的 typed answers。
+ * `state + questions`（含图时另带顶层 `assets`），响应是同 id 的 typed answers。
  *
- * 当前阶段只做管理面（名单 / key / 协议探活），分类判定尚未接入判决链；
- * 这里把线格式与错误归一先固定下来，接入时 `classifier.ts` 只消费 typed answers。
+ * 本文件只管线格式、探活、名单与 key 的存取；调用顺序 / 熔断 / key 轮换在
+ * `decision-router.ts`，判定任务（请求打包与解析）在 `tasks/decide.ts`。
  *
  * 设计边界：
  * - **只认 `systemone` 线格式**：`choice` / `score` / `noul`（`box` 是图片实验特性，未接）。
@@ -16,6 +16,8 @@ import type { FetchLike } from './providers.js';
  * - **与 LLM 通道彻底隔离**：独立 key（`decision_key:<name>`）、独立协议、独立错误类型；
  *   这里不读 `llm_*` 设置，也不复用 `LlmRouter` 的熔断状态。
  * - **key 绝不进日志/错误信息**：只在 Authorization 头出现；错误只带 HTTP 状态与响应摘要。
+ * - **图片走 TypeSafe 原生 `assets`**：纯 base64（无 data URL 前缀），ref 写进 `state`
+ *   的字符串值里；含图请求必须带 `TypeSafe-Danger-Zone-Images: true` 头。
  */
 
 /** System One 的单题形状：只有当前实现用到的三种原语；`box` 等图片实验特性未接。 */
@@ -28,6 +30,15 @@ export interface SystemOneRequest {
   model: string;
   state: unknown;
   questions: Record<string, SystemOneQuestion>;
+  /** 含图请求的图片资产：ref → { type:'image', format:'jpg', data_base64 }；无图时不带这个键 */
+  assets?: Record<string, DecisionAsset>;
+}
+
+/** System One 的图片资产：`data_base64` 是纯 base64（无 `data:` 前缀），ref 必须写进 state */
+export interface DecisionAsset {
+  type: 'image';
+  format: 'jpg';
+  data_base64: string;
 }
 
 export interface SystemOneAnswer {
@@ -64,12 +75,16 @@ export interface DecisionCallOptions {
   timeoutMs?: number;
 }
 
-/** 决策通道默认超时：与 LLM 的 requestTimeoutMs 分开，后续接入时可提升为运行时参数。 */
+/** 决策通道默认超时：装配根传入的取值来自运行时参数 `decision_request_timeout_ms`。 */
 export const DECISION_REQUEST_TIMEOUT_MS = 30_000;
+
+/** 含图请求必须带这个头（TypeSafe 的图片危险区开关），否则端点拒收 assets。 */
+export const IMAGES_HEADER = 'TypeSafe-Danger-Zone-Images';
 
 /**
  * 发一次 System One 请求。目前只有一个协议，但分派保留在函数入口：
  * 将来加 `/v1/decisions` 时在这里加分支，业务层仍只看到 `state + questions + answers`。
+ * `req.assets` 非空 = 含图请求：加图片危险区头，assets 原样进请求体。
  */
 export async function callSystemOne(
   spec: DecisionProviderConfig,
@@ -83,6 +98,7 @@ export async function callSystemOne(
   const url = `${spec.baseURL.replace(/\/+$/, '')}/systemone`;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (key) headers.Authorization = `Bearer ${key}`;
+  if (req.assets && Object.keys(req.assets).length > 0) headers[IMAGES_HEADER] = 'true';
 
   const fetchFn = opts.fetchFn ?? fetch;
   let res: Response;
@@ -173,7 +189,19 @@ export function decisionKeySetting(name: string): string {
   return `decision_key:${name}`;
 }
 
-/** key 解析器：按 provider 定义给出 key 池（逗号分隔多 key，轮换留给接入阶段）。 */
+/** key 解析器：按 provider 定义给出 key 池（逗号分隔多 key，轮换在 decision-router） */
 export function dbDecisionKeysOf(db: Db): (spec: DecisionProviderConfig) => string[] {
   return (spec) => splitCsvText(db.getSetting(decisionKeySetting(spec.name)));
+}
+
+// ---- 决策档总开关：settings 表（'1'/'0'），缺省 = 关（与 LLM 总开关平行且不共享）----
+
+const DECISION_ENABLED_SETTING = 'decision_enabled';
+
+export function isDecisionEnabled(db: Db): boolean {
+  return db.getSetting(DECISION_ENABLED_SETTING) === '1';
+}
+
+export function setDecisionEnabled(db: Db, on: boolean): void {
+  db.setSetting(DECISION_ENABLED_SETTING, on ? '1' : '0');
 }

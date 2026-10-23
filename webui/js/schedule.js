@@ -21,7 +21,8 @@
 // （无左侧日头列，居中天蓝渐变）；仅居中天有浅蓝底色；泳道无底色、道间浅分割线（mini 不画）；
 // 条面纯实色（无光泽无投影，2026-09-03 决策）；在播散尾 = ::before 的 mask（--fade）整体淡出——
 // 尾端不漏硬边、文字层保持实色、右端直角不收圆；红线 = 粉色纵向渐变 + 圆点光环；
-// hover 弹层 = 16:9 图置顶 + 标题/时间/分区/判定证据（分类名按名哈希五色 tag）。
+// hover 弹层 = 16:9 图置顶 + 标题/时间/分区/判定证据（分类名按名哈希五色 tag；生效主分类置首、
+// 走实色 tag 档，与其余分类区分）。
 //
 // 共享轴（偏移语义）：轴 = 相对各行归属日 06:00 的偏移秒数（offStart/offEnd，
 // 0 = 06:00；06:00 日界只用于「归属哪天」，与渲染窗口无关），按**当前可见全部
@@ -1029,6 +1030,10 @@ function schedTagColor(name) {
   for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return SCHED_TAG_COLORS[h % SCHED_TAG_COLORS.length];
 }
+/** 判定来源 → 弹层文案（LLM 与决策两个通道分开标；旧行 source 为 rule = 确定性条件定案） */
+function schedSourceName(source) {
+  return source === 'llm' ? 'LLM' : source === 'decision' ? '决策' : '规则';
+}
 
 function schedShowPop(el, evt) {
   var found = schedEntryOf(el);
@@ -1039,15 +1044,31 @@ function schedShowPop(el, evt) {
   var area = [seg.parentAreaName, seg.areaName].filter(Boolean).join(' / ');
   var onAir = !seg.endTs;
   var time = schedFmtHm(seg.startTs) + ' – ' + (seg.endTs ? schedFmtHm(seg.endTs) : '进行中');
-  var vs = e.verdicts.length
-    ? e.verdicts.map(function (v) {
-        return '<div class="sched-pop-v"><span class="tag ' + schedTagColor(v.categoryName) + '">' +
-          esc(v.categoryName) + '</span>' +
-          '<span class="sched-pop-src">' + (v.source === 'llm' ? 'LLM' : '规则') +
-          (v.confidence != null ? ' ' + v.confidence.toFixed(2) : '') + '</span>' +
-          (v.evidence ? '<div class="sched-pop-ev">' + esc(v.evidence) + '</div>' : '') + '</div>';
-      }).join('')
-    : '<div class="sched-pop-ev">未分类</div>';
+  // 判定区：主分类先列（其 tag 走实色档，与其余分类的浅底 tag 区分），同名的 verdict 行不再重复
+  // ——证据并回主分类行，避免丢依据；其余 verdicts 原样逐条列（confidence 只有决策档有值）
+  var primary = e.primary || null;
+  var rows = [];
+  if (primary) {
+    var primaryVerdict = null;
+    for (var i = 0; i < e.verdicts.length; i++) {
+      if (e.verdicts[i].categoryName === primary.categoryName) { primaryVerdict = e.verdicts[i]; break; }
+    }
+    rows.push('<div class="sched-pop-v"><span class="tag tag-solid ' + schedTagColor(primary.categoryName) + '">' +
+      esc(primary.categoryName) + '</span>' +
+      '<span class="sched-pop-src">' + schedSourceName(primary.source) + '</span>' +
+      (primaryVerdict && primaryVerdict.evidence ? '<div class="sched-pop-ev">' + esc(primaryVerdict.evidence) + '</div>' : '') +
+      '</div>');
+  }
+  for (var j = 0; j < e.verdicts.length; j++) {
+    var v = e.verdicts[j];
+    if (primary && v.categoryName === primary.categoryName) continue;
+    rows.push('<div class="sched-pop-v"><span class="tag ' + schedTagColor(v.categoryName) + '">' +
+      esc(v.categoryName) + '</span>' +
+      '<span class="sched-pop-src">' + schedSourceName(v.source) +
+      (v.confidence != null ? ' ' + v.confidence.toFixed(2) : '') + '</span>' +
+      (v.evidence ? '<div class="sched-pop-ev">' + esc(v.evidence) + '</div>' : '') + '</div>');
+  }
+  var vs = rows.length ? rows.join('') : '<div class="sched-pop-ev">未分类</div>';
   p.innerHTML =
     '<img referrerpolicy="no-referrer" alt="">' + // src 由 schedPopImg 按鼠标时间点填
     '<div class="sched-pop-body">' +
