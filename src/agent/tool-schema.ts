@@ -19,6 +19,8 @@ import type { McpToolDef } from '../mcp/tools.js';
  * 有意**不**暴露给 agent 的工具：
  * - 排序类（`reorder_*`）：进注册表是为了纳入回滚覆盖；让 LLM 拖排序没有产品价值，反而多一次误写机会
  * - `test_push` / `test_llm_provider` / `test_x_connection`：有对外副作用（真发一条消息）或触发熔断计数/网络探测，不可撤销
+ * - `test_category`：分类草稿试跑要读历史归档并占分析队列（一次最多 20 条样本 × 两档模型），
+ *   结论是给人看的；让 LLM 自己在对话里跑测试既浪费额度又拿不到可信对照
  * - `set_chat_mode`：写前询问的开关**不能让 agent 自己关**——能切到 auto 就等于把
  *   「未经确认不写」的门槛交回给模型，P1 验收的「误写率 0 容忍」会名存实亡
  * - `set_chat_provider`：换模型**同样是主人的决定**（选便宜/贵的、选更听话的），理由与上一条同：
@@ -34,6 +36,7 @@ export const AGENT_EXCLUDED_TOOLS: readonly string[] = [
   'test_llm_provider',
   'test_decision_provider',
   'test_x_connection',
+  'test_category',
   'set_chat_mode',
   'set_chat_provider',
 ];

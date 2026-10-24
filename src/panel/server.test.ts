@@ -16,6 +16,7 @@ import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { UndoStore, adminScope, undoEffects, type UndoEffect, type UndoResult } from '../core/undo.js';
 import { ChatStore } from '../core/chat-store.js';
+import { DEFAULT_DECISION_THRESHOLDS } from '../analysis/tasks/decide.js';
 
 interface Fixture {
   db: Db;
@@ -85,6 +86,8 @@ async function setup(
     avatar?: PanelDeps['avatar'];
     /** 注入 testPush dep（/api/push/test）；缺省不注入（404） */
     testPush?: PanelDeps['testPush'];
+    /** 注入 categoryTest dep（/api/categories/test 分类草稿试跑）；缺省不注入（404） */
+    categoryTest?: PanelDeps['categoryTest'];
     /** 注入 x dep（/api/x*）；缺省不注入（404） */
     x?: PanelDeps['x'];
     /** 注入 weibo dep（/api/weibo*）；缺省不注入（404） */
@@ -189,6 +192,7 @@ async function setup(
     xAvatars: opts.xAvatars,
     avatar: opts.avatar,
     testPush: opts.testPush,
+    categoryTest: opts.categoryTest,
     x: opts.x,
     weibo: opts.weibo,
     weiboAvatars: opts.weiboAvatars,
@@ -763,6 +767,329 @@ test('category 校验：三条件皆空 400（POST 与 PUT 合并后）/ condMod
   assert.equal((await api(base, `/api/categories/${id}`, 'PUT', { llmPrompt: '' })).status, 400,
     '清空 prompt 后条件又全空（keywords 已是 []）→ 400');
   assert.equal(db.listCategories().find((c) => c.id === id)!.llmPrompt, '在唱歌', '失败的 PUT 不落库');
+});
+
+test('POST /api/categories/test：随机样本三档试跑，不落库不推送；无 dep 404、坏草稿 400', async (t) => {
+  const categoryTest: PanelDeps['categoryTest'] = {
+    queue: { run: <T>(fn: () => Promise<T>) => fn() },
+    getRouter: () => null,
+    llmEnabled: () => false,
+    getDecisionRouter: () => null,
+    decisionEnabled: () => false,
+    decisionThresholds: () => DEFAULT_DECISION_THRESHOLDS,
+    getProxyUrl: () => '',
+    // 图片不联网：试跑本身只读，图床下载在测试里不该发生
+    imageLoader: async () => ({ dataUrls: [], skipped: [] }),
+  };
+  const { db, base } = await setup(t, { categoryTest });
+  db.recordSession({
+    roomId: 'r1', liveTime: 1_700_000_000, uid: '1', uname: '主播一', title: '今晚歌回！',
+    areaName: '唱见', parentAreaName: '虚拟主播', keyframe: 'k1.jpg', cover: 'c1.jpg',
+  });
+  // 无图场次不进随机抽样池（试判列表要缩略图）
+  db.recordSession({
+    roomId: 'r2', liveTime: 1_700_100_000, uid: '2', uname: '主播二', title: '来打游戏',
+    areaName: '单机', parentAreaName: '单机游戏',
+  });
+  const res = await api(base, '/api/categories/test', 'POST', {
+    category: { keywords: ['歌回'], llmPrompt: '以唱歌为主' },
+    filter: { limit: 10 },
+  });
+  assert.equal(res.status, 200);
+  const samples = (res.json as {
+    samples: Array<{
+      subjectId: string; authorName: string; image: string | null;
+      results: Array<{ source: string; status: string; pass: boolean | null }>;
+    }>;
+  }).samples;
+  assert.equal(samples.length, 1, '只抽到有图的那一场');
+  assert.equal(samples[0]!.subjectId, 'r1:1700000000');
+  assert.equal(samples[0]!.authorName, '主播一');
+  assert.equal(samples[0]!.image, 'k1.jpg', '摘要带缩略图源图（live 取关键帧）');
+  assert.deepEqual(samples[0]!.results.map((r) => r.source), ['rule', 'llm', 'decision']);
+  assert.equal(samples[0]!.results[0]!.status, 'ok');
+  assert.equal(samples[0]!.results[0]!.pass, true);
+  assert.equal(db.listCategories().length, 0, '草稿不落库');
+
+  // 坏草稿（什么条件都没有）与未知字段都是 400
+  assert.equal((await api(base, '/api/categories/test', 'POST', { category: {} })).status, 400);
+  const dead = await api(base, '/api/categories/test', 'POST', { category: { keywords: ['x'] }, nope: 1 });
+  assert.equal(dead.status, 400);
+  assert.match(dead.json.error!, /未知字段: nope/);
+});
+
+test('无 categoryTest dep 时 POST /api/categories/test 404', async (t) => {
+  const { base } = await setup(t);
+  const r = await api(base, '/api/categories/test', 'POST', { category: { keywords: ['x'] } });
+  assert.equal(r.status, 404, 'dep 即挂载门');
+});
+
+test('GET /api/categories/samples：只回样本摘要（query 数字转换），零模型调用；坏 kind/坏数字 400、无 dep 404', async (t) => {
+  const touched = { gate: 0, images: 0 };
+  const categoryTest: PanelDeps['categoryTest'] = {
+    queue: { run: async <T>(fn: () => Promise<T>) => { touched.gate++; return fn(); } },
+    getRouter: () => null,
+    llmEnabled: () => false,
+    getDecisionRouter: () => null,
+    decisionEnabled: () => false,
+    decisionThresholds: () => DEFAULT_DECISION_THRESHOLDS,
+    getProxyUrl: () => '',
+    imageLoader: async () => { touched.images += 1; return { dataUrls: [], skipped: [] }; },
+  };
+  const { db, base } = await setup(t, { categoryTest });
+  db.recordSession({
+    roomId: 'r1', liveTime: 1_700_000_000, uid: '1', uname: '主播一', title: '今晚歌回！',
+    areaName: '唱见', parentAreaName: '虚拟主播', keyframe: 'k1.jpg', cover: 'c1.jpg',
+  });
+  db.recordSession({
+    roomId: 'r2', liveTime: 1_700_100_000, uid: '2', uname: '主播二', title: '来打游戏',
+    areaName: '单机', parentAreaName: '单机游戏', cover: 'c2.jpg',
+  });
+  // 无图场次：不进抽样池（列表要缩略图），但精确 sampleIds 仍可复测
+  db.recordSession({
+    roomId: 'r3', liveTime: 1_700_200_000, uid: '3', uname: '主播三', title: '随便聊聊',
+    areaName: '杂谈', parentAreaName: '虚拟主播',
+  });
+
+  const res = await api(base, '/api/categories/samples?kind=live&limit=10');
+  assert.equal(res.status, 200);
+  // 抽样是 ORDER BY RANDOM()（样本顺序本就随机），按 subjectId 对照内容
+  const samples = (res.json as { samples: Array<Record<string, unknown>> }).samples
+    .slice()
+    .sort((a, b) => String(a.subjectId).localeCompare(String(b.subjectId)));
+  assert.deepEqual(samples, [
+    {
+      subjectType: 'live', subjectId: 'r1:1700000000', uid: '1', authorName: '主播一',
+      image: 'k1.jpg', text: '今晚歌回！', tags: { area: '唱见', parentArea: '虚拟主播' },
+      url: 'https://live.bilibili.com/r1', ts: 1_700_000_000,
+    },
+    {
+      subjectType: 'live', subjectId: 'r2:1700100000', uid: '2', authorName: '主播二',
+      image: 'c2.jpg', text: '来打游戏', tags: { area: '单机', parentArea: '单机游戏' },
+      url: 'https://live.bilibili.com/r2', ts: 1_700_100_000,
+    },
+  ], '响应只有摘要 + 一张缩略图源图（r3 无图，不在池里）');
+  assert.deepEqual(touched, { gate: 0, images: 0 }, '抽样不占队列、不下图');
+
+  // 无图记录抽不到：uid 指名也没用（池子先过滤），列表因此不会出现空缩略图
+  assert.deepEqual((await api(base, '/api/categories/samples?kind=live&uid=3')).json, { samples: [] });
+
+  // query 里的数字真的转成了 number 再进工具（字符串会被 zod 剥成 undefined，过滤就白设了）
+  const filtered = await api(base, '/api/categories/samples?kind=live&fromTs=1700050000&limit=5');
+  assert.deepEqual((filtered.json as { samples: Array<{ subjectId: string }> }).samples.map((s) => s.subjectId),
+    ['r2:1700100000']);
+  const post = await api(base, '/api/categories/samples?kind=post&platform=twitter');
+  assert.deepEqual(post.json, { samples: [] }, '图文侧无样本时给空数组');
+
+  // 校验：kind 必填且只有两个值；数字字段必须是非负整数；过滤面照旧
+  const badKind = await api(base, '/api/categories/samples?kind=video');
+  assert.equal(badKind.status, 400);
+  assert.match(badKind.json.error!, /kind 必须是 live \/ post/);
+  assert.equal((await api(base, '/api/categories/samples')).status, 400, 'kind 缺省 400');
+  const badLimit = await api(base, '/api/categories/samples?kind=live&limit=abc');
+  assert.equal(badLimit.status, 400);
+  assert.match(badLimit.json.error!, /limit 必须是非负整数/);
+  assert.equal((await api(base, '/api/categories/samples?kind=live&limit=21')).status, 400, 'limit 上限 20');
+  assert.equal((await api(base, '/api/categories/samples?kind=live&uid=alice')).status, 400, '直播 uid 必须纯数字');
+
+  // 无 dep：挂载门（不是落进 /api/categories/:id 的 400）
+  const dead = await setup(t);
+  assert.equal((await api(dead.base, '/api/categories/samples?kind=live')).status, 404);
+});
+
+test('POST /api/categories/test + sampleIds：按锚点顺序复测同一条内容；缺失/跨类型/重复 400', async (t) => {
+  const categoryTest: PanelDeps['categoryTest'] = {
+    queue: { run: async <T>(fn: () => Promise<T>) => fn() },
+    getRouter: () => null,
+    llmEnabled: () => false,
+    getDecisionRouter: () => null,
+    decisionEnabled: () => false,
+    decisionThresholds: () => DEFAULT_DECISION_THRESHOLDS,
+    getProxyUrl: () => '',
+    imageLoader: async () => ({ dataUrls: [], skipped: [] }),
+  };
+  const { db, base } = await setup(t, { categoryTest });
+  db.recordSession({
+    roomId: 'r1', liveTime: 1_700_000_000, uid: '1', uname: '主播一', title: '今晚歌回！',
+    areaName: '唱见', parentAreaName: '虚拟主播', keyframe: 'k1.jpg', cover: 'c1.jpg',
+  });
+  db.recordSession({
+    roomId: 'r2', liveTime: 1_700_100_000, uid: '2', uname: '主播二', title: '来打游戏',
+    areaName: '单机', parentAreaName: '单机游戏', cover: 'c2.jpg',
+  });
+  // 无图的旧锚点：抽样池进不去，但精确复测照样读得出来（image = null）
+  db.recordSession({
+    roomId: 'r3', liveTime: 1_700_200_000, uid: '3', uname: '主播三', title: '随便聊聊',
+    areaName: '杂谈', parentAreaName: '虚拟主播',
+  });
+
+  // 抽样端点给什么，复测就按什么顺序判——filter 与锚点冲突时以锚点为准
+  const res = await api(base, '/api/categories/test', 'POST', {
+    category: { keywords: ['歌回'] },
+    sampleIds: ['r2:1700100000', 'r1:1700000000'],
+    filter: { uid: '1', limit: 1 },
+  });
+  assert.equal(res.status, 200);
+  const samples = (res.json as {
+    samples: Array<{ subjectId: string; text: string; image: string | null; results: Array<{ source: string }> }>;
+  }).samples;
+  assert.deepEqual(samples.map((s) => s.subjectId), ['r2:1700100000', 'r1:1700000000'], '顺序照传');
+  assert.equal(samples[0]!.text, '来打游戏', '第一条就是锚点那场');
+  assert.deepEqual(samples.map((s) => s.image), ['c2.jpg', 'k1.jpg'], '复测的缩略图与抽样同口径');
+  assert.deepEqual(samples[1]!.results.map((r) => r.source), ['rule', 'llm', 'decision'], '响应形状不变');
+
+  // 旧锚点没有图：允许复测，image 回 null（不因为「现在没图」就 400）
+  const legacy = await api(base, '/api/categories/test', 'POST', {
+    category: { keywords: ['聊聊'] }, sampleIds: ['r3:1700200000'],
+  });
+  assert.equal(legacy.status, 200);
+  const legacySample = (legacy.json as { samples: Array<{ subjectId: string; image: string | null }> }).samples[0]!;
+  assert.equal(legacySample.subjectId, 'r3:1700200000');
+  assert.equal(legacySample.image, null, '无图记录没有缩略图');
+
+  const missing = await api(base, '/api/categories/test', 'POST', {
+    category: { keywords: ['歌回'] }, sampleIds: ['r9:1700000000'],
+  });
+  assert.equal(missing.status, 400);
+  assert.match(missing.json.error!, /样本不存在/);
+  const crossed = await api(base, '/api/categories/test', 'POST', {
+    category: { keywords: ['歌回'] }, sampleIds: ['twitter:t1'],
+  });
+  assert.equal(crossed.status, 400);
+  assert.match(crossed.json.error!, /跨类型/);
+  const dup = await api(base, '/api/categories/test', 'POST', {
+    category: { keywords: ['歌回'] }, sampleIds: ['r1:1700000000', 'r1:1700000000'],
+  });
+  assert.equal(dup.status, 400);
+  assert.match(dup.json.error!, /不能重复/);
+});
+
+test('GET /api/category-sample-image：只代理 https 的 pbs.twimg.com，按缓存文件回字节；其余 URL 400、失败 502/404', async (t) => {
+  const cacheDir = mkdtempSync(join(tmpdir(), 'ddclaw-sample-img-'));
+  const outsideDir = mkdtempSync(join(tmpdir(), 'ddclaw-sample-img-out-'));
+  t.after(() => {
+    rmSync(cacheDir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+  const jpegBytes = Buffer.from('fake-jpeg-bytes');
+  const pngBytes = Buffer.from('fake-png-bytes');
+  const webpBytes = Buffer.from('fake-webp-bytes');
+  const calls: Array<{ url: string; dir: string; proxy: string }> = [];
+  let mode: 'jpg' | 'png' | 'webp' | 'gif' | 'fail' | 'outside' | 'missing' = 'jpg';
+  const categoryTest: PanelDeps['categoryTest'] = {
+    queue: { run: <T>(fn: () => Promise<T>) => fn() },
+    getRouter: () => null,
+    llmEnabled: () => false,
+    getDecisionRouter: () => null,
+    decisionEnabled: () => false,
+    decisionThresholds: () => DEFAULT_DECISION_THRESHOLDS,
+    getProxyUrl: () => 'http://127.0.0.1:7890',
+    imageCacheDir: cacheDir,
+    // 拉取器注入点（真实实现 localizeImageViaProxy 经代理隧道下载）：测试不联网、也不需要代理
+    localizeXImage: async (url, dir, proxy) => {
+      calls.push({ url, dir, proxy });
+      if (mode === 'fail') return null;
+      if (mode === 'outside') {
+        const p = join(outsideDir, 'evil.jpg');
+        writeFileSync(p, jpegBytes);
+        return p;
+      }
+      if (mode === 'missing') return join(dir, 'nope.jpg');
+      const ext = mode === 'png' ? '.png' : mode === 'webp' ? '.webp' : mode === 'gif' ? '.gif' : '.jpg';
+      const bytes = ext === '.png' ? pngBytes : ext === '.webp' ? webpBytes : jpegBytes;
+      const p = join(dir, `${mode}${ext}`);
+      writeFileSync(p, bytes);
+      return p;
+    },
+  };
+  const { base } = await setup(t, { categoryTest });
+
+  // 全套件并行时 Windows + undici 偶发 'fetch failed'，多次重试兜底
+  const get = async (u: string): Promise<Response> => {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        return await fetch(u, { headers: { connection: 'close' } });
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 30));
+      }
+    }
+    throw lastErr;
+  };
+  const okUrl = 'https://pbs.twimg.com/media/abc.jpg';
+  const imageOf = async (u: string) => {
+    const r = await get(`${base}/api/category-sample-image?url=${encodeURIComponent(u)}`);
+    return { status: r.status, type: r.headers.get('content-type'), body: Buffer.from(await r.arrayBuffer()) };
+  };
+  const errorOf = async (u: string): Promise<{ status: number; error: string }> => {
+    const r = await get(`${base}/api/category-sample-image?url=${encodeURIComponent(u)}`);
+    const json = (await r.json().catch(() => ({}))) as { error?: string };
+    return { status: r.status, error: json.error ?? '' };
+  };
+
+  // SSRF：scheme / host / 端口 / 子域 / userinfo 伪装全部 400，且**在下载之前**就拒掉
+  const rejected = [
+    'http://pbs.twimg.com/media/abc.jpg', // 非 https
+    'https://evil.example.com/a.jpg', // 别的域
+    'https://pbs.twimg.com.evil.example.com/a.jpg', // 前缀伪装
+    'https://pbs.twimg.com@evil.example.com/a.jpg', // userinfo 伪装（hostname 其实是 evil）
+    'https://media.pbs.twimg.com/a.jpg', // 子域也不放行（白名单窄到单域）
+    'https://abs.twimg.com/a.jpg', // 同厂别的域也不行
+    'https://127.0.0.1/a.jpg', // 回环
+    'https://pbs.twimg.com:8443/a.jpg', // 非 443 端口
+    'file:///etc/passwd', // 非 http(s)
+  ];
+  for (const bad of rejected) {
+    const r = await errorOf(bad);
+    assert.equal(r.status, 400, `${bad} 应被拒`);
+    assert.match(r.error, /X 图片地址/);
+  }
+  assert.deepEqual(calls, [], '被拒的 URL 一次下载都不该发起');
+
+  // 成功：按扩展名回 content-type，字节就是缓存文件本身；代理地址取自 categoryTest.getProxyUrl
+  const jpg = await imageOf(okUrl);
+  assert.equal(jpg.status, 200);
+  assert.equal(jpg.type, 'image/jpeg');
+  assert.deepEqual(jpg.body, jpegBytes);
+  assert.deepEqual(calls[0], { url: okUrl, dir: cacheDir, proxy: 'http://127.0.0.1:7890' });
+
+  mode = 'png';
+  const png = await imageOf('https://pbs.twimg.com/media/b.png');
+  assert.equal(png.type, 'image/png');
+  assert.deepEqual(png.body, pngBytes);
+
+  mode = 'webp';
+  const webp = await imageOf('https://pbs.twimg.com/media/c.webp');
+  assert.equal(webp.type, 'image/webp');
+  assert.deepEqual(webp.body, webpBytes);
+
+  // 失败面：拉不到 502；路径出界 / 文件没了 / 扩展名不认识 404
+  mode = 'fail';
+  const failed = await errorOf(okUrl);
+  assert.equal(failed.status, 502);
+  assert.match(failed.error, /拉取失败/);
+  mode = 'outside';
+  const escaped = await errorOf(okUrl);
+  assert.equal(escaped.status, 404, '拉取器返回缓存目录外的路径一律不读');
+  assert.match(escaped.error, /受信目录/);
+  mode = 'missing';
+  assert.equal((await errorOf(okUrl)).status, 404, '缓存文件不在盘上');
+  mode = 'gif';
+  const unsupported = await errorOf(okUrl);
+  assert.equal(unsupported.status, 404);
+  assert.match(unsupported.error, /类型不支持/);
+
+  // 挂载门：无 imageCacheDir → 404；无 categoryTest dep → 404（半装配不该半工作）
+  const noDir = await setup(t, { categoryTest: { ...categoryTest, imageCacheDir: undefined } });
+  assert.equal((await errorOf2(noDir.base)).status, 404);
+  const dead = await setup(t);
+  assert.equal((await errorOf2(dead.base)).status, 404);
+
+  async function errorOf2(b: string): Promise<{ status: number }> {
+    const r = await get(`${b}/api/category-sample-image?url=${encodeURIComponent(okUrl)}`);
+    return { status: r.status };
+  }
 });
 
 test('PUT /api/categories/order：拖拽排序重写顺序；非法 ids 400', async (t) => {

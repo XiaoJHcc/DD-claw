@@ -1131,3 +1131,135 @@ test('silent_next（主动关闭恢复位）：重新启用置位、编辑不停
   db.markBiliAccountsSilentNext();
   assert.equal(db.getBiliAccount(b2)!.silentNext, true);
 });
+
+// ---- 分类试判的样本（只读）----
+
+test('sampleLiveSessions：按主播与开播时间过滤，父分区取首段，limit 钳制；无图场次不进抽样池', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'sample-live.db');
+  db = new Db(path);
+  const nowSec = Math.floor(Date.now() / 1000);
+  db.recordSession({
+    roomId: 'r1', liveTime: 1_700_000_000, uid: '1', uname: '主播1', title: '歌回',
+    areaName: '唱见', parentAreaName: '虚拟主播', keyframe: 'k1.jpg', cover: 'c1.jpg',
+  });
+  // 第二段换了父分区：样本必须报**首段**那个（场次行本身不存父分区）
+  db.rotateSegment('r1', 1_700_000_000, nowSec + 5, {
+    title: '换标题', areaName: '单机', parentAreaName: '单机游戏',
+  });
+  db.recordSession({
+    roomId: 'r2', liveTime: 1_700_100_000, uid: '2', uname: '主播2', title: '打游戏',
+    areaName: '单机', parentAreaName: '单机游戏', cover: 'c2.jpg',
+  });
+  // 无关键帧也无封面：列表没有缩略图可显示 → 不进抽样池（但精确复读仍可读，见下一个用例）
+  db.recordSession({
+    roomId: 'r3', liveTime: 1_700_200_000, uid: '3', uname: '主播3', title: '杂谈',
+    areaName: '杂谈', parentAreaName: '虚拟主播',
+  });
+
+  const all = db.sampleLiveSessions();
+  assert.equal(all.length, 2, 'limit 缺省 10；r3 无图被排除');
+  assert.deepEqual(all.map((s) => s.roomId).sort(), ['r1', 'r2'], '抽不到无图场次');
+  const first = all.find((s) => s.roomId === 'r1')!;
+  assert.equal(first.parentAreaName, '虚拟主播', '父分区取首段');
+  assert.equal(first.title, '歌回');
+  assert.equal(first.areaName, '唱见');
+  assert.equal(first.keyframe, 'k1.jpg');
+  assert.equal(first.cover, 'c1.jpg');
+  assert.equal(all.find((s) => s.roomId === 'r2')!.keyframe, '', '无关键帧读成空串');
+
+  assert.deepEqual(db.sampleLiveSessions({ uid: '2' }).map((s) => s.roomId), ['r2']);
+  assert.deepEqual(db.sampleLiveSessions({ uid: '3' }), [], '无图场次即使被 uid 指名也不抽');
+  assert.deepEqual(db.sampleLiveSessions({ fromTs: 1_700_050_000 }).map((s) => s.roomId), ['r2']);
+  assert.deepEqual(db.sampleLiveSessions({ toTs: 1_700_050_000 }).map((s) => s.roomId), ['r1']);
+  assert.equal(db.sampleLiveSessions({ limit: 1 }).length, 1);
+  assert.equal(db.sampleLiveSessions({ limit: 999 }).length, 2, '超过样本上限只钳条数（池里只有 2 条）');
+
+  // 只有封面的场次同样在池里（keyframe || cover 任一即可）
+  db.raw.prepare("UPDATE live_sessions SET keyframe = '' WHERE room_id = 'r1'").run();
+  assert.deepEqual(db.sampleLiveSessions({ limit: 10 }).map((s) => s.roomId).sort(), ['r1', 'r2'], '有封面就够了');
+  db.close();
+});
+
+test('samplePosts：按 uid / 平台 / 发布时间过滤，pics 解成数组，随机取样；pics 空的帖子不进抽样池', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'sample-post.db');
+  db = new Db(path);
+  db.insertPosts([
+    { platform: 'twitter', uid: 'alice', itemId: 't1', type: 'tweet', text: '一', pics: ['https://pbs.twimg.com/a.jpg'], pubTs: 100, url: 'https://x.com/alice/status/t1', raw: '{"isQuote":true}' },
+    { platform: 'twitter', uid: 'alice', itemId: 't2', type: 'retweet', text: '二', pics: ['https://pbs.twimg.com/b.jpg'], pubTs: 200, url: null, raw: '{"isQuote":false}' },
+    { platform: 'twitter', uid: 'bob', itemId: 't3', type: 'tweet', text: '三', pics: ['https://pbs.twimg.com/c.jpg'], pubTs: 300, url: null, raw: null },
+    { platform: 'weibo', uid: '2203177060', itemId: 'm1', type: 'mblog', text: '四', pics: ['https://wx1.sinaimg.cn/x.jpg'], pubTs: 400, url: null, raw: null },
+    // 无配图：纯文字动态不进抽样池（精确复读仍可读，见下一个用例）
+    { platform: 'bili_dynamic', uid: '80397', itemId: 'd1', type: 'DYNAMIC_TYPE_WORD', text: '五', pics: [], pubTs: 500, url: null, raw: null },
+    { platform: 'bili_dynamic', uid: '80397', itemId: 'd2', type: 'DYNAMIC_TYPE_FORWARD', text: '六', pics: [], pubTs: 600, url: null, raw: null },
+  ]);
+
+  assert.equal(db.samplePosts().length, 4, 'limit 缺省 10；d1/d2 的 pics 是空数组被排除');
+  assert.deepEqual(db.samplePosts({ limit: 20 }).map((p) => p.itemId).sort(), ['m1', 't1', 't2', 't3']);
+  assert.equal(db.samplePosts({ limit: 2 }).length, 2);
+  assert.deepEqual(db.samplePosts({ platform: 'weibo' }).map((p) => p.itemId), ['m1']);
+  assert.deepEqual(db.samplePosts({ uid: 'alice', limit: 10 }).map((p) => p.itemId).sort(), ['t1', 't2']);
+  assert.deepEqual(db.samplePosts({ fromTs: 300, toTs: 400 }).map((p) => p.itemId).sort(), ['m1', 't3']);
+  assert.deepEqual(
+    db.samplePosts({ platform: 'twitter', uid: 'bob' }).map((p) => [p.itemId, p.text, p.pubTs]),
+    [['t3', '三', 300]],
+  );
+  assert.deepEqual(db.samplePosts({ platform: 'bili_dynamic' }), [], '该平台只有纯文字动态 → 抽不到');
+  const withPic = db.samplePosts({ platform: 'twitter', uid: 'alice' }).find((p) => p.itemId === 't1')!;
+  assert.deepEqual(withPic.pics, ['https://pbs.twimg.com/a.jpg'], 'pics 走 rowToPost 解成数组');
+  assert.equal(withPic.raw, '{"isQuote":true}', 'raw 原样带回（X 的 isQuote 靠它）');
+
+  // 随机：4 条池子里全取的话每次都是不同排列（同一顺序重复 4 次概率 ~ 1e-11）
+  const draws = new Set(Array.from({ length: 5 }, () => db!.samplePosts({ limit: 20 }).map((p) => p.itemId).join(',')));
+  assert.ok(draws.size > 1, 'ORDER BY RANDOM() 应给出不同顺序');
+  db.close();
+});
+
+test('getSampledLiveSession / getSampledPost：按身份精确复读，投影与抽样逐字一致，缺失回 null', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'sample-exact.db');
+  db = new Db(path);
+  const nowSec = Math.floor(Date.now() / 1000);
+  db.recordSession({
+    roomId: 'r1', liveTime: 1_700_000_000, uid: '1', uname: '主播1', title: '歌回',
+    areaName: '唱见', parentAreaName: '虚拟主播', keyframe: 'k1.jpg', cover: 'c1.jpg',
+  });
+  db.rotateSegment('r1', 1_700_000_000, nowSec + 5, {
+    title: '换标题', areaName: '单机', parentAreaName: '单机游戏',
+  });
+  db.recordSession({ roomId: 'r2', liveTime: 1_700_100_000, uid: '2', uname: '主播2', title: '打游戏' });
+  db.insertPosts([
+    { platform: 'twitter', uid: 'alice', itemId: 't1', type: 'tweet', text: '一', pics: ['https://pbs.twimg.com/a.jpg'], pubTs: 100, url: 'https://x.com/alice/status/t1', raw: '{"isQuote":true}' },
+    { platform: 'weibo', uid: '2203177060', itemId: 'm1', type: 'mblog', text: '四', pics: [], pubTs: 400, url: null, raw: null },
+  ]);
+
+  // 与抽样投影逐字一致（同一段 SELECT / 同一个 rowToPost，不靠两处手抄对齐）
+  const sampled = db.sampleLiveSessions({ limit: 20 });
+  for (const row of sampled) {
+    assert.deepEqual(db.getSampledLiveSession(row.roomId, row.liveTime), row, `${row.roomId} 精确复读同形`);
+  }
+  const exact = db.getSampledLiveSession('r1', 1_700_000_000)!;
+  assert.equal(exact.parentAreaName, '虚拟主播', '父分区同样取首段');
+  assert.equal(exact.keyframe, 'k1.jpg');
+  assert.equal(db.getSampledLiveSession('r1', 1_700_000_001), null, '时间不对 = 没有这一场');
+  assert.equal(db.getSampledLiveSession('r9', 1_700_000_000), null);
+  assert.equal(db.getSampledLiveSession('r1', 1_700_100_000), null, '场次身份是 (room_id, live_time) 而不是单看主播');
+
+  for (const post of db.samplePosts({ limit: 20 })) {
+    assert.deepEqual(db.getSampledPost(post.platform, post.itemId), post, `${post.itemId} 精确复读同形`);
+  }
+  const withPic = db.getSampledPost('twitter', 't1')!;
+  assert.deepEqual(withPic.pics, ['https://pbs.twimg.com/a.jpg'], 'pics 同样解成数组');
+  assert.equal(withPic.raw, '{"isQuote":true}', 'raw 原样带回');
+  assert.equal(db.getSampledPost('twitter', 'm1'), null, '平台也进身份键：同 itemId 跨平台不算同一条');
+  assert.equal(db.getSampledPost('weibo', 'nope'), null);
+
+  // 旧锚点可读：抽样池要求带图，但「当年抽中、如今没图（或被清理了图）」的记录照样按身份读得出来
+  assert.deepEqual(db.samplePosts({ platform: 'weibo' }), [], 'm1 没配图 → 不进抽样池');
+  assert.deepEqual(db.getSampledPost('weibo', 'm1')!.pics, [], '精确复读不要求带图');
+  assert.equal(db.sampleLiveSessions({ uid: '2' }).length, 0, 'r2 没有关键帧/封面 → 不进抽样池');
+  const legacyLive = db.getSampledLiveSession('r2', 1_700_100_000)!;
+  assert.deepEqual([legacyLive.keyframe, legacyLive.cover], ['', ''], '精确复读不要求带图');
+  db.close();
+});

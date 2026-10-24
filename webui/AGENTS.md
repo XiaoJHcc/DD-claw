@@ -23,12 +23,13 @@
 - `style.css` — 设计系统：间距档位、圆角三级、控件恒 36 高、按钮四语义色；浅色单主题。
 - `js/boot.js` — 入口：`?demo=1` 先装 mock 拦截器，再 `import` app。
 - `js/app.js` — 视图切换（隐藏视图后台轮询照跑）、卡片模块装配、`#view` 直达与 `?open=` 设计走查钩子。
-- `js/core.js` — 共享件：`esc` / `api` / `toast` / sheet 栈 / switch 与 checkbox / `makeSortable` / 三张事件委托表 / `mergeVisibleOrder` / `ruleDeadReason` / segnav / `dropdownHtml` / `avatarHtml` / 时间与时长格式化。
+- `js/core.js` — 共享件：`esc` / `api` / `toast` / sheet 栈（主卡 + 可选同宽副卡）/ switch 与 checkbox / `makeSortable` / 三张事件委托表 / `mergeVisibleOrder` / `ruleDeadReason` / segnav / `dropdownHtml` / `avatarHtml` / 时间与时长格式化。
 - `js/icons.js` + `js/lucide-icons.js` — 本地节选的 lucide 节点数据出图标（离线可用）。
 - `js/qr-lib.js` — B站扫码弹窗用的 qrcode-generator。
 - `js/rules.js` — 直播 / 图文共用的统一规则组件：行渲染、规则弹窗、生效范围圆柱卡 + 二级搜索多选、跨页刷新广播、摘要与可达性文案。
 - `js/x.js` — 图文分页：三张来源卡 + 图文规则卡 + 单墙混排账号卡墙（平台角标、添加浮窗按平台切草稿、微博昵称↔UID 失焦互查）。
 - `js/categories.js` — 两页的分类卡与分类弹窗（按 `appliesTo` 渲染、条件组按内容形态切换）。
+- `js/category-test.js` — 包裹分类主卡的浅灰测试副卡（外卡承担整体投影）：常驻筛选 + 1–20 拉条 + 带图样本无边框表格；刷新抽样后对同一批 `subjectId` 复测，图标判定与直接理由，异步代际清理。
 - `js/push.js` — 推送渠道卡 + 直播规则卡（规则部分委托 rules.js）+ 推送设置 sheet。
 - `js/streamers.js` — 主播卡网格（三段式）与详情弹窗（字段编辑 + 生效规则纯展示）；导出 `loadStreamers` 供跨卡刷新。
 - `js/follows.js` — 关注列表候选池（加入监听）。

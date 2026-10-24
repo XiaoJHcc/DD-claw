@@ -165,6 +165,26 @@ export const JUDGE_STAGES: readonly JudgeStage[] = [decisionJudge, llmJudge];
 /** 无条件组的确定性结论说明（落库要能看出「为什么判否」） */
 const NO_CONDITION_NOTE = '无确定性条件';
 
+/**
+ * 单分类的确定性结论（source='rule'）：线上判决链与分类草稿试跑共用同一份口径，
+ * 两边都不得各自重写一遍「命中说明 / 未命中 / 无条件组」的措辞。
+ * `hasConditions` = 该分类对本内容类型有可判定条件组（决定落库时是否保留判否行）。
+ */
+export function ruleConclusion(
+  cat: Category,
+  item: ContentItem,
+): { hasConditions: boolean; result: Classification } {
+  const m = matchCategoryItem(cat, item);
+  return {
+    hasConditions: m.hasConditions,
+    result: {
+      categoryId: cat.id, name: cat.name, source: 'rule', confidence: null,
+      evidence: m.matched ? m.evidence : (m.hasConditions ? '确定性条件未命中' : NO_CONDITION_NOTE),
+      pass: m.matched, effective: false,
+    },
+  };
+}
+
 /** 分类编排的运行时依赖（全是 getter：面板改动后下一轮即生效） */
 export interface RulesClassifierOptions {
   /** LLM 路由；null = 没有可用 provider */
@@ -244,13 +264,9 @@ export class RulesClassifier implements Classifier {
     const deterministic = new Map<number, Classification>();
     const noConditions = new Set<number>();
     for (const c of cats) {
-      const m = matchCategoryItem(c, item);
-      if (!m.hasConditions) noConditions.add(c.id);
-      deterministic.set(c.id, {
-        categoryId: c.id, name: c.name, source: 'rule', confidence: null,
-        evidence: m.matched ? m.evidence : (m.hasConditions ? '确定性条件未命中' : NO_CONDITION_NOTE),
-        pass: m.matched, effective: false,
-      });
+      const conclusion = ruleConclusion(c, item);
+      if (!conclusion.hasConditions) noConditions.add(c.id);
+      deterministic.set(c.id, conclusion.result);
     }
 
     const modelCats = cats.filter((c) => c.llmPrompt);

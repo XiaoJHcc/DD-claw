@@ -2,9 +2,11 @@
 // + 底部新增按钮。分类 = 判定描述（同时喂 LLM 与决策模型）+ 确定性条件组 + 是否进主分类组，
 // 归类结果供推送规则引用。
 // 新增/编辑走一级 sheet，保存报错内联在按钮行；删除分类会级联停用引用它的推送规则（先 confirm 告知）。
+// 表单草稿 → 提交体由 catSheetBody() 统一构造（保存与测试共用）；弹窗底部的测试区见 category-test.js。
 // 摘要标签格式两形态统一：主分类（进主分类组）+ 模型（有判定描述）+ 条件摘要（关键词 N / 分区 N / 只原·只转 / 须引用 / 须带图）。
-import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, checkRowHtml, iconBtn, field, makeSortable, mergeVisibleOrder, openSheet, closeSheet, splitCsv, dropdownHtml, onTableRefresh } from './core.js';
+import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, checkRowHtml, iconBtn, field, makeSortable, mergeVisibleOrder, openSheet, closeSheet, sheetCleanups, splitCsv, dropdownHtml, onTableRefresh } from './core.js';
 import { notifyRulesChanged } from './rules.js';
+import { catTestHtml, catTestCleanup, resetCatTest } from './category-test.js';
 
 let catCache = [];
 
@@ -106,6 +108,31 @@ function captureCatDraft() {
   }
 }
 
+// 当前草稿 → 提交体：保存与测试共用（测试用未保存草稿，故一律从表单现值读，不读 catCache）。
+// name 空则不提交该字段：POST 由后端自动补「分类 N」，PUT 保留原名（显式空串会 400）
+function catSheetBody() {
+  if (!catDraft) return null;
+  captureCatDraft();
+  const promptEl = document.getElementById('cg-prompt');
+  const nameEl = document.getElementById('cg-name');
+  const primaryEl = document.getElementById('cg-primary');
+  const name = nameEl ? nameEl.value.trim() : '';
+  const isPost = catDraft.kind === 'post';
+  const body = {
+    appliesTo: catDraft.kind,
+    llmPrompt: (promptEl ? promptEl.value.trim() : '') || null,
+    primary: !!primaryEl && primaryEl.checked,
+    keywords: splitCsv(catDraft.keywords),
+    areas: isPost ? [] : splitCsv(catDraft.areas),
+    postTypes: isPost ? catDraft.postTypes : [],
+    requireQuote: isPost && catDraft.requireQuote,
+    requireMedia: isPost && catDraft.requireMedia,
+    condMode: catDraft.condMode || 'and',
+  };
+  if (name) body.name = name;
+  return body;
+}
+
 function openCategorySheet(id, kind) {
   const c = id === null ? null : catById(id);
   if (id !== null && !c) { toast('分类数据未加载', true); return; }
@@ -118,20 +145,23 @@ function openCategorySheet(id, kind) {
     requireQuote: !!(c && c.requireQuote),
     requireMedia: !!(c && c.requireMedia),
   };
+  resetCatTest(catDraft.kind, catSheetBody);
   openSheet(c ? '编辑分类' : '新增分类',
-    field('名称', `<input class="inp" id="cg-name" placeholder="如：歌回；留空自动命名" value="` +
-      (c ? esc(c.name) : '') + '">') +
+    '<div class="two cat-name-row">' +
+      field('名称', `<input class="inp" id="cg-name" placeholder="如：歌回；留空自动命名" value="` +
+        (c ? esc(c.name) : '') + '">') +
+      '<div class="field">' + checkRowHtml('id="cg-primary"', !!(c && c.primary), '主分类') + '</div>' +
+    '</div>' +
     field('判定描述', '<textarea class="inp" id="cg-prompt" rows="4" placeholder="留空仅使用确定性条件">' +
       (c && c.llmPrompt ? esc(c.llmPrompt) : '') + '</textarea>') +
-    // 主分类组勾选：v2 表单布尔 = 多选行形态（左文字右勾点，.field 内 check-row 恒 ctl-h 高）
-    '<div class="field">' + checkRowHtml('id="cg-primary"', !!(c && c.primary), '主分类') + '</div>' +
     // 确定性条件区：按适用内容渲染可用算子（同一组件、同一交互语言）
     `<div class="field" id="cg-cond-area">${condAreaHtml()}</div>` +
     '<div class="sheet-foot"><span id="category-err" class="form-err"></span>' +
     '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
-    `<button class="btn btn-primary" data-action="save-category" data-id="${c ? c.id : ''}">保存</button></div>`);
-  // 草稿关闭清理：下次打开是全新草稿
-  // （sheetCleanups 不导出到本模块，openSheet/closeSheet 的 innerHTML 重置已足够）
+    `<button class="btn btn-primary" data-action="save-category" data-id="${c ? c.id : ''}">保存</button></div>`,
+    1, null, catTestHtml);
+  // 草稿关闭清理：下次打开是全新草稿（测试区随之作废在途请求与筛选状态）
+  sheetCleanups[1] = function () { catTestCleanup(); catDraft = null; };
 }
 
 // 中间小方钮切换两组条件的关系（且/或）；当前值在按钮 data-mode 上。
@@ -167,24 +197,8 @@ ACTIONS['toggle-cond'] = function (el) {
 ACTIONS['save-category'] = function (el) {
   const err = document.getElementById('category-err');
   if (err) err.textContent = '';
-  const prompt = document.getElementById('cg-prompt').value.trim();
-  const name = document.getElementById('cg-name').value.trim();
-  const primary = document.getElementById('cg-primary').checked;
-  captureCatDraft();
-  const isPost = catDraft.kind === 'post';
-  // name 空则不提交该字段：POST 由后端自动补「分类 N」，PUT 保留原名（显式空串会 400）
-  const body = {
-    appliesTo: catDraft.kind,
-    llmPrompt: prompt || null,
-    primary: primary,
-    keywords: splitCsv(catDraft.keywords),
-    areas: isPost ? [] : splitCsv(catDraft.areas),
-    postTypes: isPost ? catDraft.postTypes : [],
-    requireQuote: isPost && catDraft.requireQuote,
-    requireMedia: isPost && catDraft.requireMedia,
-    condMode: catDraft.condMode || 'and',
-  };
-  if (name) body.name = name;
+  const body = catSheetBody();
+  if (!body) return;
   const idAttr = el.getAttribute('data-id');
   const req = idAttr
     ? api('/api/categories/' + idAttr, 'PUT', body)

@@ -584,6 +584,318 @@ function orderError(items, ids) {
     || ids.some((id) => !items.some((item) => item.id === id)) ? 'ids 必须包含全部现有 id，且不能重复' : null;
 }
 
+// ---- 分类测试（GET samples 随机抽样 → POST test 指定样本复测）：与 src/panel/category-test.ts 同构 ----
+// 抽样池 = 真实归档（时间表 + 三平台帖子夹具）；规则列按请求里的**当前草稿**走条件算子真算，
+// 证据文案与 analysis/matcher 逐字一致；LLM / 决策列确定性模拟（同一份内容恒定同结论），
+// 形状齐全：决策概率、灰区（未定案）、未填判定描述 = skipped、模型停用 = unavailable。
+// 只读：不落库、不进变更历史（isMockConfigWrite 已把 /test 排除在外）。
+const TEST_POST_STORE = { bili_dynamic: 'biliPosts', weibo: 'weiboPosts', twitter: 'twitterPosts' };
+const TEST_IMAGE_MAX = 9;                 // analysis/image-prep 的张数上限（超出的图逐张进 skippedImages）
+const NO_CONDITION_NOTE = '无确定性条件';   // 纯模型分类：确定性档无从判定（判否 + 该说明）
+const NO_PROMPT_REASON = '未填写判定描述';
+
+function hash32(text) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return h >>> 0;
+}
+/** 0~1 的稳定概率：只由内容身份与判定描述决定，同一份内容每次请求同值 */
+function simConfidence(seed) { return (hash32(seed) % 1000) / 1000; }
+
+// 条件算子：id / 适用形态 / 证据文案都与 analysis/matcher.ts 的条件算子注册表一致
+const TEST_OPS = {
+  keyword: {
+    appliesTo: ['live', 'post'],
+    test(values, item) {
+      const text = item.text.toLowerCase();
+      const hit = values.find((k) => text.includes(String(k).toLowerCase()));
+      return hit !== undefined ? `关键词「${hit}」` : null;
+    },
+  },
+  area: {
+    appliesTo: ['live'],
+    test(values, item) {
+      const hay = `${item.tags.area ?? ''}\n${item.tags.parentArea ?? ''}`.toLowerCase();
+      const hit = values.find((a) => hay.includes(String(a).toLowerCase()));
+      return hit !== undefined ? `分区「${hit}」` : null;
+    },
+  },
+  postType: {
+    appliesTo: ['post'],
+    test(values, item) {
+      const type = item.tags.type ?? '';
+      return values.includes(type) ? `类型「${type === 'retweet' ? '转发' : '原创'}」` : null;
+    },
+  },
+  quote: { appliesTo: ['post'], test: (_values, item) => (item.tags.isQuote === 'true' ? '引用帖' : null) },
+  media: { appliesTo: ['post'], test: (_values, item) => (item.tags.hasMedia === 'true' ? '带图' : null) },
+};
+
+// 直播样本：一场直播 = 时间表条目（subjectId = roomId:liveTime）；标题与分区取首段
+function liveTestSample(entry) {
+  const seg = (entry.segments || [])[0] || {};
+  return {
+    item: {
+      subjectType: 'live',
+      subjectId: entry.roomId + ':' + entry.liveTime,
+      uid: String(entry.uid),
+      authorName: entry.name || entry.uname || String(entry.uid),
+      text: seg.title || '',
+      tags: { area: seg.areaName || '', parentArea: seg.parentAreaName || '' },
+      url: 'https://live.bilibili.com/' + entry.roomId,
+      ts: entry.liveTime,
+      image: entry.keyframe || entry.cover || null,
+    },
+    // 直播只送一张图：关键帧优先、缺则封面（与 pipeline 同一条选择）
+    images: entry.keyframe ? ['keyframe'] : entry.cover ? ['cover'] : [],
+  };
+}
+
+function testPostAuthor(post) {
+  if (post.platform === 'twitter') return '@' + post.uid;
+  if (post.platform === 'bili_dynamic') {
+    const account = store.biliAccounts.find((a) => String(a.uid) === String(post.uid));
+    return (account && (account.displayName ?? account.uname)) || String(post.uid);
+  }
+  const account = store.weiboAccounts.find((a) => String(a.uid) === String(post.uid));
+  return (account && (account.displayName ?? account.nickname)) || String(post.uid);
+}
+
+// 图文样本：三平台帖子夹具（subjectId = platform:itemId）；tags 与 analysis/content.ts 的投影同形
+function postTestSample(post) {
+  const pics = post.pics || [];
+  return {
+    item: {
+      subjectType: 'post',
+      subjectId: post.platform + ':' + post.itemId,
+      uid: String(post.uid),
+      authorName: testPostAuthor(post),
+      text: String(post.text || ''),
+      tags: {
+        type: post.type === 'retweet' ? 'retweet' : 'original',
+        isQuote: 'unknown',   // 夹具没有 posts.raw 的引用标记：与真实链路的「未知」同义
+        hasMedia: String(pics.length > 0),
+        platform: post.platform,
+      },
+      url: post.url || '',
+      ts: post.pubTs,
+      image: post.platform === 'twitter' && pics.length > 0 ? M.svgKeyframe('#5b657f', 'X') : (pics[0] || null),
+    },
+    images: pics.map((_url, i) => `pic#${i + 1}`),
+  };
+}
+
+function testImages(images) {
+  return {
+    imageCount: Math.min(images.length, TEST_IMAGE_MAX),
+    skippedImages: images.slice(TEST_IMAGE_MAX).map((ref) => ({ ref, reason: '超过张数上限' })),
+  };
+}
+
+// 规则列：五组条件 → 空组忽略 / condMode 控制组间关系 / 无有效组不命中（纯模型分类不被误判成恒中）
+function testRuleResult(category, item) {
+  const groups = [
+    { op: 'keyword', values: category.keywords || [] },
+    { op: 'area', values: category.areas || [] },
+    { op: 'postType', values: category.postTypes || [] },
+    // requireQuote / requireMedia 是开关型条件组：置位即参与（算子只看内容标签）
+    { op: 'quote', values: category.requireQuote ? ['1'] : [] },
+    { op: 'media', values: category.requireMedia ? ['1'] : [] },
+  ];
+  const active = groups.filter((group) => group.values.length > 0);
+  const usable = active.filter((group) => TEST_OPS[group.op].appliesTo.includes(item.subjectType));
+  let pass = false;
+  let evidence = NO_CONDITION_NOTE;
+  if (active.length > 0) {
+    const hits = active
+      .map((group) => (TEST_OPS[group.op].appliesTo.includes(item.subjectType)
+        ? TEST_OPS[group.op].test(group.values, item) : null))
+      .filter((hit) => hit !== null);
+    pass = category.condMode === 'or' ? hits.length > 0 : hits.length === active.length;
+    evidence = pass ? `命中${hits.join('、')}` : usable.length > 0 ? '确定性条件未命中' : NO_CONDITION_NOTE;
+  }
+  return { source: 'rule', status: 'ok', pass, confidence: null, decided: true, evidence, reason: null };
+}
+
+function testLlmResult(category, item) {
+  const prompt = String(category.llmPrompt || '').trim();
+  if (!prompt) {
+    return { source: 'llm', status: 'skipped', pass: null, confidence: null, decided: false, evidence: null, reason: NO_PROMPT_REASON };
+  }
+  if (!store.llmEnabled || store.llmProviders.filter((p) => p.enabled).length === 0) {
+    return { source: 'llm', status: 'unavailable', pass: null, confidence: null, decided: false, evidence: null,
+      reason: store.llmEnabled ? '没有可用的 LLM 供应商' : 'LLM 已停用' };
+  }
+  const pass = simConfidence(prompt + '|' + item.subjectId) >= 0.5;
+  return { source: 'llm', status: 'ok', pass, confidence: null, decided: true,
+    evidence: pass ? '与判定描述相符' : '与判定描述不符', reason: null };
+}
+
+function testDecisionResult(category, item) {
+  const prompt = String(category.llmPrompt || '').trim();
+  if (!prompt) {
+    return { source: 'decision', status: 'skipped', pass: null, confidence: null, decided: false, evidence: null, reason: NO_PROMPT_REASON };
+  }
+  if (!store.decisionEnabled || store.decisionProviders.length === 0) {
+    return { source: 'decision', status: 'unavailable', pass: null, confidence: null, decided: false, evidence: null,
+      reason: store.decisionEnabled ? '没有可用的决策模型供应商' : '决策模型已停用' };
+  }
+  const confidence = simConfidence('decision|' + prompt + '|' + item.subjectId);
+  const low = store.advanced.decisionGrayLowPct / 100;
+  const high = store.advanced.decisionGrayHighPct / 100;
+  const decided = confidence <= low || confidence >= high;
+  return {
+    source: 'decision', status: 'ok',
+    pass: confidence >= 0.5,
+    confidence: Number(confidence.toFixed(2)),
+    decided,
+    evidence: decided
+      ? (confidence >= high ? '概率高于灰区上界' : '概率低于灰区下界')
+      : '概率落在灰区，未定案',
+    reason: null,
+  };
+}
+
+// 草稿缺省值与校验走 /api/categories 新建同一套口径（parseNewCategory）
+function testDraftCategory(raw) {
+  const c = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  if (c.appliesTo !== undefined && c.appliesTo !== null && c.appliesTo !== 'live' && c.appliesTo !== 'post') {
+    return { error: 'appliesTo 必须是 live 或 post' };
+  }
+  const category = {
+    appliesTo: c.appliesTo === 'post' ? 'post' : 'live',
+    name: typeof c.name === 'string' ? c.name : null,
+    llmPrompt: typeof c.llmPrompt === 'string' ? c.llmPrompt : null,
+    primary: c.primary === true,
+    keywords: Array.isArray(c.keywords) ? c.keywords : [],
+    areas: Array.isArray(c.areas) ? c.areas : [],
+    postTypes: Array.isArray(c.postTypes) ? c.postTypes : [],
+    requireQuote: c.requireQuote === true,
+    requireMedia: c.requireMedia === true,
+    condMode: c.condMode === 'or' ? 'or' : 'and',
+    enabled: true,
+  };
+  const error = categoryError(category);
+  return error ? { error } : { category };
+}
+
+// 过滤面校验（错误文案与 src/panel/category-test.ts 的 parseCategoryTestFilter 一致）
+function testFilter(raw, appliesTo) {
+  const f = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const filter = { limit: 10 };
+  if (f.uid !== undefined && f.uid !== null) {
+    if (typeof f.uid !== 'string' || f.uid.trim() === '') return { error: 'filter.uid 必须是非空字符串' };
+    const uid = f.uid.trim();
+    if (appliesTo === 'live' && !/^\d+$/.test(uid)) return { error: '直播样本的 filter.uid 必须是纯数字主播 uid' };
+    filter.uid = uid;
+  }
+  if (f.platform !== undefined && f.platform !== null) {
+    if (typeof f.platform !== 'string' || !TEST_POST_STORE[f.platform]) {
+      return { error: 'filter.platform 必须是 bili_dynamic / weibo / twitter 之一' };
+    }
+    filter.platform = f.platform;
+  }
+  for (const [key, label] of [['fromTs', 'filter.fromTs'], ['toTs', 'filter.toTs']]) {
+    const value = f[key];
+    if (value === undefined || value === null) continue;
+    if (!Number.isInteger(value) || value < 0) return { error: label + ' 必须是非负整数（秒级时间戳）' };
+    filter[key] = value;
+  }
+  if (filter.fromTs !== undefined && filter.toTs !== undefined && filter.fromTs > filter.toTs) {
+    return { error: 'filter.fromTs 不能晚于 filter.toTs' };
+  }
+  if (f.limit !== undefined && f.limit !== null) {
+    if (!Number.isInteger(f.limit) || f.limit < 1 || f.limit > 20) return { error: 'filter.limit 必须是 1~20 的整数' };
+    filter.limit = f.limit;
+  }
+  return { filter };
+}
+
+function categorySamplePool(kind, filter, requireImage = true) {
+  const pool = [];
+  if (kind === 'post') {
+    const platforms = filter.platform ? [filter.platform] : Object.keys(TEST_POST_STORE);
+    for (const platform of platforms) {
+      for (const post of store[TEST_POST_STORE[platform]] || []) pool.push(postTestSample(post));
+    }
+  } else {
+    const seen = new Set();
+    for (const entry of store.schedule) {
+      const sample = liveTestSample(entry);
+      if (seen.has(sample.item.subjectId)) continue;
+      seen.add(sample.item.subjectId);
+      pool.push(sample);
+    }
+  }
+  let picked = pool;
+  if (filter.uid !== undefined) picked = picked.filter((sample) => sample.item.uid === filter.uid);
+  if (filter.fromTs !== undefined) picked = picked.filter((sample) => sample.item.ts >= filter.fromTs);
+  if (filter.toTs !== undefined) picked = picked.filter((sample) => sample.item.ts <= filter.toTs);
+  if (requireImage) picked = picked.filter((sample) => sample.images.length > 0);
+  return picked;
+}
+
+function sampleCategoryRecords(raw) {
+  if (raw.kind !== 'live' && raw.kind !== 'post') return err(400, 'kind 必须是 live 或 post');
+  const parsed = testFilter(raw.filter, raw.kind);
+  if (parsed.error) return err(400, parsed.error);
+  const picked = categorySamplePool(raw.kind, parsed.filter);
+  for (let i = picked.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [picked[i], picked[j]] = [picked[j], picked[i]];
+  }
+  return ok({ samples: picked.slice(0, parsed.filter.limit).map((sample) => sample.item) });
+}
+
+function testCategory(raw) {
+  const body = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  for (const key of Object.keys(body)) {
+    if (key !== 'category' && key !== 'filter' && key !== 'sampleIds') return err(400, '未知字段: ' + key);
+  }
+  const draft = testDraftCategory(body.category);
+  if (draft.error) return err(400, draft.error);
+  const category = draft.category;
+  let picked;
+  if (body.sampleIds !== undefined) {
+    if (!Array.isArray(body.sampleIds) || body.sampleIds.length < 1 || body.sampleIds.length > 20
+      || body.sampleIds.some((id) => typeof id !== 'string' || !id)
+      || new Set(body.sampleIds).size !== body.sampleIds.length) {
+      return err(400, 'sampleIds 必须是 1~20 个不重复的非空字符串');
+    }
+    const byId = new Map(categorySamplePool(category.appliesTo, {}, false).map((sample) => [sample.item.subjectId, sample]));
+    picked = [];
+    for (const id of body.sampleIds) {
+      const sample = byId.get(id);
+      if (!sample) return err(400, '样本不存在或内容类型不匹配: ' + id);
+      picked.push(sample);
+    }
+  } else {
+    const parsed = testFilter(body.filter, category.appliesTo);
+    if (parsed.error) return err(400, parsed.error);
+    picked = categorySamplePool(category.appliesTo, parsed.filter);
+    for (let i = picked.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [picked[i], picked[j]] = [picked[j], picked[i]];
+    }
+    picked = picked.slice(0, parsed.filter.limit);
+  }
+  return ok({
+    samples: picked.map((sample) => {
+      const images = testImages(sample.images);
+      return {
+        ...sample.item,
+        imageCount: images.imageCount,
+        skippedImages: images.skippedImages,
+        results: [
+          testRuleResult(category, sample.item),
+          testLlmResult(category, sample.item),
+          testDecisionResult(category, sample.item),
+        ],
+      };
+    }),
+  });
+}
+
 function handle(method, path, q, rawBody) {
   const body = () => { try { return JSON.parse(rawBody || '{}'); } catch { return {}; } };
   if (path === '/api/content-audit' && method === 'GET') {
@@ -1136,6 +1448,13 @@ for (const p of store.twitterPosts) {
   }
 
   // ---- 分类规则 ----
+  if (path === '/api/categories/samples' && method === 'GET') {
+    const filter = {};
+    for (const key of ['uid', 'platform']) if (q.has(key)) filter[key] = q.get(key);
+    for (const key of ['fromTs', 'toTs', 'limit']) if (q.has(key)) filter[key] = Number(q.get(key));
+    return sampleCategoryRecords({ kind: q.get('kind'), filter });
+  }
+  if (path === '/api/categories/test' && method === 'POST') return testCategory(body());
   if (path === '/api/categories' && method === 'GET') return ok({ categories: store.categories });
   if (path === '/api/categories' && method === 'POST') {
     const b = body();

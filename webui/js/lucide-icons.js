@@ -7,6 +7,8 @@
 // users 是 users-round 的别名（v2 命名），chevron 是 chevron-right 的别名（v2 命名）。
 export const LUCIDE = {
   plus: [["path", { d: "M5 12h14" }], ["path", { d: "M12 5v14" }]],
+  minus: [["path", { d: "M5 12h14" }]],
+  question: [["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }], ["path", { d: "M12 17h.01" }]],
   pencil: [
     ["path", { d: "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" }],
     ["path", { d: "m15 5 4 4" }],
@@ -74,6 +76,7 @@ export const LUCIDE = {
   // chevron = chevron-right 的 v2 命名别名
   chevron: [["path", { d: "m9 18 6-6-6-6" }]],
   'chevron-down': [["path", { d: "m6 9 6 6 6-6" }]],
+  'chevron-up': [["path", { d: "m18 15-6-6-6 6" }]],
   // ---- 以下取自 v2 core.js 内置图标集（实心点/块用 fill=currentColor stroke=none） ----
   paw: [
     ["path", { d: "M12 13.2c-2.9 0-5.3 2.1-5.3 4.6 0 1.7 1.2 2.9 2.9 2.9 1 0 1.6-.4 2.4-.4s1.4.4 2.4.4c1.7 0 2.9-1.2 2.9-2.9 0-2.5-2.4-4.6-5.3-4.6z", fill: "currentColor", stroke: "none" }],

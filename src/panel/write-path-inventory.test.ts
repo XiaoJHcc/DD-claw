@@ -157,6 +157,12 @@ const INVENTORY: InventoryEntry[] = [
     coverage: 'registry', tool: 'upsert_category', toolStatus: 'exists', exposeToAgent: true,
   },
   {
+    method: 'POST', path: '/api/categories/test', label: 'POST /api/categories/test',
+    coverage: 'registry', tool: 'test_category', toolStatus: 'exists', exposeToAgent: false,
+    reason: '草稿试跑：读随机归档样本 + 模型调用，不写库、不推送（与其它 test_* 同档）；'
+      + '一次试跑要占分析队列，且结论只对人有用 → 不暴露给 agent',
+  },
+  {
     method: 'POST', path: '/api/rules', label: 'POST /api/rules',
     coverage: 'registry', tool: 'upsert_push_rule', toolStatus: 'exists', exposeToAgent: true,
   },
@@ -362,6 +368,11 @@ const SIDE_EFFECT_GETS: Array<{ path: string; reason: string }> = [
     path: '/api/auth/weibo/qrcode/poll',
     reason: 'confirmed 时写 weibo-cookies.json 并热重启微博源',
   },
+  {
+    path: '/api/category-sample-image',
+    reason: '首次请求把 X 图经代理下载进图片缓存目录（缓存文件写面，非配置写；'
+      + '只允许 https://pbs.twimg.com/，读盘仍守缓存目录边界）',
+  },
 ];
 
 const SERVER_SRC = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
@@ -441,11 +452,11 @@ test('工具暴露策略闭环：exposeToAgent 与生产侧 AGENT_EXCLUDED_TOOLS
   }
 });
 
-test('带写副作用的 GET 仍在源码里（计划里点名过 2 条）', (t) => {
+test('带写副作用的 GET 仍在源码里（清单逐条可在源码核对）', (t) => {
   for (const g of SIDE_EFFECT_GETS) {
     assert.ok(
       SERVER_SRC.includes(`path === '${g.path}'`),
-      `计划里记载的带写副作用 GET ${g.path} 在 server.ts 里找不到了，请复核「配置写路径缺口清单」`,
+      `带写副作用的 GET ${g.path} 在 server.ts 里找不到了，请复核「配置写路径缺口清单」`,
     );
   }
   t.diagnostic(`带写副作用 GET ${SIDE_EFFECT_GETS.length} 条，均属排除范围`);

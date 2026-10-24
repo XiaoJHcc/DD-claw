@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve, sep, extname } from 'node:path';
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import { splitCsvText } from '../core/csv.js';
@@ -36,6 +36,8 @@ import {
 } from '../core/runtime-config.js';
 import { isPushEnabled, postVerdictSubjectId } from '../core/push.js';
 import type { XConfig } from '../core/x-config.js';
+import type { CategoryTestDeps } from './category-test.js';
+import { localizeImageViaProxy } from '../notify/image-cache.js';
 import type { NapcatConfig, ProbeResult } from '../notify/napcat.js';
 import { getNapcatAlertQq } from '../notify/napcat.js';
 import type { UndoResult, UndoStore } from '../core/undo.js';
@@ -216,6 +218,16 @@ export interface PanelDeps {
   };
   /** 测试推送（假消息走完整推送链路）；不注入则 POST /api/push/test 一律 404 */
   testPush?: () => Promise<{ total: number; succeeded: number }>;
+  /**
+   * 分类试判（`GET /api/categories/samples` + `POST /api/categories/test`，编排在
+   * `panel/category-test.ts`）：先按 kind 抽历史归档样本（只回摘要，不下图不调模型），
+   * 再把确定性条件 / LLM / 决策模型三档各自跑一遍 —— 不写库、不推送。
+   * 同一 dep 还挂 `GET /api/category-sample-image`（样本的 X 缩略图反代：经代理下载进
+   * `imageCacheDir` 再按本地文件回，浏览器直连 `pbs.twimg.com` 不通）。
+   * 注入的是运行时依赖（共享分析队列 + 各通道的实时 getter + 图片缓存目录 + X 代理 getter）；
+   * 不注入则这些路由一律 404（dep 即挂载门）。
+   */
+  categoryTest?: Omit<CategoryTestDeps, 'db'>;
   /** 写操作快照与撤销（P0 地基，core/undo.ts）；历史查询端点消费它 */
   undo?: UndoStore;
   /**
@@ -306,6 +318,28 @@ function asBodyObject(body: unknown): Record<string, unknown> {
     throw new HttpError(400, '请求体必须是 JSON 对象');
   }
   return body as Record<string, unknown>;
+}
+
+/**
+ * `GET /api/categories/samples` 的 query → 工具参数：query 全是字符串，数字字段在这里转成 number
+ * （zod 只认 number，字符串会被当未知类型拒掉；先转换再 callTool，错误文案也就落在本层）。
+ * `kind` 同样在此判定：它不是数字，但「必填且只有两个值」的拒绝理由比 zod 的英文提示清楚。
+ */
+function sampleQueryArgs(sp: URLSearchParams): Record<string, unknown> {
+  const kind = sp.get('kind');
+  if (kind !== 'live' && kind !== 'post') throw new HttpError(400, 'kind 必须是 live / post');
+  const args: Record<string, unknown> = { kind };
+  for (const key of ['uid', 'platform'] as const) {
+    const v = sp.get(key);
+    if (v !== null) args[key] = v;
+  }
+  for (const key of ['fromTs', 'toTs', 'limit'] as const) {
+    const v = sp.get(key);
+    if (v === null) continue;
+    if (!/^\d+$/.test(v)) throw new HttpError(400, `${key} 必须是非负整数`);
+    args[key] = Number(v);
+  }
+  return args;
 }
 
 interface CallToolOpts {
@@ -679,6 +713,14 @@ async function handle(
     return;
   }
 
+  // ---- 分类样本的 X 缩略图（categoryTest dep 存在才挂）：X 图墙内直连不通、浏览器更不行，
+  // 只能服务端经 X 代理下载到图片缓存目录再按本地文件回。只服务 pbs.twimg.com（不是通用反代）----
+  if (method === 'GET' && path === '/api/category-sample-image') {
+    if (!deps.categoryTest) throw new HttpError(404, '分类试判未装配');
+    await sendCategorySampleImage(deps, url, res);
+    return;
+  }
+
   // ---- B站动态账号头像本地缓存（biliAvatars dep 存在才挂）：按文件名读 cache/bili-avatars ----
   if (method === 'GET' && path === '/api/bili-avatar') {
     if (!deps.biliAvatars) throw new HttpError(404, '未装配 B站头像缓存目录');
@@ -889,6 +931,22 @@ async function handle(
   // 分类拖拽排序：ids 是现有分类的全排列（在 :id 通配之前匹配）
   if (method === 'PUT' && path === '/api/categories/order') {
     await callTool(deps, res, 'reorder_categories', asBodyObject(await readJsonBody(req)));
+    return;
+  }
+  // 分类样本抽样（categoryTest dep 存在才挂；只读：不下图、不调模型、不写库）——
+  // 与 POST /api/categories/test 同属「分类试判」的两段：这里拿摘要，用户挑几条后把 subjectId
+  // 原样回传给试判（sampleIds）复测同一条内容。同样必须在 /api/categories/:id 通配之前匹配。
+  if (method === 'GET' && path === '/api/categories/samples') {
+    if (!deps.categoryTest) throw new HttpError(404, '分类样本抽样未装配');
+    await callTool(deps, res, 'sample_category_records', sampleQueryArgs(url.searchParams));
+    return;
+  }
+  // 分类草稿试跑（categoryTest dep 存在才挂）：随机历史样本跑三档判定，只回摘要——
+  // 不落 verdicts / content_audit、不推送；必须在 /api/categories/:id 通配之前匹配。
+  // 未装配时显式 404：否则会落进 :id 通配，变成「id 必须是纯数字」的 400（挂载门不能靠 400 表达）
+  if (method === 'POST' && path === '/api/categories/test') {
+    if (!deps.categoryTest) throw new HttpError(404, '分类草稿试跑未装配');
+    await callTool(deps, res, 'test_category', asBodyObject(await readJsonBody(req)), { rejectUnknown: true });
     return;
   }
 
@@ -1281,6 +1339,62 @@ async function sendWeiboImage(deps: PanelDeps, url: URL, res: http.ServerRespons
     'cache-control': 'max-age=86400',
   });
   res.end(buf);
+}
+
+/** 分类样本缩略图唯一允许的图床（X 图片域）；不做「twimg 子域都放行」，这个端点只为缩略图存在 */
+const SAMPLE_IMAGE_HOST = 'pbs.twimg.com';
+
+/** 缓存文件扩展名 → content-type（localizeImageViaProxy 按响应 content-type 落 .jpg / .png / .webp） */
+const SAMPLE_IMAGE_TYPES: Record<string, string> = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+};
+
+/**
+ * 分类样本的 X 缩略图（`GET /api/category-sample-image?url=`）：经 X 代理下载并落进
+ * `categoryTest.imageCacheDir`，再按**本地文件**回字节——浏览器直连 `pbs.twimg.com` 不通，
+ * 把远程 URL 交给前端等于缩略图必然裂。
+ *
+ * 安全口径：
+ * - **只代理一个图床**：必须 `https://pbs.twimg.com/…`（端口缺省或 443）；其他 scheme / host / 端口一律 400。
+ *   这个端点存在的唯一理由是「分类试判列表要显示 X 缩略图」，不是通用图片反代，故白名单窄到单域。
+ * - **读盘仍守目录边界**：拉取器返回的路径 `resolve` 后必须仍在 `imageCacheDir` 内，否则 404
+ *   （缓存目录里的文件名不可信，不能让这条只读端点变成任意文件读取）。
+ * - **content-type 只按扩展名白名单挑**：不认识的扩展名 404，不回外网地址、不落别处。
+ */
+async function sendCategorySampleImage(deps: PanelDeps, url: URL, res: http.ServerResponse): Promise<void> {
+  const raw = url.searchParams.get('url') ?? '';
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new HttpError(400, 'url 参数非法');
+  }
+  if (parsed.protocol !== 'https:' || parsed.hostname !== SAMPLE_IMAGE_HOST
+    || (parsed.port !== '' && parsed.port !== '443')) {
+    throw new HttpError(400, `url 必须是 https://${SAMPLE_IMAGE_HOST}/ 下的 X 图片地址`);
+  }
+  const dep = deps.categoryTest;
+  if (!dep?.imageCacheDir) throw new HttpError(404, '未装配图片缓存目录');
+  const dir = dep.imageCacheDir;
+  const localize = dep.localizeXImage ?? localizeImageViaProxy;
+  const file = await localize(raw, dir, dep.getProxyUrl());
+  if (!file) throw new HttpError(502, 'X 图片拉取失败（需要可用的代理）');
+  const root = resolve(dir);
+  const absolute = resolve(file);
+  if (absolute !== root && !absolute.startsWith(root + sep)) throw new HttpError(404, '缓存文件不在受信目录内');
+  const type = SAMPLE_IMAGE_TYPES[extname(absolute).toLowerCase()];
+  if (!type) throw new HttpError(404, '缓存文件类型不支持');
+  let data: Buffer;
+  try {
+    data = readFileSync(absolute);
+  } catch {
+    throw new HttpError(404, '缓存文件读不到');
+  }
+  res.writeHead(200, { 'content-type': type, 'cache-control': 'max-age=86400' });
+  res.end(data);
 }
 
 /** 名单 + face + 实况（room_state）+ 生效规则名标签 + 最近动态（posts，含关联微博账号的微博）。一次请求内每表只查一次。 */

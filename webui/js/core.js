@@ -131,18 +131,21 @@ ACTIONS.noop = function () {};
 // sheetCleanups 由打开方注册清理逻辑（停轮询、清状态等），关窗时执行。
 // 可选第四参 footHtml：传字符串 = 自定义底部按钮区；传 null = 无底部区（v2 形态）；
 // 省略 = 不加底部区（生产现存调用把按钮写在 bodyHtml 内的 .sheet-foot 里，两种都支持）。
+// 第五参 attachmentHtml = 副卡包装函数，接收主卡 HTML 并返回完整外层卡片。
 export var sheetCleanups = { 1: null, 2: null };
-export function openSheet(title, bodyHtml, level, footHtml) {
+export function openSheet(title, bodyHtml, level, footHtml, attachmentHtml) {
   var l = level || 1;
   closeDropDown();
   var mask = document.getElementById('sheet-mask' + l);
-  mask.querySelector('.sheet').innerHTML =
+  var sheetHtml = '<div class="sheet">' +
     // .sheet-title 类保留：streamers.js 详情弹窗事后往标题里插 .sheet-head-meta
     `<div class="sheet-head"><b class="sheet-title">${esc(title)}</b>` +
     `<button class="sheet-x" data-action="close-sheet" data-level="${l}" title="关闭" aria-label="关闭">` +
     `${icon('xmark')}</button></div>` +
     `<div class="sheet-body">${bodyHtml}</div>` +
-    (footHtml != null ? `<div class="sheet-foot">${footHtml}</div>` : '');
+    (footHtml != null ? `<div class="sheet-foot">${footHtml}</div>` : '') + '</div>';
+  mask.innerHTML = '<div class="sheet-stack">' +
+    (attachmentHtml ? attachmentHtml(sheetHtml) : sheetHtml) + '</div>';
   mask.classList.remove('hidden');
 }
 export function closeSheet(level) {

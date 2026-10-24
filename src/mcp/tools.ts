@@ -24,6 +24,8 @@ import {
   parseXAccountPatch, parseXPatch, parseXTestRequest, syncStreamerWeiboLink, watchStreamer,
 } from '../panel/http-util.js';
 import { scheduleInfo } from '../panel/schedule.js';
+import { runCategoryTest, sampleCategoryRecords } from '../panel/category-test.js';
+import { SAMPLE_LIMIT_MAX } from '../core/db.js';
 import { setPushEnabled, splitPushRuleChannel, type PushChannel } from '../core/push.js';
 import { normalizeCsvText, splitCsvText } from '../core/csv.js';
 import { setListen, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
@@ -1185,6 +1187,67 @@ const adminTools: McpToolDef[] = [
     handler: async (deps, args) => {
       if (!deps.x) throw new HttpError(400, 'X 分页未装配');
       return deps.x.test(parseXTestRequest(pickBody(args, ['target', 'proxyUrl', 'instances', 'screenName'])));
+    },
+  },
+  {
+    name: 'sample_category_records',
+    description: '从归档里抽一批内容样本，供分类试判挑选（只读）：kind=live 取直播场次 / kind=post 取图文帖，'
+      + '只回摘要（身份键 subjectId、作者、正文、标签、链接、时间、缩略图源图 image）。'
+      + '只抽有源图的记录（直播有关键帧或封面、图文有配图）。'
+      + '不下图、不调模型、不写库；把选中的 subjectId 原样传给 test_category 的 sampleIds 即可复测同一条内容',
+    schema: {
+      kind: z.enum(['live', 'post']).describe('样本类型：live = 直播场次；post = 图文帖'),
+      uid: z.string().optional().describe('主体过滤：live = 主播 uid；post = 账号标识（X screen name / 微博或B站 uid）'),
+      platform: z.enum(['bili_dynamic', 'weibo', 'twitter']).optional().describe('仅 post：限定平台'),
+      fromTs: z.number().int().nonnegative().optional().describe('内容时间下限（秒级时间戳）'),
+      toTs: z.number().int().nonnegative().optional().describe('内容时间上限（秒级时间戳）'),
+      limit: z.number().int().min(1).max(SAMPLE_LIMIT_MAX).optional().describe('样本条数，缺省 10'),
+    },
+    role: 'admin',
+    handler: (deps, args) => {
+      const dep = deps.categoryTest;
+      if (!dep) throw new HttpError(400, '分类试判未装配');
+      return sampleCategoryRecords({ ...dep, db: deps.db }, args);
+    },
+  },
+  {
+    name: 'test_category',
+    description: '用真实归档的样本试跑一条分类草稿：确定性条件（关键词/分区/帖子类型/引用/带图）、'
+      + 'LLM、决策模型三档各自独立判定，只回摘要（样本正文 + 三档结论与理由）。'
+      + '不保存分类、不落判定记录、不推送。草稿校验与新建分类同一套（至少一项条件或判定描述）；'
+      + 'live 分类取直播场次（filter.uid 可选 = 主播 uid），post 分类取图文帖'
+      + '（filter.uid + filter.platform 定位账号）。传 sampleIds = 按这些 subjectId 逐条精确复测'
+      + '（顺序照传，忽略 filter）；不传 = 按 filter 随机抽。没填判定描述时两个模型档都跳过',
+    schema: {
+      category: z.object({
+        name: z.string().optional(),
+        llmPrompt: z.string().nullable().optional()
+          .describe('判定描述（同时喂给 LLM 与决策模型）；null/空串 = 纯确定性分类'),
+        keywords: z.array(z.string()).optional(),
+        areas: z.array(z.string()).optional(),
+        appliesTo: z.enum(['live', 'post']).optional(),
+        postTypes: z.array(z.enum(['original', 'retweet'])).optional(),
+        requireQuote: z.boolean().optional(),
+        requireMedia: z.boolean().optional(),
+        condMode: z.enum(['and', 'or']).optional(),
+        primary: z.boolean().optional(),
+      }).optional().describe('草稿分类（形状同 upsert_category，但不会保存）'),
+      filter: z.object({
+        uid: z.string().optional().describe('主体过滤：live = 主播 uid；post = 账号标识（X screen name / 微博或B站 uid）'),
+        platform: z.enum(['bili_dynamic', 'weibo', 'twitter']).optional().describe('仅 post：限定平台'),
+        fromTs: z.number().int().nonnegative().optional().describe('内容时间下限（秒级时间戳）'),
+        toTs: z.number().int().nonnegative().optional().describe('内容时间上限（秒级时间戳）'),
+        limit: z.number().int().min(1).max(SAMPLE_LIMIT_MAX).optional().describe('样本条数，缺省 10'),
+      }).optional().describe('样本过滤面（传了 sampleIds 时忽略）'),
+      sampleIds: z.array(z.string()).min(1).max(SAMPLE_LIMIT_MAX).optional()
+        .describe('复测锚点：sample_category_records 给出的 subjectId，按顺序逐条精确加载，不重新随机、不套 filter'),
+    },
+    role: 'admin',
+    write: true,
+    handler: async (deps, args) => {
+      const dep = deps.categoryTest;
+      if (!dep) throw new HttpError(400, '分类试跑未装配');
+      return runCategoryTest({ ...dep, db: deps.db }, args);
     },
   },
 ];

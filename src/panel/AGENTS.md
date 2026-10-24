@@ -19,6 +19,7 @@
 - `server.ts` — 装配与分发：`createPanelServer(deps)`、`PanelDeps`（dep 即挂载门）、静态资产、`/api/*`、`/mcp`、`/onebot`；收敛出口 `runPanelTool` / `callTool`（写路由的形状与状态码映射）；agent 对话端点与历史回放（工具行按 call id 配对成 `calls`）。
 - `http-util.ts` — 请求体解析（64KB 上限）、`HttpError`、`parseUid`，以及面板与 MCP **共用**的校验/解析：`parse*`（主播补丁 / 渠道 / 分类 / 规则 / 三种账号 / 运行时参数 / X 配置）与 `check*`（渠道形状、分类条件、规则引用），外加 `watchStreamer` / `syncStreamerWeiboLink` 两个跨表动作。
 - `schedule.ts` — 时间表查询（北京 06:00 日界 + 归并 + 空日占位）；`/api/schedule` 与 MCP `get_schedule` 共用同一实现。
+- `category-test.ts` — 分类草稿两阶段试判：带图归档随机抽样只回摘要，按 `subjectId` 精确复测同一批样本；直播 / 图文统一投影与图片规范化，规则 / LLM / 决策独立跑且共用分析队列，不落判定或审计、不推送。X 缩略图反代只放行 `pbs.twimg.com`。
 - `undo-view.ts` — 变更历史的展示层翻译：中文操作名、值感知一句话、行级带值明细、`refill` 判定；settings 键与「表→中文名」的唯一信源（webui 与 `agent/tool-view.ts` 都复用，前端不再自维护映射）。
 - `webui-assets.gen.ts` — 构建期生成物（勿手改）：`WEBUI_ASSETS` 内存快照。
 - `server.test.ts` — 路由契约回归（挂载门、响应形状、错误文案、撤销与 chat 端点）。

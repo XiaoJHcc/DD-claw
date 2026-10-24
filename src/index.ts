@@ -383,25 +383,29 @@ async function main(): Promise<void> {
 
   // 装配：bus → pipeline（编排唯一入口）→ sources（只产信号）
   // 分类器：router 用 getter 每轮取最新（面板改名单热重建），LLM 总开关读 settings
+  // 共享分析队列：分类判定、图文翻译、分类草稿试跑都从这里过（同一条并发闸门，绝不直调 provider）
+  const analysisQueue = new AnalysisQueue(
+    new RulesClassifier(db, {
+      getRouter: () => llmDep.router ?? null,
+      llmEnabled: () => isLlmEnabled(db),
+      getDecisionRouter: () => decisionRouter,
+      decisionEnabled: () => isDecisionEnabled(db),
+      decisionThresholds,
+    }), 2,
+  );
+  // 图片本地化缓存目录：推送带图、判定看图、分类草稿试跑三处同一条目录。
+  // 与 toast 的自有缓存分开，避免两边的过期策略互相打架；X 图必须先经代理落到本地
+  //（NapCat 在同一墙内网络里拉不到 pbs.twimg.com）
+  const imageCacheDir = join(dirname(secrets.dbPath), 'cache', 'images');
   const bus = new Bus();
   const pipeline = new Pipeline({
     bus,
     db,
     config: eff,
-    queue: new AnalysisQueue(
-      new RulesClassifier(db, {
-        getRouter: () => llmDep.router ?? null,
-        llmEnabled: () => isLlmEnabled(db),
-        getDecisionRouter: () => decisionRouter,
-        decisionEnabled: () => isDecisionEnabled(db),
-        decisionThresholds,
-      }), 2,
-    ),
+    queue: analysisQueue,
     rule: new OncePerSessionRule(db),
     dispatcher,
-    // X 图必须先经代理落到本地（NapCat 在同一墙内网络里拉不到 pbs.twimg.com）——
-    // 与 toast 的自有缓存分开，避免两边的过期策略互相打架
-    imageCacheDir: join(dirname(secrets.dbPath), 'cache', 'images'),
+    imageCacheDir,
     // 图文帖的 LLM 判定/翻译：与分类器共用同一个 router getter 与总开关
     postAnalyzer: new PostAnalyzer(() => llmDep.router ?? null, () => isLlmEnabled(db)),
   });
@@ -790,6 +794,18 @@ async function main(): Promise<void> {
       },
       advanced: {
         onChanged: () => reconcileRuntime(),
+      },
+      // 分类草稿试跑：真实归档随机样本 + 三档独立判定，只回摘要（不写库、不推送）。
+      // 全部是实时 getter：面板改 provider 名单 / 开关 / 门槛 / 代理后下一次试跑即生效
+      categoryTest: {
+        queue: analysisQueue,
+        getRouter: () => llmDep.router ?? null,
+        llmEnabled: () => isLlmEnabled(db),
+        getDecisionRouter: () => decisionRouter,
+        decisionEnabled: () => isDecisionEnabled(db),
+        decisionThresholds,
+        imageCacheDir,
+        getProxyUrl: () => getXConfig(db).proxyUrl,
       },
       // X / 推特 独立分页：连接设置 + 连通性测试（P0 无源，故 onChanged 暂无热生效对象）
       x: {

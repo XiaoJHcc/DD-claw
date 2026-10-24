@@ -374,6 +374,85 @@ export interface TimelineEntry {
   primary: { categoryName: string; source: 'llm' | 'rule' | 'decision' } | null;
 }
 
+/**
+ * 随机样本渲染用的直播场次行（分类草稿试跑）：live_sessions 的展示字段
+ * + 首段（`start_ts` 最小那一段）的 parent_area_name——场次行本身不存父分区。
+ */
+export interface SampledLiveSession {
+  roomId: string;
+  liveTime: number;
+  uid: string;
+  uname: string;
+  title: string;
+  areaName: string;
+  parentAreaName: string;
+  keyframe: string;
+  cover: string;
+}
+
+/** 随机样本查询（两个 sample* 共用）：全部可选；`limit` 由 Db 钳进 1~SAMPLE_LIMIT_MAX */
+export interface SampleQuery {
+  /** live = 主播 uid；post = 账号标识（X screen name / 微博与B站数字 uid） */
+  uid?: string;
+  /** 仅 post：平台（bili_dynamic / weibo / twitter） */
+  platform?: string;
+  fromTs?: number;
+  toTs?: number;
+  limit?: number;
+}
+
+/** 分类草稿试跑一次最多看多少条样本（面板请求上限，Db 兜底钳制也用它） */
+export const SAMPLE_LIMIT_MAX = 20;
+
+/** 样本条数：缺省 10（面板默认），钳进 1~SAMPLE_LIMIT_MAX */
+function sampleLimit(limit: number | undefined): number {
+  return Math.max(1, Math.min(SAMPLE_LIMIT_MAX, Math.floor(limit ?? 10)));
+}
+
+/**
+ * 直播样本的投影 SQL：随机抽样与精确读取**共用这一段 SELECT**（复测时拿到的样本与抽样时
+ * 逐字段同形，不靠两处手抄对齐）。父分区不在 live_sessions 行上，按 `start_ts` 取**首段**补出来
+ * （与时间表首段口径一致）。
+ */
+const SAMPLED_LIVE_SQL = `SELECT ls.room_id, ls.live_time, ls.uid, ls.uname, ls.title,
+         ls.area_name, ls.keyframe, ls.cover,
+         (SELECT seg.parent_area_name FROM live_segments seg
+           WHERE seg.room_id = ls.room_id AND seg.live_time = ls.live_time
+           ORDER BY seg.start_ts, seg.id LIMIT 1) AS parent_area_name
+    FROM live_sessions ls`;
+
+interface SampledLiveRow {
+  room_id: string;
+  live_time: number;
+  uid: string;
+  uname: string | null;
+  title: string | null;
+  area_name: string | null;
+  parent_area_name: string | null;
+  keyframe: string | null;
+  cover: string | null;
+}
+
+/** 直播样本池条件：关键帧 / 封面至少有一个（空串与 NULL 都算没有） */
+const SAMPLED_LIVE_HAS_IMAGE = "(COALESCE(ls.keyframe, '') <> '' OR COALESCE(ls.cover, '') <> '')";
+
+/**
+ * 图文样本池条件：pics 是**非空 JSON 数组**。用 SQLite 的 JSON 函数而不是 LIKE 猜：
+ * `pics` 是 TEXT，`'[]'` / `'[ ]'` / `'{}'` / 历史脏值都得判对。`json_array_length` 对非数组回 0、
+ * 对坏 JSON 直接报错，所以先过 `json_valid`（CASE 而非 AND，避免求值顺序把坏 JSON 送进 json 函数）。
+ */
+const SAMPLED_POST_HAS_IMAGE = 'CASE WHEN json_valid(pics) THEN json_array_length(pics) ELSE 0 END > 0';
+
+/** 投影行 → 样本（空值读成空串：渲染层只做拼接，不再逐处判 null） */
+function rowToSampledLive(r: SampledLiveRow): SampledLiveSession {
+  return {
+    roomId: r.room_id, liveTime: r.live_time, uid: r.uid,
+    uname: r.uname ?? '', title: r.title ?? '', areaName: r.area_name ?? '',
+    parentAreaName: r.parent_area_name ?? '',
+    keyframe: r.keyframe ?? '', cover: r.cover ?? '',
+  };
+}
+
 export class Db {
   private readonly db: Database.Database;
 
@@ -1683,6 +1762,74 @@ export class Db {
                 ORDER BY pub_ts DESC, id DESC LIMIT ?`)
       .all(...args, limit) as PostRow[];
     return rows.map(rowToPost);
+  }
+
+  // ---- 分类试判的样本（只读）：RANDOM() 抽样 + 按样本身份精确复读 ----
+  //
+  // 随机抽样的池子**只收能带图的记录**：试判列表要显示缩略图，抽到无图记录那一行就只能空着。
+  // 精确复读（getSampled*) 不受此限——旧锚点（当年抽中时还没图，或图后来被清理）照样能复测。
+
+  /**
+   * 随机抽直播场次（分类试判）。过滤面：主播 uid + 场次开播时间 [fromTs, toTs]，
+   * 并且只抽**有关键帧或封面**的场次（池子口径见本节注释）。
+   * 父分区不在 live_sessions 行上，按 `start_ts` 取**首段**补出来（与时间表首段口径一致）。
+   */
+  sampleLiveSessions(q: SampleQuery = {}): SampledLiveSession[] {
+    const where: string[] = [SAMPLED_LIVE_HAS_IMAGE];
+    const args: Array<string | number> = [];
+    if (q.uid) { where.push('ls.uid = ?'); args.push(q.uid); }
+    if (q.fromTs !== undefined) { where.push('ls.live_time >= ?'); args.push(q.fromTs); }
+    if (q.toTs !== undefined) { where.push('ls.live_time <= ?'); args.push(q.toTs); }
+    const rows = this.db
+      .prepare(
+        `${SAMPLED_LIVE_SQL}
+           WHERE ${where.join(' AND ')}
+          ORDER BY RANDOM() LIMIT ?`,
+      )
+      .all(...args, sampleLimit(q.limit)) as SampledLiveRow[];
+    return rows.map(rowToSampledLive);
+  }
+
+  /**
+   * 精确读一场直播样本（复测用）：身份 = `(room_id, live_time)`，投影与 `sampleLiveSessions` 同一段 SQL。
+   * **不套抽样池的带图条件**（旧锚点照样可读，没有图就回空串）。
+   * 行不存在回 `null`——调用方据此拒绝整次复测，绝不静默换一条样本。
+   */
+  getSampledLiveSession(roomId: string, liveTime: number): SampledLiveSession | null {
+    const row = this.db
+      .prepare(`${SAMPLED_LIVE_SQL} WHERE ls.room_id = ? AND ls.live_time = ?`)
+      .get(roomId, liveTime) as SampledLiveRow | undefined;
+    return row ? rowToSampledLive(row) : null;
+  }
+
+  /**
+   * 随机抽图文帖（分类试判）：uid / platform / 发布时间 [fromTs, toTs] 过滤，
+   * 并且只抽**pics 非空**的帖子（池子口径见本节注释）。
+   * `ORDER BY RANDOM()` 取样，limit 钳 1~SAMPLE_LIMIT_MAX。走 rowToPost（pics 解成数组、raw 原样）。
+   */
+  samplePosts(q: SampleQuery = {}): Post[] {
+    const where: string[] = [SAMPLED_POST_HAS_IMAGE];
+    const args: Array<string | number> = [];
+    if (q.uid) { where.push('uid = ?'); args.push(q.uid); }
+    if (q.platform) { where.push('platform = ?'); args.push(q.platform); }
+    if (q.fromTs !== undefined) { where.push('pub_ts >= ?'); args.push(q.fromTs); }
+    if (q.toTs !== undefined) { where.push('pub_ts <= ?'); args.push(q.toTs); }
+    const rows = this.db
+      .prepare(`SELECT * FROM posts WHERE ${where.join(' AND ')}
+                ORDER BY RANDOM() LIMIT ?`)
+      .all(...args, sampleLimit(q.limit)) as PostRow[];
+    return rows.map(rowToPost);
+  }
+
+  /**
+   * 精确读一条图文样本（复测用）：身份 = `(platform, item_id)`（posts 的唯一键），
+   * 投影走 `rowToPost`，与 `samplePosts` 同形；**不要求 pics 非空**（旧锚点照读）。行不存在回 `null`。
+   */
+  getSampledPost(platform: string, itemId: string): Post | null {
+    const row = this.db
+      .prepare('SELECT * FROM posts WHERE platform = ? AND item_id = ?')
+      .get(platform, itemId) as PostRow | undefined;
+    return row ? rowToPost(row) : null;
   }
 
   // ---- x_accounts：X/推特独立关注名单（独立于 streamers/follows，见 core/x-accounts.ts）----
