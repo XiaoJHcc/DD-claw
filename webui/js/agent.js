@@ -206,7 +206,7 @@ function providerOptions() {
   const opts = [{ value: '', label: '自动路由' }];
   for (let i = 0; i < providers.length; i++) {
     const p = providers[i];
-    opts.push({ value: p.name, label: p.name + (p.model ? '（' + p.model + '）' : '') });
+    opts.push({ value: p.id, label: p.name + (p.model ? '（' + p.model + '）' : '') });
   }
   let found = !curProvider;
   for (let j = 0; j < opts.length; j++) if (String(opts[j].value) === String(curProvider)) found = true;
@@ -229,7 +229,8 @@ CHANGES['chat-provider'] = function (el) {
     curProvider = (j && typeof j.provider === 'string') ? j.provider : next;
     providerEpoch += 1;   // 在途的 history 响应里是改之前的模型，别让它把选择器拨回去
     ddSetValue('chat-provider', curProvider);
-    toast(curProvider ? '已切换到 ' + curProvider : '已切回自动路由');
+    const selected = providers.find(function (p) { return p.id === curProvider; });
+    toast(curProvider ? '已切换到 ' + (selected ? selected.name : curProvider) : '已切回自动路由');
   }).catch(function (e) {
     toast(e.message, true);
     ddSetValue('chat-provider', prev);

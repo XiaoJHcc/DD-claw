@@ -28,7 +28,7 @@ import {
   fetchWeiboSelf, loadWeiboCookies, saveWeiboCookies, weiboCookieHeader, type WeiboSelfInfo,
 } from '../sources/weibo/auth.js';
 import type { DecisionProviderConfig, LlmProviderConfig } from '../config/schema.js';
-import { deriveRoutes, getChatProvider, isLlmEnabled, type FetchLike, type LlmRouter } from '../analysis/providers.js';
+import { deriveRoutes, getChatProvider, isLlmEnabled, llmKeySetting, type FetchLike, type LlmRouter } from '../analysis/providers.js';
 import { decisionKeySetting, isDecisionEnabled } from '../analysis/decision-providers.js';
 import { isListenEnabled, listenReadyFor, listenSetting, type ListenFeature } from '../core/listen.js';
 import {
@@ -124,7 +124,7 @@ export interface PanelDeps {
   };
   /**
    * 决策模型供应商（System One 通道的管理面）：不注入则 /api/decision* 一律 404。
-   * 与 LLM provider 完全隔离：独立名单、独立 key（`decision_key:<name>`）、独立协议。
+   * 与 LLM provider 完全隔离：独立名单、独立 key（`decision_key:<id>`）、独立协议。
    * key 在本机面板明文回显/编辑（与 LLM key 同一决策，只绑 127.0.0.1）；key 不进日志。
    */
   decision?: {
@@ -807,10 +807,9 @@ async function handle(
   }
   if (deps.llm && method === 'PUT' && path === '/api/llm/keys') {
     const body = asBodyObject(await readJsonBody(req));
-    // REST 入参键是 provider/value（webui 契约），工具参数是 name/value；响应补 key 状态回显
-    await callTool(deps, res, 'set_llm_key', { name: body.provider, value: body.value }, {
+    await callTool(deps, res, 'set_llm_key', { id: body.provider, value: body.value }, {
       map: (d) => {
-        const provider = (deps.llm?.store?.list() ?? []).find((p) => p.name === d.provider);
+        const provider = (deps.llm?.store?.list() ?? []).find((p) => p.id === d.provider);
         return {
           ...d,
           key: provider ? llmKeySource(db, provider) : { source: 'unset', count: 0, value: null },
@@ -824,22 +823,17 @@ async function handle(
     return;
   }
   if (deps.llm?.store && method === 'POST' && path === '/api/llm/providers') {
-    const body = asBodyObject(await readJsonBody(req));
-    // 裁决（P0 收敛）：REST 保持「重名 400」（webui 契约）；工具 upsert_llm_provider 保持按名 upsert（MCP 契约）
-    if (typeof body.name === 'string' && deps.llm.store.list().some((p) => p.name === body.name)) {
-      throw new HttpError(400, `provider name 重复: ${body.name}`);
-    }
-    await callTool(deps, res, 'upsert_llm_provider', body, { status: 201 });
+    await callTool(deps, res, 'upsert_llm_provider', asBodyObject(await readJsonBody(req)), { status: 201 });
     return;
   }
-  // 排序路由必须在 :name 通配之前匹配，否则 'order' 会被当成 provider 名
+  // 排序路由必须在 :id 通配之前匹配，否则 'order' 会被当成 provider ID
   if (deps.llm?.store && method === 'PUT' && path === '/api/llm/providers/order') {
     await callTool(deps, res, 'reorder_llm_providers', asBodyObject(await readJsonBody(req)));
     return;
   }
   const lpt = path.match(/^\/api\/llm\/providers\/([^/]+)\/test$/);
   if (deps.llm?.router && lpt && method === 'POST') {
-    const r = await runPanelTool(deps, 'test_llm_provider', {}, { pathArgs: { name: decodeURIComponent(lpt[1]!) } });
+    const r = await runPanelTool(deps, 'test_llm_provider', {}, { pathArgs: { id: decodeURIComponent(lpt[1]!) } });
     if (r.ok) {
       sendJson(res, 200, r.data);
       return;
@@ -853,15 +847,13 @@ async function handle(
   }
   const lpm = path.match(/^\/api\/llm\/providers\/([^/]+)$/);
   if (deps.llm?.store && lpm) {
-    const name = decodeURIComponent(lpm[1]!);
+    const id = decodeURIComponent(lpm[1]!);
     if (method === 'PUT') {
-      // 404 预检（与 POST 重名同属一个裁决）：REST 按存在性区分 404/400，工具是按名 upsert
-      if (!deps.llm.store.list().some((p) => p.name === name)) throw new HttpError(404, 'provider 不存在');
-      await callTool(deps, res, 'upsert_llm_provider', asBodyObject(await readJsonBody(req)), { pathArgs: { name } });
+      await callTool(deps, res, 'upsert_llm_provider', asBodyObject(await readJsonBody(req)), { pathArgs: { id } });
       return;
     }
     if (method === 'DELETE') {
-      await callTool(deps, res, 'delete_llm_provider', {}, { pathArgs: { name } });
+      await callTool(deps, res, 'delete_llm_provider', {}, { pathArgs: { id } });
       return;
     }
   }
@@ -875,15 +867,10 @@ async function handle(
     return;
   }
   if (deps.decision?.store && method === 'POST' && path === '/api/decision/providers') {
-    const body = asBodyObject(await readJsonBody(req));
-    // 与 LLM 同一裁决：REST 拒绝重名（webui 契约）；工具按名 upsert（MCP 契约）
-    if (typeof body.name === 'string' && deps.decision.store.list().some((p) => p.name === body.name)) {
-      throw new HttpError(400, `provider name 重复: ${body.name}`);
-    }
-    await callTool(deps, res, 'upsert_decision_provider', body, { status: 201 });
+    await callTool(deps, res, 'upsert_decision_provider', asBodyObject(await readJsonBody(req)), { status: 201 });
     return;
   }
-  // 排序路由必须在 :name 通配之前匹配，否则 'order' 会被当成 provider 名
+  // 排序路由必须在 :id 通配之前匹配，否则 'order' 会被当成 provider ID
   if (deps.decision?.store && method === 'PUT' && path === '/api/decision/providers/order') {
     await callTool(deps, res, 'reorder_decision_providers', asBodyObject(await readJsonBody(req)));
     return;
@@ -891,7 +878,7 @@ async function handle(
   const dpt = path.match(/^\/api\/decision\/providers\/([^/]+)\/test$/);
   if (deps.decision && dpt && method === 'POST') {
     const r = await runPanelTool(deps, 'test_decision_provider', {}, {
-      pathArgs: { name: decodeURIComponent(dpt[1]!) },
+      pathArgs: { id: decodeURIComponent(dpt[1]!) },
     });
     if (r.ok) {
       sendJson(res, 200, r.data);
@@ -906,14 +893,13 @@ async function handle(
   }
   const dpm = path.match(/^\/api\/decision\/providers\/([^/]+)$/);
   if (deps.decision?.store && dpm) {
-    const name = decodeURIComponent(dpm[1]!);
+    const id = decodeURIComponent(dpm[1]!);
     if (method === 'PUT') {
-      if (!deps.decision.store.list().some((p) => p.name === name)) throw new HttpError(404, 'provider 不存在');
-      await callTool(deps, res, 'upsert_decision_provider', asBodyObject(await readJsonBody(req)), { pathArgs: { name } });
+      await callTool(deps, res, 'upsert_decision_provider', asBodyObject(await readJsonBody(req)), { pathArgs: { id } });
       return;
     }
     if (method === 'DELETE') {
-      await callTool(deps, res, 'delete_decision_provider', {}, { pathArgs: { name } });
+      await callTool(deps, res, 'delete_decision_provider', {}, { pathArgs: { id } });
       return;
     }
   }
@@ -1601,14 +1587,14 @@ function biliAccountInfo(db: Db, id: number): unknown {
   return biliAccountView(db, a);
 }
 
-// ---- LLM key 管理（settings 表 llm_key:<providerName>；本机面板，值可回显/编辑）----
+// ---- LLM key 管理（settings 表 llm_key:<providerId>；本机面板，值可回显/编辑）----
 
 /** key 来源、池子大小与值本身：panel = 面板填写；unset = 未设置（key 唯一来源是 settings） */
 function llmKeySource(
   db: Db,
   p: LlmProviderConfig,
 ): { source: 'panel' | 'unset'; count: number; value: string | null } {
-  const panel = db.getSetting(`llm_key:${p.name}`);
+  const panel = db.getSetting(llmKeySetting(p.id));
   if (panel && panel.trim()) {
     const v = panel.trim();
     return { source: 'panel', count: splitCsvText(v).length, value: v };
@@ -1619,13 +1605,14 @@ function llmKeySource(
 function llmInfo(deps: PanelDeps): unknown {
   const list = deps.llm!.store?.list() ?? [];
   const routes = deriveRoutes(list);
-  const described = new Map((deps.llm!.router?.describe() ?? []).map((s) => [s.name, s]));
+  const described = new Map((deps.llm!.router?.describe() ?? []).map((s) => [s.id, s]));
   return {
     enabled: isLlmEnabled(deps.db),
     // agent 会话选定的 provider（'' = 自动路由）：选择器只需读这一处就能预选，
     // 与 /api/chat/history 的 provider 同一个 settings 键
     chatProvider: getChatProvider(deps.db),
     providers: list.map((p) => ({
+      id: p.id,
       name: p.name,
       baseURL: p.baseURL,
       model: p.model,
@@ -1633,24 +1620,24 @@ function llmInfo(deps: PanelDeps): unknown {
       enabled: p.enabled,
       structuredOutput: p.structuredOutput,
       api: p.api,
-      routes: (['text', 'vision'] as const).filter((r) => routes[r].includes(p.name)),
-      status: described.get(p.name)?.status ?? null,
+      routes: (['text', 'vision'] as const).filter((r) => routes[r].includes(p.id)),
+      status: described.get(p.id)?.status ?? null,
       // 此刻能不能真的用（启用 + 有 key + 未熔断）：Agent 模型选择器只让挑能用的，
       // 与 loop 的 chatBlockedReason 同一判据（ProviderStatus.ready）
-      ready: described.get(p.name)?.ready ?? false,
+      ready: described.get(p.id)?.ready ?? false,
       key: llmKeySource(deps.db, p),
     })),
   };
 }
 
-// ---- 决策模型 provider 展示（settings 表 decision_providers / decision_key:<name>）----
+// ---- 决策模型 provider 展示（settings 表 decision_providers / decision_key:<id>）----
 
 /** key 来源、池子大小与值本身（与 LLM 同口径：本机面板明文回显供编辑）。 */
 function decisionKeySource(
   db: Db,
   p: DecisionProviderConfig,
 ): { source: 'panel' | 'unset'; count: number; value: string | null } {
-  const panel = db.getSetting(decisionKeySetting(p.name));
+  const panel = db.getSetting(decisionKeySetting(p.id));
   if (panel && panel.trim()) {
     const v = panel.trim();
     return { source: 'panel', count: splitCsvText(v).length, value: v };
@@ -1662,6 +1649,7 @@ function decisionInfo(deps: PanelDeps): unknown {
   return {
     enabled: isDecisionEnabled(deps.db),
     providers: (deps.decision?.store.list() ?? []).map((p) => ({
+      id: p.id,
       name: p.name,
       baseURL: p.baseURL,
       model: p.model,

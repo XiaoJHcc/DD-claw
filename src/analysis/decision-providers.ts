@@ -1,10 +1,10 @@
-import type { DecisionProviderConfig } from '../config/index.js';
+import { normalizeProviderBaseURL, type DecisionProviderConfig } from '../config/index.js';
 import { splitCsvText } from '../core/csv.js';
 import type { Db } from '../core/db.js';
 import type { FetchLike } from './providers.js';
 
 /**
- * 决策模型 provider 层（System One）：`POST <baseURL>/systemone`，请求体是
+ * 决策模型 provider 层（System One）：`POST <baseURL>/v1/systemone`，请求体是
  * `state + questions`（含图时另带顶层 `assets`），响应是同 id 的 typed answers。
  *
  * 本文件只管线格式、探活、名单与 key 的存取；调用顺序 / 熔断 / key 轮换在
@@ -13,7 +13,7 @@ import type { FetchLike } from './providers.js';
  * 设计边界：
  * - **只认 `systemone` 线格式**：`choice` / `score` / `noul`（`box` 是图片实验特性，未接）。
  *   OpenAI / Perplexity 的 `/v1/decisions` 形状不同，等接入时再加协议值。
- * - **与 LLM 通道彻底隔离**：独立 key（`decision_key:<name>`）、独立协议、独立错误类型；
+ * - **与 LLM 通道彻底隔离**：独立 key（`decision_key:<id>`）、独立协议、独立错误类型；
  *   这里不读 `llm_*` 设置，也不复用 `LlmRouter` 的熔断状态。
  * - **key 绝不进日志/错误信息**：只在 Authorization 头出现；错误只带 HTTP 状态与响应摘要。
  * - **图片走 TypeSafe 原生 `assets`**：纯 base64（无 data URL 前缀），ref 写进 `state`
@@ -95,7 +95,7 @@ export async function callSystemOne(
   if (spec.protocol !== 'systemone') {
     throw new DecisionCallError(`不支持的决策模型协议: ${spec.protocol}`);
   }
-  const url = `${spec.baseURL.replace(/\/+$/, '')}/systemone`;
+  const url = `${normalizeProviderBaseURL(spec.baseURL)}/v1/systemone`;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (key) headers.Authorization = `Bearer ${key}`;
   if (req.assets && Object.keys(req.assets).length > 0) headers[IMAGES_HEADER] = 'true';
@@ -184,14 +184,14 @@ export function saveDecisionProviders(db: Db, providers: DecisionProviderConfig[
   db.setSetting(DECISION_PROVIDERS_SETTING, JSON.stringify(providers));
 }
 
-/** key 设置项名（`decision_key:<providerName>`，与 LLM 的 `llm_key:` 平行且不共享）。 */
-export function decisionKeySetting(name: string): string {
-  return `decision_key:${name}`;
+/** key 设置项名（`decision_key:<providerId>`，与 LLM 的 `llm_key:` 平行且不共享）。 */
+export function decisionKeySetting(id: string): string {
+  return `decision_key:${id}`;
 }
 
 /** key 解析器：按 provider 定义给出 key 池（逗号分隔多 key，轮换在 decision-router） */
 export function dbDecisionKeysOf(db: Db): (spec: DecisionProviderConfig) => string[] {
-  return (spec) => splitCsvText(db.getSetting(decisionKeySetting(spec.name)));
+  return (spec) => splitCsvText(db.getSetting(decisionKeySetting(spec.id)));
 }
 
 // ---- 决策档总开关：settings 表（'1'/'0'），缺省 = 关（与 LLM 总开关平行且不共享）----

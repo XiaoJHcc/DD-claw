@@ -23,7 +23,7 @@ const STATUS: PanelStatus = {
 };
 
 const PROVIDER: LlmProviderConfig = {
-  name: 'p1', baseURL: 'https://api.example.com/v1', model: 'm1', vision: false,
+  id: 'p1', name: 'p1', baseURL: 'https://api.example.com/v1', model: 'm1', vision: false,
   keyEnvs: [], enabled: true, structuredOutput: 'schema', api: 'chat-completions',
 };
 

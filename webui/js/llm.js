@@ -6,8 +6,10 @@ import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, fie
 
 let llmCache = [];
 
+let editingLlmId = null;
+
 function llmRowHtml(p) {
-  return `<div class="row row-2" data-sid="${esc(p.name)}">` +
+  return `<div class="row row-2" data-sid="${esc(p.id)}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-llm-provider"', p.enabled) +
     '<span class="row-main"><span class="row-line">' +
@@ -39,29 +41,30 @@ CHANGES['toggle-llm'] = function (el) {
 };
 
 CHANGES['toggle-llm-provider'] = function (el) {
-  const name = el.closest('.row').getAttribute('data-sid');
+  const id = el.closest('.row').getAttribute('data-sid');
   const on = el.checked;
-  api('/api/llm/providers/' + encodeURIComponent(name), 'PUT', { enabled: on })
+  api('/api/llm/providers/' + encodeURIComponent(id), 'PUT', { enabled: on })
     .then(function () { toast(on ? '已启用' : '已停用'); })
     .catch(function (e) { toast(e.message, true); loadLlm(); });
 };
 
-function llmByName(name) {
-  for (let i = 0; i < llmCache.length; i++) if (llmCache[i].name === name) return llmCache[i];
+function llmById(id) {
+  for (let i = 0; i < llmCache.length; i++) if (llmCache[i].id === id) return llmCache[i];
   return null;
 }
 
 ACTIONS['test-llm'] = function (el) {
-  const name = el.closest('.row').getAttribute('data-sid');
-  api('/api/llm/providers/' + encodeURIComponent(name) + '/test', 'POST')
+  const id = el.closest('.row').getAttribute('data-sid');
+  api('/api/llm/providers/' + encodeURIComponent(id) + '/test', 'POST')
     .then(function (j) { toast('可用（' + j.ms + 'ms）'); })
     .catch(function (e) { toast('不可用: ' + e.message, true); });
 };
 
 ACTIONS['del-llm'] = function (el) {
-  const name = el.closest('.row').getAttribute('data-sid');
-  if (!confirm('删除供应商「' + name + '」？它的 key 设置会保留。')) return;
-  api('/api/llm/providers/' + encodeURIComponent(name), 'DELETE')
+  const id = el.closest('.row').getAttribute('data-sid');
+  const p = llmById(id);
+  if (!confirm('删除供应商「' + (p ? p.name : id) + '」？它的 key 设置会保留。')) return;
+  api('/api/llm/providers/' + encodeURIComponent(id), 'DELETE')
     .then(function () { toast('已删除'); loadLlm(); })
     .catch(function (e) { toast(e.message, true); });
 };
@@ -69,15 +72,15 @@ ACTIONS['del-llm'] = function (el) {
 ACTIONS['add-llm'] = function () { openLlmSheet(null); };
 ACTIONS['edit-llm'] = function (el) { openLlmSheet(el.closest('.row').getAttribute('data-sid')); };
 
-// ---- 新增 / 编辑弹窗（同一个表单；name 是路径标识，编辑时不可改） ----
-function openLlmSheet(name) {
-  const p = name === null ? null : llmByName(name);
-  if (name !== null && !p) { toast('供应商数据未加载', true); return; }
+function openLlmSheet(id) {
+  const p = id === null ? null : llmById(id);
+  if (id !== null && !p) { toast('供应商数据未加载', true); return; }
+  editingLlmId = id;
   openSheet(p ? '编辑供应商' : '新增供应商',
     field('名称', `<input id="lp-name" class="inp" placeholder="如 deepseek" value="` +
-      (p ? esc(p.name) : '') + '"' + (p ? ' disabled' : '') + '>') +
+      (p ? esc(p.name) : '') + '">') +
     '<div class="two">' +
-    field('Base URL', `<input id="lp-base" class="inp" placeholder="如 https://api.deepseek.com/v1" value="` +
+    field('Base URL', `<input id="lp-base" class="inp" placeholder="如 https://api.deepseek.com" value="` +
       (p ? esc(p.baseURL) : '') + '">') +
     field('协议', dropdownHtml('lp-api', [
       { value: 'chat-completions', label: 'chat/completions（默认）' },
@@ -91,7 +94,7 @@ function openLlmSheet(name) {
       (p ? esc(p.model) : '') + '">') +
     // 多模态勾：v2 表单布尔 = 多选行形态（左文字右勾点，.field 内 check-row 恒 ctl-h 高）
     '<div class="field"><label class="field-label">多模态</label>' +
-    checkRowHtml('id="lp-vision"', !!(p && p.vision), '识图（带图分类）') +
+    checkRowHtml('id="lp-vision"', !!(p && p.vision), '图片输入') +
     '</div>' +
     '</div>' +
     field('结构化输出', dropdownHtml('lp-so', [
@@ -104,9 +107,9 @@ function openLlmSheet(name) {
 }
 
 ACTIONS['save-llm'] = function () {
-  const nameEl = document.getElementById('lp-name');
-  const isNew = !nameEl.disabled;
+  const isNew = editingLlmId === null;
   const body = {
+    name: document.getElementById('lp-name').value.trim(),
     baseURL: document.getElementById('lp-base').value.trim(),
     model: document.getElementById('lp-model').value.trim(),
     vision: document.getElementById('lp-vision').checked,
@@ -115,8 +118,8 @@ ACTIONS['save-llm'] = function () {
     key: document.getElementById('lp-key').value.trim(),
   };
   const req = isNew
-    ? api('/api/llm/providers', 'POST', Object.assign({ name: nameEl.value.trim() }, body))
-    : api('/api/llm/providers/' + encodeURIComponent(nameEl.value), 'PUT', body);
+    ? api('/api/llm/providers', 'POST', body)
+    : api('/api/llm/providers/' + encodeURIComponent(editingLlmId), 'PUT', body);
   req.then(function () {
     closeSheet(1);
     toast(isNew ? '已新增' : '已保存');
@@ -166,9 +169,9 @@ ACTIONS['save-llm-advanced'] = function () {
 // 拖拽排序：顺序 = 调用优先级，落库后热生效
 makeSortable(document.getElementById('llm-list'), {
   items: function () { return llmCache; },
-  getId: function (p) { return p.name; },
-  onOrder: function (names) {
-    api('/api/llm/providers/order', 'PUT', { names: names })
+  getId: function (p) { return p.id; },
+  onOrder: function (ids) {
+    api('/api/llm/providers/order', 'PUT', { ids: ids })
       .then(loadLlm)
       .catch(function (err) { toast(err.message, true); loadLlm(); });
   },

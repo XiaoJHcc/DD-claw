@@ -9,10 +9,17 @@ import { z } from 'zod';
  *   settings 后给 sources/router/装配消费——不再有「从文件读运行参数」的路径。
  */
 
+export function normalizeProviderBaseURL(value: string): string {
+  return value.trim().replace(/\/+$/, '').replace(/\/v1$/i, '');
+}
+
+const providerBaseURLSchema = z.url('baseURL 必须是合法 URL').transform(normalizeProviderBaseURL);
+
 /** LLM provider：OpenAI 兼容端点。名单存 settings 表（面板 LLM 卡片管理），本 schema 供面板 CRUD 校验。 */
 export const llmProviderSchema = z.object({
+  id: z.string().min(1),
   name: z.string().min(1),
-  baseURL: z.url('baseURL 必须是合法 URL'),
+  baseURL: providerBaseURLSchema,
   model: z.string().min(1),
   /** 是否可接含图任务（vision 路由候选） */
   vision: z.boolean().default(false),
@@ -25,8 +32,8 @@ export const llmProviderSchema = z.object({
    */
   structuredOutput: z.enum(['schema', 'object', 'none']).default('schema'),
   /**
-   * 端点协议：chat-completions = /chat/completions（绝大多数 OpenAI 兼容端点）；
-   * responses = /responses（OpenAI Responses API，如 OpenCode Go 的 gpt-5.6-luna）。
+   * 端点协议：chat-completions = /v1/chat/completions（绝大多数 OpenAI 兼容端点）；
+   * responses = /v1/responses（OpenAI Responses API，如 OpenCode Go 的 gpt-5.6-luna）。
    * Anthropic /messages 协议不做（他家模型贵，MiniMax/Qwen 走各自官方 API）
    */
   api: z.enum(['chat-completions', 'responses']).default('chat-completions'),
@@ -43,10 +50,11 @@ export type LlmProviderConfig = z.infer<typeof llmProviderSchema>;
  * `/v1/decisions` 形状不同，等真正接入时再作为新枚举值扩展，不在业务代码里分支。
  */
 export const decisionProviderSchema = z.object({
+  id: z.string().min(1),
   name: z.string().min(1),
-  baseURL: z.url('baseURL 必须是合法 URL'),
+  baseURL: providerBaseURLSchema,
   model: z.string().min(1),
-  /** 端点协议：systemone = POST /systemone（baseURL 写到 /v1 这一层） */
+  /** 端点协议：systemone = POST /v1/systemone（baseURL 不含 /v1） */
   protocol: z.enum(['systemone']).default('systemone'),
   /** 是否可接含图请求（带图内容先交给 vision 供应商，纯文本供应商只作兜底） */
   vision: z.boolean().default(false),

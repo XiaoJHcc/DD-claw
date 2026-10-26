@@ -293,7 +293,8 @@ const chatUsage = () => {
 };
 // 这条回复由谁提供：选定模型优先，'' = 自动路由 → 取第一个启用的供应商（无则 null，仿「LLM 全停用」）
 function activeProviderName() {
-  if (store.chat.provider) return store.chat.provider;
+  const selected = store.llmProviders.find((p) => p.id === store.chat.provider);
+  if (selected) return selected.name;
   const first = store.llmProviders.find((p) => p.enabled);
   return first ? first.name : null;
 }
@@ -405,7 +406,8 @@ function writeMeta(method, path, b) {
       detail: [{ label: 'LLM 供应商名单', ...upd, changes: [{ field: 'LLM 供应商名单', to: '顺序已调整' }] }] };
   }
   if (path === '/api/llm/providers' || /^\/api\/llm\/providers\/[^/]+$/.test(path)) {
-    const name = path === '/api/llm/providers' ? b.name : decodeURIComponent(path.split('/').pop());
+    const id = path === '/api/llm/providers' ? '' : decodeURIComponent(path.split('/').pop());
+    const name = path === '/api/llm/providers' ? b.name : (store.llmProviders.find((p) => p.id === id) || {}).name || id;
     const withKey = !del && !!(b.key && String(b.key).trim());
     return {
       tool: del ? 'delete_llm_provider' : 'upsert_llm_provider',
@@ -424,7 +426,8 @@ function writeMeta(method, path, b) {
       detail: [{ label: '决策模型供应商名单', ...upd, changes: [{ field: '决策模型供应商名单', to: '顺序已调整' }] }] };
   }
   if (path === '/api/decision/providers' || /^\/api\/decision\/providers\/[^/]+$/.test(path)) {
-    const name = path === '/api/decision/providers' ? b.name : decodeURIComponent(path.split('/').pop());
+    const id = path === '/api/decision/providers' ? '' : decodeURIComponent(path.split('/').pop());
+    const name = path === '/api/decision/providers' ? b.name : (store.decisionProviders.find((p) => p.id === id) || {}).name || id;
     const withKey = !del && !!(b.key && String(b.key).trim());
     return {
       tool: del ? 'delete_decision_provider' : 'upsert_decision_provider',
@@ -1590,8 +1593,8 @@ for (const p of store.twitterPosts) {
     return ok({ ok: true });
   }
   if (path === '/api/llm/providers/order' && method === 'PUT') {
-    const names = body().names || [];
-    store.llmProviders.sort((a, b) => names.indexOf(a.name) - names.indexOf(b.name));
+    const ids = body().ids || [];
+    store.llmProviders.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
     return ok({ ok: true });
   }
   {
@@ -1603,26 +1606,28 @@ for (const p of store.twitterPosts) {
   if (path === '/api/llm/providers' && method === 'POST') {
     const b = body();
     if (store.llmProviders.some((p) => p.name === b.name)) return err(400, `provider name 重复: ${b.name}`);
+    const id = crypto.randomUUID();
     store.llmProviders.push({
-      name: b.name, baseURL: b.baseURL || '', model: b.model || '',
+      id, name: b.name, baseURL: b.baseURL || '', model: b.model || '',
       vision: !!b.vision, enabled: true,
       structuredOutput: b.structuredOutput || 'schema', api: b.api || 'chat-completions',
     });
-    return created({ name: b.name });
+    return created({ id, name: b.name });
   }
   {
     const pm = path.match(/^\/api\/llm\/providers\/([^/]+)$/);
     if (pm) {
-      const name = decodeURIComponent(pm[1]);
-      const p = store.llmProviders.find((x) => x.name === name);
+      const id = decodeURIComponent(pm[1]);
+      const p = store.llmProviders.find((x) => x.id === id);
       if (!p) return err(404, 'provider 不存在');
       if (method === 'PUT') {
         const b = body();
-        for (const k of ['baseURL', 'model', 'vision', 'enabled', 'structuredOutput', 'api']) if (b[k] !== undefined) p[k] = b[k];
-        return ok({ ok: true, name });
+        if (store.llmProviders.some((x) => x.id !== id && x.name === b.name)) return err(400, `provider name 重复: ${b.name}`);
+        for (const k of ['name', 'baseURL', 'model', 'vision', 'enabled', 'structuredOutput', 'api']) if (b[k] !== undefined) p[k] = b[k];
+        return ok({ ok: true, id, name: p.name });
       }
       if (method === 'DELETE') {
-        store.llmProviders = store.llmProviders.filter((x) => x.name !== name);
+        store.llmProviders = store.llmProviders.filter((x) => x.id !== id);
         return ok({ ok: true });
       }
     }
@@ -1644,14 +1649,14 @@ for (const p of store.twitterPosts) {
     return ok({ ok: true, enabled: store.decisionEnabled });
   }
   if (path === '/api/decision/providers/order' && method === 'PUT') {
-    const names = body().names || [];
-    store.decisionProviders.sort((a, b) => names.indexOf(a.name) - names.indexOf(b.name));
+    const ids = body().ids || [];
+    store.decisionProviders.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
     return ok({ ok: true });
   }
   {
     const tm = path.match(/^\/api\/decision\/providers\/([^/]+)\/test$/);
     if (tm && method === 'POST') {
-      const p = store.decisionProviders.find((x) => x.name === decodeURIComponent(tm[1]));
+      const p = store.decisionProviders.find((x) => x.id === decodeURIComponent(tm[1]));
       if (!p) return err(404, 'provider 不存在');
       return ok({ ok: true, ms: 38, model: p.model });
     }
@@ -1659,25 +1664,27 @@ for (const p of store.twitterPosts) {
   if (path === '/api/decision/providers' && method === 'POST') {
     const b = body();
     if (store.decisionProviders.some((p) => p.name === b.name)) return err(400, `provider name 重复: ${b.name}`);
+    const id = crypto.randomUUID();
     store.decisionProviders.push({
-      name: b.name, baseURL: b.baseURL || '', model: b.model || '',
+      id, name: b.name, baseURL: b.baseURL || '', model: b.model || '',
       protocol: b.protocol || 'systemone', vision: !!b.vision, enabled: true,
     });
-    return created({ name: b.name });
+    return created({ id, name: b.name });
   }
   {
     const pm = path.match(/^\/api\/decision\/providers\/([^/]+)$/);
     if (pm) {
-      const name = decodeURIComponent(pm[1]);
-      const p = store.decisionProviders.find((x) => x.name === name);
+      const id = decodeURIComponent(pm[1]);
+      const p = store.decisionProviders.find((x) => x.id === id);
       if (!p) return err(404, 'provider 不存在');
       if (method === 'PUT') {
         const b = body();
-        for (const k of ['baseURL', 'model', 'protocol', 'vision', 'enabled']) if (b[k] !== undefined) p[k] = b[k];
-        return ok({ ok: true, name });
+        if (store.decisionProviders.some((x) => x.id !== id && x.name === b.name)) return err(400, `provider name 重复: ${b.name}`);
+        for (const k of ['name', 'baseURL', 'model', 'protocol', 'vision', 'enabled']) if (b[k] !== undefined) p[k] = b[k];
+        return ok({ ok: true, id, name: p.name });
       }
       if (method === 'DELETE') {
-        store.decisionProviders = store.decisionProviders.filter((x) => x.name !== name);
+        store.decisionProviders = store.decisionProviders.filter((x) => x.id !== id);
         return ok({ ok: true });
       }
     }
@@ -1738,7 +1745,7 @@ for (const p of store.twitterPosts) {
   if (path === '/api/chat/provider' && method === 'PUT') {
     const p = body().provider;
     if (typeof p !== 'string') return json(400, { error: 'provider 必须是字符串' });
-    if (p !== '' && !store.llmProviders.some((x) => x.name === p)) {
+    if (p !== '' && !store.llmProviders.some((x) => x.id === p)) {
       return json(400, { error: `provider 不存在: ${p}` });
     }
     store.chat.provider = p;

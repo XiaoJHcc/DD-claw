@@ -1,5 +1,5 @@
 import { makeLogger } from '../logger.js';
-import type { AppConfig, LlmProviderConfig } from '../config/index.js';
+import { normalizeProviderBaseURL, type AppConfig, type LlmProviderConfig } from '../config/index.js';
 import { splitCsvText } from '../core/csv.js';
 import type { Db } from '../core/db.js';
 import type { ModelAttempt } from '../core/content-audit.js';
@@ -67,7 +67,7 @@ export interface LlmRequest {
   /** 强制指定路由；缺省按 messages 里有没有 image_url 自动判断 */
   vision?: boolean;
   /**
-   * **强制指定哪个 provider 回答**（agent 会话模型选择，settings `chat_provider`）。
+   * **强制指定哪个 provider ID 回答**（agent 会话模型选择，settings `chat_provider`）。
    * 与 `vision` 不同：这是硬约束，指定的 provider 不存在 / 未启用 / 熔断 / 调用失败都
    * **抛错且绝不回落别人**（`SelectedProviderError`）——主人选了模型，就不该被静默换掉。
    * 缺省（undefined 或空串）= 按路由优先级自动选，失败逐级降级。
@@ -89,9 +89,13 @@ export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 /** key 解析器：按 provider 定义给出 key 池 */
 export type SpecKeysOf = (spec: LlmProviderConfig) => string[];
 
-/** 生产解析：面板填写的 key（settings 表 `llm_key:<providerName>`，逗号分隔多 key，中英文逗号均可），唯一来源 */
+export function llmKeySetting(id: string): string {
+  return `llm_key:${id}`;
+}
+
+/** 生产解析：面板填写的 key（settings 表 `llm_key:<providerId>`，逗号分隔多 key，中英文逗号均可），唯一来源 */
 export function dbKeysOf(db: Db): SpecKeysOf {
-  return (spec) => splitCsvText(db.getSetting(`llm_key:${spec.name}`));
+  return (spec) => splitCsvText(db.getSetting(llmKeySetting(spec.id)));
 }
 
 /**
@@ -187,6 +191,10 @@ export class OpenAiProvider {
     this.keyIdx = 0;
   }
 
+  get id(): string {
+    return this.spec.id;
+  }
+
   get name(): string {
     return this.spec.name;
   }
@@ -277,7 +285,7 @@ export class OpenAiProvider {
     if (key) headers.Authorization = `Bearer ${key}`;
 
     let res: Response;
-    const url = `${this.spec.baseURL.replace(/\/+$/, '')}${path}`;
+    const url = `${normalizeProviderBaseURL(this.spec.baseURL)}/v1${path}`;
     try {
       res = await this.fetchFn(url, {
         method: 'POST',
@@ -577,6 +585,7 @@ function classifyToolError(e: unknown, hadTools: boolean): unknown {
 }
 
 export interface ProviderStatus {
+  id: string;
   name: string;
   model: string;
   vision: boolean;
@@ -590,7 +599,7 @@ export interface ProviderStatus {
 }
 
 export class LlmRouter {
-  private readonly byName = new Map<string, OpenAiProvider>();
+  private readonly byId = new Map<string, OpenAiProvider>();
 
   constructor(
     providers: OpenAiProvider[],
@@ -598,27 +607,27 @@ export class LlmRouter {
     /** 由 createLlmRouter 注入：面板改 key 后 refreshKeys() 热更新用 */
     private readonly resolveKeys?: (spec: LlmProviderConfig) => string[],
   ) {
-    for (const p of providers) this.byName.set(p.name, p);
+    for (const p of providers) this.byId.set(p.id, p);
   }
 
   /** 重新解析所有 provider 的 key（面板保存/清除后调用，免重启生效） */
   refreshKeys(): void {
     if (!this.resolveKeys) return;
-    for (const p of this.byName.values()) p.setKeys(this.resolveKeys(p.spec));
+    for (const p of this.byId.values()) p.setKeys(this.resolveKeys(p.spec));
   }
 
   /** 面板「测试」按钮用：单 provider 状态；null = 不存在 */
-  providerStatus(name: string): string | null {
-    return this.byName.get(name)?.status() ?? null;
+  providerStatus(id: string): string | null {
+    return this.byId.get(id)?.status() ?? null;
   }
 
   /**
    * 面板「测试」按钮：绕过熔断对该 provider 发一个最小 ping，返回毫秒耗时。
    * 失败照常计入熔断统计（ping 不通 = 端点确实有问题）。key 绝不进错误信息。
    */
-  async ping(name: string): Promise<number> {
-    const p = this.byName.get(name);
-    if (!p) throw new ProviderCallError(`provider 不存在: ${name}`);
+  async ping(id: string): Promise<number> {
+    const p = this.byId.get(id);
+    if (!p) throw new ProviderCallError(`provider 不存在: ${id}`);
     if (p.keyMissing) throw new ProviderCallError('缺 key，请先填写');
     const t0 = Date.now();
     try {
@@ -636,11 +645,12 @@ export class LlmRouter {
 
   /** probe / 面板用：所有 provider 的可用状态（不含 key） */
   describe(): ProviderStatus[] {
-    return [...this.byName.values()].map((p) => ({
+    return [...this.byId.values()].map((p) => ({
+      id: p.id,
       name: p.name,
       model: p.spec.model,
       vision: p.spec.vision,
-      routes: (['text', 'vision'] as const).filter((r) => this.routes[r].includes(p.name)),
+      routes: (['text', 'vision'] as const).filter((r) => this.routes[r].includes(p.id)),
       status: p.status(),
       ready: p.isReady(),
     }));
@@ -651,7 +661,7 @@ export class LlmRouter {
    * 硬着头皮带图会让整个请求在空路由上失败，把本可走 text 路由的判定/翻译一起拖死。
    */
   hasVision(): boolean {
-    return this.routes.vision.some((name) => this.byName.get(name)?.isReady() ?? false);
+    return this.routes.vision.some((id) => this.byId.get(id)?.isReady() ?? false);
   }
 
   /**
@@ -669,24 +679,24 @@ export class LlmRouter {
     const route = this.routes[routeKind];
     const attempts: string[] = [];
 
-    for (const name of route) {
-      const p = this.byName.get(name);
+    for (const id of route) {
+      const p = this.byId.get(id);
       if (!p) continue;
       if (!p.isReady()) {
-        attempts.push(`${name}[跳过:${p.status()}]`);
-        onAttempt?.({ provider: name, model: p.spec.model, status: 'skipped', error: p.status() });
+        attempts.push(`${p.name}[跳过:${p.status()}]`);
+        onAttempt?.({ provider: p.name, model: p.spec.model, status: 'skipped', error: p.status() });
         continue;
       }
       try {
         const raw = await p.complete(req);
         const result = parse ? parse(raw) : (raw as T);
         p.recordSuccess();
-        onAttempt?.({ provider: name, model: p.spec.model, status: 'success' });
+        onAttempt?.({ provider: p.name, model: p.spec.model, status: 'success' });
         return result;
       } catch (e) {
         p.recordFailure(e);
-        attempts.push(`${name}[失败]`);
-        onAttempt?.({ provider: name, model: p.spec.model, status: 'failed', error: String(e) });
+        attempts.push(`${p.name}[失败]`);
+        onAttempt?.({ provider: p.name, model: p.spec.model, status: 'failed', error: String(e) });
       }
     }
     throw new AllProvidersExhaustedError(routeKind, attempts);
@@ -711,14 +721,14 @@ export class LlmRouter {
     const route = this.routes[routeKind];
     const attempts: string[] = [];
 
-    for (const name of route) {
-      const p = this.byName.get(name);
+    for (const id of route) {
+      const p = this.byId.get(id);
       if (!p) continue;
       if (!p.isReady()) {
-        attempts.push(`${name}[跳过:${p.status()}]`);
+        attempts.push(`${p.name}[跳过:${p.status()}]`);
         continue;
       }
-      const out = await this.tryChat(p, req, attempts, name);
+      const out = await this.tryChat(p, req, attempts, p.name);
       if (out !== null) return out;
     }
     throw new AllProvidersExhaustedError(routeKind, attempts);
@@ -728,16 +738,16 @@ export class LlmRouter {
    * 点名路由：只有这一个 provider 会被调用，任何一步不顺都抛错（不换人）。
    * 「未就绪」在调用前就判定（省一次注定失败的请求），调用失败照常计熔断。
    */
-  private async completeChatWith(name: string, req: LlmRequest): Promise<ChatCompletion> {
-    const p = this.byName.get(name);
-    if (!p) throw new SelectedProviderError(name, `没有这个 LLM provider：${name}（请在设置页重新选择）`);
+  private async completeChatWith(id: string, req: LlmRequest): Promise<ChatCompletion> {
+    const p = this.byId.get(id);
+    if (!p) throw new SelectedProviderError(id, `没有这个 LLM provider：${id}（请在设置页重新选择）`);
     if (!p.isReady()) {
-      throw new SelectedProviderError(name, `指定的 LLM provider「${name}」当前不可用（${p.status()}）`);
+      throw new SelectedProviderError(id, `指定的 LLM provider「${p.name}」当前不可用（${p.status()}）`);
     }
     const attempts: string[] = [];
-    const out = await this.tryChat(p, req, attempts, name, true);
+    const out = await this.tryChat(p, req, attempts, p.name, true);
     // strict 下失败一律抛错，这行只是类型兜底（防御）
-    if (out === null) throw new SelectedProviderError(name, `指定的 LLM provider「${name}」调用失败`);
+    if (out === null) throw new SelectedProviderError(id, `指定的 LLM provider「${p.name}」调用失败`);
     return out;
   }
 
@@ -757,7 +767,7 @@ export class LlmRouter {
       p.recordFailure(e);
       attempts.push(`${name}[${tag}]`);
       if (strict) {
-        throw new SelectedProviderError(name, `LLM provider「${name}」调用失败：${(e as Error).message}`);
+        throw new SelectedProviderError(p.id, `LLM provider「${name}」调用失败：${(e as Error).message}`);
       }
       return null;
     };
@@ -911,26 +921,22 @@ export function setLlmEnabled(db: Db, on: boolean): void {
 
 const CHAT_PROVIDER_SETTING = 'chat_provider';
 
-/**
- * agent 对话选定的 provider 名；`''` = 自动路由（按 provider 列表顺序 + 降级）。
- * 只认**已配置过**的名字（选定后 provider 被删/改名 → 退回自动？不——见 `chatProviderMissing`）：
- * 读取一律原样返回，配置是否还有效由调用方按 provider 名单判定（`chatBlockedReason`）。
- */
+/** agent 对话选定的 provider ID；`''` = 自动路由。 */
 export function getChatProvider(db: Db): string {
   return (db.getSetting(CHAT_PROVIDER_SETTING) ?? '').trim();
 }
 
 /** 写入选定（`''` = 回到自动路由，key 直接删掉，与 listen 开关「回 auto」同语义） */
 export function setChatProvider(db: Db, provider: string): string {
-  const name = provider.trim();
-  if (name === '') db.deleteSetting(CHAT_PROVIDER_SETTING);
-  else db.setSetting(CHAT_PROVIDER_SETTING, name);
+  const id = provider.trim();
+  if (id === '') db.deleteSetting(CHAT_PROVIDER_SETTING);
+  else db.setSetting(CHAT_PROVIDER_SETTING, id);
   return getChatProvider(db);
 }
 
-/** 该名字在 provider 名单里有没有（面板下拉与 `PUT /api/chat/provider` 的 400 判据） */
-export function hasLlmProvider(list: readonly LlmProviderConfig[], name: string): boolean {
-  return list.some((p) => p.name === name);
+/** 该 ID 在 provider 名单里有没有（面板下拉与 `PUT /api/chat/provider` 的 400 判据） */
+export function hasLlmProvider(list: readonly LlmProviderConfig[], id: string): boolean {
+  return list.some((p) => p.id === id);
 }
 
 /**
@@ -941,7 +947,7 @@ export function hasLlmProvider(list: readonly LlmProviderConfig[], name: string)
 export function deriveRoutes(providers: LlmProviderConfig[]): { text: string[]; vision: string[] } {
   const on = providers.filter((p) => p.enabled);
   return {
-    text: on.map((p) => p.name),
-    vision: on.filter((p) => p.vision).map((p) => p.name),
+    text: on.map((p) => p.id),
+    vision: on.filter((p) => p.vision).map((p) => p.id),
   };
 }

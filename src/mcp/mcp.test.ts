@@ -53,7 +53,7 @@ async function setup(
   }
   if (opts.withLlm) {
     saveLlmProviders(db, [{
-      name: 'TestLLM', baseURL: 'http://127.0.0.1:1/v1', model: 'm',
+      id: 'TestLLM', name: 'TestLLM', baseURL: 'http://127.0.0.1:1/v1', model: 'm',
       vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema', api: 'chat-completions',
     }]);
   }
@@ -592,14 +592,14 @@ test('admin：set_llm_key 存 settings 且不回显值', async (t) => {
   const f = await setup(t, { withLlm: true });
   const adm = await mcpClient(f, ADMIN_TOKEN);
 
-  await call(adm, 'set_llm_key', { name: 'TestLLM', value: 'sk-a,sk-b' });
+  await call(adm, 'set_llm_key', { id: 'TestLLM', value: 'sk-a,sk-b' });
   assert.equal(f.db.getSetting('llm_key:TestLLM'), 'sk-a,sk-b');
 
   const list = (await call(adm, 'list_llm_providers')) as { providers: Array<{ name: string; keyCount: number }> };
   assert.equal(list.providers[0]!.keyCount, 2);
   assert.ok(!JSON.stringify(list).includes('sk-a')); // key 值不出现在工具结果里
 
-  await assert.rejects(call(adm, 'set_llm_key', { name: 'Nope', value: 'x' }), /provider 不存在/);
+  await assert.rejects(call(adm, 'set_llm_key', { id: 'Nope', value: 'x' }), /provider 不存在/);
 });
 
 // ---- 共享只读 ----
@@ -1005,38 +1005,39 @@ test('reorder_push_rules：全排列校验 + 落库顺序（live 与 post 规则
   await assert.rejects(call(adm, 'reorder_push_rules', { ids: [r1] }), /必须与现有规则一一对应/);
 });
 
-test('reorder_llm_providers：names 全排列，保存后名单顺序即路由优先级', async (t) => {
+test('reorder_llm_providers：ids 全排列，保存后名单顺序即路由优先级', async (t) => {
   const f = await setup(t, { withLlm: true });
   saveLlmProviders(f.db, [
     ...listLlmProviders(f.db),
-    { name: 'Second', baseURL: 'http://127.0.0.1:2/v1', model: 'm2', vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema', api: 'chat-completions' },
+    { id: 'Second', name: 'Second', baseURL: 'http://127.0.0.1:2/v1', model: 'm2', vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema', api: 'chat-completions' },
   ]);
   const adm = await mcpClient(f, ADMIN_TOKEN);
 
-  await call(adm, 'reorder_llm_providers', { names: ['Second', 'TestLLM'] });
+  await call(adm, 'reorder_llm_providers', { ids: ['Second', 'TestLLM'] });
   assert.deepEqual(listLlmProviders(f.db).map((p) => p.name), ['Second', 'TestLLM']);
 
-  await assert.rejects(call(adm, 'reorder_llm_providers', { names: ['TestLLM'] }), /一一对应/);
-  await assert.rejects(call(adm, 'reorder_llm_providers', { names: ['TestLLM', 'TestLLM'] }), /names 有重复/);
-  await assert.rejects(call(adm, 'reorder_llm_providers', { names: ['TestLLM', 'Nope'] }), /一一对应/);
+  await assert.rejects(call(adm, 'reorder_llm_providers', { ids: ['TestLLM'] }), /一一对应/);
+  await assert.rejects(call(adm, 'reorder_llm_providers', { ids: ['TestLLM', 'TestLLM'] }), /ids 有重复/);
+  await assert.rejects(call(adm, 'reorder_llm_providers', { ids: ['TestLLM', 'Nope'] }), /一一对应/);
 });
 
-test('决策模型工具：名单/新增/排序/测试/删除走注册表，与 LLM 通道独立', async (t) => {
+test('决策模型工具：名单/新增/改名/排序/测试/删除走注册表，与 LLM 通道独立', async (t) => {
   const f = await setup(t);
   const adm = await mcpClient(f, ADMIN_TOKEN);
 
   assert.deepEqual(await call(adm, 'list_decision_providers'), { providers: [] });
 
-  await call(adm, 'upsert_decision_provider', {
+  const jev = (await call(adm, 'upsert_decision_provider', {
     name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0', vision: true,
-  });
-  await call(adm, 'upsert_decision_provider', {
+  })) as { id: string };
+  const local = (await call(adm, 'upsert_decision_provider', {
     name: 'local', baseURL: 'http://127.0.0.1:8080/v1', model: 'clef-flash', protocol: 'systemone',
-  });
-  let list = (await call(adm, 'list_decision_providers')) as {
-    providers: Array<{ name: string; protocol: string; vision: boolean; keyCount: number }>;
+  })) as { id: string };
+  const list = (await call(adm, 'list_decision_providers')) as {
+    providers: Array<{ name: string; baseURL: string; protocol: string; vision: boolean; keyCount: number }>;
   };
   assert.deepEqual(list.providers.map((p) => p.name), ['jev', 'local']);
+  assert.deepEqual(list.providers.map((p) => p.baseURL), ['https://api.typesafe.ai', 'http://127.0.0.1:8080']);
   assert.deepEqual(list.providers.map((p) => p.protocol), ['systemone', 'systemone'], '缺省协议 systemone');
   assert.deepEqual(list.providers.map((p) => p.vision), [true, false], 'vision 落库并可回读（缺省假）');
   assert.deepEqual(list.providers.map((p) => p.keyCount), [0, 0]);
@@ -1048,24 +1049,25 @@ test('决策模型工具：名单/新增/排序/测试/删除走注册表，与 
     name: 'bad2', baseURL: 'https://x.com/v1', model: 'm', protocol: 'decisions',
   }));
 
-  await call(adm, 'reorder_decision_providers', { names: ['local', 'jev'] });
+  await call(adm, 'reorder_decision_providers', { ids: [local.id, jev.id] });
   assert.deepEqual(listDecisionProviders(f.db).map((p) => p.name), ['local', 'jev']);
-  await assert.rejects(call(adm, 'reorder_decision_providers', { names: ['local'] }), /一一对应/);
+  await assert.rejects(call(adm, 'reorder_decision_providers', { ids: [local.id] }), /一一对应/);
 
-  await assert.rejects(call(adm, 'test_decision_provider', { name: 'Nope' }), /provider 不存在/);
-  await assert.rejects(call(adm, 'test_decision_provider', { name: 'jev' }), /缺 key/);
-  f.db.setSetting('decision_key:jev', 'sk-decision');
-  const ping = (await call(adm, 'test_decision_provider', { name: 'jev' })) as { ok: boolean; ms: number; model: string };
+  await assert.rejects(call(adm, 'test_decision_provider', { id: 'Nope' }), /provider 不存在/);
+  await assert.rejects(call(adm, 'test_decision_provider', { id: jev.id }), /缺 key/);
+  f.db.setSetting(`decision_key:${jev.id}`, 'sk-decision');
+  await call(adm, 'upsert_decision_provider', { id: jev.id, name: 'Jev renamed' });
+  assert.equal(f.db.getSetting(`decision_key:${jev.id}`), 'sk-decision', '改名不动 key');
+  const ping = (await call(adm, 'test_decision_provider', { id: jev.id })) as { ok: boolean; ms: number; model: string };
   assert.deepEqual(ping, { ok: true, ms: 9, model: 'jev-1.14.0' });
 
-  // 本地 loopback 无鉴权：不需要 key 也能测
-  const local = (await call(adm, 'test_decision_provider', { name: 'local' })) as { ok: boolean; model: string };
-  assert.equal(local.model, 'clef-flash');
+  const localPing = (await call(adm, 'test_decision_provider', { id: local.id })) as { ok: boolean; model: string };
+  assert.equal(localPing.model, 'clef-flash');
 
-  await call(adm, 'delete_decision_provider', { name: 'local' });
-  assert.deepEqual(listDecisionProviders(f.db).map((p) => p.name), ['jev']);
-  await assert.rejects(call(adm, 'delete_decision_provider', { name: 'local' }), /provider 不存在/);
-  assert.equal(f.db.getSetting('decision_key:jev'), 'sk-decision', '删除 provider 不动 key 设置项');
+  await call(adm, 'delete_decision_provider', { id: local.id });
+  assert.deepEqual(listDecisionProviders(f.db).map((p) => p.name), ['Jev renamed']);
+  await assert.rejects(call(adm, 'delete_decision_provider', { id: local.id }), /provider 不存在/);
+  assert.equal(f.db.getSetting(`decision_key:${jev.id}`), 'sk-decision', '删除 provider 不动 key 设置项');
 });
 
 test('set_decision_enabled：决策档总开关落 settings（缺省关），与 LLM 开关互不影响', async (t) => {
@@ -1092,20 +1094,20 @@ test('test_llm_provider：404 / 缺 key / ping 成功 / ping 失败（502 口径
   const f = await setup(t, { withLlm: true });
   const adm = await mcpClient(f, ADMIN_TOKEN);
 
-  await assert.rejects(call(adm, 'test_llm_provider', { name: 'Nope' }), /provider 不存在/);
-  await assert.rejects(call(adm, 'test_llm_provider', { name: 'TestLLM' }), /缺 key/);
+  await assert.rejects(call(adm, 'test_llm_provider', { id: 'Nope' }), /provider 不存在/);
+  await assert.rejects(call(adm, 'test_llm_provider', { id: 'TestLLM' }), /缺 key/);
 
   f.db.setSetting('llm_key:TestLLM', 'sk-x');
-  const ok = (await call(adm, 'test_llm_provider', { name: 'TestLLM' })) as { ok: boolean; ms: number };
+  const ok = (await call(adm, 'test_llm_provider', { id: 'TestLLM' })) as { ok: boolean; ms: number };
   assert.deepEqual(ok, { ok: true, ms: 12 });
 
   // ping 失败：错误归一为 502 口径文本（失败计熔断由 router.ping 自身保证）
   saveLlmProviders(f.db, [
     ...listLlmProviders(f.db),
-    { name: 'Broken', baseURL: 'http://127.0.0.1:3/v1', model: 'm', vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema', api: 'chat-completions' },
+    { id: 'Broken', name: 'Broken', baseURL: 'http://127.0.0.1:3/v1', model: 'm', vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema', api: 'chat-completions' },
   ]);
   f.db.setSetting('llm_key:Broken', 'sk-y');
-  await assert.rejects(call(adm, 'test_llm_provider', { name: 'Broken' }), /ECONNREFUSED/);
+  await assert.rejects(call(adm, 'test_llm_provider', { id: 'Broken' }), /ECONNREFUSED/);
 });
 
 test('test_x_connection：覆盖值透传 + 缺省 target=all；快照写库语义在 deps.x.test 内（同 REST）', async (t) => {
@@ -1237,7 +1239,7 @@ test('undo_last_change：未绑渠道的 gateway 拒绝；gateway 只撤本渠�
 test('undo_last_change：撤 LLM key = 清空 + refill 提示，且触发 router 重建', async (t) => {
   const f = await setup(t, { withLlm: true });
   const adm = await mcpClient(f, ADMIN_TOKEN);
-  await call(adm, 'set_llm_key', { name: 'TestLLM', value: 'sk-live-1' });
+  await call(adm, 'set_llm_key', { id: 'TestLLM', value: 'sk-live-1' });
 
   const r = (await call(adm, 'undo_last_change')) as { refill?: string[]; change: { tool: string } };
   assert.equal(r.change.tool, 'set_llm_key');

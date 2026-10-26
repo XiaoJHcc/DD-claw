@@ -16,6 +16,7 @@ function spec(over: Partial<DecisionProviderConfig> = {}): DecisionProviderConfi
     name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0',
     protocol: 'systemone', vision: false, enabled: true,
     ...over,
+    id: over.id ?? over.name ?? 'jev',
   };
 }
 

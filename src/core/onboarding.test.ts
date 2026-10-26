@@ -96,7 +96,7 @@ test('部分已配置：已有渠道不种渠道，规则渠道映射到现有�
 test('LLM 名单已配置：不覆盖用户自己的 provider 名单', async (t) => {
   const db = memDb(t);
   db.setSetting('llm_providers', JSON.stringify([{
-    name: 'mine', baseURL: 'http://127.0.0.1:1234/v1', model: 'm', vision: false,
+    id: 'mine', name: 'mine', baseURL: 'http://127.0.0.1:1234/v1', model: 'm', vision: false,
     enabled: true, structuredOutput: 'schema', api: 'chat-completions',
   }]));
   seedOnboardingDefaults(db);

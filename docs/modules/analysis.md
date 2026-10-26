@@ -44,6 +44,8 @@
 
 ## Provider 层
 
+- **稳定身份**：两类 provider 都以 `id` 定位，`name` 只是可编辑显示名；key、排序与 Agent 模型选择引用 ID，改名不影响它们。LLM key 在 `llm_key:<id>`，Agent 的 `chat_provider` 同样存 ID。
+- **Base URL 不含 `/v1`**：名单保存根地址，适配器分别追加 `/v1/chat/completions`、`/v1/responses` 与 `/v1/systemone`；旧末尾 `/v1` 会在保存与迁移时归一移除。
 - **路由由名单推导**：provider 名单顺序即优先级；text 路由收全部启用的，vision 路由只收多模态的。请求带图即走 vision，无图走 text；显式指定路由可覆盖。
 - **双协议**：chat-completions 与 responses（system→instructions、结构化输出走 `text.format`）。Anthropic `/messages` 明确不接。
 - **结构化输出三档**：`schema`（约束最强）/ `object`（只保证是 JSON）/ `none`（不带 response_format，解析时剥代码围栏兜底）。本地小模型与不支持的端点靠第三档活。
@@ -54,7 +56,7 @@
 
 ## 决策模型通道
 
-判决链的**第一档**：一次 `POST <baseURL>/systemone` 同时回答是非（每分类一道 `noul`）与主分类（一道 `choice`）。
+判决链的**第一档**：一次 `POST <baseURL>/v1/systemone` 同时回答是非（每分类一道 `noul`）与主分类（一道 `choice`）。
 代码分工：线格式与名单 / key 在 `decision-providers.ts`，候选顺序 / 熔断 / key 轮换在 `decision-router.ts`，
 请求打包与解析在 `tasks/decide.ts`，档位在 `classifier.ts`（`JUDGE_STAGES = [decisionJudge, llmJudge]`）。
 
@@ -64,7 +66,7 @@
   `≥ 主分类门槛` 才定案。带图内容只被纯文本供应商回答时，结论落库但**一律不定案**（它没看图）。
 - **失败语义**：HTTP 错误 / 超时 / 响应不符契约 = 该供应商本次失败（计熔断、换下一个），
   全部候选不可用则本档没有结果，未定案项交 LLM；灰区与「没看图」不算失败。
-- **独立通道**：名单在 settings `decision_providers`（含 `vision`），key 在 `decision_key:<name>`，
+- **独立通道**：名单在 settings `decision_providers`（含 `vision`），key 在 `decision_key:<id>`，
   总开关 `decision_enabled`，超时 / 熔断与灰区门槛在 `decision_*` 运行参数；与 LLM 的
   `llm_providers` / `llm_key:*` / `llm_enabled` 互不共享，也不复用 `LlmRouter` 的熔断状态。
 - **门槛调参**：阈值是 settings 里的可调参数（面板决策卡「高级」），按线上审计回看调整；

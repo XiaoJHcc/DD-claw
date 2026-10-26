@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { normalizeProviderBaseURL } from '../config/schema.js';
 import { makeLogger } from '../logger.js';
 import type { PrevState } from './state.js';
 import type { AnalysisAudit, ContentAudit, PushAudit } from './content-audit.js';
@@ -541,6 +543,7 @@ export class Db {
     this.migratePushRuleScopeShape();
     this.migratePostRulesToCategories();
     this.migrateAccountRuleIdsDrop();
+    this.migrateProviderIds();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -552,6 +555,42 @@ export class Db {
   /** 同步 SQL 段的事务包装（级联写原子化用；回调必须是同步代码，不得跨 await） */
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  private migrateProviderIds(): void {
+    const gate = 'migrated_provider_ids_v1';
+    if (this.getSetting(gate)) return;
+    this.transaction(() => {
+      const migrateList = (setting: string, keyPrefix: string): Array<Record<string, unknown>> => {
+        const raw = this.getSetting(setting);
+        if (raw === null) return [];
+        const providers = JSON.parse(raw) as Array<Record<string, unknown>>;
+        const ids = new Set<string>();
+        for (const p of providers) {
+          let id = typeof p.id === 'string' && p.id ? p.id : randomUUID();
+          while (ids.has(id)) id = randomUUID();
+          ids.add(id);
+          const name = typeof p.name === 'string' ? p.name : '';
+          const oldKey = `${keyPrefix}:${name}`;
+          const newKey = `${keyPrefix}:${id}`;
+          const key = this.getSetting(oldKey);
+          if (oldKey !== newKey && key !== null && this.getSetting(newKey) === null) {
+            this.setSetting(newKey, key);
+          }
+          if (oldKey !== newKey) this.deleteSetting(oldKey);
+          p.id = id;
+          if (typeof p.baseURL === 'string') p.baseURL = normalizeProviderBaseURL(p.baseURL);
+        }
+        this.setSetting(setting, JSON.stringify(providers));
+        return providers;
+      };
+      const llmProviders = migrateList('llm_providers', 'llm_key');
+      migrateList('decision_providers', 'decision_key');
+      const selected = this.getSetting('chat_provider');
+      const selectedProvider = llmProviders.find((p) => p.name === selected);
+      if (selectedProvider) this.setSetting('chat_provider', selectedProvider.id as string);
+      this.setSetting(gate, '1');
+    });
   }
 
   /** 缺列则 ALTER TABLE 补上（旧库在线迁移；新列一律可空或带默认值，不动旧数据） */

@@ -1584,7 +1584,7 @@ test('无 weiboAuth dep 时微博扫码路由 404', async (t) => {
 const LLM_CFG = {
   enabled: true, requestTimeoutMs: 5000, circuitThreshold: 2, circuitCooldownMs: 60_000,
   providers: [{
-    name: 'ds', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
+    id: 'ds', name: 'ds', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
     vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema',
     api: 'chat-completions',
   }] as LlmProviderConfig[],
@@ -1631,7 +1631,7 @@ test('PUT /api/llm/keys：provider 不存在 404；非法 value 400；中文逗�
   assert.deepEqual(cn.json.key, { source: 'panel', count: 2, value: 'sk-a,sk-b' }, '落库归一成英文逗号');
 });
 
-test('POST /api/llm/providers/:name/test：真实 ping 判断能不能用', async (t) => {
+test('POST /api/llm/providers/:id/test：真实 ping 判断能不能用', async (t) => {
   const okFetch: FetchLike = async () => new Response(
     JSON.stringify({ choices: [{ message: { content: '{"pong":true}' } }] }),
     { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -1649,7 +1649,7 @@ test('POST /api/llm/providers/:name/test：真实 ping 判断能不能用', asyn
   assert.equal(typeof ok.json.ms, 'number');
 });
 
-test('POST /api/llm/providers/:name/test：端点报错 502，错误信息不含 key', async (t) => {
+test('POST /api/llm/providers/:id/test：端点报错 502，错误信息不含 key', async (t) => {
   const failFetch: FetchLike = async () => new Response('invalid api key', { status: 401 });
   const { base } = await setup(t, { llm: { config: LLM_CFG }, llmFetch: failFetch });
   await api(base, '/api/llm/keys', 'PUT', { provider: 'ds', value: 'sk-secret-xyz' });
@@ -1685,41 +1685,59 @@ test('POST /api/llm/providers：新增即出现在 GET，路由自动推导；�
     api: 'responses',
   });
   assert.equal(added.status, 201);
+  const id = added.json.id as string;
 
   const info = await api(base, '/api/llm');
-  const providers = info.json.providers as Array<{ name: string; routes: string[]; api: string }>;
+  const providers = info.json.providers as Array<{ name: string; baseURL: string; routes: string[]; api: string }>;
   assert.deepEqual(providers.map((p) => p.name), ['ds', 'mm'], 'config 种子 + 新增');
+  assert.equal(providers[1]!.baseURL, 'https://api.minimaxi.com');
   assert.deepEqual(providers[0]!.routes, ['text'], '纯文本只进 text 路由');
   assert.deepEqual(providers[1]!.routes, ['text', 'vision'], '多模态进两条路由');
   assert.equal(providers[0]!.api, 'chat-completions', '缺省协议回显');
   assert.equal(providers[1]!.api, 'responses', 'POST 指定 responses 协议');
 
-  // PUT 可改协议；非法值 400
-  assert.equal((await api(base, '/api/llm/providers/mm', 'PUT', { api: 'chat-completions' })).status, 200);
+  assert.equal((await api(base, `/api/llm/providers/${id}`, 'PUT', { api: 'chat-completions', name: 'mm-renamed' })).status, 200);
   const after = await api(base, '/api/llm');
   assert.equal((after.json.providers as Array<{ api: string }>)[1]!.api, 'chat-completions');
-  assert.equal((await api(base, '/api/llm/providers/mm', 'PUT', { api: 'anthropic' })).status, 400, '不支持 anthropic 协议');
+  assert.equal((after.json.providers as Array<{ id: string; name: string }>)[1]!.id, id);
+  assert.equal((after.json.providers as Array<{ name: string }>)[1]!.name, 'mm-renamed');
+  assert.equal((await api(base, `/api/llm/providers/${id}`, 'PUT', { api: 'anthropic' })).status, 400, '不支持 anthropic 协议');
 
   assert.equal((await api(base, '/api/llm/providers', 'POST', {
-    name: 'mm', baseURL: 'https://x.com/v1', model: 'm',
+    name: 'mm-renamed', baseURL: 'https://x.com/v1', model: 'm',
   })).status, 400, '重名 400');
   const bad = await api(base, '/api/llm/providers', 'POST', { name: 'x', baseURL: 'not-a-url', model: 'm' });
   assert.equal(bad.status, 400);
   assert.match(bad.json.error!, /baseURL/);
 });
 
+test('LLM 供应商改名：ID、key 与 Agent 模型选择保持不变', async (t) => {
+  const { base, db } = await setup(t, { chat: true, llm: { config: LLM_CFG } });
+  await api(base, '/api/llm/providers/ds', 'PUT', { key: 'sk-stable' });
+  assert.equal((await api(base, '/api/chat/provider', 'PUT', { provider: 'ds' })).status, 200);
+  assert.equal((await api(base, '/api/llm/providers/ds', 'PUT', { name: 'DeepSeek renamed' })).status, 200);
+  const info = await api(base, '/api/llm');
+  assert.equal(info.json.chatProvider, 'ds');
+  assert.equal(info.json.providers[0].id, 'ds');
+  assert.equal(info.json.providers[0].name, 'DeepSeek renamed');
+  assert.equal(info.json.providers[0].key.value, 'sk-stable');
+  assert.equal(db.getSetting('llm_key:ds'), 'sk-stable');
+});
+
 test('provider 表单可携带 key：POST/PUT 直接保存，GET 明文回显', async (t) => {
   const { base } = await setup(t, { llm: { config: { ...LLM_CFG, providers: [] } } });
-  assert.equal((await api(base, '/api/llm/providers', 'POST', {
+  const added = await api(base, '/api/llm/providers', 'POST', {
     name: 'k', baseURL: 'https://api.x.com/v1', model: 'm', key: 'sk-form-1',
-  })).status, 201);
+  });
+  assert.equal(added.status, 201);
+  const id = added.json.id as string;
   let info = await api(base, '/api/llm');
   assert.deepEqual((info.json.providers as Array<{ key: { value: string } }>)[0]!.key,
     { source: 'panel', count: 1, value: 'sk-form-1' }, 'POST 带 key 直接保存');
-  await api(base, '/api/llm/providers/k', 'PUT', { key: 'sk-form-2' });
+  await api(base, `/api/llm/providers/${id}`, 'PUT', { key: 'sk-form-2' });
   info = await api(base, '/api/llm');
   assert.equal((info.json.providers as Array<{ key: { value: string } }>)[0]!.key.value, 'sk-form-2', 'PUT 带 key 更新');
-  await api(base, '/api/llm/providers/k', 'PUT', { model: 'm2' });
+  await api(base, `/api/llm/providers/${id}`, 'PUT', { model: 'm2' });
   info = await api(base, '/api/llm');
   assert.equal((info.json.providers as Array<{ key: { value: string } }>)[0]!.key.value, 'sk-form-2',
     '不带 key 的 PUT 不动现有 key');
@@ -1727,16 +1745,17 @@ test('provider 表单可携带 key：POST/PUT 直接保存，GET 明文回显', 
 
 test('PUT /api/llm/providers/order：整体重排；名单不对应/重复 → 400', async (t) => {
   const { base } = await setup(t, { llm: { config: LLM_CFG } });
-  await api(base, '/api/llm/providers', 'POST', {
+  const added = await api(base, '/api/llm/providers', 'POST', {
     name: 'mm', baseURL: 'https://api.minimaxi.com/v1', model: 'MiniMax-M3', vision: true,
   });
-  const r = await api(base, '/api/llm/providers/order', 'PUT', { names: ['mm', 'ds'] });
+  const id = added.json.id as string;
+  const r = await api(base, '/api/llm/providers/order', 'PUT', { ids: [id, 'ds'] });
   assert.equal(r.status, 200);
   const info = await api(base, '/api/llm');
   assert.deepEqual((info.json.providers as Array<{ name: string }>).map((p) => p.name), ['mm', 'ds']);
-  assert.equal((await api(base, '/api/llm/providers/order', 'PUT', { names: ['mm'] })).status, 400, '缺一个');
-  assert.equal((await api(base, '/api/llm/providers/order', 'PUT', { names: ['mm', 'mm'] })).status, 400, '重复');
-  assert.equal((await api(base, '/api/llm/providers/order', 'PUT', { names: ['mm', 'ghost'] })).status, 400, '不存在');
+  assert.equal((await api(base, '/api/llm/providers/order', 'PUT', { ids: [id] })).status, 400, '缺一个');
+  assert.equal((await api(base, '/api/llm/providers/order', 'PUT', { ids: [id, id] })).status, 400, '重复');
+  assert.equal((await api(base, '/api/llm/providers/order', 'PUT', { ids: [id, 'ghost'] })).status, 400, '不存在');
 });
 
 test('PUT 启停影响路由推导；DELETE 移除；onProvidersChanged 重建 router', async (t) => {
@@ -1758,7 +1777,7 @@ test('PUT 启停影响路由推导；DELETE 移除；onProvidersChanged 重建 r
 // ---- 决策模型供应商（System One 管理面，与 LLM 通道隔离）----
 
 const DECISION_CFG: DecisionProviderConfig[] = [{
-  name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0',
+  id: 'jev', name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0',
   protocol: 'systemone', vision: false, enabled: true,
 }];
 
@@ -1789,18 +1808,20 @@ test('PUT /api/decision/enabled：总开关落 settings，GET 回显', async (t)
 
 test('决策名单 / key 写完立刻重建 router（vision 随表单落库）', async (t) => {
   const { base, decisionChanges } = await setup(t, { decision: { providers: [] } });
-  assert.equal((await api(base, '/api/decision/providers', 'POST', {
+  const added = await api(base, '/api/decision/providers', 'POST', {
     name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0', vision: true, key: 'sk-a',
-  })).status, 201);
+  });
+  assert.equal(added.status, 201);
+  const id = added.json.id as string;
   assert.equal(decisionChanges!(), 1, '新增后重建（新 key 生效）');
   const p = (await api(base, '/api/decision')).json.providers as Array<{ vision: boolean }>;
   assert.equal(p[0]!.vision, true, 'vision 落库并回显');
 
-  await api(base, '/api/decision/providers/jev', 'PUT', { vision: false });
+  await api(base, `/api/decision/providers/${id}`, 'PUT', { vision: false });
   assert.equal(decisionChanges!(), 2, '编辑后重建');
-  await api(base, '/api/decision/providers/order', 'PUT', { names: ['jev'] });
+  await api(base, '/api/decision/providers/order', 'PUT', { ids: [id] });
   assert.equal(decisionChanges!(), 3, '排序后重建（顺序 = 优先级）');
-  await api(base, '/api/decision/providers/jev', 'DELETE');
+  await api(base, `/api/decision/providers/${id}`, 'DELETE');
   assert.equal(decisionChanges!(), 4, '删除后重建');
 });
 
@@ -1812,8 +1833,9 @@ test('POST /api/decision/providers：新增即出现在 GET；协议缺省 syste
   assert.equal(added.status, 201);
 
   const info = await api(base, '/api/decision');
-  const providers = info.json.providers as Array<{ name: string; protocol: string }>;
+  const providers = info.json.providers as Array<{ name: string; baseURL: string; protocol: string }>;
   assert.deepEqual(providers.map((p) => p.name), ['local']);
+  assert.equal(providers[0]!.baseURL, 'http://127.0.0.1:8080');
   assert.equal(providers[0]!.protocol, 'systemone', '缺省协议回显');
 
   assert.equal((await api(base, '/api/decision/providers', 'POST', {
@@ -1829,38 +1851,41 @@ test('POST /api/decision/providers：新增即出现在 GET；协议缺省 syste
 
 test('决策 provider 表单可携带 key：POST/PUT 直接保存，GET 明文回显，删除保留 key 设置项', async (t) => {
   const { base, db } = await setup(t, { decision: { providers: DECISION_CFG } });
-  assert.equal((await api(base, '/api/decision/providers', 'POST', {
+  const created = await api(base, '/api/decision/providers', 'POST', {
     name: 'add', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0', key: 'sk-d1',
-  })).status, 201);
+  });
+  assert.equal(created.status, 201);
+  const id = created.json.id as string;
   let info = await api(base, '/api/decision');
   const added = (info.json.providers as Array<{ name: string; key: { value: string } }>)
     .find((p) => p.name === 'add')!;
   assert.deepEqual(added.key, { source: 'panel', count: 1, value: 'sk-d1' });
 
-  await api(base, '/api/decision/providers/add', 'PUT', { key: 'sk-d2' });
+  await api(base, `/api/decision/providers/${id}`, 'PUT', { key: 'sk-d2' });
   info = await api(base, '/api/decision');
   assert.equal((info.json.providers as Array<{ name: string; key: { value: string } }>)
     .find((p) => p.name === 'add')!.key.value, 'sk-d2', 'PUT 带 key 更新');
-  await api(base, '/api/decision/providers/add', 'PUT', { model: 'jev-1.13.0' });
+  await api(base, `/api/decision/providers/${id}`, 'PUT', { model: 'jev-1.13.0' });
   info = await api(base, '/api/decision');
   assert.equal((info.json.providers as Array<{ name: string; key: { value: string } }>)
     .find((p) => p.name === 'add')!.key.value, 'sk-d2', '不带 key 的 PUT 不动现有 key');
 
-  assert.equal((await api(base, '/api/decision/providers/add', 'DELETE')).status, 200);
-  assert.equal(db.getSetting('decision_key:add'), 'sk-d2', '删除 provider 不动 key 设置项（与 LLM 同语义）');
+  assert.equal((await api(base, `/api/decision/providers/${id}`, 'DELETE')).status, 200);
+  assert.equal(db.getSetting(`decision_key:${id}`), 'sk-d2', '删除 provider 不动 key 设置项（与 LLM 同语义）');
 });
 
 test('PUT /api/decision/providers/order：整体重排；名单不对应/重复 → 400', async (t) => {
   const { base } = await setup(t, { decision: { providers: DECISION_CFG } });
-  await api(base, '/api/decision/providers', 'POST', {
+  const added = await api(base, '/api/decision/providers', 'POST', {
     name: 'second', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.13.0',
   });
-  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { names: ['second', 'jev'] })).status, 200);
+  const id = added.json.id as string;
+  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { ids: [id, 'jev'] })).status, 200);
   const info = await api(base, '/api/decision');
   assert.deepEqual((info.json.providers as Array<{ name: string }>).map((p) => p.name), ['second', 'jev']);
-  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { names: ['second'] })).status, 400, '缺一个');
-  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { names: ['second', 'second'] })).status, 400, '重复');
-  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { names: ['second', 'ghost'] })).status, 400, '不存在');
+  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { ids: [id] })).status, 400, '缺一个');
+  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { ids: [id, id] })).status, 400, '重复');
+  assert.equal((await api(base, '/api/decision/providers/order', 'PUT', { ids: [id, 'ghost'] })).status, 400, '不存在');
 });
 
 test('PUT 启停 / DELETE 移除；不存在 404', async (t) => {
@@ -1874,7 +1899,7 @@ test('PUT 启停 / DELETE 移除；不存在 404', async (t) => {
   assert.equal((await api(base, '/api/decision/providers/jev', 'DELETE')).status, 404);
 });
 
-test('POST /api/decision/providers/:name/test：缺 key 400、真实 probe 200、失败 502 且不含 key', async (t) => {
+test('POST /api/decision/providers/:id/test：缺 key 400、真实 probe 200、失败 502 且不含 key', async (t) => {
   let probeSpec: DecisionProviderConfig | null = null;
   let probeKey: string | null = null;
   const ok = await setup(t, {
@@ -1924,11 +1949,12 @@ test('变更历史结构化：决策模型 key 行同样 refill，明文不进�
   const c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
   assert.equal(c[0]!.title, '保存决策模型供应商');
   assert.equal(c[0]!.headline, '设置了 jev 的决策模型密钥');
-  assert.deepEqual(c[0]!.detail, [{
+  const detail = c[0]!.detail as Array<Record<string, unknown>>;
+  assert.deepEqual(detail.at(-1), {
     label: '决策模型密钥（jev）',
     action: 'created',
     changes: [],
-  }]);
+  });
   assert.equal(c[0]!.undoNote, 'refill', '涉及 decision_key:* → 撤销 = 清空、需重填');
   assert.ok(!JSON.stringify(c[0]).includes('sk-dec-refill'), '明文 key 绝不进历史');
 

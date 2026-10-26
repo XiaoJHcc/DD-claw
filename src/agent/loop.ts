@@ -112,10 +112,10 @@ export function chatBlockedReason(deps: PanelDeps): string | null {
   if (providers.length === 0) return '还没有配置 LLM provider：请在设置页添加';
   const selected = getChatProvider(deps.db);
   if (selected !== '') {
-    const p = providers.find((x) => x.name === selected);
+    const p = providers.find((x) => x.id === selected);
     if (!p) return `选定的 LLM provider「${selected}」不在配置里：请在设置页重新选择或改回自动`;
     if (!p.ready) {
-      return `选定的 LLM provider「${selected}」当前不可用（${p.status}）：请在设置页检查它，或改回自动`;
+      return `选定的 LLM provider「${p.name}」当前不可用（${p.status}）：请在设置页检查它，或改回自动`;
     }
     return null;
   }

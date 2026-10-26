@@ -13,6 +13,7 @@ function spec(over: Partial<DecisionProviderConfig> = {}): DecisionProviderConfi
     name: 'jev', baseURL: 'https://api.typesafe.ai/v1', model: 'jev-1.14.0',
     protocol: 'systemone', enabled: true,
     ...over,
+    id: over.id ?? over.name ?? 'jev',
   };
 }
 
@@ -41,7 +42,7 @@ const OK_BODY = {
   usage: { input_tokens: 12, output_tokens: 1 },
 };
 
-test('callSystemOne：POST <baseURL>/systemone，带 Bearer 与 state+questions，解析 typed answers', async () => {
+test('callSystemOne：POST <baseURL>/v1/systemone，带 Bearer 与 state+questions，解析 typed answers', async () => {
   const f = fakeFetch([jsonResponse(OK_BODY)]);
   const out = await callSystemOne(spec({ baseURL: 'https://api.typesafe.ai/v1/' }), 'sk-test', {
     model: 'jev-1.14.0',

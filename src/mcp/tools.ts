@@ -12,6 +12,7 @@
  * 单渠道 ≤ 20 条、写操作按渠道限流。契约见 docs/mcp.md「gateway 写/读的服务端强制」。
  */
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PanelDeps } from '../panel/server.js';
 import {
@@ -32,7 +33,7 @@ import { setListen, listenReadyFor, listenSetting, type ListenFeature } from '..
 import { setChatWriteMode, type ChatWriteMode } from '../agent/system-prompt.js';
 import { X_INTERVAL_MAX, X_INTERVAL_MIN } from '../core/x-config.js';
 import { getRuntimeConfig, saveRuntimeConfig, NUM_SPECS, BOOL_SPECS } from '../core/runtime-config.js';
-import { hasLlmProvider, isLlmEnabled, setChatProvider, setLlmEnabled } from '../analysis/providers.js';
+import { hasLlmProvider, isLlmEnabled, llmKeySetting, setChatProvider, setLlmEnabled } from '../analysis/providers.js';
 import {
   dbDecisionKeysOf, decisionKeySetting, decisionNeedsAuth, isDecisionEnabled, setDecisionEnabled,
 } from '../analysis/decision-providers.js';
@@ -468,7 +469,7 @@ const adminTools: McpToolDef[] = [
     description: 'agent 对话用哪个 LLM provider 回答（空串 = 自动路由，按 provider 顺序 + 失败降级）。'
       + '点名后不降级：它不可用时直接报错，不会偷偷换别人回答。面板的 Agent 模型选择用它',
     schema: {
-      provider: z.string().describe('provider 名；空串 = 自动路由'),
+      provider: z.string().describe('provider ID；空串 = 自动路由'),
     },
     role: 'admin',
     write: true,
@@ -877,15 +878,16 @@ const adminTools: McpToolDef[] = [
       enabled: isLlmEnabled(deps.db),
       providers: (deps.llm?.store?.list() ?? []).map((p) => ({
         ...p,
-        keyCount: splitCsvText(deps.db.getSetting(`llm_key:${p.name}`)).length,
+        keyCount: splitCsvText(deps.db.getSetting(llmKeySetting(p.id))).length,
       })),
     }),
   },
   {
     name: 'upsert_llm_provider',
-    description: '新增/更新 LLM provider（按 name 定位，name 不可改）。新建需 name+baseURL+model；可顺带传 key。保存后路由热重建',
+    description: '新增/更新 LLM provider（按 id 定位，name 可改）。新建需 name+baseURL+model；可顺带传 key。保存后路由热重建',
     schema: {
-      name: z.string().min(1),
+      id: z.string().min(1).optional(),
+      name: z.string().min(1).optional(),
       baseURL: z.string().optional(),
       model: z.string().optional(),
       vision: z.boolean().optional(),
@@ -901,9 +903,10 @@ const adminTools: McpToolDef[] = [
       const store = deps.llm?.store;
       if (!store) throw new HttpError(400, 'LLM provider 管理未装配');
       const list = store.list();
-      const prev = list.find((p) => p.name === (args.name as string));
-      const patch = pickBody(args, ['baseURL', 'model', 'vision', 'keyEnvs', 'enabled', 'structuredOutput', 'api']);
-      const merged = prev ? { ...prev, ...patch } : { name: args.name, ...patch };
+      const prev = args.id === undefined ? undefined : list.find((p) => p.id === args.id);
+      if (args.id !== undefined && !prev) throw new HttpError(404, 'provider 不存在');
+      const patch = pickBody(args, ['name', 'baseURL', 'model', 'vision', 'keyEnvs', 'enabled', 'structuredOutput', 'api']);
+      const merged = prev ? { ...prev, ...patch } : { id: randomUUID(), ...patch };
       const parsed = llmProviderSchema.safeParse(merged);
       if (!parsed.success) {
         const msg = parsed.error.issues
@@ -911,30 +914,33 @@ const adminTools: McpToolDef[] = [
         throw new HttpError(400, `provider 校验失败：${msg}`);
       }
       const provider = parsed.data;
+      if (list.some((p) => p.id !== provider.id && p.name === provider.name)) {
+        throw new HttpError(400, `provider name 重复: ${provider.name}`);
+      }
       store.save(prev
-        ? list.map((p) => (p.name === provider.name ? provider : p))
+        ? list.map((p) => (p.id === provider.id ? provider : p))
         : [...list, provider]);
       // key 可随表单一并提交（同面板弹窗体验）；空串 = 清除；中文逗号归一成英文逗号落库
       if (typeof args.key === 'string') {
-        deps.db.setSetting(`llm_key:${provider.name}`, normalizeCsvText(args.key.trim()));
+        deps.db.setSetting(llmKeySetting(provider.id), normalizeCsvText(args.key.trim()));
         deps.llm?.router?.refreshKeys();
       }
       deps.llm?.onProvidersChanged?.();
-      return { ok: true, name: provider.name };
+      return { ok: true, id: provider.id, name: provider.name };
     },
   },
   {
     name: 'delete_llm_provider',
     description: '删除 LLM provider（不动已存的 key 设置项）',
-    schema: { name: z.string().min(1) },
+    schema: { id: z.string().min(1) },
     role: 'admin',
     write: true,
     handler: (deps, args) => {
       const store = deps.llm?.store;
       if (!store) throw new HttpError(400, 'LLM provider 管理未装配');
       const list = store.list();
-      if (!list.some((p) => p.name === args.name)) throw new HttpError(404, 'provider 不存在');
-      store.save(list.filter((p) => p.name !== args.name));
+      if (!list.some((p) => p.id === args.id)) throw new HttpError(404, 'provider 不存在');
+      store.save(list.filter((p) => p.id !== args.id));
       deps.llm?.onProvidersChanged?.();
       return { ok: true };
     },
@@ -943,22 +949,22 @@ const adminTools: McpToolDef[] = [
     name: 'set_llm_key',
     description: '设置/清除某 provider 的 API key（多个用逗号分隔，中英文逗号均可；空串 = 清除）。保存即热更新',
     schema: {
-      name: z.string().min(1),
+      id: z.string().min(1),
       value: z.string().describe('key 值；空串 = 清除'),
     },
     role: 'admin',
     write: true,
     handler: (deps, args) => {
-      const name = args.name as string;
+      const id = args.id as string;
       const value = normalizeCsvText((args.value as string).trim());
       const list = deps.llm?.store?.list() ?? [];
-      if (!list.some((p) => p.name === name)) throw new HttpError(404, `provider 不存在: ${name}`);
+      if (!list.some((p) => p.id === id)) throw new HttpError(404, `provider 不存在: ${id}`);
       if (value && !/^[^\s,]+(\s*,\s*[^\s,]+)*$/.test(value)) {
         throw new HttpError(400, '多个 key 用逗号分隔（中英文逗号均可），key 内不能有空格');
       }
-      deps.db.setSetting(`llm_key:${name}`, value);
+      deps.db.setSetting(llmKeySetting(id), value);
       deps.llm?.router?.refreshKeys();
-      return { ok: true, provider: name };
+      return { ok: true, provider: id };
     },
   },
   // ---- 决策模型供应商（System One 通道管理面；与 LLM provider 完全隔离）----
@@ -976,11 +982,12 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'upsert_decision_provider',
-    description: '新增/更新决策模型供应商（按 name 定位，name 不可改）。新建需 name+baseURL+model；'
+    description: '新增/更新决策模型供应商（按 id 定位，name 可改）。新建需 name+baseURL+model；'
       + 'protocol 目前只有 systemone（Jev /v1/systemone 线格式）；vision = 该端点能否接含图请求'
       + '（带图内容优先交给 vision 供应商）。可顺带传 key；保存后判定路由立即重建',
     schema: {
-      name: z.string().min(1),
+      id: z.string().min(1).optional(),
+      name: z.string().min(1).optional(),
       baseURL: z.string().optional(),
       model: z.string().optional(),
       protocol: z.enum(['systemone']).optional().describe('端点协议；当前只有 systemone'),
@@ -994,9 +1001,10 @@ const adminTools: McpToolDef[] = [
       const store = deps.decision?.store;
       if (!store) throw new HttpError(400, '决策模型供应商管理未装配');
       const list = store.list();
-      const prev = list.find((p) => p.name === (args.name as string));
-      const patch = pickBody(args, ['baseURL', 'model', 'protocol', 'vision', 'enabled']);
-      const merged = prev ? { ...prev, ...patch } : { name: args.name, ...patch };
+      const prev = args.id === undefined ? undefined : list.find((p) => p.id === args.id);
+      if (args.id !== undefined && !prev) throw new HttpError(404, 'provider 不存在');
+      const patch = pickBody(args, ['name', 'baseURL', 'model', 'protocol', 'vision', 'enabled']);
+      const merged = prev ? { ...prev, ...patch } : { id: randomUUID(), ...patch };
       const parsed = decisionProviderSchema.safeParse(merged);
       if (!parsed.success) {
         const msg = parsed.error.issues
@@ -1004,30 +1012,33 @@ const adminTools: McpToolDef[] = [
         throw new HttpError(400, `provider 校验失败：${msg}`);
       }
       const provider = parsed.data;
+      if (list.some((p) => p.id !== provider.id && p.name === provider.name)) {
+        throw new HttpError(400, `provider name 重复: ${provider.name}`);
+      }
       store.save(prev
-        ? list.map((p) => (p.name === provider.name ? provider : p))
+        ? list.map((p) => (p.id === provider.id ? provider : p))
         : [...list, provider]);
       // key 与 LLM 同款：随表单一并提交，空串 = 清除，中文逗号归一成英文逗号落库
       if (typeof args.key === 'string') {
-        deps.db.setSetting(decisionKeySetting(provider.name), normalizeCsvText(args.key.trim()));
+        deps.db.setSetting(decisionKeySetting(provider.id), normalizeCsvText(args.key.trim()));
       }
       // 名单与 key 都在 router 构造时快照：写完立刻重建，判定档下一轮就用新名单
       deps.decision?.onProvidersChanged?.();
-      return { ok: true, name: provider.name };
+      return { ok: true, id: provider.id, name: provider.name };
     },
   },
   {
     name: 'delete_decision_provider',
     description: '删除决策模型供应商（不动已存的 key 设置项）',
-    schema: { name: z.string().min(1) },
+    schema: { id: z.string().min(1) },
     role: 'admin',
     write: true,
     handler: (deps, args) => {
       const store = deps.decision?.store;
       if (!store) throw new HttpError(400, '决策模型供应商管理未装配');
       const list = store.list();
-      if (!list.some((p) => p.name === args.name)) throw new HttpError(404, 'provider 不存在');
-      store.save(list.filter((p) => p.name !== args.name));
+      if (!list.some((p) => p.id === args.id)) throw new HttpError(404, 'provider 不存在');
+      store.save(list.filter((p) => p.id !== args.id));
       deps.decision?.onProvidersChanged?.();
       return { ok: true };
     },
@@ -1075,42 +1086,42 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'reorder_llm_providers',
-    description: 'LLM provider 排序：names 必须是现有 provider 名单的一个排列（长度一致/无重复/无增删）；顺序 = 路由优先级，保存后路由热重建',
-    schema: { names: z.array(z.string().min(1)) },
+    description: 'LLM provider 排序：ids 必须是现有 provider ID 的一个排列（长度一致/无重复/无增删）；顺序 = 路由优先级，保存后路由热重建',
+    schema: { ids: z.array(z.string().min(1)) },
     role: 'admin',
     write: true,
     handler: (deps, args) => {
       const store = deps.llm?.store;
       if (!store) throw new HttpError(400, 'LLM provider 管理未装配');
-      const names = args.names as string[];
-      if (new Set(names).size !== names.length) throw new HttpError(400, 'names 有重复');
+      const ids = args.ids as string[];
+      if (new Set(ids).size !== ids.length) throw new HttpError(400, 'ids 有重复');
       const list = store.list();
-      const byName = new Map(list.map((p) => [p.name, p]));
-      if (names.length !== list.length || names.some((n) => !byName.has(n))) {
-        throw new HttpError(400, 'names 必须与现有 provider 名单一一对应');
+      const byId = new Map(list.map((p) => [p.id, p]));
+      if (ids.length !== list.length || ids.some((id) => !byId.has(id))) {
+        throw new HttpError(400, 'ids 必须与现有 provider 名单一一对应');
       }
-      store.save(names.map((n) => byName.get(n)!));
+      store.save(ids.map((id) => byId.get(id)!));
       deps.llm?.onProvidersChanged?.();
       return { ok: true };
     },
   },
   {
     name: 'reorder_decision_providers',
-    description: '决策模型供应商排序：names 必须是现有 provider 名单的一个排列（长度一致/无重复/无增删）；顺序 = 判定档的调用优先级（带图内容先试 vision 供应商，再按名单序试纯文本供应商）',
-    schema: { names: z.array(z.string().min(1)) },
+    description: '决策模型供应商排序：ids 必须是现有 provider ID 的一个排列（长度一致/无重复/无增删）；顺序 = 判定档的调用优先级（带图内容先试 vision 供应商，再按名单序试纯文本供应商）',
+    schema: { ids: z.array(z.string().min(1)) },
     role: 'admin',
     write: true,
     handler: (deps, args) => {
       const store = deps.decision?.store;
       if (!store) throw new HttpError(400, '决策模型供应商管理未装配');
-      const names = args.names as string[];
-      if (new Set(names).size !== names.length) throw new HttpError(400, 'names 有重复');
+      const ids = args.ids as string[];
+      if (new Set(ids).size !== ids.length) throw new HttpError(400, 'ids 有重复');
       const list = store.list();
-      const byName = new Map(list.map((p) => [p.name, p]));
-      if (names.length !== list.length || names.some((n) => !byName.has(n))) {
-        throw new HttpError(400, 'names 必须与现有 provider 名单一一对应');
+      const byId = new Map(list.map((p) => [p.id, p]));
+      if (ids.length !== list.length || ids.some((id) => !byId.has(id))) {
+        throw new HttpError(400, 'ids 必须与现有 provider 名单一一对应');
       }
-      store.save(names.map((n) => byName.get(n)!));
+      store.save(ids.map((id) => byId.get(id)!));
       deps.decision?.onProvidersChanged?.();
       return { ok: true };
     },
@@ -1118,14 +1129,13 @@ const adminTools: McpToolDef[] = [
   {
     name: 'test_decision_provider',
     description: '测试某个决策模型供应商：发一次最小 systemone 请求，返回毫秒耗时与响应回显的模型版本；失败 502',
-    schema: { name: z.string().min(1) },
+    schema: { id: z.string().min(1) },
     role: 'admin',
     write: true,
     handler: async (deps, args) => {
       const dep = deps.decision;
       if (!dep) throw new HttpError(400, '决策模型供应商管理未装配');
-      const name = args.name as string;
-      const spec = dep.store.list().find((p) => p.name === name);
+      const spec = dep.store.list().find((p) => p.id === args.id);
       if (!spec) throw new HttpError(404, 'provider 不存在');
       const key = dbDecisionKeysOf(deps.db)(spec)[0] ?? null;
       if (key === null && decisionNeedsAuth(spec)) throw new HttpError(400, '缺 key，请先填写');
@@ -1153,18 +1163,18 @@ const adminTools: McpToolDef[] = [
   {
     name: 'test_llm_provider',
     description: '测试某个 LLM provider：绕过熔断发一个最小 ping，返回毫秒耗时；失败照常计入熔断统计（与面板「测试」按钮同一语义）',
-    schema: { name: z.string().min(1) },
+    schema: { id: z.string().min(1) },
     role: 'admin',
     write: true,
     handler: async (deps, args) => {
       const router = deps.llm?.router;
       if (!router) throw new HttpError(400, 'LLM 未装配');
-      const name = args.name as string;
-      const status = router.providerStatus(name);
+      const id = args.id as string;
+      const status = router.providerStatus(id);
       if (status === null) throw new HttpError(404, 'provider 不存在');
       if (status.startsWith('缺 key')) throw new HttpError(400, '缺 key，请先填写');
       try {
-        const ms = await router.ping(name);
+        const ms = await router.ping(id);
         return { ok: true, ms };
       } catch (e) {
         // 同 REST 的 502：错误信息只含 HTTP 状态/对端响应摘要，不含 key

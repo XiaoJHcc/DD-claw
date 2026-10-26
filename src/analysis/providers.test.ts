@@ -15,6 +15,7 @@ function spec(over: Partial<LlmProviderConfig> = {}): LlmProviderConfig {
     vision: false, keyEnvs: [], enabled: true, structuredOutput: 'schema',
     api: 'chat-completions',
     ...over,
+    id: over.id ?? over.name ?? 'p1',
   };
 }
 

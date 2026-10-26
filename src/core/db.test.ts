@@ -1263,3 +1263,39 @@ test('getSampledLiveSession / getSampledPost：按身份精确复读，投影与
   assert.deepEqual([legacyLive.keyframe, legacyLive.cover], ['', ''], '精确复读不要求带图');
   db.close();
 });
+
+test('供应商 ID 迁移：保留 key 与 Agent 选择，规范 baseURL，重跑稳定', (t) => {
+  let db: Db | undefined;
+  const path = join(tmpdir_(t, () => db?.close()), 'provider-ids.db');
+  db = new Db(path);
+  db.close();
+  const raw = new Database(path);
+  const insert = raw.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
+  insert.run('llm_providers', JSON.stringify([{ name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1/', model: 'm' }]));
+  insert.run('decision_providers', JSON.stringify([{ name: 'Jev', baseURL: 'https://api.typesafe.ai/v1', model: 'j' }]));
+  insert.run('llm_key:DeepSeek', 'sk-llm');
+  insert.run('decision_key:Jev', 'sk-decision');
+  insert.run('chat_provider', 'DeepSeek');
+  raw.prepare("DELETE FROM settings WHERE key = 'migrated_provider_ids_v1'").run();
+  raw.close();
+
+  db = new Db(path);
+  const llm = JSON.parse(db.getSetting('llm_providers')!) as Array<{ id: string; name: string; baseURL: string }>;
+  const decision = JSON.parse(db.getSetting('decision_providers')!) as Array<{ id: string; baseURL: string }>;
+  assert.ok(llm[0]!.id);
+  assert.ok(decision[0]!.id);
+  assert.equal(llm[0]!.baseURL, 'https://api.deepseek.com');
+  assert.equal(decision[0]!.baseURL, 'https://api.typesafe.ai');
+  assert.equal(db.getSetting(`llm_key:${llm[0]!.id}`), 'sk-llm');
+  assert.equal(db.getSetting(`decision_key:${decision[0]!.id}`), 'sk-decision');
+  assert.equal(db.getSetting('llm_key:DeepSeek'), null);
+  assert.equal(db.getSetting('decision_key:Jev'), null);
+  assert.equal(db.getSetting('chat_provider'), llm[0]!.id);
+  db.close();
+
+  db = new Db(path);
+  const again = JSON.parse(db.getSetting('llm_providers')!) as Array<{ id: string }>;
+  assert.equal(again[0]!.id, llm[0]!.id, '重跑不重新生成 ID');
+  assert.equal(db.getSetting(`llm_key:${llm[0]!.id}`), 'sk-llm');
+  db.close();
+});

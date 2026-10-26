@@ -196,9 +196,9 @@ export class DecisionRouter {
   }
 
   /** 面板 / 排障用的状态快照（不含 key） */
-  describe(): Array<{ name: string; model: string; vision: boolean; status: DecisionProviderStatus }> {
+  describe(): Array<{ id: string; name: string; model: string; vision: boolean; status: DecisionProviderStatus }> {
     return this.providers.map((p) => ({
-      name: p.name, model: p.spec.model, vision: p.spec.vision, status: p.status(),
+      id: p.spec.id, name: p.name, model: p.spec.model, vision: p.spec.vision, status: p.status(),
     }));
   }
 

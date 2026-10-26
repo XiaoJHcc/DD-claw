@@ -8,8 +8,10 @@ import { api, toast, ACTIONS, CHANGES, esc, gripHtml, checkDotHtml, iconBtn, fie
 
 let decisionCache = [];
 
+let editingDecisionId = null;
+
 function decisionRowHtml(p) {
-  return `<div class="row row-2" data-sid="${esc(p.name)}">` +
+  return `<div class="row row-2" data-sid="${esc(p.id)}">` +
     gripHtml() +
     checkDotHtml('data-change="toggle-decision-provider"', p.enabled) +
     '<span class="row-main"><span class="row-line">' +
@@ -41,29 +43,30 @@ CHANGES['toggle-decision'] = function (el) {
 };
 
 CHANGES['toggle-decision-provider'] = function (el) {
-  const name = el.closest('.row').getAttribute('data-sid');
+  const id = el.closest('.row').getAttribute('data-sid');
   const on = el.checked;
-  api('/api/decision/providers/' + encodeURIComponent(name), 'PUT', { enabled: on })
+  api('/api/decision/providers/' + encodeURIComponent(id), 'PUT', { enabled: on })
     .then(function () { toast(on ? '已启用' : '已停用'); })
     .catch(function (e) { toast(e.message, true); loadDecision(); });
 };
 
-function decisionByName(name) {
-  for (let i = 0; i < decisionCache.length; i++) if (decisionCache[i].name === name) return decisionCache[i];
+function decisionById(id) {
+  for (let i = 0; i < decisionCache.length; i++) if (decisionCache[i].id === id) return decisionCache[i];
   return null;
 }
 
 ACTIONS['test-decision'] = function (el) {
-  const name = el.closest('.row').getAttribute('data-sid');
-  api('/api/decision/providers/' + encodeURIComponent(name) + '/test', 'POST')
+  const id = el.closest('.row').getAttribute('data-sid');
+  api('/api/decision/providers/' + encodeURIComponent(id) + '/test', 'POST')
     .then(function (j) { toast('可用（' + j.ms + 'ms，' + j.model + '）'); })
     .catch(function (e) { toast('不可用: ' + e.message, true); });
 };
 
 ACTIONS['del-decision'] = function (el) {
-  const name = el.closest('.row').getAttribute('data-sid');
-  if (!confirm('删除供应商「' + name + '」？它的 key 设置会保留。')) return;
-  api('/api/decision/providers/' + encodeURIComponent(name), 'DELETE')
+  const id = el.closest('.row').getAttribute('data-sid');
+  const p = decisionById(id);
+  if (!confirm('删除供应商「' + (p ? p.name : id) + '」？它的 key 设置会保留。')) return;
+  api('/api/decision/providers/' + encodeURIComponent(id), 'DELETE')
     .then(function () { toast('已删除'); loadDecision(); })
     .catch(function (e) { toast(e.message, true); });
 };
@@ -71,15 +74,15 @@ ACTIONS['del-decision'] = function (el) {
 ACTIONS['add-decision'] = function () { openDecisionSheet(null); };
 ACTIONS['edit-decision'] = function (el) { openDecisionSheet(el.closest('.row').getAttribute('data-sid')); };
 
-// ---- 新增 / 编辑弹窗（同一个表单；name 是路径标识，编辑时不可改） ----
-function openDecisionSheet(name) {
-  const p = name === null ? null : decisionByName(name);
-  if (name !== null && !p) { toast('供应商数据未加载', true); return; }
+function openDecisionSheet(id) {
+  const p = id === null ? null : decisionById(id);
+  if (id !== null && !p) { toast('供应商数据未加载', true); return; }
+  editingDecisionId = id;
   openSheet(p ? '编辑供应商' : '新增供应商',
     field('名称', `<input id="dp-name" class="inp" placeholder="如 jev" value="` +
-      (p ? esc(p.name) : '') + '"' + (p ? ' disabled' : '') + '>') +
+      (p ? esc(p.name) : '') + '">') +
     '<div class="two">' +
-    field('Base URL', `<input id="dp-base" class="inp" placeholder="如 https://api.typesafe.ai/v1" value="` +
+    field('Base URL', `<input id="dp-base" class="inp" placeholder="如 https://api.typesafe.ai" value="` +
       (p ? esc(p.baseURL) : '') + '">') +
     field('协议', dropdownHtml('dp-protocol', [
       { value: 'systemone', label: 'systemone' },
@@ -92,7 +95,7 @@ function openDecisionSheet(name) {
       (p ? esc(p.model) : '') + '">') +
     // 多模态勾：v2 表单布尔 = 多选行形态（左文字右勾点，.field 内 check-row 恒 ctl-h 高）
     '<div class="field"><label class="field-label">多模态</label>' +
-    checkRowHtml('id="dp-vision"', !!(p && p.vision), '识图（带图判定）') +
+    checkRowHtml('id="dp-vision"', !!(p && p.vision), '图片输入') +
     '</div>' +
     '</div>' +
     '<div class="sheet-foot"><button class="btn btn-line" data-action="close-sheet" data-level="1">取消</button>' +
@@ -100,9 +103,9 @@ function openDecisionSheet(name) {
 }
 
 ACTIONS['save-decision'] = function () {
-  const nameEl = document.getElementById('dp-name');
-  const isNew = !nameEl.disabled;
+  const isNew = editingDecisionId === null;
   const body = {
+    name: document.getElementById('dp-name').value.trim(),
     baseURL: document.getElementById('dp-base').value.trim(),
     model: document.getElementById('dp-model').value.trim(),
     protocol: document.getElementById('dp-protocol').value,
@@ -110,8 +113,8 @@ ACTIONS['save-decision'] = function () {
     key: document.getElementById('dp-key').value.trim(),
   };
   const req = isNew
-    ? api('/api/decision/providers', 'POST', Object.assign({ name: nameEl.value.trim() }, body))
-    : api('/api/decision/providers/' + encodeURIComponent(nameEl.value), 'PUT', body);
+    ? api('/api/decision/providers', 'POST', body)
+    : api('/api/decision/providers/' + encodeURIComponent(editingDecisionId), 'PUT', body);
   req.then(function () {
     closeSheet(1);
     toast(isNew ? '已新增' : '已保存');
@@ -176,14 +179,14 @@ ACTIONS['save-decision-advanced'] = function () {
 // 拖拽排序：顺序 = 调用优先级，落库后热生效
 makeSortable(document.getElementById('decision-list'), {
   items: function () { return decisionCache; },
-  getId: function (p) { return p.name; },
-  onOrder: function (names) {
-    api('/api/decision/providers/order', 'PUT', { names: names })
+  getId: function (p) { return p.id; },
+  onOrder: function (ids) {
+    api('/api/decision/providers/order', 'PUT', { ids: ids })
       .then(loadDecision)
       .catch(function (err) { toast(err.message, true); loadDecision(); });
   },
 });
 
 loadDecision();
-// 名单与 key 都在 settings 表（decision_providers / decision_key:<name>）——撤销后重拉本卡
+// 名单与 key 都在 settings 表（decision_providers / decision_key:<id>）——撤销后重拉本卡
 onTableRefresh(['settings'], loadDecision);

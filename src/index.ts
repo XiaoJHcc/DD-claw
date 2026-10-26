@@ -277,7 +277,7 @@ async function main(): Promise<void> {
   llmDep.onProvidersChanged();
 
   // 决策模型：名单与 key 的唯一信源同样是 settings 表（`decision_providers` /
-  // `decision_key:<name>`），超时/熔断来自运行时参数。判定档按「名单顺序 + vision 优先」
+  // `decision_key:<id>`），超时/熔断来自运行时参数。判定档按「名单顺序 + vision 优先」
   // 路由候选，名单 / key / 超时熔断任一变化都要重建 router（onProvidersChanged），
   // 而灰区与主分类门槛由判定档每轮直读 settings，不需要重建。
   const decisionDep: NonNullable<PanelDeps['decision']> = {
