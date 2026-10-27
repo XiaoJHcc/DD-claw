@@ -1,11 +1,13 @@
-import { normalizeProviderBaseURL, type DecisionProviderConfig } from '../config/index.js';
+import type { DecisionProviderConfig } from '../config/index.js';
 import { splitCsvText } from '../core/csv.js';
 import type { Db } from '../core/db.js';
+import { endpointUrl } from './endpoint.js';
 import type { FetchLike } from './providers.js';
 
 /**
- * 决策模型 provider 层（System One）：`POST <baseURL>/v1/systemone`，请求体是
+ * 决策模型 provider 层（System One）：`POST <baseURL>/systemone`，请求体是
  * `state + questions`（含图时另带顶层 `assets`），响应是同 id 的 typed answers。
+ * baseURL 的版本段由 `endpoint.ts` 归一：写了 `/v1`、`/v3` 就沿用，没写补默认 v1。
  *
  * 本文件只管线格式、探活、名单与 key 的存取；调用顺序 / 熔断 / key 轮换在
  * `decision-router.ts`，判定任务（请求打包与解析）在 `tasks/decide.ts`。
@@ -95,7 +97,7 @@ export async function callSystemOne(
   if (spec.protocol !== 'systemone') {
     throw new DecisionCallError(`不支持的决策模型协议: ${spec.protocol}`);
   }
-  const url = `${normalizeProviderBaseURL(spec.baseURL)}/v1/systemone`;
+  const url = endpointUrl(spec.baseURL, spec.protocol);
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (key) headers.Authorization = `Bearer ${key}`;
   if (req.assets && Object.keys(req.assets).length > 0) headers[IMAGES_HEADER] = 'true';

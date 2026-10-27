@@ -1,5 +1,6 @@
 import { makeLogger } from '../logger.js';
-import { normalizeProviderBaseURL, type AppConfig, type LlmProviderConfig } from '../config/index.js';
+import type { AppConfig, LlmProviderConfig } from '../config/index.js';
+import { endpointUrl } from './endpoint.js';
 import { splitCsvText } from '../core/csv.js';
 import type { Db } from '../core/db.js';
 import type { ModelAttempt } from '../core/content-audit.js';
@@ -279,13 +280,14 @@ export class OpenAiProvider {
   }
 
   /** 共享：POST + 鉴权 + 错误归一化，返回响应 JSON。key 只在 Authorization 头 */
-  private async post(path: string, body: Record<string, unknown>): Promise<unknown> {
+  private async post(body: Record<string, unknown>): Promise<unknown> {
     const key = this.nextKey();
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (key) headers.Authorization = `Bearer ${key}`;
 
     let res: Response;
-    const url = `${normalizeProviderBaseURL(this.spec.baseURL)}/v1${path}`;
+    // api 缺省（旧库没落这个字段）按 chat/completions，与 complete() 的分派口径一致
+    const url = endpointUrl(this.spec.baseURL, this.spec.api ?? 'chat-completions');
     try {
       res = await this.fetchFn(url, {
         method: 'POST',
@@ -343,7 +345,7 @@ export class OpenAiProvider {
 
     let data: { choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }> };
     try {
-      data = (await this.post('/chat/completions', body)) as typeof data;
+      data = (await this.post(body)) as typeof data;
     } catch (e) {
       throw classifyToolError(e, hasTools);
     }
@@ -376,7 +378,7 @@ export class OpenAiProvider {
       body.response_format = { type: 'json_object' };
     }
 
-    const data = (await this.post('/chat/completions', body)) as {
+    const data = (await this.post(body)) as {
       choices?: Array<{ message?: { content?: unknown } }>;
     };
     const content = data.choices?.[0]?.message?.content;
@@ -418,7 +420,7 @@ export class OpenAiProvider {
       body.text = { format: { type: 'json_object' } };
     }
 
-    const data = (await this.post('/responses', body)) as {
+    const data = (await this.post(body)) as {
       output_text?: unknown;
       output?: Array<{ type?: string; content?: Array<{ type?: string; text?: unknown }> }>;
     };
@@ -484,7 +486,7 @@ export class OpenAiProvider {
 
     let data: { output?: Array<Record<string, unknown>> };
     try {
-      data = (await this.post('/responses', body)) as typeof data;
+      data = (await this.post(body)) as typeof data;
     } catch (e) {
       throw classifyToolError(e, hasTools);
     }

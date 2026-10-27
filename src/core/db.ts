@@ -2,7 +2,6 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { normalizeProviderBaseURL } from '../config/schema.js';
 import { makeLogger } from '../logger.js';
 import type { PrevState } from './state.js';
 import type { AnalysisAudit, ContentAudit, PushAudit } from './content-audit.js';
@@ -579,7 +578,6 @@ export class Db {
           }
           if (oldKey !== newKey) this.deleteSetting(oldKey);
           p.id = id;
-          if (typeof p.baseURL === 'string') p.baseURL = normalizeProviderBaseURL(p.baseURL);
         }
         this.setSetting(setting, JSON.stringify(providers));
         return providers;

@@ -94,6 +94,18 @@ test('纯文本走 text 路由，不碰 vision provider', async () => {
   assert.equal(visionCalls.length, 0);
 });
 
+test('请求地址按协议拼：baseURL 带版本段就沿用，不带补默认 /v1', async () => {
+  const versioned = fakeFetch([okResponse('{"a":1}')]);
+  await new LlmRouter([provider({ name: 'v3', baseURL: 'https://api.example.com/v3/' }, [], versioned.fn)],
+    { text: ['v3'], vision: [] }).completeJson({ messages: textMsg });
+  assert.equal(versioned.calls[0]!.url, 'https://api.example.com/v3/chat/completions');
+
+  const bare = fakeFetch([okResponse('{"a":2}')]);
+  await new LlmRouter([provider({ name: 'bare', baseURL: 'https://api.example.com' }, [], bare.fn)],
+    { text: ['bare'], vision: [] }).completeJson({ messages: textMsg });
+  assert.equal(bare.calls[0]!.url, 'https://api.example.com/v1/chat/completions');
+});
+
 test('含 image_url 自动走 vision 路由；显式 vision=false 可覆盖', async () => {
   const { fn: textFetch, calls: textCalls } = fakeFetch([okResponse('{"a":1}')]);
   const { fn: visionFetch, calls: visionCalls } = fakeFetch([okResponse('{"a":2}')]);

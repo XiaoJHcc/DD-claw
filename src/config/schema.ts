@@ -9,8 +9,13 @@ import { z } from 'zod';
  *   settings 后给 sources/router/装配消费——不再有「从文件读运行参数」的路径。
  */
 
+/**
+ * provider Base URL 的存储归一：只去首尾空白与末尾斜杠。
+ * 版本段（`/v1`、`/v3` 等）原样保留——拼请求时以用户填的版本为准，
+ * 没填才补协议默认版本，见 `analysis/endpoint.ts`。
+ */
 export function normalizeProviderBaseURL(value: string): string {
-  return value.trim().replace(/\/+$/, '').replace(/\/v1$/i, '');
+  return value.trim().replace(/\/+$/, '');
 }
 
 const providerBaseURLSchema = z.url('baseURL 必须是合法 URL').transform(normalizeProviderBaseURL);
@@ -32,8 +37,9 @@ export const llmProviderSchema = z.object({
    */
   structuredOutput: z.enum(['schema', 'object', 'none']).default('schema'),
   /**
-   * 端点协议：chat-completions = /v1/chat/completions（绝大多数 OpenAI 兼容端点）；
-   * responses = /v1/responses（OpenAI Responses API，如 OpenCode Go 的 gpt-5.6-luna）。
+   * 端点协议：chat-completions = /chat/completions（绝大多数 OpenAI 兼容端点）；
+   * responses = /responses（OpenAI Responses API，如 OpenCode Go 的 gpt-5.6-luna）。
+   * 两者都挂在版本根下（默认 /v1）；baseURL 自带版本段时以 baseURL 为准。
    * Anthropic /messages 协议不做（他家模型贵，MiniMax/Qwen 走各自官方 API）
    */
   api: z.enum(['chat-completions', 'responses']).default('chat-completions'),
@@ -42,7 +48,7 @@ export const llmProviderSchema = z.object({
 export type LlmProviderConfig = z.infer<typeof llmProviderSchema>;
 
 /**
- * 决策模型 provider：System One 端点（当前只有 `POST /v1/systemone`）。
+ * 决策模型 provider：System One 端点（当前只有 `POST /systemone`，版本根默认 /v1）。
  * 名单存 settings 表（面板决策模型卡片管理），本 schema 供面板 CRUD 校验。
  *
  * `protocol` 是协议下拉框的落点：现在只允许 `systemone`（Jev / Clef / vLLM-SR /
@@ -54,7 +60,7 @@ export const decisionProviderSchema = z.object({
   name: z.string().min(1),
   baseURL: providerBaseURLSchema,
   model: z.string().min(1),
-  /** 端点协议：systemone = POST /v1/systemone（baseURL 不含 /v1） */
+  /** 端点协议：systemone = POST /systemone（版本根默认 /v1，baseURL 自带版本段时以 baseURL 为准） */
   protocol: z.enum(['systemone']).default('systemone'),
   /** 是否可接含图请求（带图内容先交给 vision 供应商，纯文本供应商只作兜底） */
   vision: z.boolean().default(false),

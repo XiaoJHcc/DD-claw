@@ -1690,7 +1690,7 @@ test('POST /api/llm/providers：新增即出现在 GET，路由自动推导；�
   const info = await api(base, '/api/llm');
   const providers = info.json.providers as Array<{ name: string; baseURL: string; routes: string[]; api: string }>;
   assert.deepEqual(providers.map((p) => p.name), ['ds', 'mm'], 'config 种子 + 新增');
-  assert.equal(providers[1]!.baseURL, 'https://api.minimaxi.com');
+  assert.equal(providers[1]!.baseURL, 'https://api.minimaxi.com/v1', '版本段原样保留');
   assert.deepEqual(providers[0]!.routes, ['text'], '纯文本只进 text 路由');
   assert.deepEqual(providers[1]!.routes, ['text', 'vision'], '多模态进两条路由');
   assert.equal(providers[0]!.api, 'chat-completions', '缺省协议回显');
@@ -1835,7 +1835,7 @@ test('POST /api/decision/providers：新增即出现在 GET；协议缺省 syste
   const info = await api(base, '/api/decision');
   const providers = info.json.providers as Array<{ name: string; baseURL: string; protocol: string }>;
   assert.deepEqual(providers.map((p) => p.name), ['local']);
-  assert.equal(providers[0]!.baseURL, 'http://127.0.0.1:8080');
+  assert.equal(providers[0]!.baseURL, 'http://127.0.0.1:8080/v1', '版本段原样保留');
   assert.equal(providers[0]!.protocol, 'systemone', '缺省协议回显');
 
   assert.equal((await api(base, '/api/decision/providers', 'POST', {

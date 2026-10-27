@@ -1264,7 +1264,7 @@ test('getSampledLiveSession / getSampledPost：按身份精确复读，投影与
   db.close();
 });
 
-test('供应商 ID 迁移：保留 key 与 Agent 选择，规范 baseURL，重跑稳定', (t) => {
+test('供应商 ID 迁移：保留 key 与 Agent 选择，不改写 baseURL，重跑稳定', (t) => {
   let db: Db | undefined;
   const path = join(tmpdir_(t, () => db?.close()), 'provider-ids.db');
   db = new Db(path);
@@ -1284,8 +1284,8 @@ test('供应商 ID 迁移：保留 key 与 Agent 选择，规范 baseURL，重�
   const decision = JSON.parse(db.getSetting('decision_providers')!) as Array<{ id: string; baseURL: string }>;
   assert.ok(llm[0]!.id);
   assert.ok(decision[0]!.id);
-  assert.equal(llm[0]!.baseURL, 'https://api.deepseek.com');
-  assert.equal(decision[0]!.baseURL, 'https://api.typesafe.ai');
+  assert.equal(llm[0]!.baseURL, 'https://api.deepseek.com/v1/', '迁移不碰 baseURL，版本段与尾斜杠原样保留');
+  assert.equal(decision[0]!.baseURL, 'https://api.typesafe.ai/v1');
   assert.equal(db.getSetting(`llm_key:${llm[0]!.id}`), 'sk-llm');
   assert.equal(db.getSetting(`decision_key:${decision[0]!.id}`), 'sk-decision');
   assert.equal(db.getSetting('llm_key:DeepSeek'), null);

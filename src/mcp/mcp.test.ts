@@ -1037,7 +1037,8 @@ test('决策模型工具：名单/新增/改名/排序/测试/删除走注册表
     providers: Array<{ name: string; baseURL: string; protocol: string; vision: boolean; keyCount: number }>;
   };
   assert.deepEqual(list.providers.map((p) => p.name), ['jev', 'local']);
-  assert.deepEqual(list.providers.map((p) => p.baseURL), ['https://api.typesafe.ai', 'http://127.0.0.1:8080']);
+  assert.deepEqual(list.providers.map((p) => p.baseURL), ['https://api.typesafe.ai/v1', 'http://127.0.0.1:8080/v1'],
+    '版本段原样保留，只归一尾斜杠');
   assert.deepEqual(list.providers.map((p) => p.protocol), ['systemone', 'systemone'], '缺省协议 systemone');
   assert.deepEqual(list.providers.map((p) => p.vision), [true, false], 'vision 落库并可回读（缺省假）');
   assert.deepEqual(list.providers.map((p) => p.keyCount), [0, 0]);

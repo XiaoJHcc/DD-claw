@@ -42,7 +42,7 @@ const OK_BODY = {
   usage: { input_tokens: 12, output_tokens: 1 },
 };
 
-test('callSystemOne：POST <baseURL>/v1/systemone，带 Bearer 与 state+questions，解析 typed answers', async () => {
+test('callSystemOne：POST <baseURL>/systemone（版本根缺省 /v1），带 Bearer 与 state+questions，解析 typed answers', async () => {
   const f = fakeFetch([jsonResponse(OK_BODY)]);
   const out = await callSystemOne(spec({ baseURL: 'https://api.typesafe.ai/v1/' }), 'sk-test', {
     model: 'jev-1.14.0',
@@ -62,6 +62,22 @@ test('callSystemOne：POST <baseURL>/v1/systemone，带 Bearer 与 state+questio
     type: 'noul', instructions: '是否歌回？',
   });
   assert.deepEqual(out, OK_BODY);
+});
+
+test('callSystemOne：baseURL 自带版本段（/v3）时沿用，不重复补 /v1', async () => {
+  const f = fakeFetch([jsonResponse(OK_BODY)]);
+  await callSystemOne(spec({ baseURL: 'https://api.typesafe.ai/v3/' }), 'sk-test', {
+    model: 'm', state: 'x', questions: { probe: { type: 'noul' } },
+  }, { fetchFn: f.fn });
+  assert.equal(f.calls[0]!.url, 'https://api.typesafe.ai/v3/systemone');
+});
+
+test('callSystemOne：baseURL 不带版本段时补默认 /v1', async () => {
+  const f = fakeFetch([jsonResponse(OK_BODY)]);
+  await callSystemOne(spec({ baseURL: 'https://api.typesafe.ai/' }), 'sk-test', {
+    model: 'm', state: 'x', questions: { probe: { type: 'noul' } },
+  }, { fetchFn: f.fn });
+  assert.equal(f.calls[0]!.url, 'https://api.typesafe.ai/v1/systemone');
 });
 
 test('callSystemOne：无 key 不写 Authorization 头（本地无鉴权端点）', async () => {

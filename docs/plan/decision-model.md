@@ -8,7 +8,7 @@
 1. **协议只做 System One**：`POST <baseURL>/systemone`，请求 `state + questions`（含图时另带顶层 `assets`），响应同 id 的 typed answers。
    - `protocol` 枚举只有 `systemone`；`/v1/decisions` 形状不同，真正接入时再加枚举值与适配分支，不把厂商字段带进业务代码。
    - 原语只接 `choice` / `noul`；`score` 留在线格式里不用，`box` 不接。
-   - baseURL 写到 `/v1` 这一层，适配器追加 `/systemone`。
+   - baseURL 写到版本根这一层（`/v1` 可省，适配器按需补默认 `v1`），适配器追加 `/systemone`。
 2. **模型版本写死**：生产配置用 `jev-1.14.0` 这类完整版本号；审计记响应回显的 `model`。
 3. **通道隔离**：独立 settings（`decision_providers` / `decision_key:<name>` / `decision_*` 参数）、独立 key 池、独立熔断；不与 `LlmRouter` 共享任何运行时状态。
 4. **识图是默认输入**：带图内容只交给标记了 `vision` 的决策供应商。纯文本供应商是最低兼容：可以判，结果落库，但对带图内容不作为生效结论。

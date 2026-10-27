@@ -28,6 +28,7 @@
 - `classifier.ts` — `RulesClassifier` + **判决链**：`JudgeStage` / `JudgeRequest` / `JudgeOutcome` 接口、档位顺序表 `JUDGE_STAGES`（`decisionJudge` → `llmJudge`）与确定性预跑；按内容类型取启用分类，逐档结论入 `verdicts` / `primary_verdicts` 与 `content_audit`（含 `stageNotes`：某档被跳过 / 失败的原因）。
 - `image-prep.ts` — 送模型图片的规范化（`sharp`）：`prepareImage` / `prepareImageFiles` 产出合规 JPEG data URL 与被拦图片原因（`PreparedImages`），纯本地、不做网络。
 - `queue.ts` — 分析队列：并发 2 的信号量与通用 `run()` 入口（图文翻译等非分类任务同走这条路）。
+- `endpoint.ts` — provider 端点拼装（LLM 与决策模型共用）：Base URL 的末尾斜杠 / 版本段 / 误贴整条端点三种写法归一，版本段缺省按协议表补默认 `v1`。
 - `providers.ts` — LLM provider 层与 `LlmRouter`：路由推导、双协议、结构化输出三档、可重试失败就地重试、熔断、多 key 池、point-named 严格路由、工具对话与 JSON 模拟降级；`createLlmRouter` 装配入口与 settings 读写 helper。
 - `decision-providers.ts` — 决策模型 provider 层：System One（`state + questions + assets` → typed answers）线格式、协议分派、最小探活、settings 名单 / 独立 key 前缀 / 总开关。
 - `decision-router.ts` — 决策路由：候选顺序（含图时 vision 优先）、未就绪跳过、失败换下一个、可重试失败就地重试、连续失败熔断、key 池轮换、`DecisionUnavailableError`；`createDecisionRouter` 装配入口。与 `LlmRouter` 不共享任何运行时状态。

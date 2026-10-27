@@ -45,7 +45,7 @@
 ## Provider 层
 
 - **稳定身份**：两类 provider 都以 `id` 定位，`name` 只是可编辑显示名；key、排序与 Agent 模型选择引用 ID，改名不影响它们。LLM key 在 `llm_key:<id>`，Agent 的 `chat_provider` 同样存 ID。
-- **Base URL 不含 `/v1`**：名单保存根地址，适配器分别追加 `/v1/chat/completions`、`/v1/responses` 与 `/v1/systemone`；旧末尾 `/v1` 会在保存与迁移时归一移除。
+- **Base URL 自动兼容**：保存时只去首尾空白与末尾斜杠，版本段（`/v1`、`/v3` 等）原样保留；端点 = 版本根 + 协议路径（`/chat/completions`、`/responses`、`/systemone`），末尾写了版本就沿用、没写才补协议默认版本（当前都是 `v1`），误贴整条端点时先剥回版本根再拼。默认版本的唯一信源是 `endpoint.ts` 的协议表。
 - **路由由名单推导**：provider 名单顺序即优先级；text 路由收全部启用的，vision 路由只收多模态的。请求带图即走 vision，无图走 text；显式指定路由可覆盖。
 - **双协议**：chat-completions 与 responses（system→instructions、结构化输出走 `text.format`）。Anthropic `/messages` 明确不接。
 - **结构化输出三档**：`schema`（约束最强）/ `object`（只保证是 JSON）/ `none`（不带 response_format，解析时剥代码围栏兜底）。本地小模型与不支持的端点靠第三档活。
@@ -56,7 +56,7 @@
 
 ## 决策模型通道
 
-判决链的**第一档**：一次 `POST <baseURL>/v1/systemone` 同时回答是非（每分类一道 `noul`）与主分类（一道 `choice`）。
+判决链的**第一档**：一次 `POST <baseURL>/systemone` 同时回答是非（每分类一道 `noul`）与主分类（一道 `choice`）；`baseURL` 的版本段按上一节规则补齐。
 代码分工：线格式与名单 / key 在 `decision-providers.ts`，候选顺序 / 熔断 / key 轮换在 `decision-router.ts`，
 请求打包与解析在 `tasks/decide.ts`，档位在 `classifier.ts`（`JUDGE_STAGES = [decisionJudge, llmJudge]`）。
 
