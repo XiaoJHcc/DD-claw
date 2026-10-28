@@ -48,7 +48,7 @@ function memDb(t: import('node:test').TestContext): Db {
 
 function category(over: Partial<NewCategory> = {}): NewCategory {
   return {
-    name: '', llmPrompt: null, keywords: [], areas: [],
+    name: '', llmPrompt: null, judgeMode: 'simple', judgeConditions: [], keywords: [], areas: [],
     postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live',
     condMode: 'and', primary: false, enabled: true,
     ...over,
@@ -995,6 +995,187 @@ test('无 ctx.images：按无图判定，imageCount=0 且不写 skippedImages', 
   const audit = db.getContentAudit('post', 'twitter:9001')!.analysis!;
   assert.equal(audit.imageCount, 0);
   assert.equal(audit.skippedImages, undefined);
+});
+
+// ---- 判定模式：precise 逐条条件（simple 的行为由上面全部用例锁定，不受影响）----
+
+/** 精确条件的小工具：稳定 id 手写，方便断言 */
+function cond(id: string, direction: 'pass' | 'reject', text: string, enabled = true) {
+  return { id, direction, text, enabled };
+}
+
+test('toClassifyCategory：precise 只带启用且非空的精确条件，判定描述不进口径', () => {
+  const db = new Db(':memory:');
+  try {
+    const id = db.upsertCategory(category({
+      name: '歌回', llmPrompt: '旧的判定描述', judgeMode: 'precise',
+      judgeConditions: [
+        cond('p1', 'pass', '以唱歌为主'),
+        cond('p2', 'pass', '停用的正向条件', false),
+        cond('p3', 'pass', '   '),
+        cond('n1', 'reject', '在打单机游戏'),
+      ],
+    }));
+    assert.deepEqual(toClassifyCategory(storedCategory(db, id)), {
+      id, name: '歌回', prompt: '', judgeMode: 'precise',
+      positives: [{ id: 'p1', text: '以唱歌为主' }],
+      negatives: [{ id: 'n1', text: '在打单机游戏' }],
+    });
+  } finally {
+    db.close();
+  }
+});
+
+test('precise：LLM 请求是结构化条件清单（正负分块 + 稳定 id），判定描述绝不进请求', async (t) => {
+  const db = memDb(t);
+  const catId = db.upsertCategory(category({
+    name: '歌回', llmPrompt: '这段旧描述在精确模式不该出现', judgeMode: 'precise',
+    judgeConditions: [
+      cond('p1', 'pass', '标题或画面以唱歌为主'),
+      cond('p2', 'pass', '分区是唱见'),
+      cond('n1', 'reject', '明确在玩单机游戏'),
+    ],
+  }));
+  const { router, calls } = fakeRouter(async (_req, parse) =>
+    parse!({ results: [{ id: catId, match: true, evidence: '在唱' }] }));
+
+  const out = await new RulesClassifier(db, { getRouter: () => router, llmEnabled: () => true }).classify(ctx());
+  assert.deepEqual(out.map((c) => [c.categoryId, c.source]), [[catId, 'llm']]);
+  const text = requestText(calls[0]!);
+  assert.match(text, /- id=\d+ 「歌回」（精确条件）/);
+  assert.match(text, /正向条件（任一成立即可支持）/, '正向条件单独成块');
+  assert.match(text, /- id=p1 标题或画面以唱歌为主/, '条件带稳定 id');
+  assert.match(text, /- id=p2 分区是唱见/);
+  assert.match(text, /负向条件（任一成立即否决，优先于正向）/);
+  assert.match(text, /- id=n1 明确在玩单机游戏/);
+  assert.match(text, /负向条件之间也是「或」，且整体否决正向/, '判定规则写明否决优先');
+  assert.doesNotMatch(text, /这段旧描述在精确模式不该出现/, '精确模式不拿 llmPrompt 当口径');
+});
+
+test('precise 没有启用正向条件：不进任何模型档，也不回退 llmPrompt', async (t) => {
+  const db = memDb(t);
+  const catId = db.upsertCategory(category({
+    name: '歌回', llmPrompt: '旧描述（不得作为回退口径）', judgeMode: 'precise',
+    keywords: ['歌'],
+    judgeConditions: [cond('n1', 'reject', '在打游戏'), cond('p1', 'pass', '停用的正向', false)],
+  }));
+  const { router, calls } = fakeRouter(async () => { throw new Error('不该问 LLM'); });
+  const { router: decisionRouter, requests } = fakeDecisionRouter({
+    respond: () => { throw new Error('不该问决策模型'); },
+  });
+
+  const out = await new RulesClassifier(db, {
+    getRouter: () => router,
+    llmEnabled: () => true,
+    getDecisionRouter: () => decisionRouter,
+    decisionEnabled: () => true,
+  }).classify(ctx());
+
+  assert.equal(calls.length, 0, '没有启用正向条件 => 不进 LLM 档');
+  assert.equal(requests.length, 0, '也不进决策档');
+  assert.deepEqual(out.map((c) => [c.categoryId, c.source]), [[catId, 'rule']], '按既有「无模型条件」路径由确定性定案');
+  const v = db.listVerdicts('live', 'r1:1785310737');
+  assert.deepEqual(v.map((r) => [r.source, r.effective]), [['rule', true]]);
+  assert.match(v[0]!.evidence, /关键词「歌」/);
+});
+
+test('precise：决策档每条件一道题，逐条件概率入审计、confidence 为 null', async (t) => {
+  const db = memDb(t);
+  const catId = db.upsertCategory(category({
+    name: '歌回', judgeMode: 'precise',
+    judgeConditions: [cond('p1', 'pass', '在唱歌'), cond('p2', 'pass', '唱见分区'), cond('n1', 'reject', '在打游戏')],
+  }));
+  const { router: decisionRouter, requests } = fakeDecisionRouter({
+    respond: (req) => decisionAnswers(req, {
+      noul: { [`c${catId}:p1`]: 0.9, [`c${catId}:p2`]: 0.3, [`c${catId}:n1`]: 0.05 },
+    }),
+  });
+  const { router: llmRouter, calls } = fakeRouter(async () => { throw new Error('决策档已定案，不该问 LLM'); });
+
+  const out = await new RulesClassifier(db, {
+    getRouter: () => llmRouter,
+    llmEnabled: () => true,
+    getDecisionRouter: () => decisionRouter,
+    decisionEnabled: () => true,
+  }).classify(ctx());
+
+  assert.deepEqual(Object.keys(requests[0]!.questions), [`c${catId}:p1`, `c${catId}:p2`, `c${catId}:n1`],
+    '一个条件一道 noul（正向在前）');
+  assert.equal(calls.length, 0);
+  assert.deepEqual(out.map((c) => [c.categoryId, c.source, c.confidence]), [[catId, 'decision', null]]);
+
+  const v = db.listVerdicts('live', 'r1:1785310737');
+  assert.deepEqual(v.map((r) => [r.source, r.pass, r.confidence, r.effective]), [['decision', true, null, true]]);
+  const audit = db.getContentAudit('live', 'r1:1785310737')!.analysis!;
+  assert.deepEqual(audit.conditionResults, [
+    { categoryId: catId, conditionId: 'p1', direction: 'pass', text: '在唱歌', p: 0.9, band: 'high', decisive: true },
+    { categoryId: catId, conditionId: 'p2', direction: 'pass', text: '唱见分区', p: 0.3, band: 'gray', decisive: false },
+    { categoryId: catId, conditionId: 'n1', direction: 'reject', text: '在打游戏', p: 0.05, band: 'low', decisive: false },
+  ], '逐条件原文 / 方向 / 概率 / 分带 / 生效标记进 content_audit');
+});
+
+test('precise 主分类：选项集含无效正向条件时不问模型主分类，交确定性主分类', async (t) => {
+  const db = memDb(t);
+  const ok = db.upsertCategory(category({
+    name: '歌回', judgeMode: 'precise', primary: true,
+    judgeConditions: [cond('p1', 'pass', '在唱歌')],
+  }));
+  // 精确成员只有负向条件 = 说不出「最像它」的口径 → 选项集残缺，本轮不问模型主分类
+  db.upsertCategory(category({
+    name: '杂谈', judgeMode: 'precise', primary: true, keywords: ['聊'],
+    judgeConditions: [cond('n1', 'reject', '在唱歌')],
+  }));
+  const { router: decisionRouter, requests } = fakeDecisionRouter({
+    respond: (req) => decisionAnswers(req, { noul: { [`c${ok}:p1`]: 0.9 } }),
+  });
+  const { router: llmRouter, calls } = fakeRouter(async (_req, parse) =>
+    parse!({ results: [{ id: ok, match: true, evidence: '在唱' }] }));
+
+  await new RulesClassifier(db, {
+    getRouter: () => llmRouter,
+    llmEnabled: () => true,
+    getDecisionRouter: () => decisionRouter,
+    decisionEnabled: () => true,
+  }).classify(ctx());
+
+  assert.equal(requests[0]!.questions.primary, undefined, '残缺选项集不问 choice');
+  assert.equal(calls.length, 0, '已无疑问项时也不问 LLM');
+  const primary = db.listPrimaryVerdicts('live', 'r1:1785310737');
+  assert.deepEqual([primary[0]!.categoryId, primary[0]!.source, primary[0]!.effective], [ok, 'rule', true],
+    '模型主分类跳过 → 按分类排序取组内首个生效且属于');
+  const audit = db.getContentAudit('live', 'r1:1785310737')!.analysis!;
+  assert.ok(audit.stageNotes!.some((n) => /有效精确正向条件/.test(n.reason)), '跳过原因可回看');
+});
+
+test('precise 主分类：全部具备有效正向条件时 choice criteria 用条件组合', async (t) => {
+  const db = memDb(t);
+  const song = db.upsertCategory(category({
+    name: '歌回', judgeMode: 'precise', primary: true,
+    judgeConditions: [cond('p1', 'pass', '在唱歌'), cond('p2', 'pass', '唱见分区')],
+  }));
+  const chat = db.upsertCategory(category({
+    name: '杂谈', judgeMode: 'precise', primary: true,
+    judgeConditions: [cond('p1', 'pass', '在聊天')],
+  }));
+  const { router: decisionRouter, requests } = fakeDecisionRouter({
+    respond: (req) => decisionAnswers(req, {
+      noul: { [`c${song}:p1`]: 0.9, [`c${song}:p2`]: 0.1, [`c${chat}:p1`]: 0.1 },
+      pick: '歌回', top: 0.9,
+    }),
+  });
+
+  await new RulesClassifier(db, {
+    getRouter: () => null,
+    llmEnabled: () => true,
+    getDecisionRouter: () => decisionRouter,
+    decisionEnabled: () => true,
+  }).classify(ctx());
+
+  assert.deepEqual(requests[0]!.questions.primary!.criteria, {
+    歌回: '在唱歌 或 唱见分区', 杂谈: '在聊天', 其他: '不属于以上任何一项',
+  });
+  const primary = db.listPrimaryVerdicts('live', 'r1:1785310737');
+  assert.deepEqual([primary[0]!.categoryId, primary[0]!.source], [song, 'decision']);
 });
 
 /** 类型自检：Classification 的 pass/effective 必填（编译期约束，运行时无副作用） */

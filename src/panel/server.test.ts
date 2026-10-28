@@ -769,6 +769,86 @@ test('category 校验：三条件皆空 400（POST 与 PUT 合并后）/ condMod
   assert.equal(db.listCategories().find((c) => c.id === id)!.llmPrompt, '在唱歌', '失败的 PUT 不落库');
 });
 
+test('category 判定模式：POST/PUT 收 judgeMode + judgeConditions，两套数据双份保留', async (t) => {
+  const { db, base } = await setup(t);
+
+  // 精确模式新建：id 缺省由后端补，停用项照样保存，顺序即数组顺序
+  const created = await api(base, '/api/categories', 'POST', {
+    name: '歌回', judgeMode: 'precise',
+    judgeConditions: [
+      { direction: 'pass', text: '标题或画面以唱歌为主' },
+      { id: 'stable-2', direction: 'reject', text: '明确在玩单机游戏', enabled: false },
+    ],
+  });
+  assert.equal(created.status, 201);
+  const id = (created.json as { id: number }).id;
+  const cat = db.listCategories().find((c) => c.id === id)!;
+  assert.equal(cat.judgeMode, 'precise');
+  assert.equal(cat.judgeConditions.length, 2);
+  assert.match(cat.judgeConditions[0]!.id, /^[0-9a-f-]{36}$/, '缺 id 的新条件补 randomUUID');
+  assert.equal(cat.judgeConditions[1]!.id, 'stable-2', '已有 id 原样保留');
+  assert.equal(cat.judgeConditions[1]!.enabled, false, '停用项也保存');
+
+  // GET 原样返回两个字段
+  const listed = await api(base, '/api/categories');
+  const shown = (listed.json['categories'] as Array<Record<string, unknown>>).find((c) => c.id === id)!;
+  assert.equal(shown.judgeMode, 'precise');
+  assert.equal((shown.judgeConditions as unknown[]).length, 2);
+
+  // 切回简单模式：精确条件与判定描述都留着
+  assert.equal((await api(base, `/api/categories/${id}`, 'PUT', {
+    judgeMode: 'simple', llmPrompt: '以唱歌为主',
+  })).status, 200);
+  const simple = db.listCategories().find((c) => c.id === id)!;
+  assert.equal(simple.judgeMode, 'simple');
+  assert.equal(simple.llmPrompt, '以唱歌为主');
+  assert.equal(simple.judgeConditions.length, 2, '切模式不清空精确条件');
+
+  // 再切精确：判定描述仍在
+  assert.equal((await api(base, `/api/categories/${id}`, 'PUT', { judgeMode: 'precise' })).status, 200);
+  const back = db.listCategories().find((c) => c.id === id)!;
+  assert.equal(back.llmPrompt, '以唱歌为主', '切模式不清空判定描述');
+});
+
+test('category 精确条件校验：空白 text / 坏 direction / 未知字段 / 重复 id 一律 400；精确模式没有通过条件算死分类', async (t) => {
+  const { db, base } = await setup(t);
+
+  const bad = async (judgeConditions: unknown, judgeMode = 'precise'): Promise<number> =>
+    (await api(base, '/api/categories', 'POST', { name: 'x', judgeMode, judgeConditions })).status;
+
+  assert.equal(await bad([{ direction: 'pass', text: '   ' }]), 400, 'text 空白');
+  assert.equal(await bad([{ direction: 'pass', text: 'ok', id: 5 }]), 400, 'id 必须是字符串');
+  assert.equal(await bad([{ direction: 'maybe', text: 'ok' }]), 400, 'direction 枚举');
+  assert.equal(await bad([{ direction: 'pass', text: 'ok', enabled: 'yes' }]), 400, 'enabled 必须布尔');
+  assert.equal(await bad([{ direction: 'pass', text: 'ok', weight: 1 }]), 400, '未知字段');
+  assert.equal(await bad([{ direction: 'pass', text: 'ok' }, { id: 'dup', direction: 'pass', text: 'y' },
+    { id: 'dup', direction: 'reject', text: 'z' }]), 400, '分类内 id 唯一');
+  assert.equal(await bad({ direction: 'pass', text: 'ok' }), 400, '必须是数组');
+
+  // 精确模式下判定描述不算口径：只有拒绝 + 只有 llmPrompt 都是死分类
+  const noPositive = await api(base, '/api/categories', 'POST', {
+    name: '只有拒绝', judgeMode: 'precise', llmPrompt: '旧描述不算数',
+    judgeConditions: [{ direction: 'reject', text: '在打游戏' }],
+  });
+  assert.equal(noPositive.status, 400);
+  assert.match(noPositive.json.error ?? '', /至少.*通过条件/, '精确模式要至少一条启用通过条件');
+  // 有一条启用通过即可
+  const okPrecise = await api(base, '/api/categories', 'POST', {
+    name: '歌回', judgeMode: 'precise',
+    judgeConditions: [{ direction: 'pass', text: '在唱歌' }],
+  });
+  assert.equal(okPrecise.status, 201);
+  // PUT 把唯一的启用通过条件停用 → 合并后形状没有口径 → 400（不会偷偷回退 llmPrompt）
+  const id = (okPrecise.json as { id: number }).id;
+  assert.equal((await api(base, `/api/categories/${id}`, 'PUT', { llmPrompt: '在唱歌' })).status, 200,
+    '判定描述可写（切回简单模式要用）');
+  const disabled = await api(base, `/api/categories/${id}`, 'PUT', {
+    judgeConditions: [{ id: db.listCategories().find((c) => c.id === id)!.judgeConditions[0]!.id,
+      direction: 'pass', text: '在唱歌', enabled: false }],
+  });
+  assert.equal(disabled.status, 400, '启用通过条件被停用 = 没有口径');
+});
+
 test('POST /api/categories/test：随机样本三档试跑，不落库不推送；无 dep 404、坏草稿 400', async (t) => {
   const categoryTest: PanelDeps['categoryTest'] = {
     queue: { run: <T>(fn: () => Promise<T>) => fn() },
@@ -3325,6 +3405,22 @@ test('撤销端点未装配 → 404（两个端点各自按 dep 挂载）', asyn
   assert.equal(sRow.label, '主播「阿梓」');
   assert.deepEqual(sRow.changes, [{ field: '简称', from: '（空）', to: '梓宝' }], '只报配置列：轮询回写列被忽略表挡在外面');
   assert.equal(c[0]!.undoNote, null);
+
+  // ⑥ 判定模式与精确条件也是配置列：切模式 / 改条件是「从什么改成了什么」，条件只报条数
+  const catId2 = (await api(base, '/api/categories', 'POST',
+    { name: '杂谈', llmPrompt: '以聊天为主' })).json as { id: number };
+  assert.equal((await api(base, `/api/categories/${catId2.id}`, 'PUT', {
+    judgeMode: 'precise',
+    judgeConditions: [{ id: 'p1', direction: 'pass', text: '在聊天' }],
+  })).status, 200);
+  c = (await api(base, '/api/undo/history')).json.changes as Array<Record<string, unknown>>;
+  const modeRow = (c[0]!.detail as Array<Record<string, unknown>>)[0]!;
+  assert.deepEqual(modeRow.changes, [
+    { field: '判定模式', from: '简单', to: '精确' },
+    { field: '精确条件', from: '0 条条件', to: '1 条条件' },
+  ], '模式枚举译中文、条件数组报条数');
+  assert.equal(db.listCategories().find((x) => x.id === catId2.id)!.llmPrompt, '以聊天为主',
+    '切模式后判定描述仍在（两套数据双份保留）');
 });
 
 test('变更历史结构化：LLM key 行的 undoNote=refill，撤销响应带 title 与 refill 透传', async (t) => {

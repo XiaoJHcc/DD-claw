@@ -136,12 +136,14 @@ test('categories A.1 列迁移：旧表补 applies_to/post_types/require_quote/r
   }
 
   db = new Db(path);
-  for (const col of ['applies_to', 'post_types', 'require_quote', 'require_media', 'is_primary']) {
+  for (const col of ['applies_to', 'post_types', 'require_quote', 'require_media', 'is_primary', 'judge_mode', 'judge_conditions']) {
     assert.ok(columns(path, 'categories').includes(col), `categories 应补列 ${col}`);
   }
   const old = db.listCategories().find((c) => c.name === '歌回')!;
   assert.equal(old.appliesTo, 'live', '旧行默认直播分类');
   assert.equal(old.primary, false, '旧行默认不进主分类组');
+  assert.equal(old.judgeMode, 'simple', '旧行默认简单模式（行为与升级前一致）');
+  assert.deepEqual(old.judgeConditions, [], '旧行没有精确条件');
   assert.deepEqual(old.postTypes, []);
   assert.equal(old.requireQuote, false);
   assert.equal(old.requireMedia, false);

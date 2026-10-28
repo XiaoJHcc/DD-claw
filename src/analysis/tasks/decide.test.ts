@@ -22,6 +22,24 @@ const CATS: ClassifyCategory[] = [
 
 const IMG = 'data:image/jpeg;base64,QUJD';
 
+/** 精确模式分类：两条正向 + 一条负向（稳定 id 是逐条概率的锚点） */
+const PRECISE: ClassifyCategory = {
+  id: 5, name: '歌回', prompt: '', judgeMode: 'precise',
+  positives: [
+    { id: 'p1', text: '标题或画面在以唱歌为主' },
+    { id: 'p2', text: '分区是唱见或 singer' },
+  ],
+  negatives: [{ id: 'n1', text: '明确在玩单机游戏' }],
+};
+
+/** 精确分类的合规响应：逐条件给概率（缺任一条件 = 整份失败） */
+function preciseAnswers(p: [number, number], n: number[]): Record<string, SystemOneAnswer> {
+  const answers: Record<string, SystemOneAnswer> = {};
+  PRECISE.positives!.forEach((c, i) => { answers[`c5:${c.id}`] = { type: 'noul', noul: p[i]! }; });
+  PRECISE.negatives!.forEach((c, i) => { answers[`c5:${c.id}`] = { type: 'noul', noul: n[i]! }; });
+  return answers;
+}
+
 /** 按题目 id 拼一份合规响应 */
 function response(
   answers: Record<string, SystemOneAnswer>,
@@ -237,4 +255,116 @@ test('parseDecisionResponse：未请求主分类时不产出主分类结论', ()
     primary: { type: 'choice', choice: '歌回', probabilities: { 歌回: 1 } },
   }), CATS, undefined, {}, TH, META);
   assert.equal(out.primary, null, '没问主分类就不采纳模型多给的主分类答案');
+});
+
+// ---- 精确模式：逐条件一道题，逐条件裁决 ----
+
+test('buildDecisionRequest：精确分类每个启用条件一道 noul，问句引用字段与条件原文', () => {
+  const { req } = buildDecisionRequest(item(), [PRECISE], undefined, 'm', false);
+  assert.deepEqual(Object.keys(req.questions), ['c5:p1', 'c5:p2', 'c5:n1'], '一条条件一道题，正向在前');
+  assert.equal(req.questions['c5:p1']!.type, 'noul');
+  const q = (req.questions['c5:p1'] as { instructions: string }).instructions;
+  assert.match(q, /`标题`/, '问句指称 state 字段');
+  assert.match(q, /标题或画面在以唱歌为主/, '条件原文整体进问句');
+  assert.doesNotMatch(q, /分区是唱见/, '不同条件不拼进同一道问句');
+  assert.doesNotMatch(q, /是否属于「歌回」/, '精确模式不问整体是否属于');
+  // 抓取内容只进 state，不进问句
+  assert.doesNotMatch(JSON.stringify(req.questions), /今晚歌回/);
+});
+
+test('buildDecisionRequest：精确分类的主分类 criteria 用正向条件组合，不拿判定描述', () => {
+  const mixed: ClassifyCategory = { ...PRECISE, prompt: '这段判定描述在精确模式不该被用' };
+  const { req, keyMap } = buildDecisionRequest(item(), [], [mixed], 'm', false);
+  assert.deepEqual(keyMap, { 歌回: 5, 其他: 0 });
+  assert.equal(req.questions.primary!.criteria!['歌回'], '标题或画面在以唱歌为主 或 分区是唱见或 singer');
+});
+
+test('buildDecisionRequest：主分类选项缺有效口径时拒绝组题（不让残缺选项集提前定案）', () => {
+  const broken: ClassifyCategory = { id: 6, name: '空精确分类', prompt: '', judgeMode: 'precise', positives: [] };
+  assert.throws(
+    () => buildDecisionRequest(item(), [], [PRECISE, broken], 'm', false),
+    /没有可用的判定条件/,
+  );
+});
+
+test('parseDecisionResponse 精确：负向成立即否决，即使正向很强', () => {
+  const out = parseDecisionResponse(response(preciseAnswers([0.95, 0.9], [0.9])),
+    [PRECISE], undefined, {}, TH, META);
+  const row = out.results[0]!;
+  assert.deepEqual([row.categoryId, row.pass, row.source], [5, false, 'decision']);
+  assert.equal(row.confidence, null, '精确模式不合成伪最终概率');
+  assert.ok(out.decided.has(5), '负向明确成立 = 定案');
+  assert.match(row.evidence, /负向条件「明确在玩单机游戏」成立 p=0\.90，判否/);
+  assert.deepEqual(out.conditionResults!.map((c) => [c.conditionId, c.direction, c.p]), [
+    ['p1', 'pass', 0.95], ['p2', 'pass', 0.9], ['n1', 'reject', 0.9],
+  ], '逐条件 id / 方向 / 概率全部回传');
+  const veto = out.conditionResults!.find((c) => c.conditionId === 'n1')!;
+  assert.deepEqual([veto.text, veto.band, veto.decisive], ['明确在玩单机游戏', 'high', true]);
+  assert.ok(out.conditionResults!.filter((c) => c.direction === 'pass').every((c) => !c.decisive));
+});
+
+test('parseDecisionResponse 精确：全部正向都不成立即判否；无负向视作全部不成立', () => {
+  const noNeg: ClassifyCategory = { ...PRECISE, negatives: [] };
+  const out = parseDecisionResponse(response({
+    ...preciseAnswers([0.1, 0.05], []),
+  }), [noNeg], undefined, {}, TH, META);
+  assert.equal(out.results[0]!.pass, false);
+  assert.ok(out.decided.has(5));
+  assert.match(out.results[0]!.evidence, /全部正向条件都不成立/);
+  assert.equal(out.conditionResults!.length, 2, '只记存在的条件');
+});
+
+test('parseDecisionResponse 精确：正向成立且负向全不成立 → 判是定案', () => {
+  const out = parseDecisionResponse(response(preciseAnswers([0.85, 0.3], [0.1])),
+    [PRECISE], undefined, {}, TH, META);
+  assert.equal(out.results[0]!.pass, true);
+  assert.ok(out.decided.has(5));
+  assert.match(out.results[0]!.evidence, /判是/);
+  assert.match(out.results[0]!.evidence, /「明确在玩单机游戏」p=0\.10/, '逐条件概率进证据');
+});
+
+test('parseDecisionResponse 精确：灰区不定案（正向偏中 / 强正向下负向未排除）', () => {
+  // ① 正向都偏中、负向低：没有强正向证据
+  const mid = parseDecisionResponse(response(preciseAnswers([0.5, 0.6], [0.1])),
+    [PRECISE], undefined, {}, TH, META);
+  assert.equal(mid.decided.size, 0);
+  assert.equal(mid.results[0]!.pass, false, '灰区的 pass 只是倾向标记');
+  assert.match(mid.results[0]!.evidence, /灰区未定案/);
+
+  // ② 有强正向但负向落在灰区：不定案，倾向「是」
+  const leaning = parseDecisionResponse(response(preciseAnswers([0.9, 0.1], [0.5])),
+    [PRECISE], undefined, {}, TH, META);
+  assert.equal(leaning.decided.size, 0);
+  assert.equal(leaning.results[0]!.pass, true, '有强正向证据 → 倾向标记为 true');
+});
+
+test('parseDecisionResponse 精确：缺条件答案 / 非 noul / 越界都整份失败', () => {
+  const missing = preciseAnswers([0.9, 0.9], [0.1]);
+  delete missing['c5:p2'];
+  assert.throws(() => parseDecisionResponse(response(missing), [PRECISE], undefined, {}, TH, META),
+    /条件「分区是唱见或 singer」的答案/);
+  assert.throws(
+    () => parseDecisionResponse(response({
+      ...preciseAnswers([0.9, 0.9], [0.1]),
+      'c5:n1': { type: 'choice', choice: 'x', probabilities: {} },
+    }), [PRECISE], undefined, {}, TH, META),
+    /不是 noul/,
+  );
+  assert.throws(
+    () => parseDecisionResponse(response({
+      ...preciseAnswers([0.9, 0.9], [0.1]),
+      'c5:p1': { type: 'noul', noul: 1.4 },
+    }), [PRECISE], undefined, {}, TH, META),
+    /0–1 的数值/,
+  );
+});
+
+test('parseDecisionResponse 精确：纯文本供应商对带图内容不定案（结论与逐条件概率仍回传）', () => {
+  const out = parseDecisionResponse(response(preciseAnswers([0.95, 0.95], [0.05])),
+    [PRECISE], undefined, {}, TH, { ...META, textOnlyForImageItem: true });
+  assert.equal(out.decided.size, 0);
+  assert.equal(out.results[0]!.pass, true);
+  assert.match(out.results[0]!.evidence, /纯文本供应商未看图/);
+  assert.equal(out.conditionResults!.length, 3);
+  assert.ok(out.conditionResults!.every((c) => !c.decisive), '未看图时没有任何条件实际促成定案');
 });

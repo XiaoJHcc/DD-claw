@@ -2,6 +2,9 @@ import type { LiveEvent, Signal } from '../core/types.js';
 import type { PreparedImages } from './image-prep.js';
 import type { PostCandidate } from './matcher.js';
 
+/** 精确模式的逐条件结论类型（审计形状的唯一信源在 core/content-audit，这里只转出口供分析层引用） */
+export type { ConditionAudit as ConditionResult } from '../core/content-audit.js';
+
 /** 一份内容被判属于/不属于某分类的结果（入 verdicts 表；每档每来源一行） */
 export interface Classification {
   categoryId: number;
@@ -10,7 +13,8 @@ export interface Classification {
   /** llm = LLM 判定（权威路径）；rule = 确定性条件（无提示词分类 / 模型档不可用时的回退）；
    *  decision = 决策模型通道（判决链第一档，带 P(属于)） */
   source: 'llm' | 'rule' | 'decision';
-  /** 仅决策模型的 P(属于)，其余来源 null（LLM 自报数字没有校准意义，不采信） */
+  /** 仅决策模型的 P(属于)，其余来源 null（LLM 自报数字没有校准意义，不采信）。
+   *  精确模式的是非由逐条件裁决得出，不合成伪最终概率，故同样为 null。 */
   confidence: number | null;
   /** LLM 证据 / 命中的关键词·分区说明 */
   evidence: string;

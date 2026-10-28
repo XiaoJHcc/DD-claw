@@ -248,7 +248,8 @@ export function undoRowLabel(img: RowImage): string {
 const COLUMN_NAMES: Record<string, Record<string, string>> = {
   settings: { key: '键名', value: '值' },
   categories: {
-    name: '名称', llm_prompt: '判定描述', keywords: '关键词', areas: '分区',
+    name: '名称', llm_prompt: '判定描述', judge_mode: '判定模式', judge_conditions: '精确条件',
+    keywords: '关键词', areas: '分区',
     applies_to: '适用内容', post_types: '帖子类型', require_quote: '必须引用', require_media: '必须带图',
     cond_mode: '条件关系', enabled: '启用', sort: '位置',
   },
@@ -384,6 +385,7 @@ const SECRET_SETTING_KEYS: readonly string[] = ['mcp_tokens'];
 /** 小枚举列 → 中文（`表.列` 为键） */
 const ENUM_VALUES: Record<string, Record<string, string>> = {
   'categories.cond_mode': { and: '且', or: '或' },
+  'categories.judge_mode': { simple: '简单', precise: '精确' },
   'categories.applies_to': { live: '直播', post: '图文' },
   'categories.post_types': { original: '原创', retweet: '转发' },
   'push_rules.subject_kind': { live: '直播', post: '图文' },
@@ -405,6 +407,15 @@ function isBoolCell(table: string, column: string, settingKey?: string): boolean
     (BOOL_SETTING_KEYS.includes(settingKey) || settingKey.startsWith('listen_'));
 }
 
+/** 精确条件列的一行读法：条数（解析失败回退原文截断） */
+function judgeConditionsSummary(v: unknown): string {
+  try {
+    const parsed: unknown = JSON.parse(String(v));
+    if (Array.isArray(parsed)) return `${parsed.length} 条条件`;
+  } catch { /* 落原文 */ }
+  return truncate(String(v));
+}
+
 /** 单值 → 人读形态；返回 null = 值不可示人（调用方给 redacted 变化项） */
 function formatValue(table: string, column: string, v: unknown, settingKey?: string): string | null {
   if (settingKey !== undefined && SECRET_SETTING_KEYS.includes(settingKey)) return null;
@@ -415,6 +426,8 @@ function formatValue(table: string, column: string, v: unknown, settingKey?: str
   const enumMap = ENUM_VALUES[`${table}.${column}`];
   if (enumMap) return enumMap[String(v)] ?? String(v);
   if (column === 'sort') return `第 ${String(v)} 位`;
+  // 精确条件是对象数组：逐条列出没有意义（撤销面板一行放不下），只报条数
+  if (table === 'categories' && column === 'judge_conditions') return judgeConditionsSummary(v);
   if (table === 'settings' && settingKey !== undefined && SETTING_UNITS[settingKey] !== undefined) {
     const n = Number(v);
     const unit = SETTING_UNITS[settingKey];

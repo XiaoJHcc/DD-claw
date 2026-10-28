@@ -1,6 +1,7 @@
 import { makeLogger } from '../logger.js';
 import type { Db } from '../core/db.js';
 import type { Category, PrimaryJudgement } from '../core/push.js';
+import { hasJudgeBasis } from '../core/push.js';
 import type { LlmRouter } from './providers.js';
 import type { DecisionRouter } from './decision-router.js';
 import { DecisionUnavailableError } from './decision-router.js';
@@ -10,7 +11,7 @@ import { buildClassifyRequest, parseClassifyResults, toClassifyCategory, PRIMARY
 import {
   buildDecisionRequest, parseDecisionResponse, DEFAULT_DECISION_THRESHOLDS, type DecisionThresholds,
 } from './tasks/decide.js';
-import type { AnalysisContext, Classification, Classifier } from './types.js';
+import type { AnalysisContext, Classification, Classifier, ConditionResult } from './types.js';
 import type { AnalysisAudit, ModelAttempt } from '../core/content-audit.js';
 
 const log = makeLogger('analysis/classifier');
@@ -55,6 +56,8 @@ export interface JudgeOutcome {
   decided: Set<number>;
   primary: PrimaryJudgement | null;
   primaryDecided: boolean;
+  /** 精确模式的逐条件概率（只有决策档产出；进审计与试判响应用于回看） */
+  conditionResults?: ConditionResult[];
 }
 
 /** 判决档位：返回 null = 本档不可用 / 不适用（交下一档）。 */
@@ -203,14 +206,18 @@ export interface RulesClassifierOptions {
  * 分类编排：live_start 对直播分类、feed_post 对图文分类判定，结论入 verdicts / primary_verdicts。
  *
  * 逐档落库 + 定案条件：
- * - 确定性永远先跑（零成本），对全部分类给出属于 / 不属于；无判定描述的分类由它定案
- * - 有判定描述的分类按档位依次判（决策模型 → LLM）：每档只收到仍未定案的分类，返回的结论
+ * - 确定性永远先跑（零成本），对全部分类给出属于 / 不属于；无模型判定口径的分类由它定案
+ *   （口径 = simple 的判定描述 / precise 的启用正向条件，见 `hasJudgeBasis`）
+ * - 有口径的分类按档位依次判（决策模型 → LLM）：每档只收到仍未定案的分类，返回的结论
  *   全部落库，定案的（`decided`）成为该分类生效结论并移出后续档；决策档的灰区、
  *   以及「带图内容只被纯文本供应商回答」的结论照样落库但不定案
- * - 模型档都没定案的有描述分类，由确定性结果定案（evidence 写明是回退）
+ * - 模型档都没定案的有口径分类，由确定性结果定案（evidence 写明是回退）
  * - 主分类：模型档定案优先；仍未定案则按分类排序取主分类组里第一个「生效且属于」的分类，
- *   都不属于 = 「其他」（categoryId 0）
+ *   都不属于 = 「其他」（categoryId 0）。主分类组里有精确分类没有有效正向条件（选项集残缺）
+ *   时本次不问模型主分类，直接走确定性主分类
  * - 模型定案后不回看确定性（关键词捞不回模型的「否」）
+ *
+ * 判定模式只决定模型看到什么，不碰确定性：`condMode` 与各条件组的语义与模式无关。
  *
  * 落库口径两形态统一：pass=true 与 pass=false 都入 verdicts（「为什么没推」可回看）；
  * 无任何有效条件组的分类不落确定性行（除非它成为生效结论）——那里没有可回看的判据。
@@ -269,14 +276,22 @@ export class RulesClassifier implements Classifier {
       deterministic.set(c.id, conclusion.result);
     }
 
-    const modelCats = cats.filter((c) => c.llmPrompt);
+    // 模型判定口径：simple 要有判定描述、precise 要有启用正向条件（精确模式不回退 llmPrompt）
+    const modelCats = cats.filter(hasJudgeBasis);
     const primaryAll = cats.filter((c) => c.primary);
-    const primaryModel = primaryAll.filter((c) => c.llmPrompt);
+    const primaryModel = primaryAll.filter(hasJudgeBasis);
+    // 主分类选项集不完整（precise 成员没有有效正向条件 = 说不出它的口径）时，本次不问模型主分类：
+    // 缺一条选项的集合会让模型在残缺选项上提前定案。simple 无判定描述的成员照旧不参与，不算残缺
+    const primaryIncomplete = primaryAll.some((c) => c.judgeMode === 'precise' && !hasJudgeBasis(c));
     const pending = new Set(modelCats.map((c) => c.id));
-    let primaryPending = primaryModel.length > 0;
+    let primaryPending = primaryModel.length > 0 && !primaryIncomplete;
+    if (primaryIncomplete) {
+      jctx.onStageSkip?.('decision', '主分类组含不具备有效精确正向条件的分类，本次不问模型主分类（交确定性主分类）');
+    }
     const modelRows: Classification[] = [];
     const primaryRows: PrimaryJudgement[] = [];
     let decidedPrimary: PrimaryJudgement | null = null;
+    const conditionResults: ConditionResult[] = [];
 
     for (const stage of JUDGE_STAGES) {
       if (pending.size === 0 && !primaryPending) break;
@@ -294,6 +309,7 @@ export class RulesClassifier implements Classifier {
         pending.delete(r.categoryId);
       }
       modelRows.push(...out.results);
+      if (out.conditionResults !== undefined) conditionResults.push(...out.conditionResults);
       if (out.primary !== null) {
         primaryRows.push(out.primary);
         if (out.primaryDecided) {
@@ -304,10 +320,10 @@ export class RulesClassifier implements Classifier {
       }
     }
 
-    // 生效结论：无描述分类 = 确定性；模型定案的 = 该档结论；其余 = 确定性回退（写明原因）
+    // 生效结论：无判定口径的分类 = 确定性；模型定案的 = 该档结论；其余 = 确定性回退（写明原因）
     const effective = new Map<number, Classification>();
     for (const c of cats) {
-      if (!c.llmPrompt) effective.set(c.id, deterministic.get(c.id)!);
+      if (!hasJudgeBasis(c)) effective.set(c.id, deterministic.get(c.id)!);
     }
     for (const r of modelRows) {
       if (!r.effective) continue; // 未定案（如决策模型灰区 / 纯文本供应商没看图）不生效
@@ -374,6 +390,8 @@ export class RulesClassifier implements Classifier {
       categoryId: r.categoryId, name: r.name, source: r.source,
       pass: r.pass, confidence: r.confidence, evidence: r.evidence, effective: r.effective,
     }));
+    // 精确模式的逐条件概率同样逐档全量入审计（判据完整，不只留生效结论那一行）
+    if (conditionResults.length > 0) audit.conditionResults = conditionResults;
     if (primaryRows.length > 0) audit.primary = primaryRows;
     audit.status = 'done';
     audit.durationMs = Date.now() - started;

@@ -30,10 +30,10 @@
 **持久化与仓储**（`db.ts` 建表 + CRUD，其余文件只放行类型 / 映射）
 - `db.ts` — SQLite 表群与仓储（会话 / 时间轴 / 状态 / 名单 / 渠道 / 分类 / 规则 / 判定 / 内容审计 / 帖子 / 关键帧 / 设置），`raw` 只读句柄与 `transaction` 包装，一次性迁移。
 - `streamers.ts` — `streamers` / `follows` 行类型与映射。
-- `push.ts` — 渠道 / 分类 / 推送规则 / 判定（`verdicts`）与主分类（`primary_verdicts`）行类型与映射；`SubjectKind` / `postSubjectRef` / `liveVerdictSubjectId` / `postVerdictSubjectId`；推送总开关；copy-on-write 拆渠道。
+- `push.ts` — 渠道 / 分类 / 推送规则 / 判定（`verdicts`）与主分类（`primary_verdicts`）行类型与映射；分类的判定模式（`judge_mode` simple / precise）与精确条件（`judge_conditions`，正负向 + 稳定 id + 停用态）及 `hasJudgeBasis` / `preciseConditions` 口径函数——两套判定数据**双份保留**，切模式不清空对方；`SubjectKind` / `postSubjectRef` / `liveVerdictSubjectId` / `postVerdictSubjectId`；推送总开关；copy-on-write 拆渠道。
 - `posts.ts` — `posts` 行类型与映射（pics JSON）。
 - `x-accounts.ts` / `weibo-accounts.ts` / `bili-accounts.ts` — 三张图文账号名单的行类型、映射与标识归一化（含 `silent_next` / `fetch_fail_*`）。
-- `content-audit.ts` — 判定与推送过程归档类型（标准与规则快照、逐来源结论 `effective`、主分类结论、标通道的模型尝试、通道结果）。
+- `content-audit.ts` — 判定与推送过程归档类型（标准与规则快照、逐来源结论 `effective`、精确模式逐条件概率 `conditionResults`、主分类结论、标通道的模型尝试、通道结果）。
 - `chat-store.ts` — agent 会话存储（`chat_sessions` / `chat_messages`；会话键 = 来源渠道，与撤销栈同 scope）。
 
 **配置 · 开关 · 撤销**

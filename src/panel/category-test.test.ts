@@ -15,7 +15,7 @@ import { Db } from '../core/db.js';
 import { DEFAULT_DECISION_THRESHOLDS } from '../analysis/tasks/decide.js';
 import type { DecisionRouter } from '../analysis/decision-router.js';
 import type { DecisionProviderConfig } from '../config/schema.js';
-import type { SystemOneRequest, SystemOneResponse } from '../analysis/decision-providers.js';
+import type { SystemOneQuestion, SystemOneRequest, SystemOneResponse } from '../analysis/decision-providers.js';
 import type { LlmRequest, LlmRouter } from '../analysis/providers.js';
 import type { PreparedImages } from '../analysis/image-prep.js';
 import {
@@ -123,8 +123,11 @@ const DECISION_SPEC: DecisionProviderConfig = {
   protocol: 'systemone', vision: false, enabled: true,
 };
 
-/** 假决策路由：noul 一律回同一个概率（试跑只问一道题）；throwOnCall = 整档失败 */
-function fakeDecisionRouter(p: number | null): { router: DecisionRouter; requests: SystemOneRequest[] } {
+/** 假决策路由：noul 一律回同一个概率（试跑只问一道题）；throwOnCall = 整档失败。
+ *  传函数 = 按题给概率（精确模式逐条件）：`p === null` 仍然表示整档失败。 */
+function fakeDecisionRouter(
+  p: number | null | ((q: SystemOneQuestion) => number),
+): { router: DecisionRouter; requests: SystemOneRequest[] } {
   const requests: SystemOneRequest[] = [];
   const router = {
     decide: async (
@@ -137,7 +140,7 @@ function fakeDecisionRouter(p: number | null): { router: DecisionRouter; request
       if (p === null) throw new Error('决策端点 500');
       const answers: Record<string, { type: 'noul'; noul: number }> = {};
       for (const [key, q] of Object.entries(call.req.questions)) {
-        if (q.type === 'noul') answers[key] = { type: 'noul', noul: p };
+        if (q.type === 'noul') answers[key] = { type: 'noul', noul: typeof p === 'function' ? p(q) : p };
       }
       const response: SystemOneResponse = { model: 'jev-1.13.0', answers };
       validate(response);
@@ -703,4 +706,75 @@ test('复测拒绝：缺失 / 非法 / 跨类型 / 重复 / 超限都是 400（�
   // 没传 sampleIds 时仍然是原来那套随机抽样（向后兼容：不给锚点就不校验它们）
   const legacy = await run({ category: live, filter: { limit: 10 } });
   assert.equal(legacy.samples.length, 2);
+});
+
+// ---- 精确模式草稿：逐条件试判 ----
+
+/** 草稿里的精确条件（id 手写：试判响应按它对齐） */
+const DRAFT_PRECISE = {
+  judgeMode: 'precise',
+  judgeConditions: [
+    { id: 'p1', direction: 'pass', text: '标题或画面以唱歌为主' },
+    { id: 'p2', direction: 'pass', text: '分区是唱见', enabled: false },
+    { id: 'n1', direction: 'reject', text: '明确在玩单机游戏' },
+  ],
+};
+
+test('草稿精确模式：没有启用通过条件时两个模型档都跳过（不回退判定描述）', async (t) => {
+  const db = memDb(t);
+  seedLive(db);
+  const { samples, llmCalls, decisionCalls } = await runLive(db, {
+    keywords: ['歌回'], llmPrompt: '这段旧描述不该被用',
+    judgeMode: 'precise',
+    judgeConditions: [{ id: 'n1', direction: 'reject', text: '在打游戏' }],
+  }, { filter: { uid: '1', limit: 1 } });
+
+  const [rule, llm, decision] = samples[0]!.results;
+  assert.equal(rule!.status, 'ok', '确定性档照跑');
+  for (const tier of [llm!, decision!]) {
+    assert.equal(tier.status, 'skipped');
+    assert.equal(tier.reason, '精确模式没有启用的通过条件', '跳过原因写明是精确模式缺通过条件');
+    assert.equal(tier.pass, null);
+  }
+  assert.equal(llmCalls.length, 0, '不问 LLM');
+  assert.equal(decisionCalls.length, 0, '也不问决策模型');
+});
+
+test('草稿精确模式：LLM 档是结构化条件清单，决策档每条件一道题并回逐条件概率', async (t) => {
+  const db = memDb(t);
+  seedLive(db);
+  const { samples, llmCalls, decisionCalls } = await runLive(db, DRAFT_PRECISE, {
+    filter: { uid: '1', limit: 1 },
+    decision: (q) => (q.instructions.includes('唱歌为主') ? 0.9 : 0.05),
+  });
+
+  const [, llm, decision] = samples[0]!.results;
+  assert.equal(llm!.status, 'ok');
+  assert.equal(llm!.decided, true);
+  const text = requestText(llmCalls[0]!);
+  assert.match(text, /「草稿分类」（精确条件）/);
+  assert.match(text, /- id=p1 标题或画面以唱歌为主/);
+  assert.doesNotMatch(text, /分区是唱见/, '停用的条件不进请求');
+  assert.match(text, /- id=n1 明确在玩单机游戏/);
+
+  assert.equal(decision!.status, 'ok');
+  assert.equal(decision!.pass, true, '通过成立且拒绝不成立 = 是');
+  assert.equal(decision!.confidence, null, '精确模式不合成伪最终概率');
+  assert.deepEqual(decision!.conditionResults!.map((c) => [c.conditionId, c.direction, c.p]), [
+    ['p1', 'pass', 0.9], ['n1', 'reject', 0.05],
+  ], '逐条件 id / 方向 / 概率回给面板');
+  assert.ok(JSON.stringify(decisionCalls[0]!.questions).includes('c-1:p1'), '决策题目键用合成的负数 id');
+  assert.doesNotMatch(JSON.stringify(decisionCalls[0]!.questions), /c-1:p2/, '停用条件不问');
+});
+
+test('草稿精确模式：只有拒绝条件的草稿仍是死草稿（400），判定描述不算口径', async () => {
+  await assert.rejects(
+    (async () => parseCategoryTestRequest({
+      category: {
+        llmPrompt: '旧描述', judgeMode: 'precise',
+        judgeConditions: [{ id: 'n1', direction: 'reject', text: '在打游戏' }],
+      },
+    }))(),
+    /至少要有.*通过条件|至少.*通过条件/,
+  );
 });

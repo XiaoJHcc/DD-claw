@@ -68,6 +68,19 @@ export interface McpToolDef {
 const uidSchema = z.string().regex(/^\d+$/, 'uid 必须是纯数字字符串');
 const idSchema = z.number().int().positive();
 
+/**
+ * 精确条件（分类判定模式的原子条件）。`id` 只由调用方在**已有**条件上回传（试判 / 审计按它对齐）；
+ * 新条件可以不给，后端补 randomUUID。形状是 strict：拼错字段名必须报错，不能被静默剥掉。
+ */
+const judgeConditionSchema = z.object({
+  id: z.string().optional().describe('条件 id（已有条件必须原样回传；新条件可省略，后端生成）'),
+  direction: z.enum(['pass', 'reject']).describe('pass=正向（任一成立即可支持）/ reject=负向（任一成立即否决）'),
+  text: z.string().describe('条件原文（非空；模型按这一条独立判定）'),
+  enabled: z.boolean().optional().describe('是否参与判定（缺省 true）；停用项照样保存'),
+}).strict();
+
+const judgeConditionsSchema = z.array(judgeConditionSchema).describe('精确条件列表，数组顺序即展示顺序');
+
 /** 从 args 挑出「出现过」的键组成 body 对象（复用面板 parse* 校验函数） */
 function pickBody(args: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
   const o: Record<string, unknown> = {};
@@ -227,7 +240,8 @@ const sharedTools: McpToolDef[] = [
   },
   {
     name: 'list_categories',
-    description: '内容分类定义：判定描述（llmPrompt，喂给 LLM 与决策模型）+ 确定性条件组（condMode 且/或）；appliesTo=live=直播分类 / post=图文分类',
+    description: '内容分类定义：判定模式（judgeMode=simple 用判定描述 llmPrompt / precise 用逐条精确条件 judgeConditions）+ 确定性条件组（condMode 且/或）；'
+      + '两种模式的数据同时保留，切模式不清空对方；appliesTo=live=直播分类 / post=图文分类',
     schema: {},
     role: 'shared',
     handler: (deps) => deps.db.listCategories(),
@@ -702,12 +716,17 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'upsert_category',
-    description: '新建/更新内容分类（判定描述 + 确定性条件组，至少一项非空）。带 id = 更新（未传字段保留原值），不带 = 新建。'
+    description: '新建/更新内容分类（判定口径 + 确定性条件组，至少一项非空）。带 id = 更新（未传字段保留原值），不带 = 新建。'
+      + 'judgeMode=simple（默认）：用一句判定描述 llmPrompt；judgeMode=precise：用逐条精确条件 judgeConditions'
+      + '（正向任一成立即支持、负向任一成立即否决；没有启用正向条件时该分类不进模型判定）。'
+      + '两种模式的数据都保存，切模式不清空对方。'
       + 'appliesTo=live（默认）：关键词/分区条件；appliesTo=post：关键词/帖子类型/引用/带图条件（图文 filters 已上移进分类）',
     schema: {
       id: idSchema.optional(),
       name: z.string().optional(),
-      llmPrompt: z.string().nullable().optional().describe('判定描述（定义句，同时喂给 LLM 与决策模型）；null/空串 = 纯确定性分类'),
+      llmPrompt: z.string().nullable().optional().describe('判定描述（简单模式的判定口径）；null/空串 = 无描述'),
+      judgeMode: z.enum(['simple', 'precise']).optional().describe('判定模式：simple=一句判定描述 / precise=逐条精确条件'),
+      judgeConditions: judgeConditionsSchema.optional(),
       keywords: z.array(z.string()).optional().describe('标题/正文关键词，命中任一即可'),
       areas: z.array(z.string()).optional().describe('分区（仅直播分类）'),
       appliesTo: z.enum(['live', 'post']).optional().describe('分类服务的内容类型：live=直播场次 / post=图文帖；新建后不可更改'),
@@ -723,8 +742,8 @@ const adminTools: McpToolDef[] = [
     write: true,
     handler: (deps, args) => {
       const keys = [
-        'name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia',
-        'condMode', 'primary', 'enabled',
+        'name', 'llmPrompt', 'judgeMode', 'judgeConditions', 'keywords', 'areas', 'appliesTo', 'postTypes',
+        'requireQuote', 'requireMedia', 'condMode', 'primary', 'enabled',
       ] as const;
       if (args.id === undefined) {
         const c = parseNewCategory(pickBody(args, keys));
@@ -740,7 +759,9 @@ const adminTools: McpToolDef[] = [
       // 条件校验对合并后的形状做（同面板 PUT）
       checkCategoryConditions({
         appliesTo: prev.appliesTo,
+        judgeMode: patch.judgeMode ?? prev.judgeMode,
         llmPrompt: patch.llmPrompt !== undefined ? patch.llmPrompt : prev.llmPrompt,
+        judgeConditions: patch.judgeConditions ?? prev.judgeConditions,
         keywords: patch.keywords ?? prev.keywords,
         areas: patch.areas ?? prev.areas,
         postTypes: patch.postTypes ?? prev.postTypes,
@@ -1224,15 +1245,19 @@ const adminTools: McpToolDef[] = [
     name: 'test_category',
     description: '用真实归档的样本试跑一条分类草稿：确定性条件（关键词/分区/帖子类型/引用/带图）、'
       + 'LLM、决策模型三档各自独立判定，只回摘要（样本正文 + 三档结论与理由）。'
-      + '不保存分类、不落判定记录、不推送。草稿校验与新建分类同一套（至少一项条件或判定描述）；'
+      + '不保存分类、不落判定记录、不推送。草稿校验与新建分类同一套（至少一项条件或判定口径）；'
+      + 'judgeMode=precise 时模型档按逐条精确条件判，决策档回逐条件概率（conditionResults），'
+      + '没有启用正向条件的分类两个模型档都跳过（不回退判定描述）。'
       + 'live 分类取直播场次（filter.uid 可选 = 主播 uid），post 分类取图文帖'
       + '（filter.uid + filter.platform 定位账号）。传 sampleIds = 按这些 subjectId 逐条精确复测'
-      + '（顺序照传，忽略 filter）；不传 = 按 filter 随机抽。没填判定描述时两个模型档都跳过',
+      + '（顺序照传，忽略 filter）；不传 = 按 filter 随机抽。没填判定口径时两个模型档都跳过',
     schema: {
       category: z.object({
         name: z.string().optional(),
         llmPrompt: z.string().nullable().optional()
-          .describe('判定描述（同时喂给 LLM 与决策模型）；null/空串 = 纯确定性分类'),
+          .describe('判定描述（简单模式的判定口径）；null/空串 = 无描述'),
+        judgeMode: z.enum(['simple', 'precise']).optional().describe('判定模式：simple=一句判定描述 / precise=逐条精确条件'),
+        judgeConditions: judgeConditionsSchema.optional(),
         keywords: z.array(z.string()).optional(),
         areas: z.array(z.string()).optional(),
         appliesTo: z.enum(['live', 'post']).optional(),

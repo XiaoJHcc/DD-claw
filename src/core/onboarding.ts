@@ -41,6 +41,8 @@ export function seedOnboardingDefaults(db: Db): void {
     for (const c of ONBOARDING_CATEGORIES) {
       db.upsertCategory({
         name: c.name, llmPrompt: c.llmPrompt, keywords: c.keywords, areas: c.areas,
+        // 判定模式与精确条件随默认值种入（缺省 = 简单模式、无精确条件）
+        judgeMode: c.judgeMode ?? 'simple', judgeConditions: c.judgeConditions ?? [],
         condMode: c.condMode, primary: false, enabled: true,
       });
     }

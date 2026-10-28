@@ -22,7 +22,7 @@ function channel(over: Partial<NewPushChannel> = {}): NewPushChannel {
 
 function category(over: Partial<NewCategory> = {}): NewCategory {
   return {
-    name: '歌回', llmPrompt: null, keywords: ['歌回'], areas: ['虚拟Singer'],
+    name: '歌回', llmPrompt: null, judgeMode: 'simple', judgeConditions: [], keywords: ['歌回'], areas: ['虚拟Singer'],
     postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live',
     condMode: 'and', primary: false, enabled: true,
     ...over,
@@ -114,7 +114,58 @@ test('分类主分类标记：缺省 false、可勾选、补丁未提供保留�
   assert.equal(db.listCategories().find((x) => x.id === primary)!.primary, false);
 });
 
-test('分类名称：不传自动补「分类 N」，传了存自定义名', (t) => {  const db = memDb(t);
+test('判定模式：缺省 simple；两套数据双份保留，切模式不清空对方', (t) => {
+  const db = memDb(t);
+  const id = db.upsertCategory(category());
+  const plain = db.listCategories().find((x) => x.id === id)!;
+  assert.equal(plain.judgeMode, 'simple', '缺省 simple');
+  assert.deepEqual(plain.judgeConditions, [], '缺省空条件数组');
+
+  // 简单模式写判定描述，同时存一份精确条件（前端切模式时两份都在库）
+  db.upsertCategory({
+    id,
+    llmPrompt: '以唱歌为主',
+    judgeConditions: [
+      { id: 'p1', direction: 'pass', text: '标题或画面在唱歌', enabled: true },
+      { id: 'n1', direction: 'reject', text: '在玩单机游戏', enabled: false },
+    ],
+  });
+  const both = db.listCategories().find((x) => x.id === id)!;
+  assert.equal(both.llmPrompt, '以唱歌为主');
+  assert.deepEqual(both.judgeConditions.map((x) => [x.id, x.direction, x.enabled]), [
+    ['p1', 'pass', true], ['n1', 'reject', false],
+  ], '停用项照样保存，数组顺序即展示顺序');
+
+  // 切到精确：判定描述不动
+  db.upsertCategory({ id, judgeMode: 'precise' });
+  const precise = db.listCategories().find((x) => x.id === id)!;
+  assert.equal(precise.judgeMode, 'precise');
+  assert.equal(precise.llmPrompt, '以唱歌为主', '切精确不清空判定描述');
+  assert.equal(precise.judgeConditions.length, 2, '精确条件原样保留');
+
+  // 切回简单：精确条件不动
+  db.upsertCategory({ id, judgeMode: 'simple', llmPrompt: null });
+  const back = db.listCategories().find((x) => x.id === id)!;
+  assert.equal(back.judgeMode, 'simple');
+  assert.equal(back.llmPrompt, null);
+  assert.equal(back.judgeConditions.length, 2, '切简单不清空精确条件');
+
+  // 补丁只改别的字段时，模式与两套数据都不变
+  db.upsertCategory({ id, keywords: ['歌', '唱'] });
+  const patched = db.listCategories().find((x) => x.id === id)!;
+  assert.equal(patched.judgeMode, 'simple');
+  assert.equal(patched.judgeConditions.length, 2);
+});
+
+test('判定模式与确定性条件互不影响：condMode 只由自己的字段决定', (t) => {
+  const db = memDb(t);
+  const id = db.upsertCategory(category({ condMode: 'or' }));
+  db.upsertCategory({ id, judgeMode: 'precise' });
+  assert.equal(db.listCategories().find((x) => x.id === id)!.condMode, 'or', '模式选择不改条件关系');
+});
+
+test('分类名称：不传自动补「分类 N」，传了存自定义名', (t) => {
+  const db = memDb(t);
   const id = db.upsertCategory(category({ name: '' }));
   assert.equal(db.listCategories().find((x) => x.id === id)!.name, `分类 ${id}`);
   const id2 = db.upsertCategory(category({ name: '杂谈' }));

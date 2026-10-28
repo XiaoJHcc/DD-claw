@@ -34,6 +34,7 @@ import type { Db, SampledLiveSession } from '../core/db.js';
 import { SAMPLE_LIMIT_MAX } from '../core/db.js';
 import type { Post } from '../core/posts.js';
 import type { Category, SubjectKind } from '../core/push.js';
+import { hasJudgeBasis } from '../core/push.js';
 import type { XAccount } from '../core/x-accounts.js';
 import type { WeiboAccount } from '../core/weibo-accounts.js';
 import type { BiliAccount } from '../core/bili-accounts.js';
@@ -46,6 +47,7 @@ import type { DecisionRouter } from '../analysis/decision-router.js';
 import type { LlmRouter } from '../analysis/providers.js';
 import { prepareImageFiles, type PreparedImages } from '../analysis/image-prep.js';
 import type { DecisionThresholds } from '../analysis/tasks/decide.js';
+import type { ConditionResult } from '../analysis/types.js';
 import type { PostCandidate } from '../analysis/matcher.js';
 import { localizeImage, localizeImageViaProxy } from '../notify/image-cache.js';
 import { HttpError, parseNewCategory } from './http-util.js';
@@ -63,7 +65,7 @@ export type CategoryTestSource = 'rule' | 'llm' | 'decision';
  * 单档结论：
  * - `ok` 有结论（`pass` 非空）
  * - `unavailable` 该档不可用 / 失败（开关关、没配 provider、调用或解析失败），`reason` 是回调原因
- * - `skipped` 该档不适用（分类没填判定描述 → 两个模型档都不问）
+ * - `skipped` 该档不适用（分类没有模型判定口径 → 两个模型档都不问）
  */
 export type CategoryTestStatus = 'ok' | 'unavailable' | 'skipped';
 
@@ -72,13 +74,15 @@ export interface CategoryTestTier {
   status: CategoryTestStatus;
   /** 该档结论：属于 = true；skipped / unavailable = null */
   pass: boolean | null;
-  /** 仅决策档有 P(属于)；LLM 自报置信度不采信、确定性无条件 = null */
+  /** 仅决策档有 P(属于)（simple 分类）；精确模式不合成伪最终概率，恒 null */
   confidence: number | null;
   /** 是否定案：决策档灰区（或纯文本供应商没看图）有结论但不定案 */
   decided: boolean;
   evidence: string | null;
   /** skipped / unavailable 的原因（`ok` 时 null） */
   reason: string | null;
+  /** 精确模式的逐条件概率（只有决策档、只有精确分类有；simple 分类不出现这个键） */
+  conditionResults?: ConditionResult[];
 }
 
 /**
@@ -495,16 +499,17 @@ function resolveSamples(
 
 // ---- 三档判定（各自独立）----
 
-const NO_PROMPT_REASON = '未填写判定描述';
-
-function hasPrompt(cat: Category): boolean {
-  return (cat.llmPrompt ?? '').trim() !== '';
+/** 没有模型判定口径时的跳过原因（按模式给不同措辞：精确模式不是「没填描述」） */
+function skipReason(cat: Category): string {
+  return cat.judgeMode === 'precise'
+    ? '精确模式没有启用的通过条件'
+    : '未填写判定描述';
 }
 
-function skippedTier(source: CategoryTestSource): CategoryTestTier {
+function skippedTier(source: CategoryTestSource, cat: Category): CategoryTestTier {
   return {
     source, status: 'skipped', pass: null, confidence: null, decided: false,
-    evidence: null, reason: NO_PROMPT_REASON,
+    evidence: null, reason: skipReason(cat),
   };
 }
 
@@ -528,7 +533,7 @@ function ruleTier(cat: Category, item: ContentItem): CategoryTestTier {
 async function llmTier(
   deps: CategoryTestDeps, cat: Category, item: ContentItem,
 ): Promise<CategoryTestTier> {
-  if (!hasPrompt(cat)) return skippedTier('llm');
+  if (!hasJudgeBasis(cat)) return skippedTier('llm', cat);
   const box: { reason: string | null } = { reason: null };
   const jctx: JudgeContext = {
     getRouter: deps.getRouter,
@@ -552,7 +557,7 @@ async function llmTier(
 async function decisionTier(
   deps: CategoryTestDeps, cat: Category, item: ContentItem,
 ): Promise<CategoryTestTier> {
-  if (!hasPrompt(cat)) return skippedTier('decision');
+  if (!hasJudgeBasis(cat)) return skippedTier('decision', cat);
   const box: { reason: string | null } = { reason: null };
   const jctx: JudgeContext = {
     getRouter: () => null,
@@ -566,9 +571,11 @@ async function decisionTier(
   if (out === null) return unavailableTier('decision', box.reason, '决策模型不可用');
   const row = out.results.find((r) => r.categoryId === cat.id);
   if (!row) return unavailableTier('decision', '决策模型没有返回这个分类的结论', '决策模型不可用');
+  const conditions = out.conditionResults?.filter((c) => c.categoryId === cat.id);
   return {
     source: 'decision', status: 'ok', pass: row.pass, confidence: row.confidence,
     decided: out.decided.has(cat.id), evidence: row.evidence, reason: null,
+    ...(conditions && conditions.length > 0 ? { conditionResults: conditions } : {}),
   };
 }
 

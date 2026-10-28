@@ -11,7 +11,7 @@ import type { Category, PushRule } from '../core/push.js';
 
 function category(over: Partial<Category> = {}): Category {
   return {
-    id: 1, name: '歌回', llmPrompt: null, keywords: [], areas: [],
+    id: 1, name: '歌回', llmPrompt: null, judgeMode: 'simple', judgeConditions: [], keywords: [], areas: [],
     postTypes: [], requireQuote: false, requireMedia: false, appliesTo: 'live',
     condMode: 'and', enabled: true, createdAt: 0, updatedAt: 0,
     ...over,

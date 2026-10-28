@@ -64,6 +64,29 @@ export function setPushEnabled(db: Db, enabled: boolean): void {
 
 export type CondMode = 'and' | 'or';
 
+// ---- 判定模式：简单（一句判定描述）/ 精确（逐条原子条件）----
+//
+// 两套数据**永远双份保留**：`judgeMode` 只决定模型判定读哪一份，切换模式绝不清空另一份
+// （切回简单模式时旧判定描述还在，反之亦然）。确定性条件组（keywords/areas/…）与模式无关。
+
+/** 分类的模型判定口径：simple = `llmPrompt` 一句定义；precise = 逐条原子条件 */
+export type JudgeMode = 'simple' | 'precise';
+
+/** 精确条件的方向：pass = 正向（任一成立即可支持），reject = 负向（任一成立即否决） */
+export type JudgeDirection = 'pass' | 'reject';
+
+/**
+ * 一条原子判定条件（只服务模型判定；确定性条件组是另一套，两者互不影响）。
+ * `id` 在分类内稳定——试判逐条概率与审计按它对齐，改动顺序不影响已有条件；
+ * 数组顺序即展示顺序。
+ */
+export interface JudgeCondition {
+  id: string;
+  direction: JudgeDirection;
+  text: string;
+  enabled: boolean;
+}
+
 /** 内容主体类型：分类 applies_to / 推送规则 subject_kind / verdicts subject_type 同域 */
 export type SubjectKind = 'live' | 'post';
 
@@ -73,8 +96,12 @@ export type PostType = 'original' | 'retweet';
 export interface CategoryRow {
   id: number;
   name: string;
-  /** LLM 判定提示词；null = 纯确定性分类 */
+  /** 简单模式的判定提示词；precise 模式下保留但不参与判定 */
   llm_prompt: string | null;
+  /** 模型判定口径：simple 读 llm_prompt / precise 读 judge_conditions */
+  judge_mode: JudgeMode;
+  /** JSON：精确模式的条件数组（正负向、启用态、稳定 id）；两模式共存，切换不清空 */
+  judge_conditions: string;
   keywords: string;
   areas: string;
   /** 分类服务的内容类型（live=直播场次 / post=图文帖），UI 按此渲染可用算子 */
@@ -98,8 +125,12 @@ export interface CategoryRow {
 export interface Category {
   id: number;
   name: string;
-  /** LLM 判定提示词；null = 无 LLM 判定，永远走确定性条件 */
+  /** 简单模式的判定提示词；precise 模式下保留但不参与判定 */
   llmPrompt: string | null;
+  /** 模型判定口径：simple = 只用 llmPrompt；precise = 只用 judgeConditions（precise 下不读 llmPrompt） */
+  judgeMode: JudgeMode;
+  /** 精确模式的原子条件（含停用项，数组顺序即展示顺序）；simple 模式下同样保留，切模式不丢 */
+  judgeConditions: JudgeCondition[];
   /** 标题/正文子串，任一命中（大小写不敏感）；空 = 该组不参与 */
   keywords: string[];
   /** 分区子串（areaName / parentAreaName 都匹配），任一命中；空 = 该组不参与（仅 live） */
@@ -112,7 +143,7 @@ export interface Category {
   requireMedia: boolean;
   /** 分类服务的内容类型（live / post） */
   appliesTo: SubjectKind;
-  /** 各条件组之间的关系（空组忽略；全部条件组皆空且无判定描述 = 死分类） */
+  /** 各条件组之间的关系（空组忽略；全部条件组皆空且无当前模式判定口径 = 死分类） */
   condMode: CondMode;
   /** 属于主分类组：主分类判定的候选集（时间表等展示用的单选分类，不参与确定性条件） */
   primary: boolean;
@@ -128,6 +159,8 @@ export type CategoryInput = Partial<NewCategory> & { id?: number };
 export function rowToCategory(r: CategoryRow): Category {
   return {
     id: r.id, name: r.name, llmPrompt: r.llm_prompt,
+    judgeMode: r.judge_mode === 'precise' ? 'precise' : 'simple',
+    judgeConditions: parseJudgeConditions(r.judge_conditions),
     keywords: JSON.parse(r.keywords) as string[],
     areas: JSON.parse(r.areas) as string[],
     postTypes: JSON.parse(r.post_types) as PostType[],
@@ -139,6 +172,66 @@ export function rowToCategory(r: CategoryRow): Category {
     enabled: r.enabled === 1,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
+}
+
+/**
+ * `judge_conditions` 列的读取口径：坏 JSON / 坏项一律丢弃——一条脏数据不该让整张分类列表读不出来。
+ * `enabled` 缺失按启用读（输入层总是显式落布尔，缺失只可能是手工改库或更早的中间态）。
+ */
+export function parseJudgeConditions(raw: string | null | undefined): JudgeCondition[] {
+  if (typeof raw !== 'string' || raw === '') return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: JudgeCondition[] = [];
+  for (const v of parsed) {
+    if (typeof v !== 'object' || v === null) continue;
+    const o = v as Record<string, unknown>;
+    if (typeof o.id !== 'string' || o.id === '') continue;
+    if (o.direction !== 'pass' && o.direction !== 'reject') continue;
+    if (typeof o.text !== 'string') continue;
+    out.push({ id: o.id, direction: o.direction, text: o.text, enabled: o.enabled !== false });
+  }
+  return out;
+}
+
+/** 参与判定的精确条件：停用与空白文本不参与（数组顺序 = 展示顺序） */
+export function activeJudgeConditions(c: Pick<Category, 'judgeConditions'>): JudgeCondition[] {
+  return c.judgeConditions.filter((x) => x.enabled && x.text.trim() !== '');
+}
+
+/** 精确条件的正负分组：判定语义是 `(P1 OR P2 …) AND NOT (N1 OR N2 …)`，负向集合可空 */
+export function preciseConditions(c: Pick<Category, 'judgeConditions'>): {
+  positives: JudgeCondition[];
+  negatives: JudgeCondition[];
+} {
+  const active = activeJudgeConditions(c);
+  return {
+    positives: active.filter((x) => x.direction === 'pass'),
+    negatives: active.filter((x) => x.direction === 'reject'),
+  };
+}
+
+/** 精确条件的落库序列化（唯一口径：db.ts 的 upsert 与行映射共用，字段顺序由类型决定） */
+export function serializeJudgeConditions(list: JudgeCondition[]): string {
+  return JSON.stringify(list);
+}
+
+/**
+ * 该分类有没有交给模型判定的口径（决定它进不进 LLM / 决策档）：
+ * - simple：`llmPrompt` 非空
+ * - precise：至少一条**启用的正向条件**（只有负向不构成口径——「什么都不成立」不是分类标准）
+ *
+ * 精确模式**绝不回退** `llmPrompt`：那是简单模式的数据，只是与精确条件一起被保留下来而已。
+ * 无口径的分类按既有「无模型条件」路径走：只由确定性条件判定，模型档不参与。
+ */
+export function hasJudgeBasis(c: Category): boolean {
+  if (c.judgeMode === 'precise') return preciseConditions(c).positives.length > 0;
+  return (c.llmPrompt ?? '').trim() !== '';
 }
 
 // ---- push_rules v2：推送规则（统一规则：分类引用 × 生效范围 × 渠道 × 推送词 × 附加动作）----

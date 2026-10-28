@@ -10,7 +10,7 @@ import {
   type Follow, type FollowRow, type Streamer, type StreamerInput, type StreamerRow,
 } from './streamers.js';
 import {
-  rowToCategory, rowToChannel, rowToPrimaryVerdict, rowToRule, rowToVerdict,
+  rowToCategory, rowToChannel, rowToPrimaryVerdict, rowToRule, rowToVerdict, serializeJudgeConditions,
   type Category, type CategoryInput, type CategoryRow, type NewCategory,
   type NewPrimaryVerdict, type NewPushChannel, type NewPushRule, type NewVerdict,
   type PrimaryVerdict, type PrimaryVerdictRow,
@@ -231,6 +231,8 @@ CREATE TABLE IF NOT EXISTS categories (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   name          TEXT    NOT NULL,
   llm_prompt    TEXT,
+  judge_mode    TEXT    NOT NULL DEFAULT 'simple' CHECK(judge_mode IN ('simple','precise')),
+  judge_conditions TEXT NOT NULL DEFAULT '[]',
   keywords      TEXT    NOT NULL DEFAULT '[]',
   areas         TEXT    NOT NULL DEFAULT '[]',
   applies_to    TEXT    NOT NULL DEFAULT 'live' CHECK(applies_to IN ('live','post')),
@@ -499,6 +501,10 @@ export class Db {
     this.ensureColumn('categories', 'require_media', 'require_media INTEGER NOT NULL DEFAULT 0');
     // 分类「主分类」勾选（主分类判定的候选集；旧库在线补列，默认 0 = 不进主分类组）
     this.ensureColumn('categories', 'is_primary', 'is_primary INTEGER NOT NULL DEFAULT 0');
+    // 分类判定模式（simple = 一句判定描述 / precise = 逐条原子条件）。
+    // 旧库在线补列 + 默认值 = 存量分类一律 simple，行为与升级前逐字一致（llm_prompt 不动）
+    this.ensureColumn('categories', 'judge_mode', "judge_mode TEXT NOT NULL DEFAULT 'simple'");
+    this.ensureColumn('categories', 'judge_conditions', "judge_conditions TEXT NOT NULL DEFAULT '[]'");
     // x_accounts 头像（抓取时顺手抠 X 头像 → 代理下载到 cache/x-avatars，存文件名；旧库在线补列）
     this.ensureColumn('x_accounts', 'avatar', 'avatar TEXT');
     // x_accounts 昵称（X 的 display name，与自定义显示名 display_name 分开；旧库的
@@ -1487,6 +1493,9 @@ export class Db {
     const c: NewCategory = {
       name: input.name !== undefined ? input.name : prev?.name ?? '',
       llmPrompt: input.llmPrompt !== undefined ? input.llmPrompt : prev?.llmPrompt ?? null,
+      // 判定模式与精确条件各存一份、互不覆盖：切模式只写 judge_mode，另一模式的数据原样留着
+      judgeMode: input.judgeMode ?? prev?.judgeMode ?? 'simple',
+      judgeConditions: input.judgeConditions ?? prev?.judgeConditions ?? [],
       keywords: input.keywords ?? prev?.keywords ?? [],
       areas: input.areas ?? prev?.areas ?? [],
       postTypes: input.postTypes ?? prev?.postTypes ?? [],
@@ -1500,11 +1509,12 @@ export class Db {
     if (prev) {
       this.db
         .prepare(
-          `UPDATE categories SET name=?, llm_prompt=?, keywords=?, areas=?, post_types=?,
+          `UPDATE categories SET name=?, llm_prompt=?, judge_mode=?, judge_conditions=?, keywords=?, areas=?, post_types=?,
              require_quote=?, require_media=?, applies_to=?, cond_mode=?, is_primary=?, enabled=?, updated_at=?
            WHERE id=?`,
         )
-        .run(c.name, c.llmPrompt, JSON.stringify(c.keywords), JSON.stringify(c.areas),
+        .run(c.name, c.llmPrompt, c.judgeMode, serializeJudgeConditions(c.judgeConditions),
+          JSON.stringify(c.keywords), JSON.stringify(c.areas),
           JSON.stringify(c.postTypes), c.requireQuote ? 1 : 0, c.requireMedia ? 1 : 0,
           c.appliesTo, c.condMode, c.primary ? 1 : 0, c.enabled ? 1 : 0, now(), prev.id);
       return prev.id;
@@ -1516,11 +1526,12 @@ export class Db {
       .get() as { m: number };
     const info = this.db
       .prepare(
-        `INSERT INTO categories (name, llm_prompt, keywords, areas, post_types,
+        `INSERT INTO categories (name, llm_prompt, judge_mode, judge_conditions, keywords, areas, post_types,
            require_quote, require_media, applies_to, cond_mode, is_primary, enabled, sort, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(c.name, c.llmPrompt, JSON.stringify(c.keywords), JSON.stringify(c.areas),
+      .run(c.name, c.llmPrompt, c.judgeMode, serializeJudgeConditions(c.judgeConditions),
+        JSON.stringify(c.keywords), JSON.stringify(c.areas),
         JSON.stringify(c.postTypes), c.requireQuote ? 1 : 0, c.requireMedia ? 1 : 0,
         c.appliesTo, c.condMode, c.primary ? 1 : 0, c.enabled ? 1 : 0, m, t, t);
     const id = Number(info.lastInsertRowid);

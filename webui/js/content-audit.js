@@ -31,7 +31,7 @@ function distributionText(distribution) {
     .map(function (pair) { return esc(pair[0]) + ' ' + pair[1].toFixed(2); }).join(' · ');
 }
 
-/** 当时的分类标准（判定描述 + 确定性条件）折叠块 */
+/** 当时的分类标准（启用模式的模型条件 + 确定性条件）折叠块 */
 function standardsHtml(category) {
   if (!category) return '';
   const conditions = [
@@ -40,8 +40,14 @@ function standardsHtml(category) {
     category.postTypes.length ? '帖子类型：' + category.postTypes.map(function (kind) { return kind === 'original' ? '原创' : '转发'; }).join('、') : '',
     category.requireQuote ? '须引用' : '', category.requireMedia ? '须带图' : '',
   ].filter(Boolean).join(category.condMode === 'or' ? ' 或 ' : ' 且 ');
+  const precise = category.judgeMode === 'precise' && Array.isArray(category.judgeConditions);
+  const judgeConditions = precise ? category.judgeConditions.map(function (condition) {
+    return (condition.direction === 'reject' ? '拒绝' : '通过') + (condition.enabled === false ? '（已禁用）' : '') + '：' + condition.text;
+  }).join('；') : '';
   return '<details><summary>当时的分类标准</summary>' +
-    (category.llmPrompt ? '<p>判定描述：' + esc(category.llmPrompt) + '</p>' : '') +
+    (precise
+      ? (judgeConditions ? '<p>精确条件：' + esc(judgeConditions) + '</p>' : '')
+      : (category.llmPrompt ? '<p>判定描述：' + esc(category.llmPrompt) + '</p>' : '')) +
     (conditions ? '<p>确定性条件：' + esc(conditions) + '</p>' : '') + '</details>';
 }
 

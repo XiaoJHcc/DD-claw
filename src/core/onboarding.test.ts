@@ -33,6 +33,13 @@ test('首启：空库种入「系统通知」渠道 + 默认分类 + 默认规�
   assert.equal(cats.length, ONBOARDING_CATEGORIES.length);
   assert.deepEqual(cats.map((c) => c.name), ONBOARDING_CATEGORIES.map((c) => c.name));
   assert.deepEqual(cats.map((c) => c.primary), ONBOARDING_CATEGORIES.map(() => false), '默认分类不进主分类组');
+  // 判定模式与精确条件随默认值种入（defaults.json 是唯一手工信源）
+  assert.deepEqual(cats.map((c) => c.judgeMode), ONBOARDING_CATEGORIES.map((c) => c.judgeMode ?? 'simple'));
+  assert.deepEqual(
+    cats.map((c) => c.judgeConditions),
+    ONBOARDING_CATEGORIES.map((c) => c.judgeConditions ?? []),
+    '精确条件原样种入（与判定描述共存，不互相覆盖）',
+  );
 
   const rules = db.listPushRules();
   assert.equal(rules.length, ONBOARDING_RULES.length);

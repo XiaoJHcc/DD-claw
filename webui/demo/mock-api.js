@@ -34,7 +34,8 @@ const nowSec = Math.floor(Date.now() / 1000);
 // 故进来后在下面按名单补标——demo 需要主分类组非空，时间表 hover 与内容记录才有主分类可展示。
 const DEMO_PRIMARY = new Set(['歌回', '带图原创']);
 const demoCategories = (defaults?.categories ?? []).map((c, i) => ({
-  id: i + 1, name: c.name, llmPrompt: c.llmPrompt ?? null,
+  id: i + 1, name: c.name, judgeMode: c.judgeMode === 'precise' ? 'precise' : 'simple',
+  llmPrompt: c.llmPrompt ?? null, judgeConditions: clone(c.judgeConditions ?? []),
   keywords: c.keywords ?? [], areas: c.areas ?? [],
   appliesTo: 'live', postTypes: [], requireQuote: false, requireMedia: false,
   condMode: c.condMode ?? 'and', primary: DEMO_PRIMARY.has(c.name),
@@ -67,6 +68,10 @@ const demoCategories = (defaults?.categories ?? []).map((c, i) => ({
     enabled: true, createdAt: nowSec, updatedAt: nowSec,
   },
 ]);
+demoCategories.forEach(function (category) {
+  category.judgeMode = category.judgeMode === 'precise' ? 'precise' : 'simple';
+  category.judgeConditions = Array.isArray(category.judgeConditions) ? category.judgeConditions : [];
+});
 const catIdByName = new Map(demoCategories.map((c) => [c.name, c.id]));
 const allChannelIds = M.mockChannels.map((c) => c.id);
 const demoRules = (defaults?.rules ?? []).map((r, i) => ({
@@ -555,9 +560,12 @@ function categoryError(category) {
     return '直播分类不能配置帖子类型、引用或带图条件';
   }
   if (kind === 'post' && (category.areas || []).length) return '图文分类不能配置直播分区条件';
-  if (!(category.llmPrompt || '').trim() && !(category.keywords || []).length
+  const hasModelConditions = category.judgeMode === 'precise'
+    ? (category.judgeConditions || []).some((condition) => condition.direction === 'pass' && condition.enabled && condition.text.trim())
+    : !!(category.llmPrompt || '').trim();
+  if (!hasModelConditions && !(category.keywords || []).length
     && !(category.areas || []).length && !(category.postTypes || []).length
-    && !category.requireQuote && !category.requireMedia) return '至少配置判定描述或一组确定性条件（关键词/分区/帖子类型/引用/带图）';
+    && !category.requireQuote && !category.requireMedia) return '至少配置判定条件或一组确定性条件（关键词/分区/帖子类型/引用/带图）';
   return null;
 }
 
@@ -720,41 +728,87 @@ function testRuleResult(category, item) {
   return { source: 'rule', status: 'ok', pass, confidence: null, decided: true, evidence, reason: null };
 }
 
+function preciseConditions(category) {
+  return (category.judgeConditions || []).filter((condition) => condition.enabled && condition.text.trim());
+}
+
+function modelSeed(category) {
+  if (category.judgeMode !== 'precise') return String(category.llmPrompt || '').trim();
+  return preciseConditions(category).map((condition) => condition.id + ':' + condition.text).join('|');
+}
+
+function skipModelTier(category, source) {
+  const precise = category.judgeMode === 'precise';
+  const missing = precise
+    ? !preciseConditions(category).some((condition) => condition.direction === 'pass')
+    : !String(category.llmPrompt || '').trim();
+  if (!missing) return null;
+  return { source, status: 'skipped', pass: null, confidence: null, decided: false, evidence: null,
+    reason: precise ? '精确模式没有启用的通过条件' : NO_PROMPT_REASON };
+}
+
 function testLlmResult(category, item) {
-  const prompt = String(category.llmPrompt || '').trim();
-  if (!prompt) {
-    return { source: 'llm', status: 'skipped', pass: null, confidence: null, decided: false, evidence: null, reason: NO_PROMPT_REASON };
-  }
+  const skipped = skipModelTier(category, 'llm');
+  if (skipped) return skipped;
   if (!store.llmEnabled || store.llmProviders.filter((p) => p.enabled).length === 0) {
     return { source: 'llm', status: 'unavailable', pass: null, confidence: null, decided: false, evidence: null,
       reason: store.llmEnabled ? '没有可用的 LLM 供应商' : 'LLM 已停用' };
   }
-  const pass = simConfidence(prompt + '|' + item.subjectId) >= 0.5;
+  const precise = category.judgeMode === 'precise';
+  const pass = simConfidence(modelSeed(category) + '|' + item.subjectId) >= 0.5;
   return { source: 'llm', status: 'ok', pass, confidence: null, decided: true,
-    evidence: pass ? '与判定描述相符' : '与判定描述不符', reason: null };
+    evidence: pass ? `与${precise ? '精确条件' : '判定描述'}相符` : `与${precise ? '精确条件' : '判定描述'}不符`, reason: null };
 }
 
 function testDecisionResult(category, item) {
-  const prompt = String(category.llmPrompt || '').trim();
-  if (!prompt) {
-    return { source: 'decision', status: 'skipped', pass: null, confidence: null, decided: false, evidence: null, reason: NO_PROMPT_REASON };
-  }
+  const skipped = skipModelTier(category, 'decision');
+  if (skipped) return skipped;
   if (!store.decisionEnabled || store.decisionProviders.length === 0) {
     return { source: 'decision', status: 'unavailable', pass: null, confidence: null, decided: false, evidence: null,
       reason: store.decisionEnabled ? '没有可用的决策模型供应商' : '决策模型已停用' };
   }
-  const confidence = simConfidence('decision|' + prompt + '|' + item.subjectId);
   const low = store.advanced.decisionGrayLowPct / 100;
   const high = store.advanced.decisionGrayHighPct / 100;
+  const provider = store.decisionProviders[0];
+  const base = provider.name + ' · ' + provider.model;
+  if (category.judgeMode === 'precise') {
+    const conditionResults = preciseConditions(category).map((condition) => {
+      const p = Number(simConfidence('decision|' + condition.id + '|' + condition.text + '|' + item.subjectId).toFixed(2));
+      return {
+        categoryId: -1, conditionId: condition.id, direction: condition.direction, text: condition.text, p,
+        band: p >= high ? 'high' : p <= low ? 'low' : 'gray', decisive: false,
+      };
+    });
+    const passResults = conditionResults.filter((condition) => condition.direction === 'pass');
+    const rejectResults = conditionResults.filter((condition) => condition.direction === 'reject');
+    const rejected = rejectResults.some((condition) => condition.p >= high);
+    const unsupported = passResults.every((condition) => condition.p <= low);
+    const accepted = !rejected && passResults.some((condition) => condition.p >= high)
+      && rejectResults.every((condition) => condition.p <= low);
+    const decided = rejected || unsupported || accepted;
+    conditionResults.forEach(function (condition) {
+      condition.decisive = decided && (rejected
+        ? condition.direction === 'reject' && condition.p >= high
+        : unsupported ? condition.direction === 'pass' : condition.direction === 'pass' && condition.p >= high);
+    });
+    const verdict = decided ? (rejected ? '拒绝条件达到否决门槛' : accepted ? '通过条件达到定案门槛' : '没有通过条件达到支持门槛') : '条件概率落在灰区，未定案';
+    return {
+      source: 'decision', status: 'ok', pass: accepted, confidence: null, decided, conditionResults,
+      evidence: base + '；' + verdict,
+      reason: null,
+    };
+  }
+  const confidence = simConfidence('decision|' + modelSeed(category) + '|' + item.subjectId);
   const decided = confidence <= low || confidence >= high;
+  const verdict = decided
+    ? (confidence >= high ? '概率高于灰区上界' : '概率低于灰区下界')
+    : '概率落在灰区，未定案';
   return {
     source: 'decision', status: 'ok',
     pass: confidence >= 0.5,
     confidence: Number(confidence.toFixed(2)),
     decided,
-    evidence: decided
-      ? (confidence >= high ? '概率高于灰区上界' : '概率低于灰区下界')
-      : '概率落在灰区，未定案',
+    evidence: base + '；' + verdict,
     reason: null,
   };
 }
@@ -768,7 +822,9 @@ function testDraftCategory(raw) {
   const category = {
     appliesTo: c.appliesTo === 'post' ? 'post' : 'live',
     name: typeof c.name === 'string' ? c.name : null,
+    judgeMode: c.judgeMode === 'precise' ? 'precise' : 'simple',
     llmPrompt: typeof c.llmPrompt === 'string' ? c.llmPrompt : null,
+    judgeConditions: Array.isArray(c.judgeConditions) ? clone(c.judgeConditions) : [],
     primary: c.primary === true,
     keywords: Array.isArray(c.keywords) ? c.keywords : [],
     areas: Array.isArray(c.areas) ? c.areas : [],
@@ -1466,7 +1522,8 @@ for (const p of store.twitterPosts) {
     const id = store.categories.reduce((m, c) => Math.max(m, c.id), 0) + 1;
     store.categories.push({
       id, name: b.name || ('分类 ' + id),
-      llmPrompt: b.llmPrompt ?? null,
+      judgeMode: b.judgeMode === 'precise' ? 'precise' : 'simple',
+      llmPrompt: b.llmPrompt ?? null, judgeConditions: clone(b.judgeConditions || []),
       keywords: b.keywords || [], areas: b.areas || [],
       appliesTo: b.appliesTo || 'live',
       postTypes: b.postTypes || [],
@@ -1496,7 +1553,7 @@ for (const p of store.twitterPosts) {
         }
         const error = categoryError({ ...c, ...b });
         if (error) return err(400, error);
-        for (const k of ['name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia', 'condMode', 'primary']) if (b[k] !== undefined) c[k] = b[k];
+        for (const k of ['name', 'judgeMode', 'llmPrompt', 'judgeConditions', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia', 'condMode', 'primary']) if (b[k] !== undefined) c[k] = clone(b[k]);
         if (typeof b.enabled === 'boolean') c.enabled = b.enabled;
         return ok({ ok: true });
       }

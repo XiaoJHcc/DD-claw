@@ -3,11 +3,14 @@
  * 校验失败一律抛 HttpError，由 server 统一转成 { error } 响应。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import type { Db } from '../core/db.js';
 import type { StreamerInput } from '../core/streamers.js';
 import type {
-  CategoryInput, NewCategory, NewPushChannel, NewPushRule, PushChannelInput, PushRuleInput,
+  CategoryInput, JudgeCondition, JudgeDirection, JudgeMode, NewCategory, NewPushChannel, NewPushRule,
+  PushChannelInput, PushRuleInput,
 } from '../core/push.js';
+import { preciseConditions } from '../core/push.js';
 import { NUM_SPECS, BOOL_SPECS, type RuntimeConfig } from '../core/runtime-config.js';
 import {
   X_INTERVAL_MAX, X_INTERVAL_MIN, type XConfig,
@@ -188,12 +191,52 @@ export function parseChannelPatch(body: unknown): PushChannelInput {
 // ---- categories：分类规则 ----
 
 const CATEGORY_KEYS = [
-  'name', 'llmPrompt', 'keywords', 'areas', 'appliesTo', 'postTypes', 'requireQuote', 'requireMedia',
-  'condMode', 'primary', 'enabled',
+  'name', 'llmPrompt', 'judgeMode', 'judgeConditions', 'keywords', 'areas', 'appliesTo', 'postTypes',
+  'requireQuote', 'requireMedia', 'condMode', 'primary', 'enabled',
 ] as const;
 const COND_MODES = ['and', 'or'] as const;
 const SUBJECT_KINDS = ['live', 'post'] as const;
 const POST_TYPES = ['original', 'retweet'] as const;
+const JUDGE_MODES = ['simple', 'precise'] as const;
+const JUDGE_DIRECTIONS = ['pass', 'reject'] as const;
+const JUDGE_CONDITION_KEYS = ['id', 'direction', 'text', 'enabled'] as const;
+
+/**
+ * 精确条件数组校验（严格形状）：未知字段、非对象项、坏 direction / 非布尔 enabled、
+ * 空白 text、分类内重复 id 一律 400。缺 id 的新条件在这里补 `randomUUID()`（前端不必自己造 id），
+ * 已有 id 原样保留——它是逐条概率与审计对齐的锚点。
+ */
+function asJudgeConditions(v: unknown, field: string): JudgeCondition[] {
+  if (!Array.isArray(v)) throw new HttpError(400, `${field} 必须是数组`);
+  const out: JudgeCondition[] = [];
+  const seen = new Set<string>();
+  for (const item of v) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new HttpError(400, `${field} 的每一项必须是对象`);
+    }
+    const o = item as Record<string, unknown>;
+    for (const k of Object.keys(o)) {
+      if (!(JUDGE_CONDITION_KEYS as readonly string[]).includes(k)) {
+        throw new HttpError(400, `${field} 的条件含未知字段: ${k}`);
+      }
+    }
+    if (o.id !== undefined && typeof o.id !== 'string') throw new HttpError(400, `${field} 的条件 id 必须是字符串`);
+    const id = typeof o.id === 'string' && o.id.trim() !== '' ? o.id.trim() : randomUUID();
+    if (seen.has(id)) throw new HttpError(400, `${field} 的条件 id 重复: ${id}`);
+    seen.add(id);
+    if (!(JUDGE_DIRECTIONS as readonly string[]).includes(String(o.direction))) {
+      throw new HttpError(400, `${field} 的条件 direction 必须是 pass / reject`);
+    }
+    if (typeof o.text !== 'string') throw new HttpError(400, `${field} 的条件 text 必须是字符串`);
+    const text = o.text.trim();
+    if (text === '') throw new HttpError(400, `${field} 的条件 text 不能为空`);
+    if (o.enabled !== undefined && typeof o.enabled !== 'boolean') {
+      throw new HttpError(400, `${field} 的条件 enabled 必须是布尔值`);
+    }
+    out.push({ id, direction: o.direction as JudgeDirection, text, enabled: o.enabled !== false });
+  }
+  return out;
+}
 
 function parseCategoryFields(o: Record<string, unknown>, p: CategoryInput): void {
   if ('name' in o) {
@@ -206,6 +249,9 @@ function parseCategoryFields(o: Record<string, unknown>, p: CategoryInput): void
     const v = asNullableString(o.llmPrompt, 'llmPrompt');
     p.llmPrompt = v === '' ? null : v; // 空串 = 不用 LLM（纯确定性分类）
   }
+  if ('judgeMode' in o) p.judgeMode = asEnum(o.judgeMode, 'judgeMode', JUDGE_MODES);
+  // 两种模式的数据双份保留：切模式只改 judgeMode，judgeConditions / llmPrompt 都原样存着
+  if ('judgeConditions' in o) p.judgeConditions = asJudgeConditions(o.judgeConditions, 'judgeConditions');
   if ('keywords' in o) p.keywords = asStringArray(o.keywords, 'keywords');
   if ('areas' in o) p.areas = asStringArray(o.areas, 'areas');
   if ('appliesTo' in o) p.appliesTo = asEnum(o.appliesTo, 'appliesTo', SUBJECT_KINDS);
@@ -226,13 +272,20 @@ function parseCategoryFields(o: Record<string, unknown>, p: CategoryInput): void
 }
 
 /**
- * 分类条件可用性：所有确定性条件组皆空且无判定描述 = 死分类（确定性无从判定、LLM 也没口径）。
- * POST 对缺省合并后的形状调，PUT 对合并后形状调。
+ * 分类条件可用性：所有确定性条件组皆空 **且** 没有模型判定口径 = 死分类
+ *（确定性无从判定、模型也没有口径）。POST 对缺省合并后的形状调，PUT 对合并后形状调。
+ *
+ * 判定口径按模式取：simple = 判定描述非空；precise = 至少一条启用的正向条件。
+ * 精确模式下 `llmPrompt` **不算口径**——它只是被保留下来供切回简单模式用，
+ * 精确模式绝不回退它（否则分类会带着「一个能用的条件都没有」的状态进判决链）。
  * 「主分类」勾选不是条件（只决定它是否进主分类判定的候选集），不参与这里的最小配置校验。
  */
 export function checkCategoryConditions(c: {
   appliesTo?: 'live' | 'post';
-  llmPrompt?: string | null; keywords?: string[]; areas?: string[];
+  judgeMode?: JudgeMode;
+  llmPrompt?: string | null;
+  judgeConditions?: JudgeCondition[];
+  keywords?: string[]; areas?: string[];
   postTypes?: string[]; requireQuote?: boolean; requireMedia?: boolean;
 }): void {
   if ((c.appliesTo ?? 'live') === 'live' && ((c.postTypes ?? []).length > 0 || c.requireQuote || c.requireMedia)) {
@@ -241,14 +294,19 @@ export function checkCategoryConditions(c: {
   if (c.appliesTo === 'post' && (c.areas ?? []).length > 0) {
     throw new HttpError(400, '图文分类不能配置直播分区条件');
   }
-  const prompt = c.llmPrompt?.trim() ?? '';
   const noCond = (c.keywords ?? []).length === 0
     && (c.areas ?? []).length === 0
     && (c.postTypes ?? []).length === 0
     && !c.requireQuote
     && !c.requireMedia;
-  if (!prompt && noCond) {
-    throw new HttpError(400, '至少配置判定描述或一组确定性条件（关键词/分区/帖子类型/引用/带图）');
+  if (noCond) {
+    if ((c.judgeMode ?? 'simple') === 'precise') {
+      if (preciseConditions({ judgeConditions: c.judgeConditions ?? [] }).positives.length === 0) {
+        throw new HttpError(400, '精确模式至少要有一条启用的通过条件（只有拒绝条件时无从判「属于」）');
+      }
+    } else if ((c.llmPrompt?.trim() ?? '') === '') {
+      throw new HttpError(400, '至少配置判定描述或一组确定性条件（关键词/分区/帖子类型/引用/带图）');
+    }
   }
 }
 
@@ -261,6 +319,8 @@ export function parseNewCategory(body: unknown): NewCategory {
   const c: NewCategory = {
     name: p.name ?? '',
     llmPrompt: p.llmPrompt !== undefined ? p.llmPrompt : null,
+    judgeMode: p.judgeMode ?? 'simple',
+    judgeConditions: p.judgeConditions ?? [],
     keywords: p.keywords ?? [],
     areas: p.areas ?? [],
     postTypes: p.postTypes ?? [],

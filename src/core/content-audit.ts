@@ -1,4 +1,4 @@
-import type { Category, PrimaryJudgement, PushRule, SubjectKind } from './push.js';
+import type { Category, JudgeDirection, PrimaryJudgement, PushRule, SubjectKind } from './push.js';
 
 export interface ModelAttempt {
   provider: string;
@@ -7,6 +7,25 @@ export interface ModelAttempt {
   /** 哪个判定通道发起的尝试（LLM 与决策模型各有一条独立链路，排障时分开看） */
   channel?: 'llm' | 'decision';
   error?: string;
+}
+
+/**
+ * 精确模式的一条条件结论：条件 id + 方向 + 该条件成立的概率。
+ * 逐条落库是为了回答「哪条原子条件把结论推到了哪边」——聚合概率刻意不合成（见 analysis/tasks/decide.ts）。
+ */
+export interface ConditionAudit {
+  categoryId: number;
+  /** 分类内稳定的条件 id（与 categories.judge_conditions[].id 同源） */
+  conditionId: string;
+  direction: JudgeDirection;
+  /** 条件原文，供试判与审计直接展示，不需从当前分类草稿反查 */
+  text: string;
+  /** P(该条件成立)，0–1 */
+  p: number;
+  /** 按本次决策灰区上下界分带 */
+  band: 'high' | 'low' | 'gray';
+  /** 是否实际促成决策档的定案；灰区与未看图一律 false */
+  decisive: boolean;
 }
 
 export interface AnalysisAudit {
@@ -22,6 +41,8 @@ export interface AnalysisAudit {
     evidence: string;
     effective: boolean;
   }>;
+  /** 精确模式的逐条件概率（决策档产出；simple 分类没有） */
+  conditionResults?: ConditionAudit[];
   /** 主分类各来源结论（生效与否见各项 effective） */
   primary?: PrimaryJudgement[];
   /** LLM 档回退原因（只承载 LLM 通道；决策档的跳过 / 失败见 stageNotes） */
