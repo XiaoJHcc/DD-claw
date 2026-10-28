@@ -150,7 +150,7 @@ function fakeDecisionRouter(
   return { router, requests };
 }
 
-/** 三档一起开：返回试跑结果 + 两边的请求记录 */
+/** 缺省三档一起开，也可按 opts.sources 筛选：返回试跑结果 + 两边的请求记录 */
 async function runLive(
   db: Db,
   category: Record<string, unknown>,
@@ -161,6 +161,7 @@ async function runLive(
     filter?: Record<string, unknown>;
     /** 复测锚点（顺序即判定顺序） */
     sampleIds?: string[];
+    sources?: Array<'rule' | 'llm' | 'decision'>;
     deps?: Partial<CategoryTestDeps>;
   } = {},
 ): Promise<{ samples: CategoryTestResponse['samples']; llmCalls: LlmRequest[]; decisionCalls: SystemOneRequest[] }> {
@@ -180,6 +181,7 @@ async function runLive(
   const res = await runCategoryTest(d, {
     category,
     ...(opts.filter ? { filter: opts.filter } : {}),
+    ...(opts.sources ? { sources: opts.sources } : {}),
     ...(opts.sampleIds ? { sampleIds: opts.sampleIds } : {}),
   });
   return { samples: res.samples, llmCalls, decisionCalls };
@@ -201,6 +203,16 @@ test('parseCategoryTestRequest：草稿走新建分类同一套校验，合成 i
     '死草稿直接 400（与新建分类同一条校验）',
   );
   assert.throws(() => parseCategoryTestRequest({ category: { keywords: ['x'] }, nope: 1 }), /未知字段: nope/);
+});
+
+test('parseCategoryTestRequest：sources 缺省全选、按固定顺序返回且拒绝非法值', () => {
+  const category = { keywords: ['x'] };
+  assert.deepEqual(parseCategoryTestRequest({ category }).sources, ['rule', 'llm', 'decision']);
+  assert.deepEqual(parseCategoryTestRequest({ category, sources: ['decision', 'rule'] }).sources, ['rule', 'decision']);
+  assert.throws(() => parseCategoryTestRequest({ category, sources: [] }), /1~3/);
+  assert.throws(() => parseCategoryTestRequest({ category, sources: ['rule', 'rule'] }), /不能重复/);
+  assert.throws(() => parseCategoryTestRequest({ category, sources: ['other'] }), /rule \/ llm \/ decision/);
+  assert.throws(() => parseCategoryTestRequest({ category, sources: 'rule' }), /数组/);
 });
 
 test('parseCategoryTestRequest：filter 的 limit / 时间 / 平台 / uid 校验', () => {
@@ -266,6 +278,37 @@ test('三档独立：rule / llm / decision 各有结论，互不覆盖', async (
   assert.equal(sample.authorName, '主播一', '直播样本的作者名 = uname（缺省回退 alias）');
   assert.equal(sample.text, '今晚歌回！');
   assert.deepEqual(sample.tags, { area: '唱见', parentArea: '虚拟主播' }, '分区标签带首段父分区');
+});
+
+test('sources 只跑所选路径：仅规则不触达模型与图片，仅决策不夹带其他档', async (t) => {
+  const db = memDb(t);
+  seedLive(db);
+  let imageCalls = 0;
+  const imageLoader = async (): Promise<PreparedImages> => {
+    imageCalls += 1;
+    return { dataUrls: [], skipped: [] };
+  };
+  const ruleOnly = await runLive(db, { keywords: ['歌回'], llmPrompt: '以唱歌为主' }, {
+    filter: { uid: '1', limit: 1 }, sources: ['rule'],
+    deps: {
+      getRouter: () => { throw new Error('不应读取 LLM 路由'); },
+      getDecisionRouter: () => { throw new Error('不应读取决策路由'); },
+      imageLoader,
+    },
+  });
+  assert.deepEqual(ruleOnly.samples[0]!.results.map((r) => r.source), ['rule']);
+  assert.equal(ruleOnly.samples[0]!.imageCount, 0);
+  assert.equal(ruleOnly.llmCalls.length, 0);
+  assert.equal(ruleOnly.decisionCalls.length, 0);
+  assert.equal(imageCalls, 0);
+
+  const decisionOnly = await runLive(db, { keywords: ['歌回'], llmPrompt: '以唱歌为主' }, {
+    filter: { uid: '1', limit: 1 }, sources: ['decision'], deps: { imageLoader },
+  });
+  assert.deepEqual(decisionOnly.samples[0]!.results.map((r) => r.source), ['decision']);
+  assert.equal(decisionOnly.llmCalls.length, 0);
+  assert.equal(decisionOnly.decisionCalls.length, 1);
+  assert.equal(imageCalls, 1);
 });
 
 test('灰区：决策档有结论但不定案，confidence 保留', async (t) => {

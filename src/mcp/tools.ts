@@ -1244,7 +1244,7 @@ const adminTools: McpToolDef[] = [
   {
     name: 'test_category',
     description: '用真实归档的样本试跑一条分类草稿：确定性条件（关键词/分区/帖子类型/引用/带图）、'
-      + 'LLM、决策模型三档各自独立判定，只回摘要（样本正文 + 三档结论与理由）。'
+      + 'LLM、决策模型三档可按 sources 选择并各自独立判定，只回摘要（样本正文 + 所选档结论与理由）。'
       + '不保存分类、不落判定记录、不推送。草稿校验与新建分类同一套（至少一项条件或判定口径）；'
       + 'judgeMode=precise 时模型档按逐条精确条件判，决策档回逐条件概率（conditionResults），'
       + '没有启用正向条件的分类两个模型档都跳过（不回退判定描述）。'
@@ -1274,11 +1274,12 @@ const adminTools: McpToolDef[] = [
         toTs: z.number().int().nonnegative().optional().describe('内容时间上限（秒级时间戳）'),
         limit: z.number().int().min(1).max(SAMPLE_LIMIT_MAX).optional().describe('样本条数，缺省 10'),
       }).optional().describe('样本过滤面（传了 sampleIds 时忽略）'),
+      sources: z.array(z.enum(['rule', 'llm', 'decision'])).min(1).max(3).optional()
+        .describe('要独立试跑的判定档；缺省全部执行，未选档不调用'),
       sampleIds: z.array(z.string()).min(1).max(SAMPLE_LIMIT_MAX).optional()
         .describe('复测锚点：sample_category_records 给出的 subjectId，按顺序逐条精确加载，不重新随机、不套 filter'),
     },
     role: 'admin',
-    write: true,
     handler: async (deps, args) => {
       const dep = deps.categoryTest;
       if (!dep) throw new HttpError(400, '分类试跑未装配');

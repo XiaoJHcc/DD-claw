@@ -861,7 +861,7 @@ test('POST /api/categories/test：随机样本三档试跑，不落库不推送�
     // 图片不联网：试跑本身只读，图床下载在测试里不该发生
     imageLoader: async () => ({ dataUrls: [], skipped: [] }),
   };
-  const { db, base } = await setup(t, { categoryTest });
+  const { db, base, undo } = await setup(t, { categoryTest, undo: true });
   db.recordSession({
     roomId: 'r1', liveTime: 1_700_000_000, uid: '1', uname: '主播一', title: '今晚歌回！',
     areaName: '唱见', parentAreaName: '虚拟主播', keyframe: 'k1.jpg', cover: 'c1.jpg',
@@ -896,6 +896,7 @@ test('POST /api/categories/test：随机样本三档试跑，不落库不推送�
   const dead = await api(base, '/api/categories/test', 'POST', { category: { keywords: ['x'] }, nope: 1 });
   assert.equal(dead.status, 400);
   assert.match(dead.json.error!, /未知字段: nope/);
+  assert.deepEqual(undo!.history(), [], '试跑不是配置写，不进写审计对应的变更历史');
 });
 
 test('无 categoryTest dep 时 POST /api/categories/test 404', async (t) => {

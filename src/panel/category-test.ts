@@ -58,8 +58,9 @@ const DRAFT_CATEGORY_ID = -1;
 /** 草稿没填名字时的展示名（只进 prompt 与证据文案，不落库） */
 const DRAFT_CATEGORY_NAME = '草稿分类';
 
-/** 三档的来源标识（响应里 `results` 的顺序恒为 rule / llm / decision） */
+/** 三档的来源标识（响应里 `results` 按 rule / llm / decision 的相对顺序返回所选档） */
 export type CategoryTestSource = 'rule' | 'llm' | 'decision';
+const CATEGORY_TEST_SOURCES: readonly CategoryTestSource[] = ['rule', 'llm', 'decision'];
 
 /**
  * 单档结论：
@@ -112,7 +113,7 @@ export interface CategoryTestSample extends CategoryTestSampleSummary {
   imageCount: number;
   /** 被拦下的图逐张带原因（下载失败 / 解码失败 / 超过张数上限…） */
   skippedImages: Array<{ ref: string; reason: string }>;
-  /** 恒为三行：rule → llm → decision */
+  /** 只含本次所选档，按 rule → llm → decision 的相对顺序排列 */
   results: CategoryTestTier[];
 }
 
@@ -141,6 +142,8 @@ export interface CategoryTestRequest {
   category: Category;
   /** 草稿过滤面；给了 `sampleIds` 时被忽略（复测只认锚点，不重新随机） */
   filter: CategoryTestFilter;
+  /** 本次要执行的判定档；请求缺省时由解析器补为全部三档 */
+  sources: CategoryTestSource[];
   /**
    * 复测锚点（可选）：抽样端点给出的 `subjectId`，按给定顺序**逐条精确**加载，
    * 不重新随机、不套 filter。1~SAMPLE_LIMIT_MAX 条且不重复。
@@ -287,17 +290,34 @@ export function parseCategoryTestFilter(raw: unknown, appliesTo: SubjectKind): C
   return filter;
 }
 
-/** 完整请求校验：`{ category, filter, sampleIds? }`（category 缺省 = 空草稿，由 parseNewCategory 判「至少一项条件」） */
+function parseSources(raw: unknown): CategoryTestSource[] {
+  if (raw === undefined || raw === null) return [...CATEGORY_TEST_SOURCES];
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > CATEGORY_TEST_SOURCES.length) {
+    throw new HttpError(400, 'sources 必须是包含 1~3 项的数组');
+  }
+  for (const source of raw) {
+    if (typeof source !== 'string' || !(CATEGORY_TEST_SOURCES as readonly string[]).includes(source)) {
+      throw new HttpError(400, 'sources 的每一项必须是 rule / llm / decision 之一');
+    }
+  }
+  if (new Set(raw).size !== raw.length) throw new HttpError(400, 'sources 不能重复');
+  return CATEGORY_TEST_SOURCES.filter((source) => raw.includes(source));
+}
+
+/** 完整请求校验：`{ category, filter, sources?, sampleIds? }`（category 缺省 = 空草稿，由 parseNewCategory 判「至少一项条件」） */
 export function parseCategoryTestRequest(body: unknown): CategoryTestRequest {
   const o = isRecord(body) ? body : {};
   for (const k of Object.keys(o)) {
-    if (k !== 'category' && k !== 'filter' && k !== 'sampleIds') throw new HttpError(400, `未知字段: ${k}`);
+    if (k !== 'category' && k !== 'filter' && k !== 'sources' && k !== 'sampleIds') {
+      throw new HttpError(400, `未知字段: ${k}`);
+    }
   }
   const category = buildDraftCategory(o.category);
   const sampleIds = parseSampleIds(o.sampleIds);
   return {
     category,
     filter: parseCategoryTestFilter(o.filter, category.appliesTo),
+    sources: parseSources(o.sources),
     ...(sampleIds !== undefined ? { sampleIds } : {}),
   };
 }
@@ -583,14 +603,16 @@ async function decisionTier(
 
 async function testSample(
   deps: CategoryTestDeps, draft: Category, loader: ImageLoader, resolved: ResolvedSample,
+  sources: CategoryTestSource[],
 ): Promise<CategoryTestSample> {
-  const prepared = await loader(resolved.pending);
+  const prepared: PreparedImages = sources.includes('llm') || sources.includes('decision')
+    ? await loader(resolved.pending)
+    : { dataUrls: [], skipped: [] };
   const item: ContentItem = { ...resolved.item, imageUrls: prepared.dataUrls };
-  const results: CategoryTestTier[] = [
-    ruleTier(draft, item),
-    await llmTier(deps, draft, item),
-    await decisionTier(deps, draft, item),
-  ];
+  const results: CategoryTestTier[] = [];
+  if (sources.includes('rule')) results.push(ruleTier(draft, item));
+  if (sources.includes('llm')) results.push(await llmTier(deps, draft, item));
+  if (sources.includes('decision')) results.push(await decisionTier(deps, draft, item));
   return {
     ...resolved.summary,
     imageCount: item.imageUrls.length,
@@ -612,17 +634,17 @@ export function sampleCategoryRecords(deps: CategoryTestDeps, body: unknown): Ca
 
 /**
  * 试跑入口（注册表 handler 唯一调用点）：校验草稿 → 定位样本（随机抽样 / 按 `sampleIds` 精确复读）
- * → 逐条串行跑三档 → 只回摘要。
+ * → 逐条串行跑所选判定档 → 只回摘要。
  * 全程不写库、不推送：本模块没有任何写库或推送调用（唯一的副作用是图片缓存目录里的本地文件）。
  */
 export async function runCategoryTest(
   deps: CategoryTestDeps, body: unknown,
 ): Promise<CategoryTestResponse> {
-  const { category, filter, sampleIds } = parseCategoryTestRequest(body);
+  const { category, filter, sources, sampleIds } = parseCategoryTestRequest(body);
   const loader = deps.imageLoader ?? createImageLoader(deps.imageCacheDir, deps.getProxyUrl);
   const samples: CategoryTestSample[] = [];
   for (const resolved of resolveSamples(deps.db, category.appliesTo, filter, sampleIds)) {
-    samples.push(await testSample(deps, category, loader, resolved));
+    samples.push(await testSample(deps, category, loader, resolved, sources));
   }
   return { samples };
 }

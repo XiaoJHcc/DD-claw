@@ -158,8 +158,8 @@ const INVENTORY: InventoryEntry[] = [
   },
   {
     method: 'POST', path: '/api/categories/test', label: 'POST /api/categories/test',
-    coverage: 'registry', tool: 'test_category', toolStatus: 'exists', exposeToAgent: false,
-    reason: '草稿试跑：读随机归档样本 + 模型调用，不写库、不推送（与其它 test_* 同档）；'
+    coverage: 'excluded', exposeToAgent: false,
+    reason: '草稿试跑：读随机归档样本 + 模型调用，不改配置、不落判定、不推送，不进写审计与撤销栈；'
       + '一次试跑要占分析队列，且结论只对人有用 → 不暴露给 agent',
   },
   {

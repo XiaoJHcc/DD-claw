@@ -909,8 +909,16 @@ function sampleCategoryRecords(raw) {
 function testCategory(raw) {
   const body = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   for (const key of Object.keys(body)) {
-    if (key !== 'category' && key !== 'filter' && key !== 'sampleIds') return err(400, '未知字段: ' + key);
+    if (key !== 'category' && key !== 'filter' && key !== 'sources' && key !== 'sampleIds') return err(400, '未知字段: ' + key);
   }
+  const sourceOrder = ['rule', 'llm', 'decision'];
+  const requestedSources = body.sources === undefined ? sourceOrder : body.sources;
+  if (!Array.isArray(requestedSources) || requestedSources.length < 1 || requestedSources.length > 3
+    || requestedSources.some((source) => !sourceOrder.includes(source))
+    || new Set(requestedSources).size !== requestedSources.length) {
+    return err(400, 'sources 必须是 1~3 个不重复的 rule / llm / decision');
+  }
+  const sources = sourceOrder.filter((source) => requestedSources.includes(source));
   const draft = testDraftCategory(body.category);
   if (draft.error) return err(400, draft.error);
   const category = draft.category;
@@ -940,16 +948,18 @@ function testCategory(raw) {
   }
   return ok({
     samples: picked.map((sample) => {
-      const images = testImages(sample.images);
+      const images = sources.includes('llm') || sources.includes('decision')
+        ? testImages(sample.images) : { imageCount: 0, skippedImages: [] };
+      const results = {
+        rule: () => testRuleResult(category, sample.item),
+        llm: () => testLlmResult(category, sample.item),
+        decision: () => testDecisionResult(category, sample.item),
+      };
       return {
         ...sample.item,
         imageCount: images.imageCount,
         skippedImages: images.skippedImages,
-        results: [
-          testRuleResult(category, sample.item),
-          testLlmResult(category, sample.item),
-          testDecisionResult(category, sample.item),
-        ],
+        results: sources.map((source) => results[source]()),
       };
     }),
   });

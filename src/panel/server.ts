@@ -221,7 +221,7 @@ export interface PanelDeps {
   /**
    * 分类试判（`GET /api/categories/samples` + `POST /api/categories/test`，编排在
    * `panel/category-test.ts`）：先按 kind 抽历史归档样本（只回摘要，不下图不调模型），
-   * 再把确定性条件 / LLM / 决策模型三档各自跑一遍 —— 不写库、不推送。
+   * 再按 sources 选择确定性条件 / LLM / 决策模型各自独立试跑 —— 不写库、不推送。
    * 同一 dep 还挂 `GET /api/category-sample-image`（样本的 X 缩略图反代：经代理下载进
    * `imageCacheDir` 再按本地文件回，浏览器直连 `pbs.twimg.com` 不通）。
    * 注入的是运行时依赖（共享分析队列 + 各通道的实时 getter + 图片缓存目录 + X 代理 getter）；
@@ -927,7 +927,7 @@ async function handle(
     await callTool(deps, res, 'sample_category_records', sampleQueryArgs(url.searchParams));
     return;
   }
-  // 分类草稿试跑（categoryTest dep 存在才挂）：随机历史样本跑三档判定，只回摘要——
+  // 分类草稿试跑（categoryTest dep 存在才挂）：历史样本按 sources 跑所选判定档，只回摘要——
   // 不落 verdicts / content_audit、不推送；必须在 /api/categories/:id 通配之前匹配。
   // 未装配时显式 404：否则会落进 :id 通配，变成「id 必须是纯数字」的 400（挂载门不能靠 400 表达）
   if (method === 'POST' && path === '/api/categories/test') {

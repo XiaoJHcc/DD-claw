@@ -10,6 +10,7 @@ const PLATFORM_LABEL = { twitter: 'X', weibo: '微博', bili: 'B站' };
 const state = {
   kind: 'live', getBody: null, open: false,
   subject: '', from: '', to: '', limit: 10,
+  sources: { rule: true, llm: true, decision: true },
   subjects: [], seq: 0, phase: 'idle', samples: null,
 };
 
@@ -29,6 +30,7 @@ function fmtTime(ts) {
 function noun() { return state.kind === 'live' ? '主播' : '账号'; }
 function busy() { return state.phase !== 'idle'; }
 function allSubjectOption() { return { value: '', label: '全部' + noun() }; }
+function selectedSources() { return SOURCE_ORDER.filter(function (source) { return state.sources[source]; }); }
 
 export function resetCatTest(kind, getBody) {
   state.kind = kind === 'post' ? 'post' : 'live';
@@ -38,6 +40,7 @@ export function resetCatTest(kind, getBody) {
   state.from = '';
   state.to = '';
   state.limit = 10;
+  state.sources = { rule: true, llm: true, decision: true };
   state.subjects = [allSubjectOption()];
   state.seq += 1;
   state.phase = 'idle';
@@ -115,6 +118,12 @@ function filtersChanged() {
 CHANGES['change-cat-test-subject'] = function (el) { state.subject = el.value; filtersChanged(); };
 CHANGES['change-cat-test-from'] = function (el) { state.from = el.value; filtersChanged(); };
 CHANGES['change-cat-test-to'] = function (el) { state.to = el.value; filtersChanged(); };
+CHANGES['toggle-cat-test-source'] = function (el) {
+  const source = el.getAttribute('data-source');
+  if (!SOURCE_ORDER.includes(source) || busy()) return;
+  state.sources[source] = el.checked;
+  renderWorkspace();
+};
 
 INPUTS['cat-test-limit'] = function (el) {
   state.limit = Number(el.value);
@@ -165,8 +174,9 @@ function sampleRecords() {
 ACTIONS['sample-cat-test'] = sampleRecords;
 ACTIONS['refresh-cat-test'] = sampleRecords;
 
-ACTIONS['run-cat-test'] = function () {
-  if (busy() || !state.getBody || !state.samples || state.samples.length === 0) return;
+ACTIONS['run-cat-test'] = async function () {
+  const sources = selectedSources();
+  if (busy() || !state.getBody || !state.samples || state.samples.length === 0 || sources.length === 0) return;
   const body = state.getBody();
   if (!body) return;
   const gen = ++state.seq;
@@ -176,23 +186,24 @@ ACTIONS['run-cat-test'] = function () {
     delete next.results;
     return next;
   });
-  renderWorkspace();
+  renderWorkspace(true);
   const sampleIds = state.samples.map(function (sample) { return sample.subjectId; });
-  api('/api/categories/test', 'POST', { category: body, sampleIds }).then(function (j) {
-    if (gen !== state.seq) return;
-    const tested = {};
-    (j.samples || []).forEach(function (sample) { tested[sample.subjectId] = sample; });
-    state.samples = state.samples.map(function (sample) {
-      return { ...sample, results: tested[sample.subjectId] ? tested[sample.subjectId].results : [] };
-    });
-    state.phase = 'idle';
-    renderWorkspace();
-  }).catch(function (e) {
-    if (gen !== state.seq) return;
-    state.phase = 'idle';
-    renderWorkspace();
-    toast(e.message, true);
-  });
+  try {
+    for (const sampleId of sampleIds) {
+      const j = await api('/api/categories/test', 'POST', { category: body, sampleIds: [sampleId], sources });
+      if (gen !== state.seq) return;
+      const tested = (j.samples || []).find(function (sample) { return sample.subjectId === sampleId; });
+      state.samples = state.samples.map(function (sample) {
+        return sample.subjectId === sampleId ? { ...sample, results: tested ? tested.results : [] } : sample;
+      });
+      renderWorkspace(true);
+    }
+  } catch (e) {
+    if (gen === state.seq) toast(e.message, true);
+  }
+  if (gen !== state.seq) return;
+  state.phase = 'idle';
+  renderWorkspace(true);
 };
 
 function sampleImage(sample) {
@@ -246,9 +257,14 @@ function detailAttrs(result, source, label) {
 }
 
 function verdictMark(result, source) {
-  if (state.phase === 'testing') return '<span class="cat-test-wait" aria-label="测试中"></span>';
+  if (!result) {
+    if (state.phase === 'testing' && state.sources[source]) {
+      return '<span class="cat-test-wait" aria-label="测试中"></span>';
+    }
+    return '<span class="cat-test-empty" aria-label="未测试">—</span>';
+  }
   const label = outcomeLabel(result);
-  const kind = !result || result.status !== 'ok' || result.decided === false
+  const kind = result.status !== 'ok' || result.decided === false
     ? 'unknown' : result.pass === true ? 'yes' : result.pass === false ? 'no' : 'unknown';
   const attrs = detailAttrs(result, source, label);
   const glyph = kind === 'yes' ? 'check' : kind === 'no' ? 'xmark' : 'question';
@@ -349,7 +365,7 @@ function tooltipConditions(trigger) {
 
 function showDetailTooltip(trigger) {
   const detail = trigger.getAttribute('data-detail');
-  if (!detail || state.phase === 'testing') return;
+  if (!detail) return;
   if (detailTrigger === trigger && detailTooltip) {
     if (detailHideTimer !== null) clearTimeout(detailHideTimer);
     detailHideTimer = null;
@@ -423,7 +439,7 @@ function resultCell(sample, source) {
   const results = sample.results || [];
   let result = null;
   for (let i = 0; i < results.length; i++) if (results[i].source === source) { result = results[i]; break; }
-  const ready = state.phase !== 'testing' && result;
+  const ready = !!result;
   const probability = ready && result.confidence != null ? Number(result.confidence).toFixed(2) : '';
   const showEvidence = ready && result.status === 'ok'
     && (source === 'decision' || (result.evidence && (source === 'llm' || (source === 'rule' && result.pass === true))));
@@ -459,18 +475,27 @@ function sampleRow(sample) {
     SOURCE_ORDER.map(function (source) { return resultCell(sample, source); }).join('') + '</tr>';
 }
 
+function sourceHeader(source) {
+  const label = source === 'rule' ? '规则' : source === 'llm' ? 'LLM' : '决策';
+  const checked = state.sources[source];
+  const disabled = busy();
+  return `<th><label class="chip cat-test-source${checked ? ' on' : ''}${disabled ? ' is-disabled' : ''}">` +
+    `<input type="checkbox" data-change="toggle-cat-test-source" data-source="${source}"${checked ? ' checked' : ''}${disabled ? ' disabled' : ''}>` +
+    `<span class="chip-ic">${icon('check')}</span><span>${label}</span></label></th>`;
+}
+
 function sampleTableHtml() {
   const rows = state.samples && state.samples.length > 0 ? state.samples.map(sampleRow).join('') : '';
   const empty = state.samples === null ? '暂无样本' : state.samples.length === 0 ? '没有符合条件的带图记录' : '';
   return '<div class="cat-test-table-wrap"><table class="cat-test-table"><colgroup>' +
     '<col><col class="cat-test-result-col"><col class="cat-test-result-col"><col class="cat-test-result-col">' +
-    '</colgroup><thead><tr><th>样本</th><th>规则</th><th>LLM</th><th>决策</th></tr></thead><tbody>' +
+    `</colgroup><thead><tr><th>样本</th>${SOURCE_ORDER.map(sourceHeader).join('')}</tr></thead><tbody>` +
     rows + '</tbody></table>' + (empty ? `<div class="cat-test-placeholder">${empty}</div>` : '') + '</div>';
 }
 
 function workspaceHtml() {
   const hasSamples = state.samples !== null;
-  const canTest = hasSamples && state.samples.length > 0;
+  const canTest = hasSamples && state.samples.length > 0 && selectedSources().length > 0;
   const disabled = busy() ? ' disabled' : '';
   const refreshClass = hasSamples ? 'btn-line' : 'btn-primary';
   const testLabel = state.phase === 'testing' ? '测试中' : '开始测试';
@@ -491,8 +516,18 @@ function workspaceHtml() {
   '</div>';
 }
 
-function renderWorkspace() {
+function renderWorkspace(preserveScroll) {
   hideDetailTooltip();
   const out = document.querySelector('#sheet-mask1 .cat-test-workspace');
-  if (out) out.innerHTML = workspaceHtml();
+  if (!out) return;
+  const table = preserveScroll ? out.querySelector('.cat-test-table-wrap') : null;
+  const scroll = table ? { top: table.scrollTop, left: table.scrollLeft } : null;
+  out.innerHTML = workspaceHtml();
+  if (scroll) {
+    const next = out.querySelector('.cat-test-table-wrap');
+    if (next) {
+      next.scrollTop = scroll.top;
+      next.scrollLeft = scroll.left;
+    }
+  }
 }

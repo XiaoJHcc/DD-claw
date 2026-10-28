@@ -514,6 +514,10 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .cat-test-table th{position:sticky;top:0;z-index:1;height:36px;padding:0 var(--sp-3);border:none;
   background:var(--bg-soft);color:var(--text-2);font-size:var(--fs-xs);font-weight:600;text-align:left;white-space:nowrap}
 .cat-test-table th:not(:first-child){text-align:center}
+.cat-test-source{position:relative}
+.cat-test-source input{position:absolute;opacity:0;width:0;height:0;margin:0}
+.cat-test-source:focus-within{outline:2px solid var(--blue);outline-offset:2px}
+.cat-test-source.is-disabled{opacity:.5;cursor:default}
 .cat-test-table td{height:96px;padding:var(--sp-3);overflow:hidden;border:none;vertical-align:middle;transition:background-color .15s ease}
 .cat-test-table tbody tr:hover td{background:var(--bg-soft-deep)}
 .cat-test-table tbody tr:hover td:first-child{border-radius:var(--r-md) 0 0 var(--r-md)}
@@ -532,6 +536,7 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .cat-test-text{flex:none;height:16px;overflow:hidden;text-overflow:ellipsis;color:var(--text-2);white-space:nowrap;line-height:16px}
 .cat-test-result-inner{display:flex;flex-direction:column;align-items:center;justify-content:center;height:72px;overflow:hidden;text-align:center}
 .cat-test-verdict{display:flex;align-items:center;justify-content:center;flex:none;height:24px}
+.cat-test-empty{color:var(--text-2);opacity:.45}
 .cat-test-mark{display:inline-flex;align-items:center;justify-content:center;flex:none;width:24px;height:24px;border-radius:50%}
 .cat-test-mark svg{width:15px;height:15px}
 .cat-test-mark.yes{background:rgba(47,189,155,.12);color:var(--mint)}
