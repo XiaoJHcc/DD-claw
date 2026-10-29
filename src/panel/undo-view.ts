@@ -31,6 +31,7 @@ import {
   DEFAULT_IGNORE_COLUMNS, changeTables, isDecisionKeySetting, isLlmKeySetting, isSecretKeySetting,
   type ChangeRecord, type RowImage, type Row,
 } from '../core/undo.js';
+import { BOOL_SPECS } from '../core/runtime-config.js';
 
 /** 工具名没有（或认不出）时的标题：宁可说不知道，也不留空 */
 export const UNKNOWN_TOOL_TITLE = '未知操作';
@@ -161,6 +162,25 @@ const SETTING_NAMES: Record<string, string> = {
   backlog_push_enabled: '补推未运行期间的图文',
   backlog_max_age_hours: '补推时间限制（小时）',
   backlog_max_per_account: '补推账号条数限制',
+  // 直播分类时机（五个时机 × 三档；core/runtime-config.ts）
+  live_classify_llm_cooldown_min: '分类 LLM 冷却时间',
+  live_classify_delay_min: '分类延迟时间',
+  live_classify_periodic_min: '分类定时时间',
+  live_classify_start_rule: '开播时使用规则',
+  live_classify_start_decision: '开播时使用决策模型',
+  live_classify_start_llm: '开播时使用 LLM',
+  live_classify_start_delay_rule: '开播延迟后使用规则',
+  live_classify_start_delay_decision: '开播延迟后使用决策模型',
+  live_classify_start_delay_llm: '开播延迟后使用 LLM',
+  live_classify_periodic_rule: '直播中定时使用规则',
+  live_classify_periodic_decision: '直播中定时使用决策模型',
+  live_classify_periodic_llm: '直播中定时使用 LLM',
+  live_classify_title_change_rule: '标题/分区变更时使用规则',
+  live_classify_title_change_decision: '标题/分区变更时使用决策模型',
+  live_classify_title_change_llm: '标题/分区变更时使用 LLM',
+  live_classify_title_delay_rule: '变更延迟后使用规则',
+  live_classify_title_delay_decision: '变更延迟后使用决策模型',
+  live_classify_title_delay_llm: '变更延迟后使用 LLM',
   // 推送文案（core/push.ts）
   default_template: '默认推送词',
   // X / 推特（core/x-config.ts）
@@ -359,6 +379,7 @@ const BOOL_SETTING_KEYS: readonly string[] = [
   'push_enabled', 'llm_enabled', 'decision_enabled', 'napcat_enabled', 'napcat_autorestart',
   'qqbot_enabled', 'x_fallback_html', 'keyframe_enabled', 'notify_on_first_run',
   'notify_on_new_subscription', 'backlog_push_enabled',
+  ...BOOL_SPECS.filter((s) => s.key.startsWith('live_classify_')).map((s) => s.key),
 ];
 
 /** JSON 数组列 → 顿号连接（存的是 JSON 文本；解析失败回退原文截断） */
@@ -377,6 +398,7 @@ const SETTING_UNITS: Record<string, string> = {
   dynamic_interval_sec: '秒', weibo_interval_sec: '秒', keyframe_interval_sec: '秒',
   x_interval_sec: '秒', llm_request_timeout_ms: '毫秒', llm_circuit_cooldown_ms: '毫秒',
   health_alert_after_failures: '次', llm_circuit_threshold: '次', backlog_max_age_hours: '小时',
+  live_classify_llm_cooldown_min: '分钟', live_classify_delay_min: '分钟', live_classify_periodic_min: '分钟',
 };
 
 /** 值不可示人的 settings 键（LLM key 在 undo.ts 层已 redact；这里兜住其余敏感配置） */

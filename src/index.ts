@@ -9,6 +9,7 @@ import { Pipeline } from './core/pipeline.js';
 import { toLiveEvent } from './core/types.js';
 import { AnalysisQueue } from './analysis/queue.js';
 import { RulesClassifier } from './analysis/classifier.js';
+import { LiveClassifyTriggers } from './analysis/triggers.js';
 import { createLlmRouter, listLlmProviders, saveLlmProviders, isLlmEnabled, dbKeysOf } from './analysis/providers.js';
 import {
   listDecisionProviders, pingDecisionProvider, saveDecisionProviders, isDecisionEnabled,
@@ -44,7 +45,7 @@ import {
 } from './core/weibo-accounts.js';
 import type { NewPushChannel } from './core/push.js';
 import { isListenEnabled, shouldRunListen } from './core/listen.js';
-import { getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
+import { getLiveClassifyTiming, getRuntimeConfig, withRuntimeConfig } from './core/runtime-config.js';
 import { seedOnboardingDefaults } from './core/onboarding.js';
 import { adminScope, UndoStore, undoEffects, type UndoResult } from './core/undo.js';
 import { ChatStore } from './core/chat-store.js';
@@ -382,7 +383,8 @@ async function main(): Promise<void> {
   }
 
   // 装配：bus → pipeline（编排唯一入口）→ sources（只产信号）
-  // 分类器：router 用 getter 每轮取最新（面板改名单热重建），LLM 总开关读 settings
+  // 分类器：router 用 getter 每轮取最新（面板改名单热重建），LLM 总开关读 settings；
+  // LLM 冷却按 roomId 独立（跨时机跨场次），窗口直读 settings
   // 共享分析队列：分类判定、图文翻译、分类草稿试跑都从这里过（同一条并发闸门，绝不直调 provider）
   const analysisQueue = new AnalysisQueue(
     new RulesClassifier(db, {
@@ -391,6 +393,7 @@ async function main(): Promise<void> {
       getDecisionRouter: () => decisionRouter,
       decisionEnabled: () => isDecisionEnabled(db),
       decisionThresholds,
+      llmCooldownMin: () => getLiveClassifyTiming(db).llmCooldownMin,
     }), 2,
   );
   // 图片本地化缓存目录：推送带图、判定看图、分类草稿试跑三处同一条目录。
@@ -410,6 +413,17 @@ async function main(): Promise<void> {
     postAnalyzer: new PostAnalyzer(() => llmDep.router ?? null, () => isLlmEnabled(db)),
   });
   pipeline.attach();
+  // 直播分类时机：与 pipeline 平行的总线订阅者，在延迟 / 定时时机发内部分类信号
+  // （开播与标题变更的即时判定由 pipeline 直接处理，这里不重复发）。延迟与周期直读 settings。
+  const liveTriggers = new LiveClassifyTriggers({
+    bus,
+    delaySec: () => getLiveClassifyTiming(db).delaySec,
+    periodicSec: () => getLiveClassifyTiming(db).periodicSec,
+  });
+  liveTriggers.attach();
+  // 上次生效的分类时间口径：热更新只重排真的变了的那一项计时器，
+  // 免得保存任何无关设置都把已排好的定时器推到更晚。
+  let liveTiming = getLiveClassifyTiming(db);
 
   // NapCat 是否自己跑通过：<dir>/config 存在 = 至少成功启动过一次（onebot11/webui 配置
   // 由 NapCat 自己生成，DD-claw 只读改）。没跑通时拉起是空头支票（QQ 从未登录，快速登录
@@ -675,6 +689,16 @@ async function main(): Promise<void> {
       || prev.decision.circuitCooldownMs !== eff.decision.circuitCooldownMs) {
       rebuildDecisionRouter();
       log.info('决策模型超时/熔断参数已热更新（router 已重建）');
+    }
+    // 直播分类时机的延迟/周期：判定档的选择与冷却窗口每轮直读 settings，不需要处理；
+    // 只有已经排出去的计时器要按变化项重排（延迟计时器也只动尚未触发的那些）
+    const timing = getLiveClassifyTiming(db);
+    const delayChanged = timing.delaySec !== liveTiming.delaySec;
+    const periodicChanged = timing.periodicSec !== liveTiming.periodicSec;
+    liveTiming = timing;
+    if (delayChanged || periodicChanged) {
+      liveTriggers.reconfigure({ delay: delayChanged, periodic: periodicChanged });
+      log.info(`分类时机时间口径已热更新（延迟 ${timing.delaySec}s，定时 ${timing.periodicSec}s）`);
     }
   };
 
@@ -1021,6 +1045,7 @@ async function main(): Promise<void> {
   const shutdown = (sig: string) => {
     log.info(`收到 ${sig}，停止中`);
     napcatTask?.stop();
+    liveTriggers.stop();
     liveSrc.stop();
     followsSrc?.stop();
     dynamicSrc?.stop();

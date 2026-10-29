@@ -4,6 +4,7 @@ import { Db } from './db.js';
 import {
   getRuntimeConfig, saveRuntimeConfig, withRuntimeConfig,
   isNotifyOnFirstRun, isNotifyOnNewSubscription, getPostBacklogConfig,
+  getLiveJudgeSelection, getLiveClassifyTiming, isLiveJudgeSelectionActive, isRuntimeConfigKey,
   NUM_SPECS, BOOL_SPECS,
 } from './runtime-config.js';
 import { defaultAppConfig } from '../config/schema.js';
@@ -120,4 +121,67 @@ test('决策模型参数：默认值 / 落库回读 / 越界回落 / 叠加进 A
   assert.deepEqual(eff.decision, {
     requestTimeoutMs: 45_000, circuitThreshold: 5, circuitCooldownMs: 900_000,
   }, '超时/熔断叠加进 AppConfig（灰区与主分类门槛由判定档直读）');
+});
+
+// ---- 直播分类时机（五时机 × 三档 + 三条时间口径）----
+
+test('分类时机默认值：开播/变更走规则+决策，延迟三档全开，定时全关', (t) => {
+  const db = memDb(t);
+  assert.deepEqual(getLiveJudgeSelection(db, 'start'), { rule: true, decision: true, llm: false });
+  assert.deepEqual(getLiveJudgeSelection(db, 'titleChange'), { rule: true, decision: true, llm: false });
+  assert.deepEqual(getLiveJudgeSelection(db, 'startDelay'), { rule: true, decision: true, llm: true });
+  assert.deepEqual(getLiveJudgeSelection(db, 'titleDelay'), { rule: true, decision: true, llm: true });
+  assert.deepEqual(getLiveJudgeSelection(db, 'periodic'), { rule: false, decision: false, llm: false });
+  assert.equal(isLiveJudgeSelectionActive(getLiveJudgeSelection(db, 'periodic')), false, '定时默认等于关闭');
+  assert.equal(isLiveJudgeSelectionActive(getLiveJudgeSelection(db, 'start')), true);
+
+  assert.deepEqual(getLiveClassifyTiming(db), { delaySec: 300, periodicSec: 1200, llmCooldownMin: 5 });
+});
+
+test('分类时机：落库回读、越界/非整数回落默认、单键直读不必重启', (t) => {
+  const db = memDb(t);
+  saveRuntimeConfig(db, {
+    liveClassifyPeriodicLlm: true, liveClassifyStartLlm: true, liveClassifyTitleChangeRule: false,
+    liveClassifyLlmCooldownMin: 0, liveClassifyDelayMin: 12, liveClassifyPeriodicMin: 45,
+  });
+  assert.deepEqual(getLiveJudgeSelection(db, 'periodic'), { rule: false, decision: false, llm: true });
+  assert.deepEqual(getLiveJudgeSelection(db, 'start'), { rule: true, decision: true, llm: true });
+  assert.deepEqual(getLiveJudgeSelection(db, 'titleChange'), { rule: false, decision: true, llm: false });
+  assert.deepEqual(getLiveClassifyTiming(db), { delaySec: 720, periodicSec: 2700, llmCooldownMin: 0 },
+    '冷却 0 = 不设冷却');
+
+  db.setSetting('live_classify_periodic_min', '0'); // 低于下限 1
+  db.setSetting('live_classify_delay_min', '3.5'); // 非整数
+  const timing = getLiveClassifyTiming(db);
+  assert.equal(timing.periodicSec, 1200, '越界回落默认 20 分钟');
+  assert.equal(timing.delaySec, 300, '非整数回落默认 5 分钟');
+
+  db.setSetting('live_classify_start_llm', 'x'); // 脏值
+  assert.equal(getLiveJudgeSelection(db, 'start').llm, false, '脏值回落默认');
+});
+
+test('分类时机的 settings 键都在运行时参数规格表里（撤销热生效与 /api/advanced 校验都靠它）', () => {
+  const keys = [...NUM_SPECS, ...BOOL_SPECS].map((s) => s.key);
+  for (const trigger of ['start', 'start_delay', 'periodic', 'title_change', 'title_delay']) {
+    for (const stage of ['rule', 'decision', 'llm']) {
+      assert.ok(keys.includes(`live_classify_${trigger}_${stage}`), `缺键 live_classify_${trigger}_${stage}`);
+    }
+  }
+  for (const key of ['live_classify_llm_cooldown_min', 'live_classify_delay_min', 'live_classify_periodic_min']) {
+    assert.ok(keys.includes(key), `缺键 ${key}`);
+    assert.equal(isRuntimeConfigKey(key), true);
+  }
+  assert.equal(isRuntimeConfigKey('live_classify_start_rule'), true);
+  assert.equal(isRuntimeConfigKey('live_classify_start_llm'), true);
+});
+
+test('分类时机的字段名可由「时机 + 档位」机械拼出（面板 sheet 按这个约定生成 id 与提交体）', () => {
+  const fields = BOOL_SPECS.map((s) => String(s.field));
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  for (const trigger of ['start', 'startDelay', 'periodic', 'titleChange', 'titleDelay']) {
+    for (const stage of ['rule', 'decision', 'llm']) {
+      const field = `liveClassify${cap(trigger)}${cap(stage)}`;
+      assert.ok(fields.includes(field), `缺字段 ${field}（webui 的 timingFieldName 依赖这一约定）`);
+    }
+  }
 });

@@ -1,12 +1,15 @@
 /**
  * 运行时参数（settings 表唯一信源，面板按模块收纳：监听「抓取设置」/ LLM「高级」/
- * 推送渠道「推送设置」，保存即热生效）。
+ * 推送渠道「推送设置」/ 直播分类「分类时机」，保存即热生效）。
  * 无 settings 记录时用规格表里的代码默认值——不存在任何文件侧来源。
  *
  * 消费路径：
  * - 各 source 的轮询间隔/告警阈值：index.ts 用 withRuntimeConfig 合并出生效 AppConfig
  *   传给 SourceContext；参数变化时 reconcile 重启对应 source 刷新。
  * - 冷启动推送开关：pipeline 每次处理信号经 isNotifyOnFirstRun 等 helper 直读 settings。
+ * - 直播分类时机（哪些档在哪个时机参与、延迟/定时/LLM 冷却）：pipeline 每次判定经
+ *   `getLiveJudgeSelection` / `getLiveClassifyTiming` 直读；定时器间隔由装配根的
+ *   `LiveClassifyTriggers.reconfigure()` 重排。
  * - LLM 超时/熔断：createLlmRouter 重建时取 withRuntimeConfig 合并结果。
  * - 决策模型超时/熔断：createDecisionRouter 重建时直读本表；判定门槛（灰区/主分类）
  *   由判定档每次直读，改完即生效。
@@ -38,6 +41,29 @@ export interface RuntimeConfig {
   backlogPushEnabled: boolean;
   backlogMaxAgeHours: number;
   backlogMaxPerAccount: number;
+  /** 直播分类时机：同一 roomId 的两次 LLM 判定最短间隔（0 = 不设冷却） */
+  liveClassifyLlmCooldownMin: number;
+  /** 开播后 / 标题分区变更后的延迟重判间隔（两个延迟时机共用） */
+  liveClassifyDelayMin: number;
+  /** 直播中定时重判间隔 */
+  liveClassifyPeriodicMin: number;
+  // 五个分类时机各自选哪些判定档参与（规则=确定性条件 / 决策=决策模型 / LLM）。
+  // 三档全关 = 该时机不判定（等于关闭），不会清空已有判定。
+  liveClassifyStartRule: boolean;
+  liveClassifyStartDecision: boolean;
+  liveClassifyStartLlm: boolean;
+  liveClassifyStartDelayRule: boolean;
+  liveClassifyStartDelayDecision: boolean;
+  liveClassifyStartDelayLlm: boolean;
+  liveClassifyPeriodicRule: boolean;
+  liveClassifyPeriodicDecision: boolean;
+  liveClassifyPeriodicLlm: boolean;
+  liveClassifyTitleChangeRule: boolean;
+  liveClassifyTitleChangeDecision: boolean;
+  liveClassifyTitleChangeLlm: boolean;
+  liveClassifyTitleDelayRule: boolean;
+  liveClassifyTitleDelayDecision: boolean;
+  liveClassifyTitleDelayLlm: boolean;
 }
 
 interface NumSpec {
@@ -74,6 +100,11 @@ export const NUM_SPECS: NumSpec[] = [
   { key: 'keyframe_interval_sec', field: 'keyframeIntervalSec', label: '关键帧缓存间隔', def: 300, min: 60, max: 3600 },
   { key: 'backlog_max_age_hours', field: 'backlogMaxAgeHours', label: '补推时间限制（小时）', def: 6, min: 1, max: 168 },
   { key: 'backlog_max_per_account', field: 'backlogMaxPerAccount', label: '补推账号条数限制（1~50）', def: 3, min: 1, max: 50 },
+  // 直播分类时机的时间口径（分钟）：冷却按 roomId 独立、跨时机跨场次生效；
+  // 延迟同时服务「开播延迟后」与「变更延迟后」，定时服务直播中周期重判。
+  { key: 'live_classify_llm_cooldown_min', field: 'liveClassifyLlmCooldownMin', label: 'LLM 冷却时间（分钟）', def: 5, min: 0, max: 1440 },
+  { key: 'live_classify_delay_min', field: 'liveClassifyDelayMin', label: '延迟时间（分钟）', def: 5, min: 1, max: 120 },
+  { key: 'live_classify_periodic_min', field: 'liveClassifyPeriodicMin', label: '定时时间（分钟）', def: 20, min: 1, max: 1440 },
 ];
 
 interface BoolSpec {
@@ -88,6 +119,22 @@ export const BOOL_SPECS: BoolSpec[] = [
   { key: 'notify_on_new_subscription', field: 'notifyOnNewSubscription', label: '新增订阅在播即推送', def: true },
   { key: 'keyframe_enabled', field: 'keyframeEnabled', label: '关键帧缓存', def: true },
   { key: 'backlog_push_enabled', field: 'backlogPushEnabled', label: '补推未运行期间的图文', def: false },
+  // 直播分类时机 × 判定档（默认：开播与变更只走规则+决策，延迟时机三档全开，定时全关=定时不定判）
+  { key: 'live_classify_start_rule', field: 'liveClassifyStartRule', label: '开播时使用规则', def: true },
+  { key: 'live_classify_start_decision', field: 'liveClassifyStartDecision', label: '开播时使用决策模型', def: true },
+  { key: 'live_classify_start_llm', field: 'liveClassifyStartLlm', label: '开播时使用 LLM', def: false },
+  { key: 'live_classify_start_delay_rule', field: 'liveClassifyStartDelayRule', label: '开播延迟后使用规则', def: true },
+  { key: 'live_classify_start_delay_decision', field: 'liveClassifyStartDelayDecision', label: '开播延迟后使用决策模型', def: true },
+  { key: 'live_classify_start_delay_llm', field: 'liveClassifyStartDelayLlm', label: '开播延迟后使用 LLM', def: true },
+  { key: 'live_classify_periodic_rule', field: 'liveClassifyPeriodicRule', label: '直播中定时使用规则', def: false },
+  { key: 'live_classify_periodic_decision', field: 'liveClassifyPeriodicDecision', label: '直播中定时使用决策模型', def: false },
+  { key: 'live_classify_periodic_llm', field: 'liveClassifyPeriodicLlm', label: '直播中定时使用 LLM', def: false },
+  { key: 'live_classify_title_change_rule', field: 'liveClassifyTitleChangeRule', label: '标题/分区变更时使用规则', def: true },
+  { key: 'live_classify_title_change_decision', field: 'liveClassifyTitleChangeDecision', label: '标题/分区变更时使用决策模型', def: true },
+  { key: 'live_classify_title_change_llm', field: 'liveClassifyTitleChangeLlm', label: '标题/分区变更时使用 LLM', def: false },
+  { key: 'live_classify_title_delay_rule', field: 'liveClassifyTitleDelayRule', label: '变更延迟后使用规则', def: true },
+  { key: 'live_classify_title_delay_decision', field: 'liveClassifyTitleDelayDecision', label: '变更延迟后使用决策模型', def: true },
+  { key: 'live_classify_title_delay_llm', field: 'liveClassifyTitleDelayLlm', label: '变更延迟后使用 LLM', def: true },
 ];
 
 export function getRuntimeConfig(db: Db): RuntimeConfig {
@@ -151,6 +198,80 @@ export function getPostBacklogConfig(db: Db): PostBacklogConfig {
     enabled: rc.backlogPushEnabled,
     maxAgeSec: rc.backlogMaxAgeHours * 3600,
     maxPerAccount: rc.backlogMaxPerAccount,
+  };
+}
+
+// ---- 直播分类时机（五个时机 × 三档判定；pipeline / triggers 按信号直读）----
+
+/** 直播场次进分类判定的时机：开播 / 开播延迟后 / 直播中定时 / 标题分区变更 / 变更延迟后 */
+export type LiveClassifyTrigger = 'start' | 'startDelay' | 'periodic' | 'titleChange' | 'titleDelay';
+
+/** 某个时机选哪些判定档参与（结构同 analysis 的 JudgeSelection，core 不反向依赖 analysis 类型） */
+export interface LiveJudgeSelection {
+  rule: boolean;
+  decision: boolean;
+  llm: boolean;
+}
+
+const LIVE_TRIGGER_KEY_PREFIX: Record<LiveClassifyTrigger, string> = {
+  start: 'live_classify_start',
+  startDelay: 'live_classify_start_delay',
+  periodic: 'live_classify_periodic',
+  titleChange: 'live_classify_title_change',
+  titleDelay: 'live_classify_title_delay',
+};
+
+const boolSpecByKey = new Map(BOOL_SPECS.map((s) => [s.key, s]));
+const numSpecByKey = new Map(NUM_SPECS.map((s) => [s.key, s]));
+
+/** 单键读布尔（越界/脏值回落该规格的代码默认值）；只读需要的那几个键，不走整表合并 */
+function readBoolKey(db: Db, key: string): boolean {
+  const v = db.getSetting(key);
+  return v === '1' ? true : v === '0' ? false : (boolSpecByKey.get(key)?.def ?? false);
+}
+
+/** 单键读整数（非法/越界回落该规格的代码默认值） */
+function readNumKey(db: Db, key: string): number {
+  const spec = numSpecByKey.get(key);
+  const v = db.getSetting(key);
+  const n = v === null ? NaN : Number(v);
+  if (spec === undefined) return Number.isInteger(n) ? n : 0;
+  return Number.isInteger(n) && n >= spec.min && n <= spec.max ? n : spec.def;
+}
+
+/**
+ * 某时机参与哪些判定档。
+ * 三档全 false = 该时机不判定（面板上等于关闭）：不跑判决链、不写判定与历史，
+ * 已有判定保持不变——关闭一个时机不该把已归档的分类抹掉。
+ */
+export function getLiveJudgeSelection(db: Db, trigger: LiveClassifyTrigger): LiveJudgeSelection {
+  const base = LIVE_TRIGGER_KEY_PREFIX[trigger];
+  return {
+    rule: readBoolKey(db, `${base}_rule`),
+    decision: readBoolKey(db, `${base}_decision`),
+    llm: readBoolKey(db, `${base}_llm`),
+  };
+}
+
+/** 该时机的选择是否有任何一档参与（全关 = 时机关闭） */
+export function isLiveJudgeSelectionActive(sel: LiveJudgeSelection): boolean {
+  return sel.rule || sel.decision || sel.llm;
+}
+
+export interface LiveClassifyTiming {
+  /** 开播后 / 标题分区变更后的延迟秒数（两个延迟时机共用） */
+  delaySec: number;
+  /** 直播中定时重判的周期秒数 */
+  periodicSec: number;
+  /** 同一 roomId 两次 LLM 判定的最短间隔（分钟；0 = 不设冷却） */
+  llmCooldownMin: number;
+}
+
+export function getLiveClassifyTiming(db: Db): LiveClassifyTiming {
+  return {
+    delaySec: readNumKey(db, 'live_classify_delay_min') * 60,
+    periodicSec: readNumKey(db, 'live_classify_periodic_min') * 60,
+    llmCooldownMin: readNumKey(db, 'live_classify_llm_cooldown_min'),
   };
 }
 

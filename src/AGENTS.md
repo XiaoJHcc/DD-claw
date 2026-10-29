@@ -5,7 +5,7 @@
 本文件只管本层文件，子目录职责见各自 AGENTS。领域实现不放进入口文件；跨模块依赖与配置总约束继承根文档。
 
 - `index.ts` 负责创建并注入 DB、总线、源、分析、通知、面板及 QQ 接入，保持单一装配根；关闭时停止周期任务、服务与连接。
-- 热生效由装配根协调：`reconcileRuntime` 重读运行参数，`reconcileListen` 统一启停来源，`reconcileNapcat` 维护托管与上报；provider / cookie / notifier 变更经相应回调处理。
+- 热生效由装配根协调：`reconcileRuntime` 重读运行参数，`reconcileListen` 统一启停来源，`reconcileNapcat` 维护托管与上报；provider / cookie / notifier 变更经相应回调处理。直播分类时机的延迟/周期变化还经 `LiveClassifyTriggers.reconfigure()` 按变化项重排尚未触发的延迟与周期计时器（三档选择与冷却窗口由消费方直读，不需要回调）。
 - 撤销后按 `undoEffects` 重放同一套热生效回调，回调不下沉到 Db / UndoStore。名单由来源每轮读 DB，不为此增设重复状态。
 - X 探测由 CLI 或测试按钮显式触发；面板状态读取只返回快照，不在轮询读取路径上发探测请求。
 - CLI 复用运行时实现，不旁建分类、匹配或通知逻辑。`--dry-run` 不真发通知；`--test-notify` 和 `--force-uid` 会触达真实推送链路，使用前确认目标。

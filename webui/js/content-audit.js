@@ -3,8 +3,11 @@
 // 同一分类可有多档 / 多来源的结论，恰有一行 effective；confidence 只有决策模型有值（显示为「概率」）。
 import { api, ACTIONS, esc, openSheet, sheetCleanups } from './core.js';
 
-const STATUS = { pending: '处理中', done: '已分类', failed: '失败', skipped: '未推送',
-  sent: '发送成功', partial: '部分发送成功', 'dry-run': '演练，未实际发送' };
+// 判定侧与推送侧的状态各有读法：判定 skipped = 整轮未执行（如只有 LLM 档且在冷却），
+// 推送 skipped = 未推送——两者不是同一件事，不能共用一份文案。
+const ANALYSIS_STATUS = { pending: '处理中', done: '已分类', failed: '失败', skipped: '未执行' };
+const PUSH_STATUS = { pending: '处理中', skipped: '未推送',
+  sent: '发送成功', partial: '部分发送成功', failed: '失败', 'dry-run': '演练，未实际发送' };
 const SOURCE = { llm: 'LLM', rule: '确定性条件', decision: '决策模型' };
 const CHANNEL = { llm: 'LLM', decision: '决策' };
 /** 主分类的「其他」项：组内都不像，落库 category_id = 0 */
@@ -125,16 +128,16 @@ function render(data) {
       (attempt.error ? '<p>' + esc(attempt.error) + '</p>' : '');
   })) : '';
   return '<div class="audit-section"><h3>分类结论</h3><p class="hint">' +
-    (analysis ? esc(STATUS[analysis.status]) + ' · 用时 ' + (analysis.durationMs ?? 0) + 'ms · 视觉输入 ' + (analysis.imageCount ?? 0) + ' 张'
+    (analysis ? esc(ANALYSIS_STATUS[analysis.status]) + ' · 用时 ' + (analysis.durationMs ?? 0) + 'ms · 视觉输入 ' + (analysis.imageCount ?? 0) + ' 张'
       : '未记录分析过程；旧分类归档只保留部分结论') + '</p>' +
-    (analysis && analysis.fallbackReason ? '<p class="audit-warning">回退确定性条件：' + esc(analysis.fallbackReason) + '</p>' : '') +
+    (analysis && analysis.fallbackReason ? '<p class="audit-warning">LLM 档不可用：' + esc(analysis.fallbackReason) + '</p>' : '') +
     (analysis && analysis.error ? '<p class="audit-warning">' + esc(analysis.error) + '</p>' : '') +
     (analysis && analysis.skippedImages && analysis.skippedImages.length ? '<p class="audit-warning">未送模型的图片：' +
       esc(analysis.skippedImages.map(function (s) { return s.ref + '（' + s.reason + '）'; }).join('、')) + '</p>' : '') +
     primaryHtml + classifications +
     (analysis && analysis.attempts && analysis.attempts.length ? '<details><summary>模型调用记录</summary>' + attempts + '</details>' : '') + '</div>' +
     '<div class="audit-section"><h3>推送结果</h3>' +
-    (push ? '<p><strong>' + esc(STATUS[push.status]) + '</strong> · ' + esc(push.reason) + '</p>' +
+    (push ? '<p><strong>' + esc(PUSH_STATUS[push.status]) + '</strong> · ' + esc(push.reason) + '</p>' +
       (push.title ? '<p>推送词：' + esc(push.title) + '</p>' : '') +
       (push.imageWarning ? '<p class="audit-warning">' + esc(push.imageWarning) + '</p>' : '') +
       (push.translationWarning ? '<p class="audit-warning">译文：' + esc(push.translationWarning) + '</p>' : '') +

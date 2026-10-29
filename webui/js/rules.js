@@ -326,7 +326,7 @@ ACTIONS['rule-llm-toggle'] = function (el) { el.classList.toggle('on'); };
 
 // ---- 二级 sheet：生效主播挑选（关注列表同款 pick-card 头像卡网格，无 UID）----
 // 整卡可点切换勾选（选中 = 浅蓝底 + 蓝色内嵌描边）；搜索只按昵称过滤（隐藏不重渲染、保留勾选态）；
-// 挑选即生效到内存草稿并实时同步一级表单的圆柱卡，点「完成」（或 × / 遮罩）关窗，保存规则时才落库。
+// 挑选即生效到内存草稿并实时同步一级表单的圆柱卡，点「完成」（或 ×）关窗，保存规则时才落库。
 // 全部不选 = 对全部主播生效（含未来新增）
 function pickCountText() {
   return ruleSheet && ruleSheet.scope.size ? `已选 ${ruleSheet.scope.size} ${ruleSheet.kind === 'live' ? '人' : '个账号'}` : '未选 · 生效全部' + scopeNoun();

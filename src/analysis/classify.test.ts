@@ -15,6 +15,7 @@ import type { DecisionRouter } from './decision-router.js';
 import type { DecisionProviderConfig } from '../config/schema.js';
 import type { SystemOneRequest, SystemOneResponse } from './decision-providers.js';
 import type { ModelAttempt } from '../core/content-audit.js';
+import { LiveClassificationSkippedError } from './types.js';
 import type { AnalysisContext, Classification } from './types.js';
 
 // ---- 公共构造 ----
@@ -1183,3 +1184,199 @@ const _typecheck: Classification = {
   categoryId: 0, name: '', source: 'rule', confidence: null, evidence: '', pass: false, effective: false,
 };
 void _typecheck;
+
+// ---- 判定档选择（直播分类时机：每时机独立选 rule / decision / llm）----
+
+const LIVE_SUBJECT = 'r1:1785310737';
+
+test('判定档选择：rule 关闭时确定性既不参判也不回退（无口径分类本轮无生效结论）', async (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', analyze: true });
+  const catId = db.upsertCategory(category({ name: '歌回', keywords: ['歌'] }));
+  const { router, calls } = fakeRouter(async (_req, parse) =>
+    parse!({ results: [{ id: catId, match: true, evidence: '在唱' }] }));
+  const clf = new RulesClassifier(db, { getRouter: () => router, llmEnabled: () => true });
+
+  // 缺省（三档全开）：无判定口径的分类由确定性定案
+  assert.deepEqual((await clf.classify(ctx())).map((c) => c.categoryId), [catId]);
+  assert.equal(db.listVerdicts('live', LIVE_SUBJECT)[0]!.source, 'rule');
+
+  // rule 关闭：确定性不参与，也不被偷偷判成确定性结果
+  const off = await clf.classify({ ...ctx(), judge: { rule: false, decision: false, llm: true } });
+  assert.deepEqual(off, [], '无口径分类本轮没有生效结论');
+  const rows = db.listVerdicts('live', LIVE_SUBJECT);
+  assert.equal(rows.filter((v) => v.effective).length, 0, '当前判定按最新一轮替换为空');
+  assert.equal(rows.filter((v) => v.source === 'rule').length, 0, '连确定性历史行都不落');
+  assert.equal(calls.length, 0, '没有判定口径的分类连模型档都不进');
+});
+
+test('判定档选择：rule 关闭时模型失败不回退确定性，模型成功才定案', async (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', analyze: true });
+  const catId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌', keywords: ['歌'] }));
+  const sel = { rule: false, decision: false, llm: true };
+
+  const failing = new RulesClassifier(db, {
+    getRouter: () => fakeRouter(async () => { throw new Error('模型挂了'); }).router,
+    llmEnabled: () => true,
+  });
+  assert.deepEqual((await failing.classify({ ...ctx(), judge: sel })).map((c) => c.categoryId), []);
+  assert.equal(db.listVerdicts('live', LIVE_SUBJECT).filter((v) => v.effective).length, 0,
+    '模型不可用且 rule 关闭 = 本轮无生效结论（不回退确定性）');
+
+  const ok = new RulesClassifier(db, {
+    getRouter: () => fakeRouter(async (_req, parse) =>
+      parse!({ results: [{ id: catId, match: true, evidence: '在唱歌' }] })).router,
+    llmEnabled: () => true,
+  });
+  assert.deepEqual((await ok.classify({ ...ctx(), judge: sel })).map((c) => [c.categoryId, c.source]), [[catId, 'llm']]);
+});
+
+test('判定档选择：decision / llm 关闭时不进对应档（只有所选档能定案）', async (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', analyze: true });
+  const catId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌' }));
+  const { router: llmRouter, calls } = fakeRouter(async (_req, parse) =>
+    parse!({ results: [{ id: catId, match: true, evidence: '在唱歌' }] }));
+  const decision = fakeDecisionRouter({
+    respond: (req) => decisionAnswers(req, { noul: { [`c${catId}`]: 0.9 } }),
+  });
+  const clf = new RulesClassifier(db, {
+    getRouter: () => llmRouter,
+    llmEnabled: () => true,
+    getDecisionRouter: () => decision.router,
+    decisionEnabled: () => true,
+  });
+
+  // 只有决策档参与：LLM 不调，决策定案
+  await clf.classify({ ...ctx(), judge: { rule: false, decision: true, llm: false } });
+  assert.equal(calls.length, 0, 'llm 关闭不进 LLM 档');
+  assert.equal(decision.requests.length, 1, 'decision 开启照常问决策模型');
+  assert.equal(db.listVerdicts('live', LIVE_SUBJECT)[0]!.source, 'decision');
+
+  // 只有 LLM 档参与：决策档不进
+  await clf.classify({ ...ctx(), judge: { rule: false, decision: false, llm: true } });
+  assert.equal(decision.requests.length, 1, 'decision 关闭不再问决策模型');
+  assert.equal(calls.length, 1, 'llm 开启照常问 LLM');
+  assert.equal(db.listVerdicts('live', LIVE_SUBJECT)[0]!.source, 'llm');
+});
+
+test('判定档选择进审计：stageNotes 写明哪一档被本轮时机关掉', async (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', analyze: true });
+  db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌' }));
+  const { router } = fakeRouter(async () => { throw new Error('不该被调用'); });
+  await new RulesClassifier(db, { getRouter: () => router, llmEnabled: () => true })
+    .classify({ ...ctx(), judge: { rule: true, decision: false, llm: false } });
+  const audit = db.getContentAudit('live', LIVE_SUBJECT)!.analysis!;
+  assert.deepEqual(audit.judgeSelection, { rule: true, decision: false, llm: false });
+  assert.deepEqual((audit.stageNotes ?? []).map((n) => n.stage), ['decision', 'llm']);
+});
+
+// ---- LLM 冷却（按 roomId 独立、跨触发跨场次；只在真的调用时记）----
+
+test('LLM 冷却：同 room 冷却期内跳过 LLM（其余档照常），不同 room 独立', async (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', analyze: true });
+  const catId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌', keywords: ['歌'] }));
+  const { router, calls } = fakeRouter(async (_req, parse) =>
+    parse!({ results: [{ id: catId, match: true, evidence: '在唱' }] }));
+  const clf = new RulesClassifier(db, { getRouter: () => router, llmEnabled: () => true, llmCooldownMin: () => 5 });
+  const sel = { rule: true, decision: false, llm: true };
+
+  const first = await clf.classify({ ...ctx(), judge: sel });
+  assert.equal(calls.length, 1, '首次判定真的调了 LLM');
+  assert.equal(first[0]!.source, 'llm');
+
+  await clf.classify({ ...ctx('title_change'), judge: sel });
+  assert.equal(calls.length, 1, '冷却期内同一 room 不再调 LLM');
+  assert.equal(
+    db.listVerdicts('live', LIVE_SUBJECT).filter((v) => v.effective)[0]!.source, 'rule',
+    '有规则档时只跳过 LLM，规则照常定案',
+  );
+
+  await clf.classify({ ...ctx('live_start', { roomId: 'r2' }), judge: sel });
+  assert.equal(calls.length, 2, '另一个 room 的冷却独立');
+});
+
+test('LLM 冷却：只有 LLM 档且冷却中 = 整轮跳过，当前判定保持不变', async (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', analyze: true });
+  const catId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌', primary: true }));
+  const { router, calls } = fakeRouter(async (_req, parse) =>
+    parse!({ results: [{ id: catId, match: true, evidence: '在唱' }], primary: { id: catId, evidence: '在唱' } }));
+  const clf = new RulesClassifier(db, { getRouter: () => router, llmEnabled: () => true, llmCooldownMin: () => 5 });
+  const sel = { rule: false, decision: false, llm: true };
+
+  await clf.classify({ ...ctx(), judge: sel });
+  assert.equal(calls.length, 1);
+  const before = db.listVerdicts('live', LIVE_SUBJECT).map((v) => [v.categoryId, v.source, v.pass, v.effective]);
+  assert.deepEqual(before, [[catId, 'llm', true, true]], '首轮由 LLM 定案');
+
+  // 冷却中：整轮跳过（抛专用错误），不写任何判定，也不消耗冷却
+  await assert.rejects(
+    () => clf.classify({ ...ctx('title_change'), judge: sel }),
+    (error: unknown) => error instanceof LiveClassificationSkippedError
+      && /LLM 冷却中/.test((error as Error).message),
+    '只能由 LLM 档定案时，冷却中整轮跳过而不是产出空结果',
+  );
+  assert.equal(calls.length, 1, '冷却中不重复调用');
+  assert.deepEqual(
+    db.listVerdicts('live', LIVE_SUBJECT).map((v) => [v.categoryId, v.source, v.pass, v.effective]), before,
+    '当前判定原样保留（不被替换为空）',
+  );
+  assert.equal(db.listPrimaryVerdicts('live', LIVE_SUBJECT).filter((p) => p.effective).length, 1, '主分类也保留');
+  const audit = db.getContentAudit('live', LIVE_SUBJECT)!.analysis!;
+  assert.equal(audit.status, 'skipped', '审计记未执行，不停在 pending、也不当失败');
+  assert.match((audit.stageNotes ?? []).map((n) => n.reason).join(' '), /LLM 冷却中/);
+});
+
+test('LLM 冷却：冷却中但本轮没有 LLM 候选时按正常空结果处理（不跳过）', async (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', analyze: true });
+  const { router, calls } = fakeRouter(async (_req, parse) => parse!({ results: [] }));
+  const clf = new RulesClassifier(db, { getRouter: () => router, llmEnabled: () => true, llmCooldownMin: () => 60 });
+  const sel = { rule: false, decision: false, llm: true };
+  // 第 1 轮：有口径分类 → 真的调 LLM，起冷却
+  const catId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌' }));
+  await clf.classify({ ...ctx(), judge: sel });
+  assert.equal(calls.length, 1);
+  // 第 2 轮：把唯一的模型分类停用 → 冷却中但本轮没有候选 → 走正常判定（空结果，不抛）
+  db.upsertCategory({ id: catId, name: '歌回', llmPrompt: '在唱歌', enabled: false });
+  assert.deepEqual(await clf.classify({ ...ctx('title_change'), judge: sel }), []);
+  assert.equal(calls.length, 1);
+  assert.equal(db.getContentAudit('live', LIVE_SUBJECT)!.analysis!.status, 'done', '正常完成（空结果），不是跳过');
+});
+
+test('LLM 冷却不被「根本没有 LLM 候选」的判定消耗（只在真的调用时记）', async (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', analyze: true });
+  let answer: Array<{ id: number; match: boolean; evidence: string }> = [];
+  const { router, calls } = fakeRouter(async (_req, parse) => parse!({ results: answer }));
+  const clf = new RulesClassifier(db, { getRouter: () => router, llmEnabled: () => true, llmCooldownMin: () => 60 });
+  const sel = { rule: false, decision: false, llm: true };
+
+  // 还没有任何启用分类：没有可问的候选，不该起冷却
+  await clf.classify({ ...ctx(), judge: sel });
+  assert.equal(calls.length, 0, '无候选不进 LLM');
+
+  // 之后加了有口径的分类：冷却没被上一轮空跑占用，同一个实例照常可调
+  const catId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌' }));
+  answer = [{ id: catId, match: true, evidence: '在唱' }];
+  const out = await clf.classify({ ...ctx(), judge: sel });
+  assert.equal(calls.length, 1, '有候选 → LLM 照常调用');
+  assert.equal(out[0]!.source, 'llm');
+});
+
+test('LLM 冷却为 0 = 不设冷却（每轮都可调）', async (t) => {
+  const db = memDb(t);
+  db.upsertStreamer({ uid: '1', analyze: true });
+  const catId = db.upsertCategory(category({ name: '歌回', llmPrompt: '在唱歌' }));
+  const { router, calls } = fakeRouter(async (_req, parse) =>
+    parse!({ results: [{ id: catId, match: true, evidence: '在唱' }] }));
+  const clf = new RulesClassifier(db, { getRouter: () => router, llmEnabled: () => true, llmCooldownMin: () => 0 });
+  const sel = { rule: false, decision: false, llm: true };
+  await clf.classify({ ...ctx(), judge: sel });
+  await clf.classify({ ...ctx('title_change'), judge: sel });
+  assert.equal(calls.length, 2);
+});

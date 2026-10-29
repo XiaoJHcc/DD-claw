@@ -1301,3 +1301,68 @@ test('供应商 ID 迁移：保留 key 与 Agent 选择，不改写 baseURL，�
   assert.equal(db.getSetting(`llm_key:${llm[0]!.id}`), 'sk-llm');
   db.close();
 });
+
+// ---- 多次判定的当前结论替换与历史（直播分类时机）----
+
+test('replaceSubjectVerdicts：同一主体多次判定只留最新一轮（含主分类），不做 OR IGNORE 累积', (t) => {
+  const db = memDb(t);
+  const subject = 'r1:1785310737';
+  const first = { subjectType: 'live' as const, subjectId: subject, uid: '1', ruleId: 0,
+    categoryId: 1, categoryName: '歌回', source: 'rule' as const, confidence: null, evidence: '关键词', effective: true };
+  db.replaceSubjectVerdicts('live', subject, [first], [{
+    subjectType: 'live', subjectId: subject, uid: '1', categoryId: 1, name: '歌回', source: 'rule',
+    distribution: null, evidence: '组内首个', effective: true,
+  }]);
+  assert.equal(db.listVerdicts('live', subject).length, 1);
+
+  // 第二轮：分类换成游戏，主分类变成「其他」
+  db.replaceSubjectVerdicts('live', subject, [
+    { ...first, categoryId: 1, categoryName: '歌回', pass: false },
+    { ...first, categoryId: 2, categoryName: '游戏', pass: true },
+  ], [{
+    subjectType: 'live', subjectId: subject, uid: '1', categoryId: 0, name: '其他', source: 'rule',
+    distribution: null, evidence: '组内没有生效且属于的分类', effective: true,
+  }]);
+
+  const rows = db.listVerdicts('live', subject);
+  assert.deepEqual(rows.map((v) => [v.categoryName, v.pass, v.effective]),
+    [['歌回', false, true], ['游戏', true, true]], '旧行被清掉，只剩最新一轮');
+  const primaries = db.listPrimaryVerdicts('live', subject).filter((p) => p.effective);
+  assert.deepEqual(primaries.map((p) => [p.categoryId, p.name]), [[0, '其他']], '主分类同样被替换');
+
+  // 第三轮：空结果 = 该主体当前没有生效结论
+  db.replaceSubjectVerdicts('live', subject, [], []);
+  assert.deepEqual(db.listVerdicts('live', subject), []);
+  assert.deepEqual(db.listPrimaryVerdicts('live', subject), []);
+});
+
+test('live_classification_runs：按 ts 升序读回，触发器种类与结论 JSON 保真', (t) => {
+  const db = memDb(t);
+  const verdict = { categoryId: 1, categoryName: '歌回', source: 'rule' as const, confidence: null, evidence: '关键词' };
+  db.insertLiveClassificationRun({
+    roomId: 'r1', liveTime: 1785310737, triggerKind: 'start', ts: 1_785_310_737,
+    verdicts: [verdict], primary: { categoryId: 1, categoryName: '歌回', source: 'rule' },
+  });
+  db.insertLiveClassificationRun({
+    roomId: 'r1', liveTime: 1785310737, triggerKind: 'titleChange', ts: 1_785_311_000,
+    verdicts: [], primary: null,
+  });
+  db.insertLiveClassificationRun({
+    roomId: 'r2', liveTime: 1, triggerKind: 'periodic', ts: 1, verdicts: [], primary: null,
+  });
+
+  const runs = db.listLiveClassificationRuns('r1', 1785310737);
+  assert.deepEqual(runs.map((r) => r.triggerKind), ['start', 'titleChange']);
+  assert.deepEqual(runs[0]!.verdicts, [verdict]);
+  assert.deepEqual(runs[0]!.primary, { categoryId: 1, categoryName: '歌回', source: 'rule' });
+  assert.deepEqual(runs[1]!.verdicts, [], '空结果如实保留');
+  assert.equal(runs[1]!.primary, null);
+  assert.deepEqual(db.listLiveClassificationRuns('r1', 999), [], '按场次隔离');
+});
+
+/** 本段用的内存库（函数声明提升，放在段末不影响上面的用例） */
+function memDb(t: import('node:test').TestContext): Db {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+  return db;
+}

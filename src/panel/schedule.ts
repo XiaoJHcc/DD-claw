@@ -49,6 +49,7 @@ export function scheduleInfo(db: Db, from: string | null, to: string | null): un
       roomId: e.roomId, liveTime: e.liveTime, uid: e.uid, name: e.name, face: e.face,
       startTs: e.startTs, endTs: e.endTs, keyframe: e.keyframe, cover: e.cover,
       segments: e.segments, verdicts: e.verdicts, primary: e.primary,
+      classificationRuns: e.classificationRuns,
     });
     byDay.set(k, list);
   }

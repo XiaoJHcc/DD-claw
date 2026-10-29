@@ -284,6 +284,18 @@ CREATE TABLE IF NOT EXISTS live_segments (
   created_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_live_segments_room ON live_segments (room_id, live_time);
+CREATE TABLE IF NOT EXISTS live_classification_runs (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id      TEXT    NOT NULL,
+  live_time    INTEGER NOT NULL,
+  trigger_kind TEXT    NOT NULL,
+  ts           INTEGER NOT NULL,
+  verdicts     TEXT    NOT NULL DEFAULT '[]',
+  primary_verdict TEXT,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_live_classification_runs_session
+  ON live_classification_runs (room_id, live_time, ts);
 CREATE TABLE IF NOT EXISTS snapshots (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id    TEXT    NOT NULL,
@@ -366,15 +378,49 @@ export interface TimelineEntry {
   keyframe: string | null;
   cover: string | null;
   segments: TimelineSegment[];
-  /** 生效且属于的分类结论（判否与未生效行不进时间线） */
+  /** 最新一轮的生效且属于的分类结论（判否与未生效行不进时间线） */
   verdicts: Array<{
     categoryName: string;
     source: 'llm' | 'rule' | 'decision';
     confidence: number | null;
     evidence: string;
   }>;
-  /** 生效主分类（「其他」或无生效行 = null） */
+  /** 最新一轮的生效主分类（「其他」或无生效行 = null） */
   primary: { categoryName: string; source: 'llm' | 'rule' | 'decision' } | null;
+  /** 历次分类判定（按 ts 升序，含开播初判）；空数组 = 该场还没有历史记录，
+   *  前端按旧口径回退 verdicts / primary */
+  classificationRuns: LiveClassificationRun[];
+}
+
+/** 直播分类时机的历史口径：与 runtime-config 的 LiveClassifyTrigger 同一组值 */
+export type LiveClassifyRunTrigger = 'start' | 'startDelay' | 'periodic' | 'titleChange' | 'titleDelay';
+
+/** 一轮判定的历史结论：只收生效且属于的分类（空数组 = 从该时刻起未分类） */
+export interface LiveClassificationRunVerdict {
+  categoryId: number;
+  categoryName: string;
+  source: 'llm' | 'rule' | 'decision';
+  confidence: number | null;
+  evidence: string;
+}
+
+/** 一轮判定（一次分类时机到点后的完整结果） */
+export interface LiveClassificationRun {
+  triggerKind: LiveClassifyRunTrigger;
+  /** 判定完成时间（刻意不用触发时间：否则时间表会在结论出现前就展示它） */
+  ts: number;
+  verdicts: LiveClassificationRunVerdict[];
+  /** 生效主分类；categoryId=0 = 「其他」 */
+  primary: { categoryId: number; categoryName: string; source: 'llm' | 'rule' | 'decision' } | null;
+}
+
+interface LiveClassificationRunRow {
+  room_id: string;
+  live_time: number;
+  trigger_kind: LiveClassifyRunTrigger;
+  ts: number;
+  verdicts: string;
+  primary_verdict: string | null;
 }
 
 /**
@@ -1224,6 +1270,16 @@ export class Db {
         subject_id: string; category_id: number; category_name: string;
         source: 'llm' | 'rule' | 'decision';
       }>;
+    // 历次分类判定（多次时机的留痕）：一次 join 取全窗口，JS 按场次归并
+    const runRows = this.db
+      .prepare(
+        `SELECT r.room_id, r.live_time, r.trigger_kind, r.ts, r.verdicts, r.primary_verdict
+         FROM live_classification_runs r
+         JOIN live_sessions ls ON ls.room_id = r.room_id AND ls.live_time = r.live_time
+         WHERE ls.first_seen >= ? AND ls.first_seen < ?
+         ORDER BY r.ts, r.id`,
+      )
+      .all(fromTs, toTs) as LiveClassificationRunRow[];
     const streamerByUid = new Map(this.listStreamers().map((s) => [s.uid, s]));
 
     const key = (roomId: string, liveTime: number) => `${roomId}:${liveTime}`;
@@ -1251,6 +1307,18 @@ export class Db {
     for (const p of primaryRows) {
       if (p.category_id === 0) continue; // 「其他」= 没有组内主分类，前端不展示
       primaryBySession.set(p.subject_id, { categoryName: p.category_name, source: p.source });
+    }
+    const runsBySession = new Map<string, LiveClassificationRun[]>();
+    for (const r of runRows) {
+      const k = key(r.room_id, r.live_time);
+      const list = runsBySession.get(k) ?? [];
+      list.push({
+        triggerKind: r.trigger_kind,
+        ts: r.ts,
+        verdicts: JSON.parse(r.verdicts) as LiveClassificationRunVerdict[],
+        primary: r.primary_verdict ? JSON.parse(r.primary_verdict) as LiveClassificationRun['primary'] : null,
+      });
+      runsBySession.set(k, list);
     }
 
     return sessions.map((s) => {
@@ -1280,6 +1348,7 @@ export class Db {
         segments,
         verdicts: verdictsBySession.get(key(s.room_id, s.live_time)) ?? [],
         primary: primaryBySession.get(key(s.room_id, s.live_time)) ?? null,
+        classificationRuns: runsBySession.get(key(s.room_id, s.live_time)) ?? [],
       };
     });
   }
@@ -1686,6 +1755,64 @@ export class Db {
       .prepare('SELECT * FROM primary_verdicts WHERE subject_type = ? AND subject_id = ? ORDER BY id')
       .all(subjectType, subjectId) as PrimaryVerdictRow[];
     return rows.map(rowToPrimaryVerdict);
+  }
+
+  /**
+   * 一轮判定替换该主体的当前判定（事务内先删后插）。
+   * 同一主体会被多次判定（直播的开播 / 延迟 / 定时 / 变更时机），当前结论必须跟着最新一轮走，
+   * 所以不能用 INSERT OR IGNORE 留在第一次；历史另存 `live_classification_runs`。
+   */
+  replaceSubjectVerdicts(
+    subjectType: VerdictSubjectType,
+    subjectId: string,
+    verdicts: NewVerdict[],
+    primaries: NewPrimaryVerdict[],
+  ): void {
+    const delVerdicts = this.db.prepare('DELETE FROM verdicts WHERE subject_type = ? AND subject_id = ?');
+    const delPrimaries = this.db.prepare('DELETE FROM primary_verdicts WHERE subject_type = ? AND subject_id = ?');
+    const tx = this.db.transaction(() => {
+      delVerdicts.run(subjectType, subjectId);
+      delPrimaries.run(subjectType, subjectId);
+      for (const v of verdicts) this.insertVerdict(v);
+      for (const p of primaries) this.insertPrimaryVerdict(p);
+    });
+    tx();
+  }
+
+  // ---- live_classification_runs：直播多时机判定的历史留痕（只增不改，不参与去重）----
+
+  /** 记一轮判定结果：verdicts = 本轮生效且属于的分类（可为空 = 从该时刻起未分类） */
+  insertLiveClassificationRun(p: {
+    roomId: string; liveTime: number; triggerKind: LiveClassifyRunTrigger;
+    ts: number; verdicts: LiveClassificationRunVerdict[];
+    primary: LiveClassificationRun['primary'];
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO live_classification_runs
+           (room_id, live_time, trigger_kind, ts, verdicts, primary_verdict, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(p.roomId, p.liveTime, p.triggerKind, p.ts, JSON.stringify(p.verdicts),
+        p.primary === null ? null : JSON.stringify(p.primary), now());
+  }
+
+  /** 一场直播的历次判定（按 ts 升序；旧场次没有历史 = 空数组） */
+  listLiveClassificationRuns(roomId: string, liveTime: number): LiveClassificationRun[] {
+    const rows = this.db
+      .prepare(
+        `SELECT room_id, live_time, trigger_kind, ts, verdicts, primary_verdict
+         FROM live_classification_runs
+         WHERE room_id = ? AND live_time = ?
+         ORDER BY ts, id`,
+      )
+      .all(roomId, liveTime) as LiveClassificationRunRow[];
+    return rows.map((r) => ({
+      triggerKind: r.trigger_kind,
+      ts: r.ts,
+      verdicts: JSON.parse(r.verdicts) as LiveClassificationRunVerdict[],
+      primary: r.primary_verdict ? JSON.parse(r.primary_verdict) as LiveClassificationRun['primary'] : null,
+    }));
   }
 
   recordContentAudit(subjectType: VerdictSubjectType, subjectId: string, section: 'analysis', value: AnalysisAudit): void;

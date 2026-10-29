@@ -302,9 +302,9 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .cond-toggle{flex:none;width:var(--ctl-h);height:var(--ctl-h);padding:0;border:none;border-radius:var(--r-md);
   background:var(--fill);color:var(--text);cursor:pointer;font:inherit;font-size:var(--fs-sm);transition:background-color .15s ease}
 .cond-toggle:hover{background:var(--hover)}
-.two{display:flex;gap:var(--sp-3)}
+.two,.three{display:flex;gap:var(--sp-3)}
 .cat-name-row{align-items:flex-end}
-.two > .field{flex:1;min-width:0}
+.two > .field,.three > .field{flex:1;min-width:0}
 .cat-judge-mode{margin:var(--sp-4) 0 var(--sp-3)}
 #cg-judge-editor > .field{margin:0 0 var(--sp-3)}
 .judge-precise{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-3);margin-bottom:var(--sp-4)}
@@ -337,6 +337,17 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 @media (max-width:520px){.judge-precise{grid-template-columns:1fr;gap:var(--sp-4)}}
 .adv-group{margin:var(--sp-3) 0 var(--sp-1);font-size:var(--fs-sm);font-weight:600}
 .adv-group:first-child{margin-top:var(--sp-1)}
+
+/* ---- 分类时机（直播分类卡的 sheet）：五个时机 × 规则/决策/LLM 三列勾选圆圈 ---- */
+.ct-grid{margin:var(--sp-2) 0}
+.ct-row{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h)}
+.ct-row .ct-name{flex:1;min-width:0;font-size:var(--fs-base)}
+.ct-row .ct-num{color:var(--blue)}
+.ct-row .ct-cell{flex:none;width:56px;display:flex;justify-content:center}
+/* 时机行之间极浅分隔：表头与末行外缘不加线 */
+.ct-row:not(.ct-head):not(:last-child){border-bottom:1px solid var(--divider)}
+.ct-row.ct-head{min-height:auto;padding-bottom:var(--sp-1)}
+.ct-row.ct-head .ct-cell{font-size:var(--fs-sm);color:var(--text-2)}
 
 /* 多选行（sheet 内的渠道勾选等）：整行极浅灰 --bg-soft 为常态（背景标准，同关注列表卡），hover 同系加深 */
 .check-row{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);

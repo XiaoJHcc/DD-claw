@@ -1,5 +1,6 @@
 // 面板前端 · 卡片「分类规则」：分类列表（拖拽把手/启停勾/名称/条件摘要标签/编辑/删除）
-// + 底部新增按钮。分类 = 简单描述或精确原子条件 + 确定性条件组 + 是否进主分类组。
+// + 底部新增按钮与「分类时机」入口（只有直播分类卡有：五个时机 × 三档判定 + 时间口径）。
+// 分类 = 简单描述或精确原子条件 + 确定性条件组 + 是否进主分类组。
 // 新增/编辑走一级 sheet，保存报错内联在按钮行；删除分类会级联停用引用它的推送规则（先 confirm 告知）。
 // 表单草稿 → 提交体由 catSheetBody() 统一构造（保存与测试共用）；弹窗底部的测试区见 category-test.js。
 import { api, toast, ACTIONS, CHANGES, INPUTS, esc, gripHtml, checkDotHtml, checkRowHtml, iconBtn, field, makeSortable, mergeVisibleOrder, openSheet, closeSheet, sheetCleanups, splitCsv, dropdownHtml, onTableRefresh, segnavHtml, layoutSegnav, segnavSelect } from './core.js';
@@ -16,7 +17,7 @@ function catById(id) {
 }
 
 function catSummaryTags(c) {
-  let tags = '';
+  let tags = c.primary ? '<span class="tag tag-amber">主分类</span>' : '';
   if (c.judgeMode === 'precise') tags += '<span class="tag tag-purple">精确</span>';
   else if (c.llmPrompt) tags += '<span class="tag tag-purple">模型</span>';
   if (c.keywords.length) tags += `<span class="tag tag-blue">关键词 ${c.keywords.length}</span>`;
@@ -27,7 +28,6 @@ function catSummaryTags(c) {
     if (c.requireQuote) tags += '<span class="tag tag-mint">须引用</span>';
     if (c.requireMedia) tags += '<span class="tag tag-mint">须带图</span>';
   }
-  if (c.primary) tags += '<span class="tag tag-amber">主分类</span>';
   return tags;
 }
 
@@ -170,7 +170,7 @@ function judgeConditionRowHtml(condition) {
         ` data-action="toggle-judge-condition" data-id="${esc(condition.id)}" aria-pressed="${condition.enabled ? 'true' : 'false'}"` +
         ` title="${condition.enabled ? '禁用' : '启用'}${label}" aria-label="${condition.enabled ? '禁用' : '启用'}${label}">${icon(isPass ? 'check' : 'xmark')}</button>` +
       `<input class="inp judge-condition-input" data-input="judge-condition-text" data-id="${esc(condition.id)}"` +
-        ` placeholder="输入${label}" value="${esc(condition.text)}" aria-label="${label}">` +
+        ` value="${esc(condition.text)}" aria-label="${label}">` +
     '</div>' +
     `<button type="button" class="icon-btn judge-condition-delete" data-action="del-judge-condition" data-id="${esc(condition.id)}"` +
       ` title="删除${label}" aria-label="删除${label}">${icon('trash')}</button>` +
@@ -187,7 +187,7 @@ function judgeConditionColumnHtml(direction, label) {
 
 function judgeEditorHtml() {
   if (catDraft.judgeMode === 'simple') {
-    return field('判定描述', '<textarea class="inp" id="cg-prompt" rows="4" placeholder="留空仅使用确定性条件">' +
+    return field('判定描述', '<textarea class="inp" id="cg-prompt" rows="4" placeholder="留空则不使用模型判定">' +
       esc(catDraft.llmPrompt) + '</textarea>');
   }
   return '<div class="judge-precise" id="cg-judge-precise">' +
@@ -258,7 +258,7 @@ function openCategorySheet(id, kind) {
   resetCatTest(catDraft.kind, catSheetBody);
   openSheet(c ? '编辑分类' : '新增分类',
     '<div class="two cat-name-row">' +
-      field('名称', `<input class="inp" id="cg-name" placeholder="如：歌回；留空自动命名" value="` +
+      field('名称', `<input class="inp" id="cg-name" value="` +
         (c ? esc(c.name) : '') + '">') +
       '<div class="field">' + checkRowHtml('id="cg-primary"', !!(c && c.primary), '主分类') + '</div>' +
     '</div>' +
@@ -281,11 +281,11 @@ function condAreaHtml() {
   const d = catDraft;
   const toggle = `<button class="cond-toggle" id="cg-cond" data-action="toggle-cond" data-mode="${d.condMode}"` +
     ' title="各组条件的关系，点击切换 且/或">' + (d.condMode === 'or' ? '或' : '且') + '</button>';
-  const kw = `<input class="inp" id="cg-kw" placeholder="关键词，中英文逗号分隔" value="${esc(d.keywords)}">`;
+  const kw = `<input class="inp" id="cg-kw" placeholder="关键词，逗号分隔" value="${esc(d.keywords)}">`;
   if (d.kind === 'live') {
     return '<label class="field-label">确定性条件</label><div class="cond-row">' +
       kw + toggle +
-      `<input class="inp" id="cg-area" placeholder="分区，中英文逗号分隔" value="${esc(d.areas)}">` +
+      `<input class="inp" id="cg-area" placeholder="分区，逗号分隔" value="${esc(d.areas)}">` +
       '</div>';
   }
   const selected = d.postTypes.slice();
@@ -335,6 +335,108 @@ ACTIONS['save-category'] = function (el) {
     },
   });
 });
+
+// ---- 分类时机（只有直播分类卡带这个入口）：五个时机 × 三档判定 + 三条时间口径 ----
+// 事实来源是 settings 的运行时参数（/api/advanced，NUM_SPECS / BOOL_SPECS）；
+// 三档全关 = 该时机不判定。保存后热生效，无需重启。
+var CLASSIFY_TIMINGS = ['start', 'startDelay', 'titleChange', 'titleDelay', 'periodic'];
+var CLASSIFY_STAGES = [
+  { key: 'rule', label: '规则' },
+  { key: 'decision', label: '决策' },
+  { key: 'llm', label: 'LLM' },
+];
+// 延迟 / 定时时机的行名跟着分钟输入实时变：标签与输入框是同一份口径，不另存一份文案
+var ctTimes = { delay: 5, periodic: 20 };
+
+function timingLabelHtml(timing, delay, periodic) {
+  const num = function (n) { return '<span class="ct-num">' + esc(n) + '</span>'; };
+  if (timing === 'startDelay') return '开播 ' + num(delay) + ' 分钟后';
+  if (timing === 'titleDelay') return '变更 ' + num(delay) + ' 分钟后';
+  if (timing === 'periodic') return '每直播 ' + num(periodic) + ' 分钟';
+  return timing === 'start' ? '开播时' : '标题/分区变更时';
+}
+
+function refreshTimingLabels() {
+  CLASSIFY_TIMINGS.forEach(function (timing) {
+    const el = document.getElementById('ct-name-' + timing);
+    if (el) el.innerHTML = timingLabelHtml(timing, ctTimes.delay, ctTimes.periodic);
+  });
+}
+
+/** 时机 + 档位 → RuntimeConfig 字段名（与 core/runtime-config.ts 的 BOOL_SPECS 同形） */
+function timingFieldName(timing, stage) {
+  return 'liveClassify' + timing.charAt(0).toUpperCase() + timing.slice(1) +
+    stage.charAt(0).toUpperCase() + stage.slice(1);
+}
+function timingInputId(timing, stage) { return 'ct-' + timing + '-' + stage; }
+
+function timingRowHtml(adv, timing) {
+  return '<div class="ct-row"><span class="ct-name" id="ct-name-' + timing + '">' +
+    timingLabelHtml(timing, adv.liveClassifyDelayMin, adv.liveClassifyPeriodicMin) + '</span>' +
+    CLASSIFY_STAGES.map(function (stage) {
+      return '<span class="ct-cell">' + checkDotHtml(
+        `id="${timingInputId(timing, stage.key)}"`,
+        adv[timingFieldName(timing, stage.key)] === true) + '</span>';
+    }).join('') + '</div>';
+}
+
+INPUTS['ct-time'] = function (el) {
+  const n = parseInt(el.value, 10);
+  if (!isNaN(n)) {
+    if (el.id === 'ct-delay') ctTimes.delay = n;
+    else ctTimes.periodic = n;
+  }
+  refreshTimingLabels();
+};
+
+ACTIONS['open-classify-timing'] = function () {
+  api('/api/advanced').then(function (j) {
+    ctTimes.delay = j.liveClassifyDelayMin;
+    ctTimes.periodic = j.liveClassifyPeriodicMin;
+    openSheet('分类时机',
+      '<div class="ct-grid"><div class="ct-row ct-head"><span class="ct-name"></span>' +
+        CLASSIFY_STAGES.map(function (stage) { return '<span class="ct-cell">' + esc(stage.label) + '</span>'; }).join('') +
+        '</div>' +
+        CLASSIFY_TIMINGS.map(function (timing) { return timingRowHtml(j, timing); }).join('') +
+      '</div>' +
+      '<div class="three">' +
+        field('LLM 冷却时间（分钟）', `<input class="inp" type="number" id="ct-cooldown" value="${esc(j.liveClassifyLlmCooldownMin)}">`) +
+        field('延迟时间（分钟）', `<input class="inp" type="number" id="ct-delay" data-input="ct-time" value="${esc(j.liveClassifyDelayMin)}">`) +
+        field('定时时间（分钟）', `<input class="inp" type="number" id="ct-periodic" data-input="ct-time" value="${esc(j.liveClassifyPeriodicMin)}">`) +
+      '</div>' +
+      '<div class="sheet-foot"><span id="ct-err" class="form-err"></span>' +
+      '<button class="btn" data-action="close-sheet" data-level="1">取消</button>' +
+      '<button class="btn btn-primary" data-action="save-classify-timing">保存</button></div>',
+      1);
+  }).catch(function (e) { toast(e.message, true); });
+};
+
+ACTIONS['save-classify-timing'] = function () {
+  const err = document.getElementById('ct-err');
+  if (err) err.textContent = '';
+  const cooldown = parseInt(document.getElementById('ct-cooldown').value, 10);
+  const delay = parseInt(document.getElementById('ct-delay').value, 10);
+  const periodic = parseInt(document.getElementById('ct-periodic').value, 10);
+  if (isNaN(cooldown) || isNaN(delay) || isNaN(periodic)) {
+    if (err) err.textContent = '时间请输入整数';
+    return;
+  }
+  const body = {
+    liveClassifyLlmCooldownMin: cooldown,
+    liveClassifyDelayMin: delay,
+    liveClassifyPeriodicMin: periodic,
+  };
+  CLASSIFY_TIMINGS.forEach(function (timing) {
+    CLASSIFY_STAGES.forEach(function (stage) {
+      const el = document.getElementById(timingInputId(timing, stage.key));
+      body[timingFieldName(timing, stage.key)] = !!(el && el.checked);
+    });
+  });
+  api('/api/advanced', 'PUT', body).then(function () {
+    closeSheet(1);
+    toast('已保存并生效');
+  }).catch(function (e) { if (err) err.textContent = e.message; });
+};
 
 loadCategories();
 onTableRefresh(['categories'], loadCategories);

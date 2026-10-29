@@ -3,7 +3,7 @@ import { api, toast, ACTIONS, CHANGES, INPUTS, esc, dropdownHtml } from './core.
 import { icon } from './icons.js';
 import { accountName, loadRuleCard } from './rules.js';
 
-const SOURCE_ORDER = ['rule', 'llm', 'decision'];
+const SOURCE_ORDER = ['rule', 'decision', 'llm'];
 const PLATFORM_OF = { twitter: 'twitter', weibo: 'weibo', bili: 'bili_dynamic' };
 const PLATFORM_LABEL = { twitter: 'X', weibo: '微博', bili: 'B站' };
 

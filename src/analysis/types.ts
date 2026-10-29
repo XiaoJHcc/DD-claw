@@ -30,22 +30,53 @@ export interface PostAnalysisInput {
 }
 
 /**
+ * 本轮判定选哪些判定档参与（直播分类时机用：开播 / 延迟 / 定时 / 变更各有自己的选择）。
+ * 关闭的档既不参与判定，也不作为其他档失败时的回退：只有所选档能定案。
+ */
+export interface JudgeSelection {
+  /** 确定性条件（source='rule'） */
+  rule: boolean;
+  /** 决策模型档 */
+  decision: boolean;
+  /** LLM 档 */
+  llm: boolean;
+}
+
+/** 缺省三档全开：图文帖与既有调用保持不变 */
+export const DEFAULT_JUDGE_SELECTION: JudgeSelection = { rule: true, decision: true, llm: true };
+
+/**
+ * 整轮判定被跳过（既不是失败，也不是「结果为空」）：例如只启用了 LLM 档、本轮确有 LLM 候选、
+ * 但该房间还在冷却。判定层什么都不写（当前 `verdicts` / `primary_verdicts` 原样保留），
+ * pipeline 据此不记历史、不做分类集合变更判断、不重推，审计里记成「未执行」。
+ */
+export class LiveClassificationSkippedError extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = 'LiveClassificationSkippedError';
+  }
+}
+
+/**
  * 聚合后的多源信号。live_start 带 event（直播场次），feed_post 带 post（图文帖），
  * 后续加弹幕时在这里扩充（danmaku?: string[] 等），Classifier 的签名不变。
  */
 export interface AnalysisContext {
-  /** 直播场次（live_start 判定入口）；图文判定不带 */
+  /** 直播场次（直播分类判定入口：开播 / 延迟 / 定时 / 变更）；图文判定不带 */
   event?: LiveEvent;
   signal: Signal;
   /** 图文帖（feed_post 判定入口）；直播判定不带 */
   post?: PostAnalysisInput;
   /** 视觉输入（两种内容共用）：判定前已规范化的基线 JPEG data URL + 被拦下的图与原因 */
   images?: PreparedImages;
+  /** 判定档选择；缺省 = 三档全开（图文与旧调用行为不变） */
+  judge?: JudgeSelection;
 }
 
 export interface Classifier {
   readonly name: string;
-  /** live_start → 按直播分类判定；feed_post → 按图文分类判定；其余返回 []。
+  /** 直播分类时机（开播 / 延迟 / 定时 / 变更，ctx.event + ctx.judge）→ 按直播分类判定；
+   *  feed_post → 按图文分类判定；其余返回 []。
    *  判定结果由实现自行入 verdicts / primary_verdicts 表；返回值只含生效且属于的分类。 */
   classify(ctx: AnalysisContext): Promise<Classification[]>;
 }

@@ -94,11 +94,25 @@ demoRules.push({
 const store = {
   streamers: clone(fixtures?.streamers ?? []),
   follows: clone(fixtures?.follows ?? []),
-  // 夹具是真实库导出（可能早于主分类契约）：缺 primary 时按主分类组里首个属于的 verdict 推一个，与后端确定性主分类同口径
+  // 夹具是真实库导出（可能早于主分类契约）：缺 primary 时按主分类组里首个属于的 verdict 推一个，与后端确定性主分类同口径；
+  // 缺 classificationRuns（多时机历史是后加的）时把最新的 verdicts/primary 包成一条开播轮次，
+  // 让时间表 hover 的分类区在旧夹具上也有可用的时间轴。
   schedule: clone(fixtures?.schedule ?? []).map(function (entry) {
-    if (entry.primary !== undefined) return entry;
     const hit = (entry.verdicts || []).find(function (v) { return DEMO_PRIMARY.has(v.categoryName); });
-    return { ...entry, primary: hit ? { categoryName: hit.categoryName, source: hit.source } : null };
+    const primary = entry.primary !== undefined
+      ? entry.primary
+      : (hit ? { categoryName: hit.categoryName, source: hit.source } : null);
+    const runs = Array.isArray(entry.classificationRuns) ? entry.classificationRuns : [{
+      triggerKind: 'start', ts: entry.startTs,
+      verdicts: entry.verdicts || [],
+      primary: primary
+        ? {
+          categoryId: catIdByName.get(primary.categoryName) ?? 0,
+          categoryName: primary.categoryName, source: primary.source,
+        }
+        : null,
+    }];
+    return { ...entry, primary, classificationRuns: runs };
   }),
   channels: clone(M.mockChannels),
   categories: demoCategories,

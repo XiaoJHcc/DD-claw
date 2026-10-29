@@ -127,7 +127,7 @@ document.addEventListener('input', function (e) {
 });
 // 卡片里的链接等需要吞掉卡片点击的元素标 data-action="noop"（导航等默认行为不受影响）
 ACTIONS.noop = function () {};
-// ---- sheet：统一两级弹窗（1 主弹窗 / 2 嵌套弹窗），遮罩点击或右上角 × 关闭 ----
+// ---- sheet：统一两级弹窗（1 主弹窗 / 2 嵌套弹窗），右上角 × 关闭；遮罩空白点击不关闭 ----
 // sheetCleanups 由打开方注册清理逻辑（停轮询、清状态等），关窗时执行。
 // 可选第四参 footHtml：传字符串 = 自定义底部按钮区；传 null = 无底部区（v2 形态）；
 // 省略 = 不加底部区（生产现存调用把按钮写在 bodyHtml 内的 .sheet-foot 里，两种都支持）。
@@ -156,15 +156,7 @@ export function closeSheet(level) {
   document.querySelector('#sheet-mask' + l + ' .sheet').innerHTML = '';
 }
 ACTIONS['close-sheet'] = function (el) { closeSheet(Number(el.getAttribute('data-level')) || 1); };
-(function () {
-  for (var l = 1; l <= 2; l++) {
-    (function (lv) {
-      document.getElementById('sheet-mask' + lv).addEventListener('click', function (e) {
-        if (e.target === this) closeSheet(lv);
-      });
-    })(l);
-  }
-})();
+// 遮罩空白点击不关闭：设置表单只由右上角 × 或「取消 / 完成」显式关闭，避免误触丢草稿。
 // ---- 通用控件 ----
 // 开关：宽胶囊滑块（42×20 轨道 + 24×16 滑块），关 = 中性灰，开 = 蓝渐变 + 轨道内阴影
 export function switchHtml(attrs, checked, disabled) {

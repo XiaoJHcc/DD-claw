@@ -1,5 +1,5 @@
 import { makeLogger } from '../logger.js';
-import { toLiveEvent, type LiveEvent, type PushMessage, type Signal } from './types.js';
+import { toLiveEvent, type LiveEvent, type LiveReclassifyPayload, type PushMessage, type Signal } from './types.js';
 import { liveEventToMessage, postToMessage } from '../notify/message.js';
 import {
   aggregateRuleHits, defaultPostTitle, matchRules, postAuthorName,
@@ -18,12 +18,16 @@ import type { XAccount } from './x-accounts.js';
 import type { WeiboAccount } from './weibo-accounts.js';
 import type { BiliAccount } from './bili-accounts.js';
 import { getXConfig } from './x-config.js';
-import { isNotifyOnFirstRun, isNotifyOnNewSubscription } from './runtime-config.js';
+import {
+  getLiveJudgeSelection, isLiveJudgeSelectionActive, isNotifyOnFirstRun, isNotifyOnNewSubscription,
+  type LiveClassifyTrigger, type LiveJudgeSelection,
+} from './runtime-config.js';
 import type { Bus } from './bus.js';
 import type { Db } from './db.js';
 import type { AppConfig } from '../config/schema.js';
 import type { AnalysisQueue } from '../analysis/queue.js';
 import type { AnalysisContext, Classification } from '../analysis/types.js';
+import { LiveClassificationSkippedError } from '../analysis/types.js';
 import type { DecisionRule } from '../rules/types.js';
 import type { NotifyDispatcher } from '../notify/dispatcher.js';
 import { platformSupportsTranslate } from './post-rules.js';
@@ -46,6 +50,43 @@ function hasCoveringCategoryRule(
     r.subjectKind === subjectKind
     && r.categoryId !== null
     && (r.scope.length === 0 || r.scope.includes(subjectRef)));
+}
+
+/** 信号的分类时机：null = 这条信号不分类（live_end 等） */
+function liveClassifyTrigger(signal: Signal): LiveClassifyTrigger | null {
+  if (signal.kind === 'live_start') return 'start';
+  if (signal.kind === 'title_change') return 'titleChange';
+  if (signal.kind === 'live_reclassify') {
+    const t = (signal.payload as LiveReclassifyPayload | undefined)?.trigger;
+    return t === 'startDelay' || t === 'periodic' || t === 'titleDelay' ? t : null;
+  }
+  return null;
+}
+
+/**
+ * 冷启动抑制：只抑制推送（归档与判定照做）。三条判据都直读 settings（面板热生效），
+ * restart_recovery 与 first_run 共用「启动时已在播」开关——两者都是「启动时已在播」。
+ */
+function coldStartSuppressionReason(db: Db, signal: Signal): string | null {
+  if (signal.coldStart === 'first_run' && !isNotifyOnFirstRun(db)) return '首次运行已在播，按恢复设置不推送';
+  if (signal.coldStart === 'restart_recovery' && !isNotifyOnFirstRun(db)) return '停机期间开播，按恢复设置不推送';
+  if (signal.coldStart === 'new_subscription' && !isNotifyOnNewSubscription(db)) return '新增订阅正在直播，按恢复设置不推送';
+  return null;
+}
+
+/** 两次判定的「生效且属于」分类集合是否一致（重推只看它） */
+function sameCategorySet(a: Set<number>, b: Set<number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const id of a) if (!b.has(id)) return false;
+  return true;
+}
+
+/** 一轮判定的结果：`ok=false` = 判定过程失败（不是「没有分类」）；`skipped` = 整轮被跳过
+ *（如只有 LLM 档且房间在冷却）：当前判定与历史都不动，也不是失败 */
+interface ClassificationResult {
+  items: Classification[];
+  ok: boolean;
+  skipped?: string;
 }
 
 export interface PipelineDeps {
@@ -99,6 +140,8 @@ export class Pipeline {
   private readonly imageLimited = createLimiter(NOTIFY_CONCURRENCY * 3);
   private readonly sendingSessions = new Set<string>();
   private readonly handlingSessions = new Set<string>();
+  /** 同场分类时机串行链（一场直播一条）：保证「上一轮集合」读的是真正的前一轮 */
+  private readonly liveChains = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: PipelineDeps) {}
 
@@ -152,7 +195,11 @@ export class Pipeline {
   }
 
   private auditSubject(signal: Signal): { kind: SubjectKind; id: string } | null {
-    if (signal.kind === 'live_start' && signal.status) {
+    // 直播分类时机（开播 / 标题分区变更 / 延迟与定时重判）都带当前场次快照：
+    // 它们各自的判定与推送过程都记到这个场次下（live_end 的快照是不可靠的合成态，不记）
+    if (signal.status && (
+      signal.kind === 'live_start' || signal.kind === 'title_change' || signal.kind === 'live_reclassify'
+    )) {
       return { kind: 'live', id: liveVerdictSubjectId(signal.roomId, signal.status.liveTime) };
     }
     const payload = signal.payload as FeedPostPayload | undefined;
@@ -167,34 +214,48 @@ export class Pipeline {
     if (subject) this.deps.db.recordContentAudit(subject.kind, subject.id, 'push', audit);
   }
 
-  private analyze(context: AnalysisContext): Promise<Classification[]> {
+  private analyze(context: AnalysisContext): Promise<ClassificationResult> {
     const subject = this.auditSubject(context.signal);
     if (subject) {
       const skipped = context.images?.skipped ?? [];
       this.deps.db.recordContentAudit(subject.kind, subject.id, 'analysis', {
         status: 'pending', categories: [], results: [], imageCount: context.images?.dataUrls.length,
+        ...(context.judge ? { judgeSelection: context.judge } : {}),
         ...(skipped.length > 0 ? { skippedImages: skipped } : {}),
       });
     }
-    return this.deps.queue.submit(context).catch((error: unknown) => {
-      if (subject) {
-        const previous = this.deps.db.getContentAudit(subject.kind, subject.id)?.analysis;
-        this.deps.db.recordContentAudit(subject.kind, subject.id, 'analysis', {
-          ...previous, status: 'failed', categories: previous?.categories ?? [], results: previous?.results ?? [], error: String(error),
-        });
-      }
-      log.error('内容分析异常', error);
-      return [];
-    });
+    return this.deps.queue.submit(context).then(
+      (items): ClassificationResult => ({ items, ok: true }),
+      (error: unknown): ClassificationResult => {
+        // 整轮跳过（不是失败）：判定层已把 analysis 审计记成 skipped，这里不再改写
+        if (error instanceof LiveClassificationSkippedError) {
+          log.debug(`本轮判定跳过 [${context.signal.kind}]：${error.reason}`);
+          return { items: [], ok: false, skipped: error.reason };
+        }
+        if (subject) {
+          const previous = this.deps.db.getContentAudit(subject.kind, subject.id)?.analysis;
+          this.deps.db.recordContentAudit(subject.kind, subject.id, 'analysis', {
+            ...previous, status: 'failed', categories: previous?.categories ?? [], results: previous?.results ?? [], error: String(error),
+          });
+        }
+        log.error('内容分析异常', error);
+        return { items: [], ok: false };
+      },
+    );
   }
 
   /**
-   * live_start 的判定入口：关键帧（缺则封面）的下载与规范化在**判定这条 promise 里**完成，
-   * 所以取图再慢也不挡「任意内容」规则的推送（见 handle 的 needsWait）。
+   * 直播分类判定入口：关键帧（缺则封面）的下载与规范化在**判定这条 promise 里**完成，
+   * 所以取图再慢也不挡「任意内容」规则的推送（见 pushInitialLive 的 needsWait）。
    * 图床 URL 只在这里落本地，绝不进判定输入；失败 = 无图 + 审计原因。
+   * 判定完成后写一条 `live_classification_runs`（时间表的按时间回看）。
    */
-  private async analyzeLive(event: LiveEvent, signal: Signal): Promise<Classification[]> {
-    return this.analyze({ event, signal, images: await this.liveImages(event) });
+  private async analyzeLive(
+    event: LiveEvent, signal: Signal, judge: LiveJudgeSelection, trigger: LiveClassifyTrigger,
+  ): Promise<ClassificationResult> {
+    const res = await this.analyze({ event, signal, judge, images: await this.liveImages(event) });
+    if (res.ok) this.recordClassificationRun(event, trigger);
+    return res;
   }
 
   private async liveImages(event: LiveEvent): Promise<PreparedImages> {
@@ -254,7 +315,7 @@ export class Pipeline {
       return;
     }
 
-    const { db, rule, dispatcher } = this.deps;
+    const { db } = this.deps;
     const event = toLiveEvent(signal.status, this.aliasOf(signal.uid));
     this.auditPush(signal, { status: 'pending', reason: '等待处理', rules: [], channels: [] });
 
@@ -276,45 +337,133 @@ export class Pipeline {
       });
     }
 
-    // 冷启动抑制（政策在这层，diffRoom 只如实产信号、source 只打标记）：
-    // 跳过通知，但上面 live_start 的 recordSession 等归档照做。
-    // 开关读 settings（面板推送渠道卡「推送设置」，热生效）
-    if (signal.coldStart === 'first_run' && !isNotifyOnFirstRun(db)) {
-      this.auditPush(signal, { status: 'skipped', reason: '首次运行已在播，按恢复设置不推送', rules: [], channels: [] });
-      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 首次运行已在播，按配置不推送`);
-      return;
-    }
-    // 重启恢复：上次下播、本次启动前开播的主播，无法得知真实开播时间，
-    // 与 first_run 同属「启动时已在播」，共用 notifyOnFirstRun 这一个开关。
-    if (signal.coldStart === 'restart_recovery' && !isNotifyOnFirstRun(db)) {
-      this.auditPush(signal, { status: 'skipped', reason: '停机期间开播，按恢复设置不推送', rules: [], channels: [] });
-      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 停机期间开播（启动时已在播），按配置不推送`);
-      return;
-    }
-    if (signal.coldStart === 'new_subscription' && !isNotifyOnNewSubscription(db)) {
-      this.auditPush(signal, { status: 'skipped', reason: '新增订阅正在直播，按恢复设置不推送', rules: [], channels: [] });
-      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 新增订阅正在直播，按配置不推送`);
-      return;
-    }
+    const trigger = liveClassifyTrigger(signal);
+    if (trigger === null) return this.handleLiveWithoutClassify(signal, event);
+    return this.handleLiveClassify(signal, event, trigger);
+  }
 
-    // 推送总开关（面板推送卡右上角）：关 = 全局不推，追踪照常
+  /**
+   * 直播分类时机的编排：五个时机共用同一条判定入口，差别只在「哪些档参与」
+   *（runtime-config 每时机三档开关）与「要不要重推」。
+   *
+   * - `start`（开播初判）：走机械去重 → 每场推一次；**不**因为之后的分类变化重推
+   * - `startDelay` / `periodic` / `titleChange` / `titleDelay`（重分时机）：不经
+   *   `OncePerSession` / `hasNotified` 阻断，只有「生效且属于」的 categoryId 集合相对
+   *   上一轮真正改变时才重新匹配并发送；命中规则仍是全部命中的规则（含任意内容规则）
+   * - 三档全关的时机等于关闭：不判定、不写历史、不动已有判定
+   * - 冷启动抑制与推送总开关都只抑制**推送**：判定与历史照做，结论照样入库
+   */
+  private async handleLiveClassify(
+    signal: Signal, event: LiveEvent, trigger: LiveClassifyTrigger,
+  ): Promise<void> {
+    // 同场串行：重推判据（上一轮集合）必须在本次判定替换 verdicts 之前读，
+    // 两个时机同时到（定时与变更撞上）不得都拿同一个「上一轮」各自重推一次
+    const key = liveVerdictSubjectId(event.roomId, event.liveTime);
+    const prev = this.liveChains.get(key) ?? Promise.resolve();
+    const run = prev.then(
+      () => this.runLiveClassify(signal, event, trigger),
+      () => this.runLiveClassify(signal, event, trigger),
+    );
+    const settled = run.then(() => undefined, () => undefined);
+    this.liveChains.set(key, settled);
+    void settled.then(() => {
+      if (this.liveChains.get(key) === settled) this.liveChains.delete(key);
+    });
+    return run;
+  }
+
+  private async runLiveClassify(
+    signal: Signal, event: LiveEvent, trigger: LiveClassifyTrigger,
+  ): Promise<void> {
+    const selection = getLiveJudgeSelection(this.deps.db, trigger);
+    const active = isLiveJudgeSelectionActive(selection);
+    const reclassify = trigger !== 'start';
+    if (!active && reclassify) {
+      this.auditPush(signal, { status: 'skipped', reason: '本轮分类时机未启用任何判定档', rules: [], channels: [] });
+      log.debug(`不判定 [${trigger}] ${event.uname || event.alias}: 该时机三档全关`);
+      return;
+    }
+    const subjectId = liveVerdictSubjectId(event.roomId, event.liveTime);
+    // 上一轮的生效集合必须在本次判定替换 verdicts 之前读
+    const previous = reclassify ? this.effectiveCategoryIds(subjectId) : null;
+    const clsPromise = active
+      ? this.analyzeLive(event, signal, selection, trigger)
+      : Promise.resolve<ClassificationResult>({ items: [], ok: true });
+
+    if (reclassify) return this.repushLive(signal, event, trigger, clsPromise, previous!);
+    return this.pushInitialLive(signal, event, clsPromise);
+  }
+
+  /**
+   * 重分时机的推送：分类集合变了才重新走 matchRules / buildMessage / dispatcher。
+   * - 分类失败返回**不**当成「变成空」（不会因此重推）
+   * - 集合从有变空也算变化，但那时通常没有规则命中，自然不推
+   * - 不走 OncePerSession / hasNotified，但仍用 sendingSessions 防同场发送竞态
+   */
+  private async repushLive(
+    signal: Signal, event: LiveEvent, trigger: LiveClassifyTrigger,
+    clsPromise: Promise<ClassificationResult>, previous: Set<number>,
+  ): Promise<void> {
+    const { db } = this.deps;
+    const res = await clsPromise;
+    if (res.skipped !== undefined) {
+      // 整轮跳过：当前判定与历史原样保留，不参与集合变更判断，也不算失败
+      this.auditPush(signal, { status: 'skipped', reason: res.skipped, rules: [], channels: [] });
+      log.debug(`不重推 [${trigger}] ${event.uname || event.alias}: ${res.skipped}`);
+      return;
+    }
+    if (!res.ok) {
+      this.auditPush(signal, { status: 'skipped', reason: '分类失败，本轮不重推', rules: [], channels: [] });
+      log.warn(`不重推 [${trigger}] ${event.uname || event.alias}: 分类失败`);
+      return;
+    }
+    const next = new Set(res.items.map((entry) => entry.categoryId));
+    if (sameCategorySet(previous, next)) {
+      this.auditPush(signal, { status: 'skipped', reason: '分类结果未变，不重推', rules: [], channels: [] });
+      return;
+    }
+    if (!isPushEnabled(db)) {
+      this.auditPush(signal, { status: 'skipped', reason: '推送总开关关闭', rules: [], channels: [] });
+      log.debug(`不重推 [${trigger}] ${event.uname || event.alias}: 推送总开关已关（判定与历史照常）`);
+      return;
+    }
+    const rules = db.listPushRules();
+    const audit = this.auditRules(signal, 'live', event.uid, next, rules);
+    const msg = this.buildMessage({ ...event, classifications: res.items }, rules.filter((entry) => entry.enabled));
+    if (!msg) return; // buildMessage 已记日志（无命中规则 / 命中规则未选渠道）
+    log.info(`分类变更重推 [${trigger}] ${event.uname || event.alias} — ${[...next].join('/') || '无分类'}`);
+    await this.deliverLive(signal, event, audit, msg, false);
+  }
+
+  /**
+   * 开播初判的推送（原有语义不变）：
+   * 冷启动抑制 → 推送总开关 → 机械去重（`OncePerSessionRule`）→ 分类 × scope 匹配 → 发送。
+   * **推送等不等判定（A.4 规则级化）**：仅当存在「引用了分类的启用规则且 scope 覆盖本主播」
+   * 时推送才等判定；纯「任意内容」规则的推送不排在 LLM 后面。判定本身照跑（时间线 / verdicts
+   * 的回看面不变），不等时先推后收——绝不产生双推（分类规则只在匹配那一刻生效一次）。
+   */
+  private async pushInitialLive(
+    signal: Signal, event: LiveEvent, clsPromise: Promise<ClassificationResult>,
+  ): Promise<void> {
+    const { db, rule } = this.deps;
+    const suppressed = coldStartSuppressionReason(db, signal);
+    if (suppressed !== null) {
+      this.auditPush(signal, { status: 'skipped', reason: suppressed, rules: [], channels: [] });
+      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: ${suppressed}`);
+      await clsPromise; // 抑制只跳推送：判定与历史照做
+      return;
+    }
+    // 推送总开关（面板推送卡右上角）：关 = 全局不推，追踪与判定照常
     if (!isPushEnabled(db)) {
       this.auditPush(signal, { status: 'skipped', reason: '推送总开关关闭', rules: [], channels: [] });
       log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 推送总开关已关`);
+      await clsPromise;
       return;
     }
 
-    // 分类判定只在 live_start 做（live_end / title_change 不烧 LLM），每场单次：
-    // 判定结果进规则匹配：推送规则按 categoryId 引用分类（buildMessage）。
-    // **推送等不等判定（A.4 规则级化）**：仅当存在「引用了分类的启用规则且 scope 覆盖本主播」
-    // 时推送才等判定；纯「任意内容」规则的推送不再排在 LLM 后面。判定本身照跑（时间线/verdicts
-    // 的回看面不变），不等时先推后收——绝不产生双推（分类规则只在匹配那一刻生效一次）。
     const rules = db.listPushRules();
-    const clsPromise = signal.kind === 'live_start'
-      ? this.analyzeLive(event, signal)
-      : Promise.resolve([] as Classification[]);
     const needsWait = hasCoveringCategoryRule(rules.filter((entry) => entry.enabled), 'live', event.uid);
-    const classifications = needsWait ? await clsPromise : [];
+    const classifications = needsWait ? (await clsPromise).items : [];
     const decision = await rule.decide({ ...event, classifications }, signal, classifications);
 
     if (!decision.shouldNotify) {
@@ -332,22 +481,87 @@ export class Pipeline {
     }
 
     log.info(`推送 [${signal.kind}] ${event.uname || event.alias} — ${decision.reason}`);
-    const sessionKey = liveVerdictSubjectId(event.roomId, event.liveTime);
-    if (this.sendingSessions.has(sessionKey) || (signal.kind === 'live_start' && db.hasNotified(event.roomId, event.liveTime))) {
-      if (!needsWait) await clsPromise;
+    await this.deliverLive(signal, event, audit, msg, true);
+    // 不等判定的路径：推完再收判定（verdicts 落库收尾，whenIdle 覆盖到）
+    if (!needsWait) await clsPromise;
+  }
+
+  /**
+   * 不分类的直播信号（live_end）：只走机械去重，不烧模型。
+   * `OncePerSessionRule` 只放行 `live_start`，所以这里正常路径恒为「不推」，
+   * 但仍要把 reason 写进审计（「为什么没收到通知」要可回看）。
+   */
+  private async handleLiveWithoutClassify(signal: Signal, event: LiveEvent): Promise<void> {
+    const { db, rule } = this.deps;
+    if (!isPushEnabled(db)) {
+      this.auditPush(signal, { status: 'skipped', reason: '推送总开关关闭', rules: [], channels: [] });
+      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: 推送总开关已关`);
       return;
     }
+    const decision = await rule.decide({ ...event }, signal, []);
+    if (!decision.shouldNotify) {
+      this.auditPush(signal, { status: 'skipped', reason: decision.reason, rules: [], channels: [] });
+      log.debug(`不推送 [${signal.kind}] ${event.uname || event.alias}: ${decision.reason}`);
+      return;
+    }
+    const rules = db.listPushRules();
+    const audit = this.auditRules(signal, 'live', event.uid, new Set(), rules);
+    const msg = this.buildMessage({ ...event }, rules.filter((entry) => entry.enabled));
+    if (!msg) return;
+    await this.deliverLive(signal, event, audit, msg, true);
+  }
+
+  /**
+   * 一场直播的实际发送：`sendingSessions` 防同场并发（开播初判与重推可能同时到）。
+   * `markSession` = 只有开播初判成功才 markNotified（重推不动「每场一次」的水位）。
+   */
+  private async deliverLive(
+    signal: Signal, event: LiveEvent, audit: PushAudit, msg: PushMessage, markSession: boolean,
+  ): Promise<void> {
+    const { db, dispatcher } = this.deps;
+    const sessionKey = liveVerdictSubjectId(event.roomId, event.liveTime);
+    if (this.sendingSessions.has(sessionKey) || (markSession && db.hasNotified(event.roomId, event.liveTime))) return;
     this.sendingSessions.add(sessionKey);
     let outcome: BroadcastOutcome;
     try {
       outcome = await this.sendLimited(() => dispatcher.broadcast(msg));
-      if (outcome.anySuccess && signal.kind === 'live_start') db.markNotified(event.roomId, event.liveTime);
+      if (outcome.anySuccess && markSession) db.markNotified(event.roomId, event.liveTime);
     } finally {
       this.sendingSessions.delete(sessionKey);
     }
     this.auditOutcome(signal, audit, outcome, msg.title);
-    // 不等判定的路径：推完再收判定（verdicts 落库收尾，whenIdle 覆盖到）
-    if (!needsWait) await clsPromise;
+  }
+
+  /** 当前生效且属于的分类 id 集合（重推判据；必须在判定替换 verdicts 之前读） */
+  private effectiveCategoryIds(subjectId: string): Set<number> {
+    return new Set(
+      this.deps.db.listVerdicts('live', subjectId)
+        .filter((v) => v.effective && v.pass)
+        .map((v) => v.categoryId),
+    );
+  }
+
+  /**
+   * 记一轮判定的历史（时间表 hover 按鼠标时间点取最后一轮）。
+   * ts 用判定完成时刻而不是触发时刻——否则时间表会在结论真正产生之前就展示它。
+   * 空结果也要记：它表示「从这个时刻起未分类」。
+   */
+  private recordClassificationRun(event: LiveEvent, trigger: LiveClassifyTrigger): void {
+    const subjectId = liveVerdictSubjectId(event.roomId, event.liveTime);
+    const verdicts = this.deps.db.listVerdicts('live', subjectId)
+      .filter((v) => v.effective && v.pass)
+      .map((v) => ({
+        categoryId: v.categoryId, categoryName: v.categoryName,
+        source: v.source, confidence: v.confidence, evidence: v.evidence,
+      }));
+    const primary = this.deps.db.listPrimaryVerdicts('live', subjectId).find((p) => p.effective);
+    this.deps.db.insertLiveClassificationRun({
+      roomId: event.roomId, liveTime: event.liveTime, triggerKind: trigger,
+      ts: Math.floor(Date.now() / 1000), verdicts,
+      primary: primary
+        ? { categoryId: primary.categoryId, categoryName: primary.name, source: primary.source }
+        : null,
+    });
   }
 
   /**
@@ -490,7 +704,7 @@ export class Pipeline {
     const needsWait = hasCoveringCategoryRule(rules, 'post', subjectRef);
     const clsPromise = this.analyze({ signal, post: { post }, ...(prepared ? { images: prepared } : {}) });
     const matched = needsWait
-      ? new Set((await clsPromise).map((c) => c.categoryId))
+      ? new Set((await clsPromise).items.map((c) => c.categoryId))
       : new Set<number>();
 
     const hits = matchRules(rules, { subjectType: 'post' }, matched, subjectRef);

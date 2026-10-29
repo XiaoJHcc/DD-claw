@@ -22,7 +22,8 @@
 // 条面纯实色（无光泽无投影，2026-09-03 决策）；在播散尾 = ::before 的 mask（--fade）整体淡出——
 // 尾端不漏硬边、文字层保持实色、右端直角不收圆；红线 = 粉色纵向渐变 + 圆点光环；
 // hover 弹层 = 16:9 图置顶 + 标题/时间/分区/判定证据（分类名按名哈希五色 tag；生效主分类置首、
-// 走实色 tag 档，与其余分类区分）。
+// 走实色 tag 档，与其余分类区分）；图与分类区都跟随鼠标横向位置的时间点，分类取该场历次判定里
+// 最后一个 ts ≤ 该时间的轮次（第一轮之前 = 未分类，无历史才回退最新结果）。
 //
 // 共享轴（偏移语义）：轴 = 相对各行归属日 06:00 的偏移秒数（offStart/offEnd，
 // 0 = 06:00；06:00 日界只用于「归属哪天」，与渲染窗口无关），按**当前可见全部
@@ -962,29 +963,38 @@ function reconcileSchedLanes(lanesEl, now, winStart, span, lanes) {
 }
 
 // ---- hover 弹层（跟随鼠标，离开段即关；全部 esc；缩略行 mini 不触发）----
-// 缩略图 = 鼠标在条内横向位置对应时间点的「最近缓存关键帧」优先（/api/snapshot，
-// 按 60s 分桶，桶变才换图，鼠标静止不换）；API 404 回退远程 e.keyframe || e.cover
-//（旧行为），并记 schedSnapFail——本场 hover 不再试 API（防移动时 404 轰炸）；
-// 远程图也挂（或没有远程图）则移除 img，防 onerror 循环
+// 缩略图与分类区都按鼠标在条内的横向位置对应的时间点取：
+//  - 图 = 「最近缓存关键帧」（/api/snapshot，按 60s 分桶，桶变才换图，鼠标静止不换）；
+//    API 404 回退远程 e.keyframe || e.cover（旧行为），并记 schedSnapFail——本场 hover
+//    不再试 API（防移动时 404 轰炸）；远程图也挂（或没有远程图）则移除 img，防 onerror 循环
+//  - 分类 = 该场历次判定（classificationRuns）里最后一个 ts ≤ 鼠标时间的；第一轮之前 = 未分类；
+//    该场没有历史（旧场次）才回退 entry.verdicts / primary
 var schedPopEl = null;      // 当前弹层归属的 .sched-seg
 var schedPopBucket = -1;    // 当前已请求的 60s 桶（-1 = 本次 hover 还未取图）
+var schedPopClassKey = '';  // 当前已渲染的分类区标识（run.ts 变了才重画）
 var schedSnapFail = {};     // 'roomId:liveTime' → true（该场 hover 已 404）
 
 function schedHidePop() {
   schedPopEl = null;
+  schedPopClassKey = '';
   var p = document.getElementById('sched-pop');
   if (p) p.classList.add('hidden');
 }
 
-/** 鼠标在条内的横向位置 → 时间点（clamp 0..1），按 60s 分桶 */
-function schedBucketOf(el, clientX) {
+/** 鼠标在条内的横向位置 → 时间点（秒，clamp 0..1） */
+function schedTimeAt(el, clientX) {
   var bs = Number(el.getAttribute('data-bs'));
   var be = Number(el.getAttribute('data-be'));
   var r = el.getBoundingClientRect();
   var f = r.width > 0 ? (clientX - r.left) / r.width : 0;
   if (f < 0) f = 0;
   if (f > 1) f = 1;
-  return Math.floor((bs + f * (be - bs)) / 60) * 60;
+  return Math.round(bs + f * (be - bs));
+}
+
+/** 鼠标位置对应的时间点，按 60s 分桶 */
+function schedBucketOf(el, clientX) {
+  return Math.floor(schedTimeAt(el, clientX) / 60) * 60;
 }
 
 /** 按条上的稳定引用（data-edate 场次归属日 / data-e 场次下标 / data-s 段下标）取场次与段；
@@ -1035,6 +1045,72 @@ function schedSourceName(source) {
   return source === 'llm' ? 'LLM' : source === 'decision' ? '决策' : '规则';
 }
 
+/** 生效主分类（categoryId=0 = 「其他」，不进展示；缺字段也算没有） */
+function schedPrimaryOf(primary) {
+  if (!primary || primary.categoryId === 0) return null;
+  return primary;
+}
+
+/**
+ * 该场在时间点 t 的分类：`undefined` = 该场没有历史（旧场次，回退最新结果）；
+ * `null` = 第一轮判定之前（未分类）；否则返回最后一轮 ts ≤ t 的判定。
+ */
+function schedRunAt(entry, t) {
+  var runs = entry.classificationRuns;
+  if (!runs || !runs.length) return undefined;
+  var pick = null;
+  for (var i = 0; i < runs.length; i++) {
+    if (runs[i].ts <= t) pick = runs[i]; else break;
+  }
+  return pick;
+}
+
+/** 分类区标识：变了才重画（鼠标在同一轮判定内移动不重排 DOM） */
+function schedRunKey(entry, t) {
+  var run = schedRunAt(entry, t);
+  if (run === undefined) return 'latest';
+  return run === null ? 'none' : 'ts:' + run.ts;
+}
+
+/**
+ * 分类区 HTML：主分类先列（其 tag 走实色档，与其余分类的浅底 tag 区分），同名的 verdict 行
+ * 不再重复——证据并回主分类行，避免丢依据；其余 verdicts 原样逐条列（confidence 只有决策档有值）。
+ */
+function schedClassHtml(verdicts, primary) {
+  var rows = [];
+  if (primary) {
+    var primaryVerdict = null;
+    for (var i = 0; i < verdicts.length; i++) {
+      if (verdicts[i].categoryName === primary.categoryName) { primaryVerdict = verdicts[i]; break; }
+    }
+    rows.push('<div class="sched-pop-v"><span class="tag tag-solid ' + schedTagColor(primary.categoryName) + '">' +
+      esc(primary.categoryName) + '</span>' +
+      '<span class="sched-pop-src">' + schedSourceName(primary.source) + '</span>' +
+      (primaryVerdict && primaryVerdict.evidence ? '<div class="sched-pop-ev">' + esc(primaryVerdict.evidence) + '</div>' : '') +
+      '</div>');
+  }
+  for (var j = 0; j < verdicts.length; j++) {
+    var v = verdicts[j];
+    if (primary && v.categoryName === primary.categoryName) continue;
+    rows.push('<div class="sched-pop-v"><span class="tag ' + schedTagColor(v.categoryName) + '">' +
+      esc(v.categoryName) + '</span>' +
+      '<span class="sched-pop-src">' + schedSourceName(v.source) +
+      (v.confidence != null ? ' ' + v.confidence.toFixed(2) : '') + '</span>' +
+      (v.evidence ? '<div class="sched-pop-ev">' + esc(v.evidence) + '</div>' : '') + '</div>');
+  }
+  return rows.length ? rows.join('') : '<div class="sched-pop-ev">未分类</div>';
+}
+
+/** 该场在时间点 t 的分类区 HTML（先看历史轮次，旧场次才回退最新结果） */
+function schedClassHtmlAt(entry, t) {
+  var run = schedRunAt(entry, t);
+  if (run === undefined) {
+    return schedClassHtml(entry.verdicts || [], schedPrimaryOf(entry.primary));
+  }
+  if (run === null) return '<div class="sched-pop-ev">未分类</div>';
+  return schedClassHtml(run.verdicts || [], schedPrimaryOf(run.primary));
+}
+
 function schedShowPop(el, evt) {
   var found = schedEntryOf(el);
   var e = found && found.entry;
@@ -1044,31 +1120,8 @@ function schedShowPop(el, evt) {
   var area = [seg.parentAreaName, seg.areaName].filter(Boolean).join(' / ');
   var onAir = !seg.endTs;
   var time = schedFmtHm(seg.startTs) + ' – ' + (seg.endTs ? schedFmtHm(seg.endTs) : '进行中');
-  // 判定区：主分类先列（其 tag 走实色档，与其余分类的浅底 tag 区分），同名的 verdict 行不再重复
-  // ——证据并回主分类行，避免丢依据；其余 verdicts 原样逐条列（confidence 只有决策档有值）
-  var primary = e.primary || null;
-  var rows = [];
-  if (primary) {
-    var primaryVerdict = null;
-    for (var i = 0; i < e.verdicts.length; i++) {
-      if (e.verdicts[i].categoryName === primary.categoryName) { primaryVerdict = e.verdicts[i]; break; }
-    }
-    rows.push('<div class="sched-pop-v"><span class="tag tag-solid ' + schedTagColor(primary.categoryName) + '">' +
-      esc(primary.categoryName) + '</span>' +
-      '<span class="sched-pop-src">' + schedSourceName(primary.source) + '</span>' +
-      (primaryVerdict && primaryVerdict.evidence ? '<div class="sched-pop-ev">' + esc(primaryVerdict.evidence) + '</div>' : '') +
-      '</div>');
-  }
-  for (var j = 0; j < e.verdicts.length; j++) {
-    var v = e.verdicts[j];
-    if (primary && v.categoryName === primary.categoryName) continue;
-    rows.push('<div class="sched-pop-v"><span class="tag ' + schedTagColor(v.categoryName) + '">' +
-      esc(v.categoryName) + '</span>' +
-      '<span class="sched-pop-src">' + schedSourceName(v.source) +
-      (v.confidence != null ? ' ' + v.confidence.toFixed(2) : '') + '</span>' +
-      (v.evidence ? '<div class="sched-pop-ev">' + esc(v.evidence) + '</div>' : '') + '</div>');
-  }
-  var vs = rows.length ? rows.join('') : '<div class="sched-pop-ev">未分类</div>';
+  var t = schedTimeAt(el, evt.clientX);
+  schedPopClassKey = schedRunKey(e, t);
   p.innerHTML =
     '<img referrerpolicy="no-referrer" alt="">' + // src 由 schedPopImg 按鼠标时间点填
     '<div class="sched-pop-body">' +
@@ -1076,7 +1129,8 @@ function schedShowPop(el, evt) {
     // 弹层空间充足用原名（e.uname），demo 旧夹具无此字段则回退横条名（简称优先的 e.name）
     '<div class="sched-pop-meta">' + icon('clock') + '<span>' + esc(e.uname || e.name) + ' · ' +
     esc(time) + '</span>' + (onAir ? '<span class="sched-pop-live">直播中</span>' : '') + '</div>' +
-    (area ? '<div class="sched-pop-meta">' + esc(area) + '</div>' : '') + vs + '</div>';
+    (area ? '<div class="sched-pop-meta">' + esc(area) + '</div>' : '') +
+    '<div id="sched-pop-class">' + schedClassHtmlAt(e, t) + '</div></div>';
   p.classList.remove('hidden');
   schedPopEl = el;
   schedPopBucket = -1; // 强制按当前鼠标位置取一次
@@ -1095,6 +1149,20 @@ function schedShowPop(el, evt) {
   schedMovePop(evt);
 }
 
+/** 跨过一轮判定就即时换分类区（不必等重新 mouseover）；图片仍按 60s 分桶 */
+function schedUpdateClass(el, clientX) {
+  var box = document.getElementById('sched-pop-class');
+  if (!box) return;
+  var found = schedEntryOf(el);
+  var e = found && found.entry;
+  if (!e) return;
+  var t = schedTimeAt(el, clientX);
+  var key = schedRunKey(e, t);
+  if (key === schedPopClassKey) return;
+  schedPopClassKey = key;
+  box.innerHTML = schedClassHtmlAt(e, t);
+}
+
 function schedMovePop(evt) {
   var p = document.getElementById('sched-pop');
   var x = evt.clientX + 14, y = evt.clientY + 14;
@@ -1103,7 +1171,10 @@ function schedMovePop(evt) {
   if (y + r.height > window.innerHeight - 8) y = evt.clientY - r.height - 14;
   p.style.left = Math.max(8, x) + 'px';
   p.style.top = Math.max(8, y) + 'px';
-  if (schedPopEl) schedPopImg(schedPopEl, evt.clientX);
+  if (schedPopEl) {
+    schedPopImg(schedPopEl, evt.clientX);
+    schedUpdateClass(schedPopEl, evt.clientX);
+  }
 }
 
 // ---- 初始化 ----

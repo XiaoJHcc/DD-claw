@@ -26,6 +26,7 @@ export interface LiveStatus {
 
 export type SignalKind =
   | 'live_start' | 'live_end' | 'title_change' // live-status source 真实产生
+  | 'live_reclassify' // analysis/triggers 产生：延迟后 / 直播中定时对同一场次重新判定
   | 'feed_post' | 'danmaku_batch' | 'snapshot' // 预留：动态/弹幕/画面
   | 'health_alert';                            // 监听自身健康
 
@@ -36,7 +37,8 @@ export interface Signal {
   uid: string;
   roomId: string;
   ts: number;
-  /** live 系信号携带：live_start / title_change 为当前状态，live_end 为最后已知状态 */
+  /** live 系信号携带：live_start / title_change 为当前状态，live_end 为最后已知状态，
+   *  live_reclassify 为最后一次观测到的快照（payload.trigger 说明是哪个时机） */
   status?: LiveStatus;
   /** title_change（标题/分区内容变更）专用：旧标题 */
   previousTitle?: string;
@@ -51,6 +53,11 @@ export interface Signal {
   coldStart?: 'first_run' | 'new_subscription' | 'restart_recovery';
   /** 各 source 自定义载荷（如 health_alert 的失败详情） */
   payload?: unknown;
+}
+
+/** live_reclassify 的载荷（analysis/triggers 产出）：说明是哪条延迟 / 定时计时器到点 */
+export interface LiveReclassifyPayload {
+  trigger: 'startDelay' | 'periodic' | 'titleDelay';
 }
 
 /**

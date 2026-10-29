@@ -29,7 +29,8 @@ export interface ConditionAudit {
 }
 
 export interface AnalysisAudit {
-  status: 'pending' | 'done' | 'failed';
+  /** skipped = 整轮未执行（如只有 LLM 档且房间在冷却）：当前判定与历史都不变，不是失败 */
+  status: 'pending' | 'done' | 'failed' | 'skipped';
   categories: Category[];
   /** 逐档逐来源的结论，同一分类可有多行；effective = 该分类的生效结论 */
   results: Array<{
@@ -49,6 +50,8 @@ export interface AnalysisAudit {
   fallbackReason?: string;
   /** 逐档被跳过 / 失败的原因（决策档不可用的具体缘由：开关关、无供应商、全部失败…） */
   stageNotes?: Array<{ stage: 'decision' | 'llm'; reason: string }>;
+  /** 该场内容本轮实际启用了哪些判定档（关闭的档不进判定，也不会作为回退） */
+  judgeSelection?: { rule: boolean; decision: boolean; llm: boolean };
   error?: string;
   durationMs?: number;
   /** 送模型的图片张数（= 规范化后仍在的 data URL 数） */

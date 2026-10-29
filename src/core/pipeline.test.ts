@@ -111,6 +111,14 @@ class FakeDb {
   // ---- verdicts：判定归档（现在由分类器落；pipeline 不再直写，保留桩面以防回归）----
   verdicts: NewVerdict[] = [];
   insertVerdict(v: NewVerdict) { this.verdicts.push(v); }
+  /** 判定档会读当前生效行（重推判据）与主分类；桩返回空 = 视为上一轮没有分类 */
+  listVerdicts() { return []; }
+  listPrimaryVerdicts() { return []; }
+  /** 分类时机历史（pipeline 每轮判定后追加） */
+  runs: Array<{ roomId: string; liveTime: number; triggerKind: string; ts: number; verdicts: unknown[] }> = [];
+  insertLiveClassificationRun(p: { roomId: string; liveTime: number; triggerKind: string; ts: number; verdicts: unknown[] }) {
+    this.runs.push(p);
+  }
 }
 
 function rule(over: Partial<PushRule> = {}): PushRule {
@@ -385,15 +393,17 @@ test('同一场不重复推（OncePerSession + markNotified）', async () => {
   assert.equal(h.disp.sent.length, 1);
 });
 
-test('live_start 做分类判定，live_end / title_change 不调分类器（不烧 LLM）', async () => {
+test('live_start 与 title_change 进分类队列，live_end 不进（分类时机由配置决定）', async () => {
   const h = harness();
   h.db.rules.push(rule());
   h.bus.emit(sig());
   h.bus.emit(sig({ kind: 'live_end' }));
   h.bus.emit(sig({ kind: 'title_change', previousTitle: '旧标题' }));
   await h.pipeline.whenIdle();
-  assert.equal(h.classifier.calls.length, 1, '只有 live_start 进分类队列');
-  assert.equal(h.disp.sent.length, 1, 'M1 规则只推开播');
+  assert.equal(h.classifier.calls.length, 2, '开播初判 + 标题变更重判各一次；下播不判定');
+  assert.equal(h.classifier.calls[0]!.event?.liveTime, 1_785_310_737);
+  assert.equal(h.classifier.calls[1]!.signal.kind, 'title_change');
+  assert.equal(h.disp.sent.length, 1, '规则只推开播：分类没变时不重推');
 });
 
 // ---- 归档分派（live_end / title_change 在抑制检查之前落库）----
@@ -406,7 +416,7 @@ test('live_end 归档：endSession 按房间 + 信号 ts 关闭场次（不推�
   assert.equal(h.disp.sent.length, 0);
 });
 
-test('title_change 归档：rotateSegment 换段（不推送、不重复分类）', async () => {
+test('title_change 归档：rotateSegment 换段（不推送：分类未变）', async () => {
   const h = harness();
   h.bus.emit(sig({ kind: 'title_change', ts: 1_800_000_100, status: status({ title: '换内容唱歌' }) }));
   await h.pipeline.whenIdle();
