@@ -115,6 +115,12 @@ function connectTunnel(proxy, host, port = 443) {
 
 → **免登录 HTML 拿到的是账号的最新推文**，不是过期样本。
 
+> **2026-10-29 复核：该路线已失效。** 代理换节点后在本机重测 `@Watase_Yuzuki` / `@Hina_Youmiya` / `@elonmusk`：
+> 页面仍是 `200`（约 184KB），但 `rest_id:"<数字>"` 出现次数均为 **0**（2026-09-16 同账号能抠到 13 个），
+> 即免登录 HTML 不再内嵌推文 id。`og:title` 仍是「名字 (@handle)」，所以这段 HTML 现在只剩
+> **账号存在性校验**价值（`web.ts` 的 `verifyAccount` 已改用它），抓推文只能靠 Nitter RSS
+> 或 syndication 的 `timeline-profile`（抽样 + 限流）。
+
 局限：
 - 只有 ~5–13 条（含置顶），**两次轮询之间发超过这个数的账号会漏推**；
 - HTML 里**没有 `created_at`**（需 3.3 补），也没有 `retweeted_status_results` 非 null 的观测（4 个账号实测全是 `null`）→ **疑似只嵌入原创、转发被过滤** [待验证]（同期 Nitter RSS 显示该账号 20 条里 10 条是转发）；

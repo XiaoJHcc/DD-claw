@@ -17,6 +17,7 @@ import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { UndoStore, adminScope, undoEffects, type UndoEffect, type UndoResult } from '../core/undo.js';
 import { ChatStore } from '../core/chat-store.js';
 import { DEFAULT_DECISION_THRESHOLDS } from '../analysis/tasks/decide.js';
+import { searchKeySource } from '../search/config.js';
 
 interface Fixture {
   db: Db;
@@ -104,6 +105,8 @@ async function setup(
     undo?: boolean;
     /** 注入 ChatStore（P1 /api/chat* 对话端点）；缺省不注入（404） */
     chat?: boolean;
+    /** 注入远程检索 dep（/api/search*）；缺省不注入（404） */
+    search?: boolean;
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -160,6 +163,16 @@ async function setup(
   undoStore?.migrate();
   const chatStore = opts.chat ? new ChatStore(db.raw) : undefined;
   chatStore?.migrate();
+  // 远程检索 dep（生产装配形状：key 现解析；测试里只关心 key 的读写与来源展示）
+  const search: PanelDeps['search'] = opts.search
+    ? {
+        web: async (q) => [{ title: q, url: 'https://example.com/x', snippet: '', summary: '', site: null, date: null }],
+        biliAccounts: async () => [],
+        weiboAccounts: async () => [],
+        xAccounts: async () => [],
+        status: () => ({ key: searchKeySource(db), providerName: null }),
+      }
+    : undefined;
   // 撤销执行器（生产装配形状：撤栈顶 + 按 core/undo.ts 的 undoEffects 触发热生效回调）。
   // 回调闭包在 index.ts，测试里用计数桩代替——映射函数本身是生产代码，不是测试自己的复刻。
   const undoFired: Record<UndoEffect, number> = { runtime: 0, listen: 0, llm: 0, decision: 0, notifiers: 0 };
@@ -177,6 +190,7 @@ async function setup(
     ...(undoLast ? { undoLast } : {}),
     ...(chatStore ? { chat: chatStore } : {}),
     weiboResolver: opts.weiboResolver,
+    search,
     status: () => ({
       ...status,
       watchedCount: db.listWatchedUids().length,
@@ -3704,4 +3718,27 @@ test('无 chat dep 时 /api/chat* 一律 404（五个端点各自按 dep 挂载�
   assert.equal((await api(base, '/api/chat/reset', 'POST')).status, 404);
   assert.equal((await api(base, '/api/chat/mode', 'PUT', { mode: 'auto' })).status, 404);
   assert.equal((await api(base, '/api/chat/provider', 'PUT', { provider: 'ds' })).status, 404);
+});
+
+test('/api/search：key 落 settings 并可撤销回退；无 dep 时 404', async (t) => {
+  const { base, db } = await setup(t, { search: true, undo: true });
+  let r = await api(base, '/api/search');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.key, { source: 'unset', count: 0, value: null }, '未配 = 空，走供应商回退');
+  assert.equal(r.json.providerName, null);
+
+  r = await api(base, '/api/search/key', 'PUT', { value: 'sk-search-1' });
+  assert.equal(r.status, 200);
+  assert.equal((r.json.key as { source: string }).source, 'panel');
+  assert.equal((r.json.key as { value: string }).value, 'sk-search-1', '本机面板明文回显（与 LLM key 同口径）');
+  assert.equal(db.getSetting('search_key'), 'sk-search-1');
+
+  // 空串 = 清除，回退到 DeepSeek 供应商
+  r = await api(base, '/api/search/key', 'PUT', { value: '  ' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.key, { source: 'unset', count: 0, value: null });
+
+  const noDep = await setup(t);
+  assert.equal((await api(noDep.base, '/api/search')).status, 404);
+  assert.equal((await api(noDep.base, '/api/search/key', 'PUT', { value: 'x' })).status, 404);
 });

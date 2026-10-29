@@ -19,6 +19,9 @@
 | **弹幕流** | `getDanmuInfo` + WBI 签名 + UA → `wss://.../sub` | [实测] 收到 `DANMU_MSG` |
 | 直播流截图 / 音频 | `getRoomPlayInfo` → FLV → ffmpeg | [实测] 截图 ~1s |
 | 视频/专栏评论 | `x/v2/reply`（旧接口） | [实测] 200 |
+| **网页事实检索 / 抓取** | DeepSeek Search / Fetch API（`api.deepseek.com/v1/tools/*`，Bearer = DeepSeek key） | [实测] 200；按成功请求计费 |
+| **B站用户名搜索** | `x/web-interface/wbi/search/type?search_type=bili_user` + 搜索页 Referer | [实测] 200（非 wbi 路径 412） |
+| **微博用户搜索建议** | `weibo.com/ajax/side/search?q=` | [实测] 匿名可用，仅昵称前缀的少量结果 |
 
 ### 需要登录凭据
 
@@ -26,6 +29,7 @@
 |---|---|---|
 | B站空间动态 | [实测] ~~HTTP 412，即使 WBI 签名正确~~（2026-08-03 推翻：全量 cookie + dm 三参（高斯算法生成，非静态占位）+ space Referer 即通，**无需 WBI**） | 完整 cookie 集 |
 | 微博用户时间线 | [实测] **HTTP 432**，游客 cookie 流程已失效（2026-08-03 补充：扫码登录 + `weibo.com/ajax/statuses/mymblog` 路径已跑通，见 feeds.md 修订块） | 登录 cookie（面板扫码落 weibo-cookies.json） |
+| 微博全站模糊搜索 | [实测] 302 到登录页（`getIndex` 用户搜索 / `s.weibo.com/user` / `weibo.com/ajax/search/*`） | 微博登录 cookie |
 | 我关注的直播列表 | [实测] `-101 账号未登录` | SESSDATA |
 | 直播原画画质 | [实测] `qn=10000` 静默降级到 250 | SESSDATA（本项目不需要） |
 | 动态评论区 | [文档] 需 `type=17` + 动态 id | 未跑通，见 feeds.md |
@@ -48,6 +52,7 @@
 - **CDP 直挂用户日常 Chrome** — [文档] Chrome ≥136 不再支持对默认 profile 用 remote debugging。
 - **免签调用 B站动态接口** — 旧接口 `dynamic_svr/space_history` [实测] 同样 412，无替代。（2026-08-03 修订：带登录 cookie + dm 参数的新接口 `web-dynamic/feed/space` 已跑通，见 §5.18；免签仍不可能。）
 - **绕过 412 靠静态占位设备指纹** — `dm_img_list` 等参数有生成算法，[实测] 填静态占位值无效；必须按 RSSHub 高斯算法现场生成（本项目 `src/sources/bili/dm.ts`）。
+- **X 免登录账号搜索** — [实测] v1.1 `users/search` 与 `search/typeahead` 均 404；Nitter 搜索大面积关闭（用户配置实例直接回「Search has been disabled due to abuse」，仓库 2026-10-09 归档）；`site:x.com` 检索恒 0 条。替代路线是网页检索挖 handle + x.com 校验存在性，见 [research/web-search.md](research/web-search.md)。
 
 ## 2. 功能边界
 
@@ -167,3 +172,11 @@
 38. **微博图床（`sinaimg.cn`）境内直连可达**，不需要 X 那条代理隧道；但**对 Referer 敏感**——头像链路带 `Referer: https://weibo.com/` 实测可达，帖子图复用的 `localizeImage` 也按域带 weibo Referer。2026-09-20 实测：**no-referrer 也 403 了**（wx1/orj960），浏览器热链与 `<img referrerpolicy="no-referrer">` 都显示不出，所以面板帖子图改走 `/api/weibo-image` 服务端反代（带 weibo Referer + 按 URL md5 落盘 cache/weibo-images；host 白名单防 SSRF）。头像 URL 还带签名与过期参数（`?KID=…&ssig=…`，同一头像每轮 URL 也可能不同），所以按 URL 的 md5 落盘、且只在还没有本地头像时下载一次——换头像不更新本地缓存（删号重加才会；旧文件体积小、随目录一起清理）。[实测]
 39. **微博的「转发」就是它的引用形态**：抓取层把带 `retweeted_status` 的微博折成 `type='retweet'` 并把原文拼进正文（`//转发自 @原作者: …`），没有独立的引用实体可言。因此「引用帖」这个条件只可能对 X 帖命中（X 免登录回退路线产出 `isQuote`），微博与 B站动态永不命中——是语义而不是校验错误，界面在对应条件上标注「仅 X」。[设计取舍]
 40. **mymblog 的图片字段是 `pic_infos` 而不是 `pics`**（2026-09-20 实测踩坑）：`pic_infos` 按 pic_id 键控、thumbnail/bmiddle/large 三档，顺序以 `pic_ids` 为准（对象键序不保证）；`picsOf` 两形态都认、`pics` 数组优先。字段没解析对的表现是「帖子归档成功但 pics 恒空」，不报错。[实测]
+
+以下来自网页检索 / 账号名搜索接入与 X 免登录路线复核（2026-10-29）：
+
+41. **B站用户搜索必须用 `wbi` 前缀的路径**：`x/web-interface/wbi/search/type?search_type=bili_user` + 搜索页 `Referer: https://search.bilibili.com/` 实测 200；换回非 wbi 的 `/x/web-interface/search/type` 直接 **412**（HTML 风控页）。当前**不需要** WBI 签名（未签名也 200），但 B站按端点灰度——出现稳定 `-352`/412 时补 `img_key`/`sub_key`，不要退回网页抓取。返回字段用 `upic`（不是 `face`）、`usign`（签名）、`official_verify.desc`（认证）。[实测]
+42. **微博的匿名搜索只剩「侧栏建议」**：`weibo.com/ajax/side/search?q=`（桌面 UA + `Referer: https://weibo.com/`）返回 `data.users[]` 完整用户对象与 `data.user[]` 简表，行为是**昵称前缀补全**（人名有、长尾团体名没有，最多几条）；`m.weibo.cn/api/container/getIndex?containerid=100103type=3&q=`、`s.weibo.com/user`、`weibo.com/ajax/search/{users,all,hot,profile}` 全部 302 到登录页。所以「模糊搜微博账号」必须等登录态，不能拿空结果当「没有这个人」。[实测]
+43. **DeepSeek 检索的 `site:x.com` / `site:twitter.com` 恒为 0 条**（X 页面不进索引）：X 账号线索只能从第三方页面正文里的 `x.com/<handle>/status/...` 或 `@handle` 抠，且同一批结果会混入错号/旧号（实测同一人名同时命中正确与过期 handle）——**必须再用 x.com 存在性校验过滤**，不能把检索第一条当答案。[实测]
+44. **带过期登录 cookie 打 `m.weibo.cn/n/<昵称>` 会被踢到 `login.sina.com.cn`**，与「昵称不存在」（HTTP 200）表现不同；`resolveUid` 只把 `visitor.passport` 跳转判为访客 cookie 失效，遇到登录跳转会报「跳转目标无法识别」。清理本地过期 cookie 后同一条昵称解析仍可用（2026-10-29 实测 `羊宫妃那` → `/u/1889464875`）。[实测]
+45. **免登录 `x.com/<screen>` HTML 不再内嵌推文 id**（2026-10-29 复核）：页面仍 200（约 184KB），但 `rest_id` 出现次数为 0（`elonmusk`、`Hina_Youmiya` 均如此；2026-09-16 时同一账号有 13 个）。`og:title` 仍是「名字 (@handle)」——所以 `verifyAccount` 改成「200 + 抠到显示名 = 账号存在」，免登录回退抓推文一段实质停摆，只能依赖 Nitter RSS 或 syndication `timeline-profile`（抽样 + 限流）。[实测]

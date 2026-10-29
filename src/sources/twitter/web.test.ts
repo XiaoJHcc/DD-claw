@@ -30,6 +30,12 @@ test('parseOgTitleName：`名字 (@handle) / X` 形态抠显示名（实体解�
     parseOgTitleName('<meta property="og:title" content="渡瀬 結月 (@Watase_Yuzuki) / X">'),
     '渡瀬 結月',
   );
+  // 2026-10 起 og:title 用 `on X` 后缀（<title> 仍是 `/ X`）：两种都要认，否则存在性校验全落空
+  assert.equal(
+    parseOgTitleName('<meta property="og:title" content="渡瀬 結月 (@Watase_Yuzuki) on X">'),
+    '渡瀬 結月',
+    'on X 后缀',
+  );
   assert.equal(
     parseOgTitleName('<meta content="A &amp; B (あ) (@ab) / X" name="og:title">'),
     'A & B (あ)',

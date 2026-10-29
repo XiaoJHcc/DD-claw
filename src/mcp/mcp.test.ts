@@ -21,6 +21,7 @@ import { listDecisionProviders, saveDecisionProviders } from '../analysis/decisi
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { UndoStore, adminScope, channelScope, undoEffects, type UndoEffect } from '../core/undo.js';
+import { searchKeySource } from '../search/config.js';
 
 const ADMIN_TOKEN = 'ddc_test_admin';
 const GATEWAY_TOKEN = 'ddc_test_gateway';
@@ -42,7 +43,7 @@ interface Fixture {
 
 async function setup(
   t: import('node:test').TestContext,
-  opts: { withTokens?: boolean; withLlm?: boolean } = {},
+  opts: { withTokens?: boolean; withLlm?: boolean; withSearch?: boolean } = {},
 ): Promise<Fixture> {
   const db = new Db(':memory:');
   if (opts.withTokens !== false) {
@@ -132,6 +133,25 @@ async function setup(
     weiboResolver: {
       resolveUid: async (nick) => (nick === '渡瀬結月' ? '2203177060' : null),
     },
+    // 远程检索 dep（生产装配形状：只暴露四个函数）；缺省注入，withSearch:false 时验证未装配报错
+    ...(opts.withSearch === false ? {} : {
+      search: {
+        web: async (q: string) => [{
+          title: `结果:${q}`, url: 'https://example.com/a', snippet: '摘要', summary: '长摘要',
+          site: null, date: null,
+        }],
+        biliAccounts: async () => [{
+          uid: '1459104794', uname: 'MyGO_AveMujica', sign: '官方', fans: 1, level: 6,
+          official: null, live: false, roomId: null, avatar: null,
+        }],
+        weiboAccounts: async () => [],
+        xAccounts: async () => [{
+          screenName: 'hina_youmiya', url: 'https://x.com/hina_youmiya', name: '羊宮妃那',
+          exists: true, sources: [{ title: 't', url: 'https://a.example', quote: 'q' }],
+        }],
+        status: () => ({ key: searchKeySource(db), providerName: null }),
+      },
+    }),
     testPush: async () => ({ total: 2, succeeded: 2 }),
   };
   const server: Server = createPanelServer(deps);
@@ -1280,4 +1300,71 @@ test('undo_last_change：撤 streamers 写（set_streamer 改别名）还原配�
   assert.equal(s.roomId, '80397', '房间号同属轮询列');
   // streamers 无热生效对象（监听名单每轮直读 DB）——撤销不触发任何装配级回调
   assert.deepEqual(f.undoFired, { runtime: 0, listen: 0, llm: 0, notifiers: 0 });
+});
+
+// ---- 远程检索（网页搜索 / 平台账号名搜索）----
+
+test('检索工具只对 admin 注册：gateway 的 tools/list 里根本看不到', async (t) => {
+  const f = await setup(t);
+  const admin = await mcpClient(f, ADMIN_TOKEN);
+  const gateway = await mcpClient(f, GATEWAY_TOKEN);
+  const names = ['web_search', 'search_bili_accounts', 'search_weibo_accounts', 'search_x_accounts'];
+  const adminTools = (await admin.listTools()).tools.map((tool) => tool.name);
+  const gatewayTools = (await gateway.listTools()).tools.map((tool) => tool.name);
+  for (const name of names) {
+    assert.ok(adminTools.includes(name), `admin 应看到 ${name}`);
+    assert.ok(!gatewayTools.includes(name), `gateway 不该看到 ${name}`);
+  }
+});
+
+test('web_search / search_bili_accounts / search_x_accounts 原样返回装配层结果', async (t) => {
+  const f = await setup(t);
+  const admin = await mcpClient(f, ADMIN_TOKEN);
+
+  const web = (await call(admin, 'web_search', { query: 'MyGO 成员', count: 3 })) as Array<Record<string, unknown>>;
+  assert.equal(web[0]!.title, '结果:MyGO 成员');
+  assert.equal(web[0]!.url, 'https://example.com/a');
+
+  const bili = (await call(admin, 'search_bili_accounts', { keyword: 'mygo' })) as Array<Record<string, unknown>>;
+  assert.equal(bili[0]!.uid, '1459104794');
+
+  const x = (await call(admin, 'search_x_accounts', { query: '羊宮妃那' })) as Array<Record<string, unknown>>;
+  assert.equal(x[0]!.screenName, 'hina_youmiya');
+  assert.equal(x[0]!.exists, true);
+});
+
+test('search_weibo_accounts：搜索空结果时用精确昵称解析补一条（via=nickname）', async (t) => {
+  const f = await setup(t);
+  const admin = await mcpClient(f, ADMIN_TOKEN);
+  const hits = (await call(admin, 'search_weibo_accounts', { keyword: '渡瀬結月' })) as Array<Record<string, unknown>>;
+  assert.deepEqual(hits, [{
+    uid: '2203177060', nickname: '渡瀬結月', description: '', followers: 0,
+    verified: false, location: null, via: 'nickname',
+  }]);
+  const none = await call(admin, 'search_weibo_accounts', { keyword: '查无此人' });
+  assert.deepEqual(none, [], '搜不到 + 解析不到 = 空数组，不是错误');
+});
+
+test('set_search_key：写 settings（可撤销），空串 = 清除', async (t) => {
+  const f = await setup(t);
+  const admin = await mcpClient(f, ADMIN_TOKEN);
+  await call(admin, 'set_search_key', { value: 'sk-search-abc' });
+  assert.equal(f.db.getSetting('search_key'), 'sk-search-abc');
+  assert.equal(f.undo.history({ scope: adminScope() })[0]!.tool, 'set_search_key', '进撤销栈（配置写）');
+
+  await call(admin, 'set_search_key', { value: '   ' });
+  assert.equal(f.db.getSetting('search_key'), '');
+});
+
+test('未注入检索 dep 时：四个工具都明确报「未装配」，不静默返回空', async (t) => {
+  const f = await setup(t, { withSearch: false });
+  const admin = await mcpClient(f, ADMIN_TOKEN);
+  for (const [name, args] of [
+    ['web_search', { query: 'x' }],
+    ['search_bili_accounts', { keyword: 'x' }],
+    ['search_weibo_accounts', { keyword: 'x' }],
+    ['search_x_accounts', { query: 'x' }],
+  ] as const) {
+    await assert.rejects(() => call(admin, name, args), /远程检索未装配/, name);
+  }
 });

@@ -35,8 +35,13 @@ import { PeriodicTask } from './core/scheduler.js';
 import { loadCookies, cookieHeader, type SelfInfo } from './sources/bili/auth.js';
 import { FollowsSource } from './sources/bili/follows.js';
 import { DynamicSource } from './sources/bili/dynamic.js';
+import { searchBiliUsers } from './sources/bili/search.js';
 import { createPanelServer, type PlatformStatus, type PanelDeps } from './panel/server.js';
 import { createWeiboResolver } from './sources/weibo/resolve.js';
+import { searchWeiboUsers } from './sources/weibo/search.js';
+import { searchXAccounts } from './sources/twitter/search.js';
+import { searchWeb } from './search/web.js';
+import { resolveSearchCredentials, searchKeySource } from './search/config.js';
 import { loadWeiboCookies, weiboCookieHeader, type WeiboSelfInfo } from './sources/weibo/auth.js';
 import { WeiboFeedSource } from './sources/weibo/feed.js';
 import {
@@ -736,6 +741,17 @@ async function main(): Promise<void> {
   const startedAt = Math.floor(Date.now() / 1000);
   let panel: Server | undefined;
   if (app.panel.enabled) {
+    // 远程检索：key 每次调用现解析（设置页改完立即生效，也跟随供应商名单变化）。
+    // 网页搜索只认 DeepSeek 端点：面板专填的 search_key 优先，否则复用 baseURL 指向
+    // api.deepseek.com 的启用供应商的 key——聊天能用的 key，搜索直接能用。
+    const resolveSearchKey = () => resolveSearchCredentials(db, listLlmProviders(db));
+    const runWebSearch = async (query: string, opts?: { count?: number }) => {
+      const creds = resolveSearchKey();
+      if (!creds) {
+        throw new Error('网页搜索不可用：请先在设置页「网页搜索」填 DeepSeek API key，或配一个 DeepSeek 供应商');
+      }
+      return searchWeb(creds.key, query, opts);
+    };
     // 面板依赖面先建出来（QQ 自助入口要复用同一份：同源的 chat / llm router / undo）
     const panelDeps: PanelDeps = {
       db,
@@ -745,6 +761,24 @@ async function main(): Promise<void> {
       weiboResolver: createWeiboResolver(),
       llm: llmDep,
       decision: decisionDep,
+      search: {
+        web: runWebSearch,
+        biliAccounts: (keyword, limit) => searchBiliUsers(keyword, { limit }),
+        weiboAccounts: (keyword, limit) => searchWeiboUsers(keyword, { limit }),
+        // X 没有站内搜索：检索挖线索 + x.com 校验（走既有代理链路，链路不通只标未校验）
+        xAccounts: (query, limit) => searchXAccounts(query, {
+          search: (q) => runWebSearch(q, { count: 8 }),
+          verify: (screenName) => verifyAccount(screenName, getXConfig(db).proxyUrl),
+          limit,
+        }),
+        status: () => {
+          const creds = resolveSearchKey();
+          return {
+            key: searchKeySource(db),
+            providerName: creds?.source === 'provider' ? (creds.providerName ?? null) : null,
+          };
+        },
+      },
       status: () => {
         // state 推导：无 cookie=none；有 cookie 还没心跳=imported；
         // isLogin true=ok / false=expired（mid 随心跳带出）

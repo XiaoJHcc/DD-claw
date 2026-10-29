@@ -122,6 +122,7 @@ const store = {
   pushEnabled: true,
   llmEnabled: true,
   decisionEnabled: true,
+  searchKey: '',   // 网页搜索 key（空 = 回退到 DeepSeek 供应商）
   undoHistory: clone(M.mockUndoHistory),
   chat: { mode: M.mockChat.mode, provider: M.mockChat.provider, messages: clone(M.mockChat.messages) },
   chatPending: null,   // 挂起的「等你确认」写操作（写前询问模式：确认后才回报已执行）
@@ -131,6 +132,15 @@ const store = {
   biliQrStep: 0,
   weiboQrStep: 0,
 };
+
+/** /api/search 的响应形状（与 server.ts 同一份：key 来源 + 回退供应商名） */
+function searchStatus() {
+  if (store.searchKey) {
+    return { key: { source: 'panel', count: 1, value: store.searchKey }, providerName: null };
+  }
+  const ds = store.llmProviders.find(function (p) { return /deepseek/i.test(p.baseURL || ''); });
+  return { key: { source: 'unset', count: 0, value: null }, providerName: ds ? ds.name : null };
+}
 
 // 内容记录（analysis 区）与后端同构：results 同一分类可有多行（确定性行 + 决策行 + 模型行），
 // 每个分类恰一行 effective；primary 为各来源的主分类结论（至多一行 effective）。
@@ -1658,6 +1668,14 @@ for (const p of store.twitterPosts) {
   }
   if (path === '/api/llm/keys' && method === 'PUT') {
     return ok({ ok: true });
+  }
+  // ---- 网页搜索（key 与 LLM 同口径；空 = 回退到 DeepSeek 供应商）----
+  if (path === '/api/search' && method === 'GET') {
+    return ok(searchStatus());
+  }
+  if (path === '/api/search/key' && method === 'PUT') {
+    store.searchKey = String(body().value || '').trim();
+    return ok(searchStatus());
   }
   if (path === '/api/llm/providers/order' && method === 'PUT') {
     const ids = body().ids || [];

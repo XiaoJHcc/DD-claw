@@ -51,6 +51,7 @@
 | [media-capture](research/media-capture.md) | 关键帧、流媒体与采样能力 |
 | [feeds](research/feeds.md) | B站动态、微博与登录要求 |
 | [twitter](research/twitter.md) | Nitter、免登录回退、代理与时效 |
+| [web-search](research/web-search.md) | 网页检索与 X/微博/B站 账号名搜索的可用接口与边界 |
 | [auth-cookie](research/auth-cookie.md) | 凭据获取的可行性与安全边界 |
 | [llm](research/llm.md) | 模型路由、协议与成本评估 |
 | [decision-models](research/decision-models.md) | 枚举判断模型、图像输入与 API 证据 |

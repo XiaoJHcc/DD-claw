@@ -120,6 +120,11 @@ const INVENTORY: InventoryEntry[] = [
     coverage: 'registry', tool: 'set_llm_key', toolStatus: 'exists', exposeToAgent: true,
   },
   {
+    method: 'PUT', path: '/api/search/key', label: 'PUT /api/search/key',
+    coverage: 'registry', tool: 'set_search_key', toolStatus: 'exists', exposeToAgent: true,
+    reason: '网页搜索 key 是配置写（settings search_key），进快照可撤销；审计日志里值打码',
+  },
+  {
     method: 'PUT', path: '/api/llm/enabled', label: 'PUT /api/llm/enabled',
     coverage: 'registry', tool: 'set_llm_enabled', toolStatus: 'exists', exposeToAgent: true,
   },

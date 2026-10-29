@@ -35,6 +35,7 @@
 | [src/AGENTS.md](src/AGENTS.md) | 装配根、CLI、日志与热生效 |
 | [core](src/core/AGENTS.md) / [config](src/config/AGENTS.md) | 领域数据、编排、撤销 / 配置自举 |
 | [sources](src/sources/AGENTS.md) | 平台抓取、凭据与媒体采样 |
+| [search](src/search/AGENTS.md) | 网页检索与账号名搜索（外部只读查询） |
 | [analysis](src/analysis/AGENTS.md) / [rules](src/rules/AGENTS.md) | 分类、模型路由、偏好匹配 / 机械去重 |
 | [notify](src/notify/AGENTS.md) | 渠道发送与 NapCat 托管 |
 | [panel](src/panel/AGENTS.md) / [mcp](src/mcp/AGENTS.md) | HTTP 适配 / 能力执行与权限 |

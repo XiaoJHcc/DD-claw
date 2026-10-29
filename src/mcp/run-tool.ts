@@ -101,10 +101,13 @@ function validateArgs(
   return { ok: false, error: `参数不合法：${detail}` };
 }
 
-/** 审计日志：写操作 + 角色 + 调用域渠道 + 参数摘要（llm key 值打码）。entry 是入口名 */
+/** 审计日志：写操作 + 角色 + 调用域渠道 + 参数摘要（凭据值打码）。entry 是入口名 */
 function auditLine(entry: ToolEntry, call: ToolCall): void {
   const sanitized = { ...call.args };
-  if (call.def.name === 'set_llm_key' && 'value' in sanitized) sanitized.value = '***';
+  // 写凭据的工具：值是 key 本身，日志只留「改过」
+  if ((call.def.name === 'set_llm_key' || call.def.name === 'set_search_key') && 'value' in sanitized) {
+    sanitized.value = '***';
+  }
   if ('key' in sanitized) sanitized.key = '***';
   const scope = scopeChannelId(call.ctx);
   const who = scope === undefined

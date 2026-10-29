@@ -37,8 +37,9 @@ export function parseOgImage(html: string): string | null {
 }
 
 /**
- * 免登录 HTML → `og:title` 里的账号显示名。形态是 `渡瀬 結月 (@Watase_Yuzuki) / X`：
- * 贪婪匹配剥掉尾部的 `(@handle)`（显示名本身可能含括号，取最后一个）与 ` / X` 后缀。
+ * 免登录 HTML → `og:title` 里的账号显示名。形态是 `渡瀬 結月 (@Watase_Yuzuki) / X` 或
+ * `渡瀬 結月 (@Watase_Yuzuki) on X`（2026-10 起 og:title 用后者，`<title>` 仍是前者）：
+ * 贪婪匹配剥掉尾部的 `(@handle)`（显示名本身可能含括号，取最后一个）与 ` / X` / ` on X` 后缀。
  * 形态对不上（页面结构变了）返回 null——昵称缺失不影响抓取主流程。
  */
 export function parseOgTitleName(html: string): string | null {
@@ -47,7 +48,7 @@ export function parseOgTitleName(html: string): string | null {
   const content = tagM[0].match(/content="([^"]+)"/);
   if (!content) return null;
   const raw = decodeEntities(content[1]!).trim();
-  const m = raw.match(/^(.*)\s*\(@[A-Za-z0-9_]+\)(?:\s*\/\s*X)?\s*$/);
+  const m = raw.match(/^(.*)\s*\(@[A-Za-z0-9_]+\)(?:\s*(?:\/|on)\s*X)?\s*$/);
   const name = (m ? m[1]! : '').trim();
   return name || null;
 }
@@ -110,10 +111,22 @@ export async function verifyAccount(
   try {
     res = await fetchWebTweetIds(user, proxyUrl, opts);
   } catch (e) {
-    return { checked: true, ok: false, kind: 'link', message: e instanceof Error ? e.message : String(e) };
+    const message = e instanceof Error ? e.message : String(e);
+    // fetchWebTweetIds 对非 200 直接抛；404 是「账号不存在」的硬证据，不能混进「链路不通」
+    // （否则面板加错账号只会提示「未能校验」，白名单永久接受不存在的 handle）
+    if (/HTTP 404/.test(message)) {
+      return { checked: true, ok: false, kind: 'not-found', message: 'x.com 返回 404' };
+    }
+    return { checked: true, ok: false, kind: 'link', message };
   }
   if (res.ids.length > 0) {
     return { checked: true, ok: true, kind: 'ok', name: res.authorName, message: `账号存在（页面含 ${res.ids.length} 条推文）` };
+  }
+  // 2026-10-29 复核：免登录 HTML 已不再内嵌 rest_id（连 elonmusk 都是 0 条），但 profile 页的
+  // og:title 仍是「名字 (@handle)」——200 + 抠到显示名就足以证明账号存在，名字还能直接种进昵称。
+  // 也意味着这条回退路线现在只能验存在性、抓不到推文（主路线仍是 Nitter RSS）。
+  if (res.authorName) {
+    return { checked: true, ok: true, kind: 'ok', name: res.authorName, message: '账号存在（profile 页 og:title）' };
   }
   // 免登录 HTML 的 id 列表为空：用页面文案区分「账号不存在」与「页面结构变了」
   const proxy = parseProxyUrl(proxyUrl);

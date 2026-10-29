@@ -8,6 +8,7 @@
 - 热生效由装配根协调：`reconcileRuntime` 重读运行参数，`reconcileListen` 统一启停来源，`reconcileNapcat` 维护托管与上报；provider / cookie / notifier 变更经相应回调处理。
 - 撤销后按 `undoEffects` 重放同一套热生效回调，回调不下沉到 Db / UndoStore。名单由来源每轮读 DB，不为此增设重复状态。
 - X 探测由 CLI 或测试按钮显式触发；面板状态读取只返回快照，不在轮询读取路径上发探测请求。
+- 远程检索的凭据每次调用现解析（`search_key` 优先、DeepSeek 供应商回退），设置页改完下一次检索即生效；检索只发一次性请求，不进轮询。
 - CLI 复用运行时实现，不旁建分类、匹配或通知逻辑。`--dry-run` 不真发通知；`--test-notify` 和 `--force-uid` 会触达真实推送链路，使用前确认目标。
 
 ## 代码分工

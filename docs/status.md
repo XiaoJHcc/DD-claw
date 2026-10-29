@@ -32,6 +32,7 @@
 | 能力面（轴 B） | 注册表为唯一能力信源，写路径全部经 `runToolTracked`（校验 / 审计 / 快照）；`/api/*` 已收敛；MCP admin/gateway 双角色 + 渠道作用域隔离；撤销栈每调用域一条 |
 | 接入途径 | `/mcp`（进程外 Host）· WebUI Agent（`src/agent/`）· NapCat 直连（`src/qqbot/`）· MaiBot 插件（独立仓库，自带 loop）；WebUI Agent 与 QQ 直连共用同一个 agent loop 与能力面 |
 | 数据迁移 | 旧图文规则与范围列的一次性搬家已完成（旧表 DROP、账号选用列删除），机制与升级约束见 [modules/core.md](modules/core.md) |
+| 远程检索 | `web_search` + `search_{bili,weibo,x}_accounts`（admin 只读）：网页检索走 DeepSeek Search，B站走官方用户名搜索，微博走匿名侧栏建议 + 精确昵称解析，X 走网页线索 + x.com 校验；凭据 `search_key` 优先、DeepSeek 供应商回退（见 [research/web-search.md](research/web-search.md)） |
 
 ## 待验收
 
@@ -43,6 +44,7 @@
 - **QQ 通道复验**：统一规则升级后未实发 QQ（当次验收本机缺机器人配置，只走了本机 toast）；下次改动推送链路时一并复验群/私聊实发。
 - **MaiBot 插件适配统一规则模型**：插件（独立仓库）仍按旧 `uids` 读取规则范围，需改为读 `subjectKind` / `scope` 并覆盖图文规则显示与筛选；未适配前其「规则范围显示」「按主播查删」不可信，改动也不在本仓。
 - **X 源待验证项**：转发去重语义（要「每次转发都推」须另取 RT 自身 id）、免登录路线的长期稳定性等，见 [research/twitter.md](research/twitter.md) §7 与 [plan/twitter-source.md](plan/twitter-source.md)。
+- **Agent 远程检索真机验收**：四个检索客户端与 x.com 校验已实测，但「一句话加一批账号」的多步链路（`web_search` → `search_*_accounts` → `upsert_*`）还没在面板按 P1 口径跑过；X 候选依赖网页检索质量，需抽查误配率。
 
 ## 未实现
 

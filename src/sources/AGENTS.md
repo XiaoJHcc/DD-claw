@@ -16,6 +16,7 @@
 - **X 的一切出网经 `core/proxy.ts` 隧道**（Node 22 原生 fetch 不认代理），主路线 Nitter RSS、免登录 HTML 作回退；链路中断走 **canary 退避**（每轮只探第一个账号，通了当轮立刻恢复全量）。
 - **关键帧缓存不阻塞轮询**：按「尝试时间」节流（失败也记，不重试轰炸）、按**内容 md5** 去重（不按 URL 判）、路径相对且正斜杠。
 - **头像本地化按图床选路**：B站 `hdslb` / 微博 `sinaimg` 境内直连，X `pbs.twimg.com` 必须经隧道。
+- **搜索/解析客户端是「一次性只读查询」，不是 Source**：`bili/search.ts` / `weibo/search.ts` / `twitter/search.ts` / `weibo/resolve.ts` 只在面板或 agent 调用时发请求，不轮询、不归档、不发信号；结果怎么用由调用方决定。
 
 ## 文件地图
 
@@ -25,6 +26,7 @@
 - `bili/types.ts` — B站接口返回类型（`RoomStatus` 是 `LiveStatus` 的扩展）。
 - `bili/dm.ts` — dm 设备指纹参数（高斯轨迹 + 静态 base64），风控接口复用。
 - `bili/avatar.ts` — B站头像本地化（直连，md5 文件名入库）。
+- `bili/search.ts` — B站用户名搜索（远程，给 watch_streamer / upsert_bili_account 找 uid）。
 
 **B站 直播间状态与时间轴素材**
 - `bili/live-status.ts` — 批量 `get_status_info_by_uids`（分片请求，非逐个轮询）；缺 key = 未开播，不算失败。
@@ -43,12 +45,14 @@
 - `weibo/auth.ts` — weibo-cookies 读写 + `X-Log-Uid` 心跳。
 - `weibo/qrcode.ts` — passport sso/v2 扫码（generate 必须带 Referer）+ 302 链换 cookie。
 - `weibo/resolve.ts` — 昵称↔UID 匿名解析链（访客 cookie 缓存、失效重建重试一次）。
+- `weibo/search.ts` — 微博用户搜索（匿名侧栏建议；uid/昵称/简介/粉丝/认证）。
 - `weibo/avatar.ts` — 微博头像本地化（直连 sinaimg，md5 文件名入库）。
 
 **X / 推特（图文来源）**
 - `twitter/feed.ts` — `TwitterFeedSource`：Nitter RSS 主路线 + 免登录回退、逐账号拉时间线 → posts → `feed_post`；链路 canary 退避、账号级故障落库、头像与昵称回写。
 - `twitter/nitter.ts` — Nitter RSS 解析（唯一能区分原创/转发的免登录路线），多实例轮询。
 - `twitter/web.ts` — 免登录回退：`x.com` HTML 发现推文 id + 单推接口补详情；账号存在性校验。
+- `twitter/search.ts` — X 账号发现：网页检索挖 `x.com/<handle>` + 逐候选校验（X 无免登录账号搜索，成因见 research/web-search.md）。
 - `twitter/probe.ts` — X 连通性探测（代理 → 实例 RSS → 免登录回退），面板测试按钮与 `npm run probe-x` 共用。
 - `twitter/avatar.ts` — X 头像本地化（隧道下载，md5 文件名入库）。
 

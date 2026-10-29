@@ -48,6 +48,7 @@ import { getChatWriteMode } from '../agent/system-prompt.js';
 import { chatBlockedReason, runAgentTurn } from '../agent/loop.js';
 import { toolCallView, type ToolCallView } from '../agent/tool-view.js';
 import type { ToolCall } from '../analysis/providers.js';
+import type { SearchDeps } from '../search/deps.js';
 
 const log = makeLogger('panel');
 
@@ -122,6 +123,11 @@ export interface PanelDeps {
     /** store.save 后调用：装配处重建 router，名单改动热生效 */
     onProvidersChanged?: () => void;
   };
+  /**
+   * 远程检索（网页搜索 + X/微博/B站 账号名搜索）：/api/search* 与 agent 的检索工具共用。
+   * 不注入则 /api/search* 404、检索工具报「未装配」；生产实现在装配根按 settings 现场解析凭据。
+   */
+  search?: SearchDeps;
   /**
    * 决策模型供应商（System One 通道的管理面）：不注入则 /api/decision* 一律 404。
    * 与 LLM provider 完全隔离：独立名单、独立 key（`decision_key:<id>`）、独立协议。
@@ -856,6 +862,17 @@ async function handle(
       await callTool(deps, res, 'delete_llm_provider', {}, { pathArgs: { id } });
       return;
     }
+  }
+  // ---- 远程检索（search dep 存在才挂）：GET 只读凭据状态，PUT 写唯一一把搜索 key ----
+  // key 与 LLM key 同口径：本机面板明文回显/编辑（只绑 127.0.0.1）；缺省回退到 DeepSeek 供应商。
+  if (deps.search && method === 'GET' && path === '/api/search') {
+    sendJson(res, 200, deps.search.status());
+    return;
+  }
+  if (deps.search && method === 'PUT' && path === '/api/search/key') {
+    const body = asBodyObject(await readJsonBody(req));
+    await callTool(deps, res, 'set_search_key', { value: body.value }, { map: () => deps.search!.status() });
+    return;
   }
   // ---- 决策模型 provider 与 key 管理（decision dep 存在才挂；与 LLM 通道完全隔离）----
   if (deps.decision && method === 'GET' && path === '/api/decision') {
