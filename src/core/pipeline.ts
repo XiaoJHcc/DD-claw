@@ -329,7 +329,8 @@ export class Pipeline {
         parentAreaName: event.parentAreaName, keyframe: event.keyframe, cover: event.cover,
       });
     } else if (signal.kind === 'live_end') {
-      db.endSession(signal.roomId, signal.ts);
+      // 重启首轮发现的下播不代表真实下播时刻：只封口，时间轴画到最后一次在线观测
+      db.endSession(signal.roomId, signal.ts, signal.endObserved !== false);
     } else if (signal.kind === 'title_change') {
       db.rotateSegment(event.roomId, event.liveTime, signal.ts, {
         title: event.title, areaName: event.areaName,

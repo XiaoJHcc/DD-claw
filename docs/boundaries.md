@@ -149,6 +149,8 @@
 26. B站 `x/relation/followings` 分页 **50/页**，按返回 total 翻页、短页到底；**无需 WBI 签名**（604 关注 13 页实测）。[实测]
 27. B站批量接口 `get_status_info_by_uids` 传入**非纯数字 uid** 会报 `65530 route_exception`，单 uid 拉取也必败——`listWatchedUids()` 只回 watch=1 且纯数字的 uid（防止 demo 演示数据混入）。[实测]
 
+**B站未开播状态不提供上一场下播时间（2026-10-30 实测）**：`get_status_info_by_uids` 在未开播/轮播时 `live_time=0`；`room/v1/Room/get_info` 的 `live_time` 是 `"0000-00-00 00:00:00"`；带 cookie 的 `getInfoByRoom` 只有 `live_start_time=0`，没有 `live_end_time`。回放/录制接口（`AnchorGetReplayList`）确实有 `live_end_time`，但要求主播本人登录/授权，且忽略任意 `room_id`，不能用来查监听名单里的房间。**实时下播时间只能靠弹幕 WS 的 `PREPARING` 事件（当前未接入）或轮询时最后一次观测到在播**；`room_state.last_live_at` 保留了这个最后观测点，时间轴只把它当作未观测下播的往早收口兜底。
+
 以下来自 X/推特接入调研（2026-09-16）：
 
 28. **Node 22 原生 fetch 不认代理**：`HTTPS_PROXY` 环境变量无效（`NODE_USE_ENV_PROXY` 是 Node 24+ 才有），项目也未装 `undici`；`curl.exe -x` 在同一环境下同样打不通（`000`）。可行解只有一个——**手写 CONNECT 隧道 + 在隧道上 `tls.connect({servername})`**。请求务必带 `Connection: close`：HTTP/1.1 默认 keep-alive 会让读取端永不 `end`，表现为**假的 20 秒超时**（本次调研踩过，浪费两轮探测）。[实测]

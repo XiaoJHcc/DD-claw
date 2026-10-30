@@ -51,6 +51,12 @@ export interface Signal {
    * - restart_recovery：上次下播、本次启动前开播（重启恢复，无法得知真实开播时间）
    */
   coldStart?: 'first_run' | 'new_subscription' | 'restart_recovery';
+  /**
+   * live_end 专用：false = 这个下播是停机/重启后才发现（重启首轮对比恢复基线），
+   * 信号 ts 是发现时刻而不是真实下播时刻。pipeline 据此只封口、不伪造 end_seen。
+   * 缺省/true = 在线轮询中观测到的下播。
+   */
+  endObserved?: boolean;
   /** 各 source 自定义载荷（如 health_alert 的失败详情） */
   payload?: unknown;
 }

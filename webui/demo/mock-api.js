@@ -1851,7 +1851,8 @@ for (const p of store.twitterPosts) {
     for (let d = fromTs; d <= toTs; d += 86400) {
       days.push({ date: M.bjDayKey(d), entries: byDay.get(M.bjDayKey(d)) || [] });
     }
-    return ok({ days });
+    // 夹具没有服务心跳记录：online 空 + trackedFrom null = 不画离线灰底（与旧库同构）
+    return ok({ days, service: { online: [], trackedFrom: null } });
   }
 
   return err(404, '未知路由');

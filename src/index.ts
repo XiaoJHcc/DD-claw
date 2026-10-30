@@ -259,6 +259,18 @@ async function main(): Promise<void> {
   // 用户清空后不复活）。默认值由 npm run demo:fixtures 归一化生成。
   seedOnboardingDefaults(db);
 
+  // 服务在线区间：启动即开一条 run，30s 心跳；正常停机封口，崩溃/强杀由下次启动按
+  // 最后心跳补封。时间表据此把「服务没跑」画成灰底，而不是把停机时段算成直播时长。
+  db.beginServiceRun();
+  const serviceHeartbeat = setInterval(() => {
+    try {
+      db.heartbeatServiceRun();
+    } catch (e) {
+      log.warn('服务心跳落库失败', e);
+    }
+  }, 30_000);
+  serviceHeartbeat.unref();
+
   // LLM：provider 名单与 key 的唯一信源是 settings 表（面板 LLM 卡片管理）；
   // 路由由名单自动推导（顺序 = 优先级）。超时/熔断参数读 settings（面板 LLM 卡「高级」）。
   // 面板改名单 → onProvidersChanged 重建 router；改 key → refreshKeys。均免重启。
@@ -378,6 +390,7 @@ async function main(): Promise<void> {
   // --test-notify 用一条假消息走完整推送链路，验证 NapCat 配置与消息格式
   if (args.testNotify) {
     await sendTestPush();
+    db.endServiceRun();
     db.close();
     return;
   }
@@ -1052,6 +1065,8 @@ async function main(): Promise<void> {
     weiboFeedSrc?.stop();
     xFeedSrc?.stop();
     panel?.close();
+    clearInterval(serviceHeartbeat);
+    db.endServiceRun();
     db.close();
     process.exit(0);
   };

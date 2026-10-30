@@ -4,6 +4,7 @@
  * 6 点后开播算当天，6 点前开播算前一天，跨 6 点的场次整体按开播日归属。
  */
 import type { Db } from '../core/db.js';
+import { getRuntimeConfig } from '../core/runtime-config.js';
 import { HttpError } from './http-util.js';
 
 const DAY_SEC = 86400;
@@ -38,8 +39,14 @@ export function scheduleInfo(db: Db, from: string | null, to: string | null): un
   if (fromTs > toTs) throw new HttpError(400, 'from 不能晚于 to');
   if ((toTs - fromTs) / DAY_SEC > 62) throw new HttpError(400, '查询跨度不能超过 62 天');
 
-  // 归属天 = first_seen 的日界日；查询范围 = [from 日界, to 日界 + 1 天)
-  const entries = db.listTimeline(fromTs, toTs + DAY_SEC);
+  // 归属天 = 真实开播时间的日界日；查询范围 = [from 日界, to 日界 + 1 天)
+  const pollSec = getRuntimeConfig(db).pollIntervalSec;
+  const staleSec = Math.max(600, pollSec * 2 + 60);
+  const entries = db.listTimeline(fromTs, toTs + DAY_SEC, staleSec);
+  // 服务在线区间独立于场次返回：前端据此给停机时段画灰底（trackedFrom 之前没有记录，
+  // 不画灰，避免把功能部署前的历史误标成离线）。行窗口可越过最后一天 06:00 最多约
+  // 一个日界日（axis offEnd 上限），区间多取一天，滚回过去时末行右半段也能画出灰底。
+  const service = db.listServiceRuns(fromTs, toTs + 2 * DAY_SEC);
   const byDay = new Map<string, unknown[]>();
   for (const e of entries) {
     const k = scheduleDayKey(e.startTs);
@@ -59,5 +66,5 @@ export function scheduleInfo(db: Db, from: string | null, to: string | null): un
     const date = scheduleDayKey(d);
     days.push({ date, entries: byDay.get(date) ?? [] });
   }
-  return { days };
+  return { days, service };
 }

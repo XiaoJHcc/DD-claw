@@ -175,6 +175,14 @@ CREATE TABLE IF NOT EXISTS live_sessions (
   notified_at INTEGER,
   PRIMARY KEY (room_id, live_time)
 );
+CREATE TABLE IF NOT EXISTS service_runs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at         INTEGER NOT NULL,
+  last_heartbeat_at  INTEGER NOT NULL,
+  stopped_at         INTEGER,
+  stop_kind          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_service_runs_started ON service_runs (started_at);
 CREATE TABLE IF NOT EXISTS notify_log (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id   TEXT    NOT NULL,
@@ -318,8 +326,28 @@ const POST_RULE_SCOPE_MIGRATION_KEY = 'migrated_post_rule_scopes_v1';
 /** 开播动态（LIVE_RCMD）彻底舍弃、清理旧库残留行的一次性闸门（见 Db.dropLiveRcmdPosts） */
 const LIVE_RCMD_DROP_KEY = 'migrated_drop_live_rcmd_posts_v1';
 
-/** listTimeline 在播判定：last_seen 超过该秒数未刷新 = 已下播（崩溃/停机错过 live_end 的兜底） */
+/** listTimeline 在播判定：last_seen 超过该秒数未刷新 = 已下播（崩溃/停机错过 live_end 的兜底）。
+ *  轮询间隔可配到 1 小时，scheduleInfo 会按「2 × 轮询间隔 + 60s」放宽，这里只是下限。 */
 const TIMELINE_LIVE_STALE_S = 600;
+
+/** live_time 的合理回溯上限：超过这个年龄只能是脏数据（legacy/异常时钟），起点回退 first_seen。
+ *  B站单场直播不可能持续一周；真实长播/停机续播都远低于这个上限。 */
+const LIVE_START_MAX_AGE_S = 7 * 86400;
+
+/** 服务心跳的宽限：最后一次心跳超过该秒数仍未更新，在线区间就收在最后一次心跳上。 */
+const SERVICE_HEARTBEAT_GRACE_S = 90;
+
+/** 时间轴查询返回的服务在线区间（秒级闭开区间语义，前端只用来画离线灰底） */
+export interface ServiceRunInterval {
+  startTs: number;
+  endTs: number;
+}
+
+/** 服务在线记录：online = 查询范围内的在线区间；trackedFrom = 最早一条在线记录的起点 */
+export interface ServiceRuns {
+  online: ServiceRunInterval[];
+  trackedFrom: number | null;
+}
 
 /** 面板实况展示用的完整 room_state 行（PrevState 展示字段 + 下播锚点/轮询时间） */
 export interface RoomStateFull {
@@ -372,8 +400,9 @@ export interface TimelineEntry {
   /** 原名（hover 弹层等空间充足处用） */
   uname: string;
   face: string | null;
+  /** 真实开播时间（live_time；异常时回退 first_seen） */
   startTs: number;
-  /** null = 仍在播（或从未观测到下播） */
+  /** null = 仍在播；停机期间结束的场次 = 最后一次在线观测 last_seen（不是发现时刻） */
   endTs: number | null;
   keyframe: string | null;
   cover: string | null;
@@ -525,9 +554,12 @@ export class Db {
     }
     this.ensureColumn('streamers', 'face', 'face TEXT');
     this.ensureColumn('follows', 'face', 'face TEXT');
-    // live_sessions 时间轴字段（last_seen = 在播期间每轮刷新，近似下播时间锚点；
-    // keyframe/cover 开场快照 + 在播刷新，供时间表 hover 缩略图）
+    // live_sessions 时间轴字段：last_seen = 最后一次在线观测到在播；end_seen = 在线期间
+    // 观测到的下播；closed_at = 判定该场结束的时刻（停机期间结束则 end_seen 为空）。
+    // keyframe/cover 开场快照 + 在播刷新，供时间表 hover 缩略图
     this.ensureColumn('live_sessions', 'last_seen', 'last_seen INTEGER');
+    this.ensureColumn('live_sessions', 'end_seen', 'end_seen INTEGER');
+    this.ensureColumn('live_sessions', 'closed_at', 'closed_at INTEGER');
     this.ensureColumn('live_sessions', 'keyframe', 'keyframe TEXT');
     this.ensureColumn('live_sessions', 'cover', 'cover TEXT');
     // streamers 三开关（watch/analyze/notify）替代旧 mode 列
@@ -1109,42 +1141,78 @@ export class Db {
     return m;
   }
 
-  /** 记录一场直播（开场快照含 keyframe/cover）并插入首个 segment。已存在则不动（保留原 notified_at/首段）。 */
+  /**
+   * 记录一场直播（开场快照含 keyframe/cover）并插入首个 segment。
+   * 首段起点用平台给的真实开播 `liveTime`（不再用观测时刻）：服务停机期间开播的场次，
+   * 时间条也从事实上播时间开始。重复 live_start 保留原行/首段；若该场此前被标结束
+   * （停机后同场续播 / 状态抖动后同一 live_time 再次出现），这里把它恢复为在播。
+   */
   recordSession(p: {
     roomId: string; liveTime: number; uid: string;
     uname: string; title: string; areaName: string; parentAreaName: string;
     keyframe?: string; cover?: string;
   }): void {
     const t = now();
+    const start = p.liveTime > 0 && p.liveTime <= t && t - p.liveTime <= LIVE_START_MAX_AGE_S
+      ? p.liveTime : t;
     const info = this.db
       .prepare(
         `INSERT INTO live_sessions
-           (room_id, live_time, uid, uname, title, area_name, keyframe, cover, first_seen, notified_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+           (room_id, live_time, uid, uname, title, area_name, keyframe, cover,
+            first_seen, last_seen, notified_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(room_id, live_time) DO NOTHING`,
       )
       .run(p.roomId, p.liveTime, p.uid, p.uname, p.title, p.areaName,
-        p.keyframe ?? null, p.cover ?? null, t);
-    // 仅新场次插首段（重复 live_start 是冲突无操作，不能重复开段）
+        p.keyframe ?? null, p.cover ?? null, t, t);
     if (info.changes > 0) {
+      this.insertSessionSegment(p, start, t);
+      return;
+    }
+    // 同一 live_time 再次开播：此前若是「未观测到结束」的关闭，开口段仍在，续上即可；
+    // 若是观测到下播后关闭，旧段已收尾，这里补开一段（不覆盖历史）。
+    const existing = this.db
+      .prepare('SELECT closed_at FROM live_sessions WHERE room_id = ? AND live_time = ?')
+      .get(p.roomId, p.liveTime) as { closed_at: number | null } | undefined;
+    if (existing?.closed_at == null) return;
+    this.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO live_segments
-             (room_id, live_time, start_ts, end_ts, title, area_name, parent_area_name, keyframe, created_at)
-           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+          `UPDATE live_sessions SET closed_at = NULL, end_seen = NULL,
+             last_seen = MAX(COALESCE(last_seen, 0), ?)
+           WHERE room_id = ? AND live_time = ?`,
         )
-        .run(p.roomId, p.liveTime, t, p.title, p.areaName, p.parentAreaName,
-          p.keyframe ?? null, t);
-    }
+        .run(t, p.roomId, p.liveTime);
+      const open = this.db
+        .prepare('SELECT 1 FROM live_segments WHERE room_id = ? AND live_time = ? AND end_ts IS NULL')
+        .get(p.roomId, p.liveTime);
+      if (!open) this.insertSessionSegment(p, t, t);
+    });
   }
 
-  /** 在播场次的存活打点（live-status source 每轮随 saveRoomStates 调）：刷 last_seen + 非空 keyframe 覆盖。 */
+  /** 插一场直播的 segment（recordSession 的首段与同场续播段共用）。 */
+  private insertSessionSegment(
+    p: { roomId: string; liveTime: number; title: string; areaName: string; parentAreaName: string; keyframe?: string },
+    startTs: number, createdAt: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO live_segments
+           (room_id, live_time, start_ts, end_ts, title, area_name, parent_area_name, keyframe, created_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+      )
+      .run(p.roomId, p.liveTime, startTs, p.title, p.areaName, p.parentAreaName,
+        p.keyframe ?? null, createdAt);
+  }
+
+  /** 在播场次的存活打点（live-status source 每轮随 saveRoomStates 调）：刷 last_seen + 非空 keyframe 覆盖。
+   *  已关闭的场次不再打点；同场续播由 recordSession 的恢复路径处理。 */
   touchLiveSessions(entries: Array<{ roomId: string; liveTime: number; keyframe?: string }>): void {
     if (entries.length === 0) return;
     const stmt = this.db.prepare(
       `UPDATE live_sessions SET last_seen = ?,
          keyframe = CASE WHEN ? != '' THEN ? ELSE keyframe END
-       WHERE room_id = ? AND live_time = ?`,
+       WHERE room_id = ? AND live_time = ? AND closed_at IS NULL`,
     );
     const t = now();
     const tx = this.db.transaction((rows: Array<{ roomId: string; liveTime: number; keyframe?: string }>) => {
@@ -1173,22 +1241,119 @@ export class Db {
   }
 
   /**
-   * live_end 归档：关闭该房间 first_seen 最新的一场（last_seen 取大、开口 segment 以 endTs 收尾）。
+   * live_end 归档：关闭该房间 first_seen 最新且仍开口的一场。
    * 不带 liveTime：live_end 信号里它不可靠（下播合成状态 liveTime=0；下播又开播的成对信号里
    * 带的是新一场的 liveTime），而 pipeline 在信号的同步前缀里按序归档（endSession 先于配对
    * live_start 的 recordSession 执行），所以此刻该房间最新一场就是要结束的那场。
+   *
+   * `observed=false` 表示这是停机 / 重启后才发现的下播：`endTs` 是「发现」时刻，不是真实
+   * 下播时刻。此时只记 closed_at，不写 end_seen，也不把 last_seen 推后——时间轴画到
+   * 最后一次在线观测为止，数据里不伪造下播时间。
    */
-  endSession(roomId: string, endTs: number): void {
+  endSession(roomId: string, endTs: number, observed = true): void {
     const s = this.db
-      .prepare('SELECT live_time FROM live_sessions WHERE room_id = ? ORDER BY first_seen DESC LIMIT 1')
+      .prepare(
+        `SELECT live_time FROM live_sessions
+         WHERE room_id = ? AND closed_at IS NULL
+         ORDER BY first_seen DESC LIMIT 1`,
+      )
       .get(roomId) as { live_time: number } | undefined;
     if (!s) return;
+    if (observed) {
+      this.db
+        .prepare(
+          `UPDATE live_sessions SET
+             last_seen = MAX(COALESCE(last_seen, 0), ?),
+             end_seen = MAX(COALESCE(end_seen, 0), ?),
+             closed_at = MAX(COALESCE(closed_at, 0), ?)
+           WHERE room_id = ? AND live_time = ?`,
+        )
+        .run(endTs, endTs, endTs, roomId, s.live_time);
+      this.db
+        .prepare('UPDATE live_segments SET end_ts = ? WHERE room_id = ? AND live_time = ? AND end_ts IS NULL')
+        .run(endTs, roomId, s.live_time);
+      return;
+    }
     this.db
-      .prepare('UPDATE live_sessions SET last_seen = MAX(COALESCE(last_seen, 0), ?) WHERE room_id = ? AND live_time = ?')
+      .prepare(
+        `UPDATE live_sessions SET closed_at = MAX(COALESCE(closed_at, 0), ?)
+         WHERE room_id = ? AND live_time = ?`,
+      )
       .run(endTs, roomId, s.live_time);
+  }
+
+  // ---- 服务在线区间：心跳记录，供时间表区分「服务在跑但我们没看到」与「服务没跑」----
+
+  /**
+   * 进程启动：把上一进程遗留的开口 run 以最后心跳封口（崩溃/强杀时没有优雅停机），
+   * 再插入本次 run。上一进程若正常停机，stopped_at 已写好，这里不会改动。
+   */
+  beginServiceRun(at: number = now()): void {
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE service_runs SET stopped_at = last_heartbeat_at, stop_kind = 'unclean'
+           WHERE stopped_at IS NULL`,
+        )
+        .run();
+      this.db
+        .prepare('INSERT INTO service_runs (started_at, last_heartbeat_at) VALUES (?, ?)')
+        .run(at, at);
+    });
+  }
+
+  /** 进程存活心跳（周期定时器 + 每轮轮询成功都可调）：只推进当前开口 run。 */
+  heartbeatServiceRun(at: number = now()): void {
     this.db
-      .prepare('UPDATE live_segments SET end_ts = ? WHERE room_id = ? AND live_time = ? AND end_ts IS NULL')
-      .run(endTs, roomId, s.live_time);
+      .prepare(
+        `UPDATE service_runs SET last_heartbeat_at = MAX(last_heartbeat_at, ?)
+         WHERE id = (SELECT id FROM service_runs WHERE stopped_at IS NULL ORDER BY id DESC LIMIT 1)`,
+      )
+      .run(at);
+  }
+
+  /** 正常停机：把当前开口 run 收在 at；stopKind 只用于诊断（unclean = 下次启动补封）。 */
+  endServiceRun(at: number = now(), stopKind = 'shutdown'): void {
+    this.db
+      .prepare(
+        `UPDATE service_runs SET
+           stopped_at = MAX(COALESCE(stopped_at, 0), ?), stop_kind = ?
+         WHERE stopped_at IS NULL`,
+      )
+      .run(at, stopKind);
+  }
+
+  /**
+   * 时间轴用的服务在线区间：查询范围内的 run（秒级半开区间），与最早一条在线记录的起点。
+   * 未封口的 run 若心跳还新鲜，按「在线到现在」返回；心跳停了就以最后心跳封口——
+   * 进程卡死或崩溃后，前端不会把未知时段画成在线。`trackedFrom` 之前的年代没有记录，
+   * 前端不对那段画灰底，避免把部署前的历史误标成离线。
+   */
+  listServiceRuns(fromTs: number, toTs: number, nowTs: number = now()): ServiceRuns {
+    const tracked = this.db
+      .prepare('SELECT MIN(started_at) AS started_at FROM service_runs')
+      .get() as { started_at: number | null };
+    const rows = this.db
+      .prepare(
+        `SELECT started_at, last_heartbeat_at, stopped_at FROM service_runs
+         WHERE started_at < ? AND COALESCE(stopped_at, last_heartbeat_at, started_at) > ?
+         ORDER BY started_at, id`,
+      )
+      .all(toTs, fromTs) as Array<{
+        started_at: number; last_heartbeat_at: number; stopped_at: number | null;
+      }>;
+    const online: ServiceRunInterval[] = [];
+    for (const r of rows) {
+      const end = r.stopped_at
+        ?? (nowTs - r.last_heartbeat_at <= SERVICE_HEARTBEAT_GRACE_S ? nowTs : r.last_heartbeat_at);
+      const startTs = Math.max(r.started_at, fromTs);
+      const endTs = Math.min(end, toTs);
+      if (endTs <= startTs) continue;
+      const last = online.at(-1);
+      if (last && startTs <= last.endTs) last.endTs = Math.max(last.endTs, endTs);
+      else online.push({ startTs, endTs });
+    }
+    return { online, trackedFrom: tracked.started_at };
   }
 
   /** title_change 归档：关闭当前开口 segment（end_ts = ts）并以新内容开下一段。场次不存在则不动。 */
@@ -1217,27 +1382,46 @@ export class Db {
   }
 
   /**
-   * 时间轴组装（/api/schedule）：first_seen 落在 [fromTs, toTs) 的场次 + 其 segments +
+   * 时间轴组装（/api/schedule）：真实开播时间落在 [fromTs, toTs) 的场次 + 其 segments +
    * verdicts + 主分类 + 主播信息（alias/uname/face）。四表各查一次（join 场次过滤），JS 按
-   * (room_id, live_time) 归并，无 N+1。endTs 语义：在播（last_seen 鲜度窗口内）= null；
-   * 已下播 = last_seen，兜底关闭开口段；legacy 无打点场次 = first_seen（零长，前端不画）。
+   * (room_id, live_time) 归并，无 N+1。
+   *
+   * 起点 = `live_time`（平台给的真实开播；异常时钟回退 first_seen），不再用首次观测时间。
+   * 终点：在播 = null；已下播 = 在线期间观测到的 end_seen，否则最后一次在线观测 last_seen；
+   * 停机期间结束的场次没有 end_seen，绝不拿「发现时刻」伪造下播时间。legacy 无打点场次
+   * 退到 first_seen（零长，前端不画）。
+   *
+   * `staleSec` 是「最后一次打点多旧仍算在播」的窗口：调用方按实际轮询间隔放宽，
+   * 避免轮询间隔 >10 分钟时把在播场误判成已下播。
    */
-  listTimeline(fromTs: number, toTs: number): TimelineEntry[] {
+  listTimeline(fromTs: number, toTs: number, staleSec = TIMELINE_LIVE_STALE_S): TimelineEntry[] {
     const nowTs = now();
+    // 真实开播时间：live_time 是平台事实，但时钟回拨/异常时可能晚于首次观测，取较早者。
+    const sessionStart = (p: string) =>
+      `(CASE WHEN ${p}live_time > 0 AND ${p}live_time <= ${p}first_seen` +
+      ` AND ${p}first_seen - ${p}live_time <= ${LIVE_START_MAX_AGE_S}` +
+      ` THEN ${p}live_time ELSE ${p}first_seen END)`;
+    const startExpr = sessionStart('');
+    const joinStartExpr = sessionStart('ls.');
     const sessions = this.db
-      .prepare('SELECT * FROM live_sessions WHERE first_seen >= ? AND first_seen < ? ORDER BY first_seen')
+      .prepare(
+        `SELECT *, ${startExpr} AS start_ts FROM live_sessions
+         WHERE ${startExpr} >= ? AND ${startExpr} < ?
+         ORDER BY start_ts, first_seen`,
+      )
       .all(fromTs, toTs) as Array<{
         room_id: string; live_time: number; uid: string; uname: string | null;
         title: string | null; area_name: string | null; parent_area_name?: string | null;
         keyframe: string | null; cover: string | null;
         first_seen: number; last_seen: number | null;
+        end_seen: number | null; closed_at: number | null; start_ts: number;
       }>;
     if (sessions.length === 0) return [];
     const segRows = this.db
       .prepare(
         `SELECT s.* FROM live_segments s
          JOIN live_sessions ls ON ls.room_id = s.room_id AND ls.live_time = s.live_time
-         WHERE ls.first_seen >= ? AND ls.first_seen < ?
+         WHERE ${joinStartExpr} >= ? AND ${joinStartExpr} < ?
          ORDER BY s.start_ts, s.id`,
       )
       .all(fromTs, toTs) as LiveSegmentRow[];
@@ -1249,7 +1433,7 @@ export class Db {
          FROM verdicts v
          JOIN live_sessions ls
            ON v.subject_type = 'live' AND v.subject_id = ls.room_id || ':' || ls.live_time
-         WHERE ls.first_seen >= ? AND ls.first_seen < ? AND v.effective = 1 AND v.pass = 1
+         WHERE ${joinStartExpr} >= ? AND ${joinStartExpr} < ? AND v.effective = 1 AND v.pass = 1
          ORDER BY v.id`,
       )
       .all(fromTs, toTs) as Array<{
@@ -1263,7 +1447,7 @@ export class Db {
          FROM primary_verdicts p
          JOIN live_sessions ls
            ON p.subject_type = 'live' AND p.subject_id = ls.room_id || ':' || ls.live_time
-         WHERE ls.first_seen >= ? AND ls.first_seen < ? AND p.effective = 1
+         WHERE ${joinStartExpr} >= ? AND ${joinStartExpr} < ? AND p.effective = 1
          ORDER BY p.id`,
       )
       .all(fromTs, toTs) as Array<{
@@ -1276,11 +1460,15 @@ export class Db {
         `SELECT r.room_id, r.live_time, r.trigger_kind, r.ts, r.verdicts, r.primary_verdict
          FROM live_classification_runs r
          JOIN live_sessions ls ON ls.room_id = r.room_id AND ls.live_time = r.live_time
-         WHERE ls.first_seen >= ? AND ls.first_seen < ?
+         WHERE ${joinStartExpr} >= ? AND ${joinStartExpr} < ?
          ORDER BY r.ts, r.id`,
       )
       .all(fromTs, toTs) as LiveClassificationRunRow[];
     const streamerByUid = new Map(this.listStreamers().map((s) => [s.uid, s]));
+    // 每房间最新状态：last_live_at 是「最后一次确认在播」，下播后保留。它不随场次归档，
+    // 只对「该房间最近一场」有意义，用作未观测下播终点的兜底收口（见下方 endTs 计算）。
+    const roomStateByRoom = new Map<string, RoomStateFull>();
+    for (const rs of this.listRoomStatesFull().values()) roomStateByRoom.set(rs.roomId, rs);
 
     const key = (roomId: string, liveTime: number) => `${roomId}:${liveTime}`;
     const segsBySession = new Map<string, TimelineSegment[]>();
@@ -1323,27 +1511,46 @@ export class Db {
 
     return sessions.map((s) => {
       const st = streamerByUid.get(s.uid);
-      // 在播判定：last_seen 在打点鲜度窗口内才算在播（endTs=null）；超时未刷新 = 已下播
-      // （崩溃/停机错过 live_end 的兜底），legacy 无打点场次终点取 first_seen（零长不画）
-      const isLive = s.last_seen != null && nowTs - s.last_seen <= TIMELINE_LIVE_STALE_S;
-      const endTs = isLive ? null : (s.last_seen ?? s.first_seen);
+      const startTs = s.start_ts;
+      // 在播 = 未被标结束 + 最后一次在线观测仍在鲜度窗口内。closed_at 已写但 end_seen 为空，
+      // 说明是停机期间结束的：终点取 last_seen（最后一次确认在播），不取发现时刻。
+      const isLive = s.closed_at == null && s.end_seen == null
+        && s.last_seen != null && nowTs - s.last_seen <= staleSec;
+      let endTs: number | null = isLive ? null : (s.end_seen ?? s.last_seen ?? s.first_seen);
+      // 未观测到下播（end_seen 为空）时，room_state.last_live_at 是旧版重启写坏 last_seen
+      // 之前最后一次确认在播的时间。只允许往早收口，不往晚延伸；房间已有更新场次时它更晚，
+      // 自然不生效。观测到下播的 end_seen 永远优先，不受影响。
+      const lastLiveAt = roomStateByRoom.get(s.room_id)?.lastLiveAt ?? null;
+      if (endTs != null && s.end_seen == null && lastLiveAt != null
+        && lastLiveAt > 0 && lastLiveAt < endTs) {
+        endTs = lastLiveAt;
+      }
       let segments = segsBySession.get(key(s.room_id, s.live_time));
       if (!segments || segments.length === 0) {
         // 旧场次（segments 表建立前归档的）没有段：回退为单段，标题/分区取开场快照
         segments = [{
-          startTs: s.first_seen, endTs,
+          startTs, endTs,
           title: s.title ?? '', areaName: s.area_name ?? '', parentAreaName: '',
         }];
-      } else if (!isLive) {
-        // 已下播：开口段以场次终点收尾（正常路径 endSession 已关，这里是兜底）
-        segments = segments.map((g) => (g.endTs === null ? { ...g, endTs } : g));
+      } else {
+        // 旧数据首段从观测时刻开始：场次起点回推到真实开播，时间条才不缺口
+        if (startTs < segments[0]!.startTs) {
+          segments[0] = { ...segments[0]!, startTs };
+        }
+        if (!isLive && endTs != null) {
+          // 已下播：开口段收在场次终点；旧数据已收尾的段也钳到 effective end
+          segments = segments.map((g) => {
+            const segEnd = g.endTs == null ? endTs : Math.min(g.endTs, endTs);
+            return segEnd === g.endTs ? g : { ...g, endTs: segEnd };
+          });
+        }
       }
       return {
         roomId: s.room_id, liveTime: s.live_time, uid: s.uid,
         name: st ? (st.alias || st.uname) : (s.uname ?? ''),
         uname: st?.uname ?? s.uname ?? '',
         face: st?.face ?? null,
-        startTs: s.first_seen, endTs,
+        startTs, endTs,
         keyframe: s.keyframe, cover: s.cover,
         segments,
         verdicts: verdictsBySession.get(key(s.room_id, s.live_time)) ?? [],

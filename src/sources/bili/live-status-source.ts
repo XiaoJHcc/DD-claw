@@ -100,6 +100,8 @@ export class LiveStatusSource implements Source {
     let statuses: Map<string, RoomStatus>;
     try {
       statuses = await this.fetcher(uids);
+      // 成功抓取也是一次服务心跳：定时器被事件循环拖慢时，时间轴仍能把这段算作在线
+      ctx.db.heartbeatServiceRun();
       this.onPollSuccess();
     } catch (e) {
       // 关键：拉取失败绝不能当成下播 —— 保留旧状态，什么都不做
@@ -128,7 +130,14 @@ export class LiveStatusSource implements Source {
         : !this.known.has(uid) ? 'new_subscription'
         : coldRound ? 'restart_recovery'
         : undefined;
-      if (cold) for (const s of sigs) s.coldStart = cold;
+      if (cold) {
+        for (const s of sigs) {
+          s.coldStart = cold;
+          // 重启首轮才发现的 live_end：恢复基线与本轮之间隔着停机，真实下播时间未知。
+          // 标成未观测，归档只封口、不把「发现时刻」写成下播时间。
+          if (cold === 'restart_recovery' && s.kind === 'live_end') s.endObserved = false;
+        }
+      }
 
       if (curr) {
         const st = toPrevState(curr);

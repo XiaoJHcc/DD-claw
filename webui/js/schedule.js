@@ -37,11 +37,18 @@
 // 右端，次日行从其窗口左起接续，相邻窗口首尾相接故无缝）。段与行窗口求交后按
 // **uid 分组整体装箱**（同主播当天多场永远同泳道；组内条互叠的异常数据退化为
 // 逐 bar 装箱）。装箱窗口 == 绘制窗口，行高 = 泳道数 × 道高。
+//
+// 服务在线区间：/api/schedule 随 days 返回 service.online（服务进程心跳区间）与
+// trackedFrom（记录起点）。行内窗口减去在线区间 = 服务未运行时段，铺灰底；trackedFrom
+// 之前没有记录，不铺灰。场次起点用平台给的 live_time（真实开播），终点用后端已按在线
+// 观测收口的 endTs——停机期间结束的场次画到最后一次在线观测，不延伸进灰底。
 import { api, toast, ACTIONS, esc } from './core.js';
 import { icon } from './icons.js';
 import { openContentAudit } from './content-audit.js';
 
 var schedDays = [];           // 窗口内 5 天升序 [{date, entries:[...]}]
+var schedOnline = [];         // 服务在线区间 [{startTs, endTs}]
+var schedTrackedFrom = null;  // 服务在线记录起点；null = 没有记录（不画灰底）
 var schedCenter = null;       // 居中日（日串）
 var schedColors = {};         // uid → {h, s}（头像平均色取 h/s）/ null（头像获取不到→哈希色）；undefined = 未算出→占位灰
 var schedColorPending = {};   // uid → true（平均色计算中，避免重复拉图）
@@ -191,13 +198,77 @@ function schedPrepareColors(days) {
 
 // ---- 窗口加载：center ± 2 天一次请求；dir = 'future'（内容上移进场）/ 'past'（下移）----
 function schedFetch(from, to) {
-  return api('/api/schedule?from=' + from + '&to=' + to).then(function (j) { return j.days || []; });
+  return api('/api/schedule?from=' + from + '&to=' + to).then(function (j) {
+    var service = j.service || {};
+    return {
+      days: j.days || [],
+      online: Array.isArray(service.online) ? service.online : [],
+      trackedFrom: typeof service.trackedFrom === 'number' ? service.trackedFrom : null,
+    };
+  });
+}
+
+/** 应用一窗数据（days + 服务在线区间），颜色按 uid 缓存复用 */
+function schedApplyData(data) {
+  schedDays = data.days || [];
+  schedOnline = (data.online || []).slice().sort(function (a, b) { return a.startTs - b.startTs; });
+  schedTrackedFrom = data.trackedFrom == null ? null : data.trackedFrom;
+  schedPrepareColors(schedDays);
+}
+
+// ---- 服务离线灰底：行窗口 [winStart, winEnd) 减去服务在线区间；trackedFrom 之前不画 ----
+var SCHED_OFFLINE_FILL = 'rgba(15,23,42,.065)';
+
+/** 生成行内离线时段的硬边渐变（透明 = 在线，灰 = 离线）；无记录/无离线段返回空串 */
+function schedOfflineGradient(winStart, winEnd, now) {
+  if (schedTrackedFrom == null) return '';
+  var start = Math.max(winStart, schedTrackedFrom);
+  var end = Math.min(winEnd, now); // 未来时段不画灰
+  if (end <= start) return '';
+  var cursor = start;
+  var gaps = [];
+  for (var i = 0; i < schedOnline.length; i++) {
+    var a = Math.max(schedOnline[i].startTs, start);
+    var b = Math.min(schedOnline[i].endTs, end);
+    if (b <= cursor) continue;
+    if (a > cursor) gaps.push([cursor, a]);
+    if (b > cursor) cursor = b;
+    if (cursor >= end) break;
+  }
+  if (cursor < end) gaps.push([cursor, end]);
+  if (gaps.length === 0) return '';
+  var span = winEnd - winStart;
+  var stops = [];
+  for (var j = 0; j < gaps.length; j++) {
+    var l = ((gaps[j][0] - winStart) / span) * 100;
+    var r = ((gaps[j][1] - winStart) / span) * 100;
+    if (r <= l) continue;
+    stops.push(
+      'transparent ' + l.toFixed(4) + '%',
+      SCHED_OFFLINE_FILL + ' ' + l.toFixed(4) + '%',
+      SCHED_OFFLINE_FILL + ' ' + r.toFixed(4) + '%',
+      'transparent ' + r.toFixed(4) + '%',
+    );
+  }
+  return stops.length === 0 ? '' : 'linear-gradient(90deg, ' + stops.join(', ') + ')';
+}
+
+/** 把离线灰底铺到行泳道容器（背景层，条与日标签画在其上） */
+function schedPaintOffline(lanesEl, winStart, winEnd, now) {
+  var bg = schedOfflineGradient(winStart, winEnd, now);
+  if (bg) {
+    lanesEl.style.backgroundImage = bg;
+    lanesEl.style.backgroundRepeat = 'no-repeat';
+    lanesEl.style.backgroundSize = '100% 100%';
+  } else {
+    lanesEl.style.backgroundImage = '';
+  }
 }
 
 // ---- 相邻窗口预取缓存：当前窗口加载完成后，后台预取 ±1 步的窗口。滚动步进命中缓存时
 // 立即渲染（折叠/展开动画不被数据加载延迟打断，否则先停顿再猛地一齐动 = 跳闪），
 // 同时后台重取纠偏。缓存只留 center ±3 步内，防长期滚动无限增长 ----
-var schedWinCache = {};      // 'from_to' → days
+var schedWinCache = {};      // 'from_to' → {days, online, trackedFrom}
 var schedWinFetching = {};   // key → true（预取在途去重）
 
 function schedCacheKey(from, to) { return from + '_' + to; }
@@ -207,9 +278,9 @@ function schedPrefetchWindow(from, to) {
   var key = schedCacheKey(from, to);
   if (schedWinCache[key] || schedWinFetching[key]) return;
   schedWinFetching[key] = true;
-  schedFetch(from, to).then(function (days) {
+  schedFetch(from, to).then(function (data) {
     schedWinFetching[key] = false;
-    schedWinCache[key] = days;
+    schedWinCache[key] = data;
   }).catch(function () { schedWinFetching[key] = false; }); // 预取失败静默，滚过去时正常加载
 }
 
@@ -238,31 +309,28 @@ function schedLoad(center) {
     // 命中预取缓存：立即渲染（动画即时连贯），随后后台重取纠偏——内容有变化才重渲
     //（新几何照旧走 CSS 过渡，不硬切）
     schedCenter = center;
-    schedDays = cached;
-    schedPrepareColors(cached);
+    schedApplyData(cached);
     recomputeSchedAxis();
     renderSched();
     schedPruneCache();
     schedPrefetchAdjacent(center);
-    schedFetch(from, to).then(function (days) {
+    schedFetch(from, to).then(function (data) {
       if (seq !== schedSeq) return; // 用户又滚走了，纠偏结果只进缓存
-      schedWinCache[key] = days;
-      if (JSON.stringify(days) === JSON.stringify(cached)) return; // 无变化不重渲（防二次闪动）
-      schedDays = days;
-      schedPrepareColors(days);
+      schedWinCache[key] = data;
+      if (JSON.stringify(data) === JSON.stringify(cached)) return; // 无变化不重渲（防二次闪动）
+      schedApplyData(data);
       recomputeSchedAxis();
       renderSched();
     }).catch(function () { /* 纠偏失败忽略，60s 保鲜周期再试 */ });
     return;
   }
-  schedFetch(from, to).then(function (days) {
+  schedFetch(from, to).then(function (data) {
     if (seq !== schedSeq) return; // 已有更新的请求在路上，作废旧渲染
     schedCenter = center;
-    schedDays = days;
-    schedPrepareColors(days);
+    schedApplyData(data);
     recomputeSchedAxis(); // center 变化时重算；轴变化只改几何（reconcile 原地更新），不整窗重画
     renderSched();
-    schedWinCache[key] = days;
+    schedWinCache[key] = data;
     schedPruneCache();
     schedPrefetchAdjacent(center);
   }).catch(function (e) {
@@ -289,11 +357,10 @@ function schedRefreshData() {
   if (!schedCenter) return;
   var seq = ++schedSeq;
   var from = schedAddDays(schedCenter, -2), to = schedAddDays(schedCenter, 2);
-  schedFetch(from, to).then(function (days) {
+  schedFetch(from, to).then(function (data) {
     if (seq !== schedSeq) return; // 已有更新的请求在路上，作废本次刷新
-    schedDays = days;
-    schedWinCache[schedCacheKey(from, to)] = days; // 保鲜结果同步进预取缓存，滚动回去不拿到旧数据
-    schedPrepareColors(days);
+    schedApplyData(data);
+    schedWinCache[schedCacheKey(from, to)] = data; // 保鲜结果同步进预取缓存，滚动回去不拿到旧数据
     recomputeSchedAxis();
     renderSched();
   }).catch(function () { /* 瞬时失败忽略，下个周期再试 */ });
@@ -631,6 +698,7 @@ function updateSchedDay(el, day, level, span, now, lanes) {
   el.style.flexGrow = '0';   // 高度全由解算器出 basis 像素值，grow/shrink 恒 0
   el.style.flexShrink = '0';
   var winStart = schedDayStartTs(day.date) + schedAxis.offStart;
+  var winEnd = winStart + span;
   // 当前时间红线跟随行窗口：now 落在本行窗口内才画（相邻窗口不重叠，至多一行命中；
   // 行窗口外的空档不画；缩略行也画红线，今天滚到首末天时红线不消失）
   var nowPct = schedRowHasNow(day.date, now) ? ((now - winStart) / span) * 100 : -1;
@@ -650,6 +718,8 @@ function updateSchedDay(el, day, level, span, now, lanes) {
   var dayPrefix = day.date === schedLogical ? (schedLogical === bjToday() ? '今天 · ' : '昨天 · ') : '';
   var pillHtml = '<b>' + dayPrefix + parts.d + '</b><span>' + parts.w + '</span>';
   if (pill.innerHTML !== pillHtml) pill.innerHTML = pillHtml;
+  // 服务离线时段铺灰底（背景层，条与日标签在其上）；trackedFrom 之前不画
+  schedPaintOffline(lanesEl, winStart, winEnd, now);
   // 级别与道数挂在元素上，供 schedSolveHeights 解算像素高度
   el._schedLevel = level;
   el._schedLanes = reconcileSchedLanes(lanesEl, now, winStart, span, lanes);

@@ -38,9 +38,13 @@
 
 ## 数据语义
 
-**直播场次与时间轴。** `live_sessions` 的主键是 `(room_id, live_time)`，这就是「一场直播」的身份。在播期间每轮刷新 `last_seen`（近似下播锚点，崩溃恢复也能给出近似终点）；`title_change` 在 `live_segments` 里切一段，段索引同样是 `(room_id, live_time)`。时间轴查询把场次、内容段与判定三张表归并：`endTs` 的取值规则是——`last_seen` 落在鲜度窗口内视为仍在播（`null`），超时或从未打点则退到 `last_seen ?? first_seen`。**这是崩溃错过 `live_end` 的兜底**；legacy 零长场次不画。
+**直播场次与时间轴。** `live_sessions` 的主键是 `(room_id, live_time)`，这就是「一场直播」的身份。时间轴起点取 `live_time`（平台给的真实开播；异常时钟回退 `first_seen`），所以服务停机期间开播、重启后才观测到的场次不会从启动时刻才开始。`title_change` 在 `live_segments` 里切一段，段索引同样是 `(room_id, live_time)`。
 
-**状态表与展示列。** `room_state` 是「上一轮是什么状态」的持久化，同时携带面板要展示的列（分区、关键帧、封面、在线数、最后开播时间）。它是 `restore()` 的来源：恢复出来的旧状态进入冷启动观察期，于是启动后第一轮新出现的开播被标成 `restart_recovery` 而不是实时开播。
+终点分三种：在线轮询中观测到下播 → `end_seen`（`closed_at` 同时写入）；停机/崩溃期间结束 → 只写 `closed_at`，**不写 `end_seen`、也不推后 `last_seen`**，时间轴画到最后一次在线观测；仍在播 → `endTs=null`。`last_seen` 是在播期间每轮刷新的「最后一次确认在播」，只用于在播鲜度判断与未观测结束的收口，不再被 `endSession` 推成重启时刻。重启首轮发现的 `live_end` 带 `endObserved=false`，pipeline 据此走未观测分支。
+
+**服务在线区间。** `service_runs` 每次进程启动开一条 run，周期心跳 + 每轮拉取成功刷新 `last_heartbeat_at`；正常停机写 `stopped_at`，崩溃/强杀由下次启动按最后心跳补封。时间轴 API 返回查询范围内的 `online` 区间与最早记录起点 `trackedFrom`；前端在行窗口内减去在线区间，把服务未运行时段铺成灰底。`trackedFrom` 之前没有记录，不铺灰，避免把功能部署前的历史误标成离线。`live_time` 相同的场次跨停机自动续上（仍是同一场），不重复建档；不同 `live_time` 才先封旧场再记新场。
+
+**状态表与展示列。** `room_state` 是「上一轮是什么状态」的持久化，同时携带面板要展示的列（分区、关键帧、封面、在线数、最后开播时间）。它是 `restore()` 的来源：恢复出来的旧状态进入冷启动观察期，于是启动后第一轮新出现的开播被标成 `restart_recovery` 而不是实时开播。`last_live_at` 是每房间最后一次确认在播，下播后保留；时间轴对「未观测下播」的终点会用它做一次只往早收的兜底（旧版重启写坏 `last_seen` 的场次能被收回到真实观测点）。它只有房间最近一场，房间已有更新场次时值更晚，兜底自然失效。
 
 **判定归档（`verdicts`）。** 直播场次与图文帖同表，身份键 `(subject_type, subject_id)` 把两类内容分开。`category_id` / `rule_id` 的 `0` 表示「不适用」——用 NULL 会让 `UNIQUE` 去重失效，所以哨兵是刻意的。`source` 区分确定性条件、LLM、决策模型三条来源，并进入唯一键：同一分类每个来源各留一行，`effective` 标出唯一生效的那行，消费方只读它。`evidence` 存命中说明（关键词 / 分区 / 模型理由），是事后追「为什么被判成这个分类」的唯一依据。主分类结论另存 `primary_verdicts`，同样按来源一行、`effective` 标生效。旧库的 `(room_id, live_time)` 形状与无 `effective` 列的形状都由启动期迁移重建（老行视为生效）。
 
@@ -98,7 +102,9 @@
 
 ## 排障
 
-- **某场直播没出现在时间轴**：先看 `live_sessions` 有没有行（没有 = 信号未产生或归档前异常），再看 `last_seen` 与 `first_seen`（零长或全空会被判为 legacy 不画），最后确认 `live_time` 是否连续变更（轮播被折叠成未开播）。
+- **某场直播没出现在时间轴**：先看 `live_sessions` 有没有行（没有 = 信号未产生或归档前异常），再看 `live_time` / `first_seen` / `last_seen` / `end_seen` / `closed_at`（legacy 无打点零长场次不画；查询范围按真实开播时间归属），最后确认 `live_time` 是否连续变更（轮播被折叠成未开播）。
+- **时间轴某段被画成灰色**：查 `service_runs` 在该时段的 `started_at` / `last_heartbeat_at` / `stopped_at`；灰底 = 没有任何在线 run 覆盖。`trackedFrom` 之前不画灰；崩溃遗留的开口 run 会在下次启动时按最后心跳补封。
+- **旧数据里仍有超长条**：功能上线前的重启把 `last_seen` 写成了重启时刻，而每次轮询的真实观测值已经被覆盖，无法从现有表恢复。新逻辑只保证从此不再写坏；这些历史行不会自动变短。
 - **某场没推**：按 `content_audit.push.status / reason` 走——`skipped` 的 reason 会直接写明是「未命中规则」「规则未选渠道」「推送总开关关闭」还是冷启动恢复设置。判定侧看 `content_audit.analysis`（含 `fallbackReason` 与逐模型尝试）。
 - **分类变了却没重推**：先看该场 `live_classification_runs` 相邻两轮的分类集合是否真的一样（一样就不重推），再看 `content_audit.push.reason`（分类失败 / LLM 冷却中本轮跳过 / 结果未变 / 总开关关闭 / 无命中规则）。
 - **改了参数没生效**：确认改的是 settings 规格表里的键（`isRuntimeConfigKey` 为假 = 存了也没人读），再确认消费路径是装配根注入型（需重启对应源）还是直读型（立刻生效）。

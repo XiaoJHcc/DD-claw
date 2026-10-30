@@ -246,6 +246,23 @@ test('重启恢复：停机期间开播的已订阅主播标 restart_recovery，
   assert.equal(signals2.length, 0);
 });
 
+test('重启首轮发现的 live_end 标 endObserved=false：真实下播时间未知', async (t) => {
+  // 上次运行结束时主播 1 仍在播（room_state 基线 live），重启后首轮已下播
+  const h = harness(['1'], async () => new Map());
+  t.after(h.cleanup);
+  h.db.saveRoomState('1', {
+    roomId: 'room-1', isLive: true, liveTime: 1_785_310_737, title: '标题',
+    areaName: '', parentAreaName: '', keyframe: '', cover: '', online: 0, face: '',
+  });
+  h.src.restore();
+
+  await h.src.pollOnce();
+  const end = h.signals.find((s) => s.kind === 'live_end');
+  assert.ok(end, '恢复基线 live → 本轮无该 uid = 下播');
+  assert.equal(end.coldStart, 'restart_recovery');
+  assert.equal(end.endObserved, false, '停机后才发现的下播不得当成真实下播时间');
+});
+
 // ---- restore 恢复基线 ----
 
 test('restore 恢复基线：重启后同一场不重复产 live_start', async (t) => {

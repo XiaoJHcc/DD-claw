@@ -59,7 +59,7 @@ class SlowClassifier implements Classifier {
 
 class FakeDb {
   sessions: string[] = [];
-  ended: Array<{ roomId: string; ts: number }> = [];
+  ended: Array<{ roomId: string; ts: number; observed: boolean }> = [];
   rotated: Array<{ roomId: string; liveTime: number; ts: number; title: string }> = [];
   notified = new Set<string>();
   streamers = new Map<string, { alias: string | null; notify: boolean }>([
@@ -74,7 +74,7 @@ class FakeDb {
   recordSession(p: { roomId: string; liveTime: number }) {
     this.sessions.push(`${p.roomId}:${p.liveTime}`);
   }
-  endSession(roomId: string, ts: number) { this.ended.push({ roomId, ts }); }
+  endSession(roomId: string, ts: number, observed = true) { this.ended.push({ roomId, ts, observed }); }
   rotateSegment(roomId: string, liveTime: number, ts: number, seg: { title: string }) {
     this.rotated.push({ roomId, liveTime, ts, title: seg.title });
   }
@@ -412,7 +412,15 @@ test('live_end 归档：endSession 按房间 + 信号 ts 关闭场次（不推�
   const h = harness();
   h.bus.emit(sig({ kind: 'live_end', ts: 1_800_000_000 }));
   await h.pipeline.whenIdle();
-  assert.deepEqual(h.db.ended, [{ roomId: 'r1', ts: 1_800_000_000 }]);
+  assert.deepEqual(h.db.ended, [{ roomId: 'r1', ts: 1_800_000_000, observed: true }]);
+  assert.equal(h.disp.sent.length, 0);
+});
+
+test('重启首轮的 live_end 标为未观测：归档只封口，不伪造下播时间', async () => {
+  const h = harness();
+  h.bus.emit(sig({ kind: 'live_end', ts: 1_800_000_000, endObserved: false }));
+  await h.pipeline.whenIdle();
+  assert.deepEqual(h.db.ended, [{ roomId: 'r1', ts: 1_800_000_000, observed: false }]);
   assert.equal(h.disp.sent.length, 0);
 });
 

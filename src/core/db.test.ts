@@ -437,14 +437,15 @@ function session(over: Partial<Parameters<Db['recordSession']>[0]> = {}): Parame
   };
 }
 
-test('live_sessions 新列迁移幂等，live_segments 建表', (t) => {
+test('live_sessions 新列迁移幂等，live_segments / service_runs 建表', (t) => {
   let db: Db | undefined;
   const path = join(tmpdir_(t, () => db?.close()), 'tl.db');
   db = new Db(path);
-  for (const col of ['last_seen', 'keyframe', 'cover']) {
+  for (const col of ['last_seen', 'end_seen', 'closed_at', 'keyframe', 'cover']) {
     assert.ok(columns(path, 'live_sessions').includes(col), `live_sessions 应补列 ${col}`);
   }
   assert.ok(columns(path, 'live_segments').length > 0, 'live_segments 应存在');
+  assert.ok(columns(path, 'service_runs').length > 0, 'service_runs 应存在');
   db.close();
   db = new Db(path);
   assert.ok(columns(path, 'live_segments').length > 0, '二次打开幂等不报错');
@@ -466,13 +467,26 @@ test('recordSession 写开场快照并插首段；重复 recordSession 不重复
     .get('r1') as { keyframe: string; cover: string; last_seen: number | null };
   assert.equal(s.keyframe, 'k1.jpg', '开场快照入库');
   assert.equal(s.cover, 'c1.jpg');
-  assert.equal(s.last_seen, null, '未打点前 last_seen 为空');
+  assert.ok(s.last_seen !== null && s.last_seen > 0, 'recordSession 本身即一次在线观测');
   assert.equal(segs().length, 1, '首个 segment');
   assert.equal(segs()[0]!.title, '打游戏');
   assert.equal(segs()[0]!.end_ts, null, '首段开口（进行中）');
 
   db.recordSession(session({ keyframe: undefined, cover: undefined }));
   assert.equal(segs().length, 1, '冲突无操作不重复开段');
+});
+
+test('recordSession 首段从真实 liveTime 开始，不从观测时刻开始', (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+  const liveTime = Math.floor(Date.now() / 1000) - 600;
+  db.recordSession(session({ liveTime }));
+  const seg = db.raw
+    .prepare('SELECT start_ts FROM live_segments WHERE room_id = ? AND live_time = ?')
+    .get('r1', liveTime) as { start_ts: number };
+  assert.equal(seg.start_ts, liveTime, '首段起点 = 真实开播');
+  const e = db.listTimeline(liveTime - 10, liveTime + 10)[0]!;
+  assert.equal(e.startTs, liveTime);
 });
 
 test('touchLiveSessions：刷 last_seen；非空 keyframe 覆盖、空 keyframe 保留', (t) => {
@@ -508,10 +522,16 @@ test('endSession：关闭该房间最新一场（last_seen 取大、开口段收
   db.recordSession(session({ liveTime: 200, title: '第二场' }));
 
   db.endSession('r1', 9_999_999_999);
-  const s100 = raw.prepare('SELECT last_seen FROM live_sessions WHERE live_time = 100').get() as { last_seen: number | null };
-  assert.equal(s100.last_seen, null, '旧场次不被误关');
-  const s200 = raw.prepare('SELECT last_seen FROM live_sessions WHERE live_time = 200').get() as { last_seen: number | null };
-  assert.equal(s200.last_seen, 9_999_999_999, '最新一场被关闭');
+  const s100 = raw
+    .prepare('SELECT last_seen, end_seen, closed_at FROM live_sessions WHERE live_time = 100')
+    .get() as { last_seen: number | null; end_seen: number | null; closed_at: number | null };
+  assert.equal(s100.closed_at, null, '旧场次不被误关');
+  assert.equal(s100.end_seen, null);
+  const s200 = raw
+    .prepare('SELECT last_seen, end_seen, closed_at FROM live_sessions WHERE live_time = 200')
+    .get() as { last_seen: number | null; end_seen: number | null; closed_at: number | null };
+  assert.deepEqual([s200.last_seen, s200.end_seen, s200.closed_at],
+    [9_999_999_999, 9_999_999_999, 9_999_999_999], '最新一场被关闭（观测下播）');
   const open = raw
     .prepare('SELECT COUNT(*) AS c FROM live_segments WHERE live_time = 200 AND end_ts IS NULL')
     .get() as { c: number };
@@ -519,9 +539,68 @@ test('endSession：关闭该房间最新一场（last_seen 取大、开口段收
 
   db.endSession('r1', 1);
   const again = raw.prepare('SELECT last_seen FROM live_sessions WHERE live_time = 200').get() as { last_seen: number };
-  assert.equal(again.last_seen, 9_999_999_999, 'last_seen 取大不回退');
+  assert.equal(again.last_seen, 9_999_999_999, '已关闭场次不再被误关');
 
   db.endSession('no-such-room', 123); // 无场次房间：静默无操作
+});
+
+test('endSession 未观测下播：只封口不伪造 end_seen；同场 live_start 可恢复', (t) => {
+  let db: Db | undefined;
+  let raw: Database.Database | undefined;
+  const path = join(tmpdir_(t, () => { db?.close(); raw?.close(); }), 'tl-restart.db');
+  db = new Db(path);
+  raw = new Database(path);
+
+  db.recordSession(session({ liveTime: 300 }));
+  raw.prepare('UPDATE live_sessions SET first_seen = 1000, last_seen = 5000 WHERE live_time = 300').run();
+  raw.prepare('UPDATE live_segments SET start_ts = 1000 WHERE live_time = 300').run();
+
+  // 停机后重启才发现下播：发现时刻 9999 不能成为下播时间
+  db.endSession('r1', 9999, false);
+  const closed = raw
+    .prepare('SELECT last_seen, end_seen, closed_at FROM live_sessions WHERE live_time = 300')
+    .get() as { last_seen: number | null; end_seen: number | null; closed_at: number | null };
+  assert.deepEqual([closed.last_seen, closed.end_seen, closed.closed_at], [5000, null, 9999]);
+  const openSeg = raw
+    .prepare('SELECT COUNT(*) AS c FROM live_segments WHERE live_time = 300 AND end_ts IS NULL')
+    .get() as { c: number };
+  assert.equal(openSeg.c, 1, '未观测结束不关段（数据里没有伪下播时间）');
+
+  // 同一场在重启后继续：恢复在播，开口段续上
+  db.recordSession(session({ liveTime: 300, title: '续上' }));
+  const resumed = raw
+    .prepare('SELECT last_seen, end_seen, closed_at FROM live_sessions WHERE live_time = 300')
+    .get() as { last_seen: number | null; end_seen: number | null; closed_at: number | null };
+  assert.equal(resumed.closed_at, null, '同场恢复在播');
+  assert.equal(resumed.end_seen, null);
+  const segs1 = raw
+    .prepare('SELECT COUNT(*) AS c FROM live_segments WHERE live_time = 300')
+    .get() as { c: number };
+  assert.equal(segs1.c, 1, '开口段续上，不重复开段');
+
+  // 在线观测到下播：这次写入真实 end_seen，并收尾开口段
+  const observedEnd = Math.floor(Date.now() / 1000) + 10;
+  db.endSession('r1', observedEnd, true);
+  const ended = raw
+    .prepare('SELECT last_seen, end_seen, closed_at FROM live_sessions WHERE live_time = 300')
+    .get() as { last_seen: number | null; end_seen: number | null; closed_at: number | null };
+  assert.deepEqual([ended.last_seen, ended.end_seen, ended.closed_at],
+    [observedEnd, observedEnd, observedEnd]);
+  const openAfter = raw
+    .prepare('SELECT COUNT(*) AS c FROM live_segments WHERE live_time = 300 AND end_ts IS NULL')
+    .get() as { c: number };
+  assert.equal(openAfter.c, 0);
+
+  // 观测下播后同一 live_time 再次出现：恢复在播并补开新段（不覆盖历史）
+  db.recordSession(session({ liveTime: 300, title: '再续' }));
+  const reopened = raw
+    .prepare('SELECT closed_at, end_seen FROM live_sessions WHERE live_time = 300')
+    .get() as { closed_at: number | null; end_seen: number | null };
+  assert.deepEqual([reopened.closed_at, reopened.end_seen], [null, null]);
+  const segs2 = raw
+    .prepare('SELECT COUNT(*) AS c FROM live_segments WHERE live_time = 300')
+    .get() as { c: number };
+  assert.equal(segs2.c, 2, '观测下播后的同场恢复补开一段');
 });
 
 test('rotateSegment：关闭开口段并开新段；场次不存在则不动', (t) => {
@@ -561,30 +640,31 @@ test('listTimeline：场次 + 段 + verdicts + 主播信息归并；旧场次无
 
   // 新场次：两段 + 一条分类判定
   db.recordSession(session());
-  raw.prepare('UPDATE live_sessions SET first_seen = 1000, last_seen = 9000 WHERE live_time = 100').run();
-  raw.prepare('UPDATE live_segments SET start_ts = 1000 WHERE live_time = 100').run();
-  db.rotateSegment('r1', 100, 5000, { title: '唱歌', areaName: '虚拟Singer', parentAreaName: '虚拟主播' });
+  // 真实开播 900 早于首次观测 1000：时间轴起点应回推到 900，首段跟着回推
+  raw.prepare('UPDATE live_sessions SET live_time = 900, first_seen = 1000, last_seen = 9000 WHERE live_time = 100').run();
+  raw.prepare('UPDATE live_segments SET live_time = 900, start_ts = 1000 WHERE live_time = 100').run();
+  db.rotateSegment('r1', 900, 5000, { title: '唱歌', areaName: '虚拟Singer', parentAreaName: '虚拟主播' });
   // 生效属于的行才进时间线；未生效行与非 pass 行都不进
   db.insertVerdict({
-    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1, ruleId: 0,
+    subjectType: 'live', subjectId: 'r1:900', uid: '1', categoryId: 1, ruleId: 0,
     categoryName: '歌回', source: 'llm', confidence: 0.9, evidence: '在唱歌', effective: true,
   });
   db.insertVerdict({
-    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1, ruleId: 0,
+    subjectType: 'live', subjectId: 'r1:900', uid: '1', categoryId: 1, ruleId: 0,
     categoryName: '歌回', source: 'rule', confidence: null, evidence: '命中关键词「歌」', effective: false,
   });
   db.insertVerdict({
-    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 2, ruleId: 0,
+    subjectType: 'live', subjectId: 'r1:900', uid: '1', categoryId: 2, ruleId: 0,
     categoryName: '游戏', source: 'llm', confidence: 0.3, evidence: '不像游戏', pass: false, effective: true,
   });
   db.insertPrimaryVerdict({
-    subjectType: 'live', subjectId: 'r1:100', uid: '1', categoryId: 1,
+    subjectType: 'live', subjectId: 'r1:900', uid: '1', categoryId: 1,
     name: '歌回', source: 'llm', distribution: null, evidence: '整场都在唱', effective: true,
   });
   // 旧场次：手工插入，无 segment（模拟 segments 表建立前归档的场次）
   raw.prepare(
     `INSERT INTO live_sessions (room_id, live_time, uid, uname, title, area_name, first_seen, notified_at, last_seen)
-     VALUES ('r2', 50, '2', '主播2', '旧场', '网游', 2000, NULL, 8000)`,
+     VALUES ('r2', 2000, '2', '主播2', '旧场', '网游', 2000, NULL, 8000)`,
   ).run();
 
   const entries = db.listTimeline(0, 2_000_000_000);
@@ -592,12 +672,12 @@ test('listTimeline：场次 + 段 + verdicts + 主播信息归并；旧场次无
   const e1 = entries.find((e) => e.roomId === 'r1')!;
   assert.equal(e1.name, '阿梓', 'alias 优先于 uname');
   assert.equal(e1.face, 'f.jpg');
-  assert.deepEqual([e1.startTs, e1.endTs], [1000, 9000]);
+  assert.deepEqual([e1.startTs, e1.endTs], [900, 9000], '起点用真实开播 900，不是观测 1000');
   assert.deepEqual([e1.keyframe, e1.cover], ['k1.jpg', 'c1.jpg']);
   assert.deepEqual(
     e1.segments.map((s) => [s.startTs, s.endTs, s.title, s.areaName]),
-    [[1000, 5000, '打游戏', '网游'], [5000, 9000, '唱歌', '虚拟Singer']],
-    '两段按 startTs 归并；last_seen 过鲜度窗口 = 已下播，开口段兜底关闭到场次终点',
+    [[900, 5000, '打游戏', '网游'], [5000, 9000, '唱歌', '虚拟Singer']],
+    '首段回推到真实开播；两段按 startTs 归并，last_seen 过鲜度窗口 = 已下播',
   );
   assert.deepEqual(
     e1.verdicts.map((v) => [v.categoryName, v.source, v.confidence]),
@@ -628,17 +708,17 @@ test('listTimeline 在播判定：last_seen 新鲜 = endTs null（在播）；�
   // 在播场：last_seen 刚打点 → endTs null，开口段保持开口
   raw.prepare(
     `INSERT INTO live_sessions (room_id, live_time, uid, uname, title, area_name, first_seen, notified_at, last_seen)
-     VALUES ('rl', 1, '1', '主播1', '在播', '网游', ?, NULL, ?)`,
-  ).run(nowS - 3600, nowS - 10);
+     VALUES ('rl', ?, '1', '主播1', '在播', '网游', ?, NULL, ?)`,
+  ).run(nowS - 3600, nowS - 3600, nowS - 10);
   raw.prepare(
     `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, created_at)
-     VALUES ('rl', 1, ?, NULL, '在播', 1)`,
-  ).run(nowS - 3600);
+     VALUES ('rl', ?, ?, NULL, '在播', 1)`,
+  ).run(nowS - 3600, nowS - 3600);
   // legacy 场：last_seen NULL → endTs = first_seen（零长，前端不画）
   raw.prepare(
     `INSERT INTO live_sessions (room_id, live_time, uid, uname, title, area_name, first_seen, notified_at, last_seen)
-     VALUES ('ro', 2, '2', '主播2', '旧场', '网游', ?, NULL, NULL)`,
-  ).run(nowS - 7200);
+     VALUES ('ro', ?, '2', '主播2', '旧场', '网游', ?, NULL, NULL)`,
+  ).run(nowS - 7200, nowS - 7200);
 
   const entries = db.listTimeline(0, nowS + 100);
   const live = entries.find((e) => e.roomId === 'rl')!;
@@ -646,6 +726,85 @@ test('listTimeline 在播判定：last_seen 新鲜 = endTs null（在播）；�
   assert.equal(live.segments[0]!.endTs, null, '在播场开口段保持开口');
   const legacy = entries.find((e) => e.roomId === 'ro')!;
   assert.equal(legacy.endTs, legacy.startTs, '无打点 legacy 场终点 = first_seen（零长）');
+});
+
+test('listTimeline：观测下播用 end_seen，停机未观测画到最后一次在线观测', (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+  const raw = db.raw;
+  // 停机期间结束：closed_at（发现时刻）9999 不能进时间轴，终点 = last_seen 5000
+  raw.prepare(
+    `INSERT INTO live_sessions
+       (room_id, live_time, uid, uname, title, area_name, first_seen, notified_at, last_seen, end_seen, closed_at)
+     VALUES ('r1', 1100, '1', '主播1', '停机结束', '网游', 1100, NULL, 5000, NULL, 9999)`,
+  ).run();
+  raw.prepare(
+    `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, created_at)
+     VALUES ('r1', 1100, 1100, NULL, '停机结束', 1)`,
+  ).run();
+  // 在线观测到下播：终点 = end_seen 6000（即使 last_seen 更晚）
+  raw.prepare(
+    `INSERT INTO live_sessions
+       (room_id, live_time, uid, uname, title, area_name, first_seen, notified_at, last_seen, end_seen, closed_at)
+     VALUES ('r2', 2100, '2', '主播2', '观测结束', '网游', 2100, NULL, 7000, 6000, 7000)`,
+  ).run();
+  raw.prepare(
+    `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, created_at)
+     VALUES ('r2', 2100, 2100, NULL, '观测结束', 1)`,
+  ).run();
+  // room_state.last_live_at：旧版重启写坏 last_seen 之前的最后在播观测，可往早收口
+  raw.prepare(
+    `INSERT INTO room_state (uid, room_id, is_live, live_time, last_live_at, updated_at)
+     VALUES ('1', 'r1', 0, 0, 4500, 9999), ('2', 'r2', 0, 0, 5500, 9999)`,
+  ).run();
+
+  const entries = db.listTimeline(1000, 10000);
+  const r1 = entries.find((e) => e.roomId === 'r1')!;
+  assert.equal(r1.endTs, 4500, '未观测下播优先用 last_live_at 收口，不取发现时刻');
+  assert.equal(r1.segments[0]!.endTs, 4500, '显示层把开口段收在同一终点');
+  const r2 = entries.find((e) => e.roomId === 'r2')!;
+  assert.equal(r2.endTs, 6000, '观测下播 = end_seen，优先于 last_live_at');
+  assert.equal(r2.segments[0]!.endTs, 6000);
+
+  // 只许往早收口：last_live_at 晚于 last_seen 时不得把终点向后延伸
+  raw.prepare("UPDATE room_state SET last_live_at = 5500 WHERE uid = '1'").run();
+  assert.equal(db.listTimeline(1000, 10000).find((e) => e.roomId === 'r1')!.endTs, 5000);
+});
+
+test('service_runs：启动/心跳/正常停机/崩溃补封与查询裁剪', (t) => {
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+
+  db.beginServiceRun(1000);
+  db.heartbeatServiceRun(1100);
+  assert.deepEqual(db.listServiceRuns(0, 5000, 1150),
+    { online: [{ startTs: 1000, endTs: 1150 }], trackedFrom: 1000 },
+    '心跳新鲜：在线到现在');
+  assert.deepEqual(db.listServiceRuns(0, 5000, 1200),
+    { online: [{ startTs: 1000, endTs: 1100 }], trackedFrom: 1000 },
+    '心跳超过宽限：在线区间收在最后心跳');
+
+  db.endServiceRun(1200);
+  db.beginServiceRun(2000);
+  db.heartbeatServiceRun(2100);
+  assert.deepEqual(db.listServiceRuns(0, 5000, 2100).online,
+    [{ startTs: 1000, endTs: 1200 }, { startTs: 2000, endTs: 2100 }],
+    '正常停机封口 + 新 run');
+  assert.deepEqual(db.listServiceRuns(1150, 2050, 2100).online,
+    [{ startTs: 1150, endTs: 1200 }, { startTs: 2000, endTs: 2050 }],
+    '按查询范围裁剪');
+
+  // 崩溃：没有 endServiceRun，下次启动按最后心跳补封
+  db.beginServiceRun(3000);
+  const rows = db.raw
+    .prepare('SELECT started_at, last_heartbeat_at, stopped_at, stop_kind FROM service_runs ORDER BY id')
+    .all() as Array<{ started_at: number; last_heartbeat_at: number; stopped_at: number | null; stop_kind: string | null }>;
+  assert.deepEqual(rows[1], {
+    started_at: 2000, last_heartbeat_at: 2100, stopped_at: 2100, stop_kind: 'unclean',
+  }, '遗留开口 run 以最后心跳封口');
+  assert.deepEqual(rows[2], {
+    started_at: 3000, last_heartbeat_at: 3000, stopped_at: null, stop_kind: null,
+  });
 });
 
 test('nearestSnapshot：取距 ts 最近一帧；无缓存 null', (t) => {

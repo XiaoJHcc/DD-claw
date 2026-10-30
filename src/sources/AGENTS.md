@@ -28,7 +28,7 @@
 
 **B站 直播间状态与时间轴素材**
 - `bili/live-status.ts` — 批量 `get_status_info_by_uids`（分片请求，非逐个轮询）；缺 key = 未开播，不算失败。
-- `bili/live-status-source.ts` — 轮询 + `diffRoom` + 批量落状态 + `coldStart` 标记 + 两级告警；顺手回填空的 face / roomId；在播场次每轮打 `last_seen` 存活点并喂关键帧缓存。
+- `bili/live-status-source.ts` — 轮询 + `diffRoom` + 批量落状态 + `coldStart` 标记 + 两级告警；顺手回填空的 face / roomId；在播场次每轮打 `last_seen` 存活点并喂关键帧缓存；重启首轮才发现的 `live_end` 标 `endObserved=false`（真实下播时间未知），成功抓取同时推进服务心跳。
 - `media/keyframe.ts` — `KeyframeCache`：在播直播间定时抓关键帧落盘入库（判定素材），开关/间隔走 settings 热生效。
 
 **B站 凭据 · 关注 · 动态**

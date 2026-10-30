@@ -2304,6 +2304,54 @@ test('/api/schedule：日界归属 + 空日期占位 + segments/verdicts 组装'
 
 const DAY_S = 86400;
 
+test('/api/schedule：归属日用真实开播 live_time，首段回推到开播', async (t) => {
+  const { db, raw, base } = await schedSetup(t);
+  const d9 = dayStart('2026-08-09');
+  const liveStart = d9 - 1800;       // 08-09 05:30，按 06:00 日界归 08-08
+  const firstSeen = d9 + 3600;       // 服务 07:00 才首次观测到
+  insertSession(raw, { roomId: 'rT', liveTime: liveStart, uid: '1', title: '凌晨续播',
+    firstSeen, lastSeen: firstSeen + 7200 });
+  raw.prepare(
+    `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, created_at)
+     VALUES ('rT', ?, ?, NULL, '凌晨续播', 1)`,
+  ).run(liveStart, firstSeen);
+
+  const r = await api(base, '/api/schedule?from=2026-08-08&to=2026-08-09');
+  assert.equal(r.status, 200);
+  const days = r.json['days'] as Array<{ date: string; entries: Array<Record<string, unknown>> }>;
+  assert.equal(days[0]!.entries.length, 1, '05:30 开播归前一天，而不是首次观测的当天');
+  assert.deepEqual(days[1]!.entries, []);
+  const e = days[0]!.entries[0]!;
+  assert.equal(e['startTs'], liveStart, '起点 = 真实开播，不是 first_seen');
+  assert.deepEqual(
+    (e['segments'] as Array<Record<string, unknown>>).map((s) => [s['startTs'], s['endTs']]),
+    [[liveStart, firstSeen + 7200]],
+    '首段起点回推到真实开播',
+  );
+});
+
+test('/api/schedule：返回服务在线区间与记录起点，供前端画离线灰底', async (t) => {
+  const { db, base } = await schedSetup(t);
+  const nowS = Math.floor(Date.now() / 1000);
+  db.beginServiceRun(nowS - 7200);
+  db.heartbeatServiceRun(nowS - 3600);
+  db.endServiceRun(nowS - 3600);
+  db.beginServiceRun(nowS - 600);
+  db.heartbeatServiceRun(nowS);
+
+  const today = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
+  const yesterday = new Date(Date.parse(today + 'T12:00:00Z') - DAY_S * 1000).toISOString().slice(0, 10);
+  const r = await api(base, `/api/schedule?from=${yesterday}&to=${today}`);
+  assert.equal(r.status, 200);
+  const service = r.json['service'] as {
+    trackedFrom: number | null; online: Array<{ startTs: number; endTs: number }>;
+  };
+  assert.equal(service.trackedFrom, nowS - 7200);
+  assert.deepEqual(service.online[0], { startTs: nowS - 7200, endTs: nowS - 3600 });
+  assert.equal(service.online[1]!.startTs, nowS - 600, '新 run 从启动时刻起算');
+  assert.ok(service.online[1]!.endTs >= nowS, '当前 run 延伸到请求时刻');
+});
+
 test('/api/schedule：缺省 from/to = 今天-7 ~ 今天+1（北京日），共 9 天', async (t) => {
   const { base } = await setup(t);
   const r = await api(base, '/api/schedule');

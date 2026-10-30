@@ -34,7 +34,7 @@
 - `js/push.js` — 推送渠道卡 + 直播规则卡（规则部分委托 rules.js）+ 推送设置 sheet。
 - `js/streamers.js` — 主播卡网格（三段式）与详情弹窗（字段编辑 + 生效规则纯展示）；导出 `loadStreamers` 供跨卡刷新。
 - `js/follows.js` — 关注列表候选池（加入监听）。
-- `js/schedule.js` — 时间表（5 天滑动窗口、行高解算、预取、hover 关键帧与按时间点取分类历史）。
+- `js/schedule.js` — 时间表（5 天滑动窗口、行高解算、预取、服务离线灰底、hover 关键帧与按时间点取分类历史）。
 - `js/listen.js` — B站登录行与抓取设置 sheet；导出扫码登录弹窗供图文页复用。
 - `js/llm.js` / `js/napcat.js` — LLM provider 与 key 卡 / NapCat 通道与自动拉起卡。
 - `js/decision.js` — 决策模型供应商卡（总开关 + System One 名单管理的管理面：启停、协议表单、`vision` 标记、探活与排序 + 「高级」sheet；与 LLM 完全隔离）。

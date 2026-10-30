@@ -18,7 +18,7 @@
 
 - `server.ts` — 装配与分发：`createPanelServer(deps)`、`PanelDeps`（dep 即挂载门）、静态资产、`/api/*`、`/mcp`、`/onebot`；收敛出口 `runPanelTool` / `callTool`（写路由的形状与状态码映射）；agent 对话端点与历史回放（工具行按 call id 配对成 `calls`）。
 - `http-util.ts` — 请求体解析（64KB 上限）、`HttpError`、`parseUid`，以及面板与 MCP **共用**的校验/解析：`parse*`（主播补丁 / 渠道 / 分类含判定模式与精确条件 / 规则 / 三种账号 / 运行时参数 / X 配置）与 `check*`（渠道形状、分类条件与判定口径、规则引用），外加 `watchStreamer` / `syncStreamerWeiboLink` 两个跨表动作。精确条件的形状校验（严格字段、非空文本、分类内唯一 id、缺 id 补 `randomUUID`）也只在这里写一遍。
-- `schedule.ts` — 时间表查询（北京 06:00 日界 + 归并 + 空日占位）；`/api/schedule` 与 MCP `get_schedule` 共用同一实现。每场除最新 `verdicts` / `primary` 外还带 `classificationRuns`（历次分类时机判定，按 ts 升序；空数组 = 旧场次没有历史，前端回退最新结果）。
+- `schedule.ts` — 时间表查询（北京 06:00 日界 + 归并 + 空日占位 + 服务在线区间）；`/api/schedule` 与 MCP `get_schedule` 共用同一实现。每场除最新 `verdicts` / `primary` 外还带 `classificationRuns`（历次分类时机判定，按 ts 升序；空数组 = 旧场次没有历史，前端回退最新结果）；`service.online` / `trackedFrom` 供前端画离线灰底，在播鲜度按实际轮询间隔放宽。
 - `category-test.ts` — 分类草稿两阶段试判：带图归档随机抽样只回摘要，按 `subjectId` 精确复测同一批样本；直播 / 图文统一投影与图片规范化，规则 / LLM / 决策独立跑且共用分析队列，不落判定或审计、不推送。草稿走新建分类同一套校验与口径判定（`hasJudgeBasis`）：精确模式没有启用正向条件时两个模型档都 `skipped` 并回原因，决策档逐条件概率走 `conditionResults`（可选字段，simple 分类不出现）。X 缩略图反代只放行 `pbs.twimg.com`。
 - `undo-view.ts` — 变更历史的展示层翻译：中文操作名、值感知一句话、行级带值明细、`refill` 判定；settings 键与「表→中文名」的唯一信源（webui 与 `agent/tool-view.ts` 都复用，前端不再自维护映射）。
 - `webui-assets.gen.ts` — 构建期生成物（勿手改）：`WEBUI_ASSETS` 内存快照。

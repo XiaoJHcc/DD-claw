@@ -148,7 +148,7 @@ src/mcp/tools.ts（schema + handler + role）
 
 | 表群 | 回答什么问题 |
 |---|---|
-| `room_state`、`live_sessions`、`live_segments` | 当前事实、重启基线、历史场次与标题分段 |
+| `room_state`、`live_sessions`、`live_segments`、`service_runs` | 当前事实、重启基线、历史场次与标题分段、服务在线区间 |
 | `follows`、`streamers` | 关注候选池与用户选择的监听名单 |
 | `posts`、`snapshots` | 可反复分析的原文与媒体引用 |
 | `categories`、`push_rules`、`push_channels` | 分类口径、通知需求、执行目标 |
