@@ -402,8 +402,14 @@ export interface TimelineEntry {
   face: string | null;
   /** 真实开播时间（live_time；异常时回退 first_seen） */
   startTs: number;
-  /** null = 仍在播；停机期间结束的场次 = 最后一次在线观测 last_seen（不是发现时刻） */
+  /** 是否仍在播（最近一次在播观测仍在鲜度窗口内）；false 时再看 endTs 判断是否观测到下播 */
+  live: boolean;
+  /** 观测到的真实下播时间。null = 仍在播，或停机/断轮询导致下播时间未知（看 live 区分）；
+   *  绝不把「最后一次在播观测」或重启发现时刻写成下播时间。 */
   endTs: number | null;
+  /** 最后一次确认在播的时间。endTs=null 且 live=false 时，时间轴以它为收口点向后画散尾；
+   *  它只是观测边界，不是下播时间。legacy 无打点场次为 null。 */
+  lastLiveTs: number | null;
   keyframe: string | null;
   cover: string | null;
   segments: TimelineSegment[];
@@ -1387,9 +1393,9 @@ export class Db {
    * (room_id, live_time) 归并，无 N+1。
    *
    * 起点 = `live_time`（平台给的真实开播；异常时钟回退 first_seen），不再用首次观测时间。
-   * 终点：在播 = null；已下播 = 在线期间观测到的 end_seen，否则最后一次在线观测 last_seen；
-   * 停机期间结束的场次没有 end_seen，绝不拿「发现时刻」伪造下播时间。legacy 无打点场次
-   * 退到 first_seen（零长，前端不画）。
+   * 终点只写观测到的 `end_seen`：在播 = null；停机/崩溃/断轮询导致没观测到下播 = null，
+   * 用 `live=false` + `lastLiveTs` 表示「画到最后一次在播观测，之后未知」——不拿发现时刻或
+   * 停止观测时刻冒充下播时间。legacy 无打点场次退到 first_seen（零长，前端不画）。
    *
    * `staleSec` 是「最后一次打点多旧仍算在播」的窗口：调用方按实际轮询间隔放宽，
    * 避免轮询间隔 >10 分钟时把在播场误判成已下播。
@@ -1512,20 +1518,33 @@ export class Db {
     return sessions.map((s) => {
       const st = streamerByUid.get(s.uid);
       const startTs = s.start_ts;
-      // 在播 = 未被标结束 + 最后一次在线观测仍在鲜度窗口内。closed_at 已写但 end_seen 为空，
-      // 说明是停机期间结束的：终点取 last_seen（最后一次确认在播），不取发现时刻。
+      // 在播 = 未被标结束 + 最后一次在线观测仍在鲜度窗口内。
       const isLive = s.closed_at == null && s.end_seen == null
         && s.last_seen != null && nowTs - s.last_seen <= staleSec;
-      let endTs: number | null = isLive ? null : (s.end_seen ?? s.last_seen ?? s.first_seen);
+      let segments = segsBySession.get(key(s.room_id, s.live_time));
+      // 未观测下播的判据：有段且最后一段仍开口。旧版 endSession（没有 end_seen 列）会在
+      // 观测到下播时收尾开口段，所以「end_seen 为空 + 最后一段已闭合」是旧数据的观测下播，
+      // 不能因为补不上 end_seen 就整段变成未知。
+      const openSegment = segments != null && segments.length > 0
+        && segments[segments.length - 1]!.endTs == null;
+      const unknownEnd = !isLive && s.end_seen == null && s.last_seen != null && openSegment;
+      let endTs: number | null;
+      if (isLive || unknownEnd) endTs = null;
+      else endTs = s.end_seen ?? s.last_seen ?? s.first_seen;
+
       // 未观测到下播（end_seen 为空）时，room_state.last_live_at 是旧版重启写坏 last_seen
       // 之前最后一次确认在播的时间。只允许往早收口，不往晚延伸；房间已有更新场次时它更晚，
-      // 自然不生效。观测到下播的 end_seen 永远优先，不受影响。
+      // 自然不生效；早于本场开播的值属于更早的场次，同样忽略。观测到下播的 end_seen 永远优先。
+      let lastLiveTs = s.last_seen;
       const lastLiveAt = roomStateByRoom.get(s.room_id)?.lastLiveAt ?? null;
-      if (endTs != null && s.end_seen == null && lastLiveAt != null
-        && lastLiveAt > 0 && lastLiveAt < endTs) {
-        endTs = lastLiveAt;
+      if (s.end_seen == null && lastLiveAt != null && lastLiveAt > 0 && lastLiveAt >= startTs) {
+        if (endTs != null) {
+          if (lastLiveAt < endTs) endTs = lastLiveAt;
+        } else if (!isLive && lastLiveTs != null && lastLiveAt < lastLiveTs) {
+          lastLiveTs = lastLiveAt;
+        }
       }
-      let segments = segsBySession.get(key(s.room_id, s.live_time));
+
       if (!segments || segments.length === 0) {
         // 旧场次（segments 表建立前归档的）没有段：回退为单段，标题/分区取开场快照
         segments = [{
@@ -1538,7 +1557,8 @@ export class Db {
           segments[0] = { ...segments[0]!, startTs };
         }
         if (!isLive && endTs != null) {
-          // 已下播：开口段收在场次终点；旧数据已收尾的段也钳到 effective end
+          // 观测到/legacy 已收尾：开口段收在场次终点；已收尾的段也钳到 effective end。
+          // 未知下播（endTs=null）保持开口：它没有下播时间可收，前端按 lastLiveTs 画散尾。
           segments = segments.map((g) => {
             const segEnd = g.endTs == null ? endTs : Math.min(g.endTs, endTs);
             return segEnd === g.endTs ? g : { ...g, endTs: segEnd };
@@ -1550,7 +1570,7 @@ export class Db {
         name: st ? (st.alias || st.uname) : (s.uname ?? ''),
         uname: st?.uname ?? s.uname ?? '',
         face: st?.face ?? null,
-        startTs, endTs,
+        startTs, live: isLive, endTs, lastLiveTs,
         keyframe: s.keyframe, cover: s.cover,
         segments,
         verdicts: verdictsBySession.get(key(s.room_id, s.live_time)) ?? [],

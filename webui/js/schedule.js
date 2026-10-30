@@ -19,7 +19,7 @@
 //
 // 视觉（v2 化，2026-09 时间表美学改版）：时间胶囊刻度 + 虚线基线轴；日标签为行内悬浮胶囊
 // （无左侧日头列，居中天蓝渐变）；仅居中天有浅蓝底色；泳道无底色、道间浅分割线（mini 不画）；
-// 条面纯实色（无光泽无投影，2026-09-03 决策）；在播散尾 = ::before 的 mask（--fade）整体淡出——
+// 条面纯实色（无光泽无投影，2026-09-03 决策）；在播 / 未知下播散尾 = ::before 的 mask（--fade）整体淡出——
 // 尾端不漏硬边、文字层保持实色、右端直角不收圆；红线 = 粉色纵向渐变 + 圆点光环；
 // hover 弹层 = 16:9 图置顶 + 标题/时间/分区/判定证据（分类名按名哈希五色 tag；生效主分类置首、
 // 走实色 tag 档，与其余分类区分）；图与分类区都跟随鼠标横向位置的时间点，分类取该场历次判定里
@@ -27,8 +27,10 @@
 //
 // 共享轴（偏移语义）：轴 = 相对各行归属日 06:00 的偏移秒数（offStart/offEnd，
 // 0 = 06:00；06:00 日界只用于「归属哪天」，与渲染窗口无关），按**当前可见全部
-// 5 天**的实际内容算定（center 变化 / 60s 定时器重算）；在播场终点用真实 now——
-// 「假定播 2 小时 + 30 分钟散尾」是纯绘制层假设，绝不进轴。空窗口兜底 {0, 86400}。
+// 5 天**的实际内容算定（center 变化 / 60s 定时器重算）；在播场终点用真实 now，
+// 未观测下播场用最后一次在播观测（lastLiveTs）——「假定播 2 小时」是纯绘制层假设，
+// 绝不进轴；未知下播的 30 分钟散尾区要给出行内空间，否则行尾会把虚化裁成硬边。
+// 空窗口兜底 {0, 86400}。
 // 每天行窗口 = 当天 06:00 + [offStart, offEnd]（可延伸到次日白天，正是设计意图），
 // 跨天竖向对齐天然成立；offEnd ≤ offStart + 24h ⇒ 相邻天窗口不重叠（至多首尾相接）。
 // 红线跟随行窗口：now 落在哪行窗口就画哪行（至多一行命中；缩略行 / 空档不画）。
@@ -40,8 +42,9 @@
 //
 // 服务在线区间：/api/schedule 随 days 返回 service.online（服务进程心跳区间）与
 // trackedFrom（记录起点）。行内窗口减去在线区间 = 服务未运行时段，铺灰底；trackedFrom
-// 之前没有记录，不铺灰。场次起点用平台给的 live_time（真实开播），终点用后端已按在线
-// 观测收口的 endTs——停机期间结束的场次画到最后一次在线观测，不延伸进灰底。
+// 之前没有记录，不铺灰。场次起点用平台给的 live_time（真实开播）；终点只在真观测到
+// 下播时用 endTs。停机/断轮询导致没观测到下播的场次 endTs=null，画到最后一次在播
+// 观测 lastLiveTs，并从那里向后散尾——不把停机时刻写成下播时间。
 import { api, toast, ACTIONS, esc } from './core.js';
 import { icon } from './icons.js';
 import { openContentAudit } from './content-audit.js';
@@ -69,15 +72,28 @@ function schedAddDays(day, n) {
   return new Date(Date.parse(day + 'T12:00:00Z') + n * 86400000).toISOString().slice(0, 10);
 }
 function schedDayStartTs(day) { return Math.floor(Date.parse(day + 'T06:00:00+08:00') / 1000); }
+/** 仍在播：后端显式 live；旧 demo 夹具/缓存没有该字段时按 endTs=null 推断 */
+function schedIsLive(e) {
+  return e.live !== undefined ? !!e.live : (e.endTs === null || e.endTs === undefined);
+}
+/** 未观测下播（停机/断轮询）：有开播但既不在播也没拿到真实 endTs */
+function schedUnknownEnd(e) {
+  return !schedIsLive(e) && (e.endTs === null || e.endTs === undefined);
+}
+/** 最后一轮确认在播的时刻（未知下播的收口点，不是下播时间）；无打点旧场退回开播 */
+function schedCutTs(e) {
+  return e.lastLiveTs !== null && e.lastLiveTs !== undefined ? e.lastLiveTs : e.startTs;
+}
 /**
  * 场次的有效终点：真实下播后 = endTs；在播中 = max(now, startTs + 7200) + 1800——
  * 假定至少播 2 小时，尾端再加 30 分钟渐变散尾区（齐头散尾；将来的直播预告条同样式）。
- * 仅装箱 / 绘制使用（纯绘制层假设）；共享轴用真实 now（见 recomputeSchedAxis）。
+ * 未知下播 = lastLiveTs + 1800：从最后一次在播观测起散尾，不假定它又播了多久。
+ * 仅装箱 / 绘制使用（纯绘制层假设）；共享轴见 recomputeSchedAxis。
  */
 function schedEffEnd(e, now) {
-  return e.endTs !== null && e.endTs !== undefined
-    ? e.endTs
-    : Math.max(now, e.startTs + 7200) + 1800;
+  if (e.endTs !== null && e.endTs !== undefined) return e.endTs;
+  if (schedIsLive(e)) return Math.max(now, e.startTs + 7200) + 1800;
+  return schedCutTs(e) + 1800;
 }
 function schedFmtHm(ts) {
   var d = new Date(ts * 1000 + 28800000);
@@ -133,8 +149,12 @@ function schedDividerLayers(bar) {
   }
   return s;
 }
-/** 在播条是否处于「齐头散尾」态（is-live class 与 --fade mask 共用同一判定） */
-function schedBarFading(bar, now) { return bar.live && bar.end > now && now > bar.start; }
+/** 条是否处于散尾态（is-fade class 与 --fade mask 共用同一判定）：在播散尾到 now、
+ *  未知下播散尾到 lastLiveTs；几何终点都没越过散尾起点才画。 */
+function schedBarFading(bar, now) {
+  return (bar.live && bar.end > now && now > bar.start) ||
+    (bar.unknown && bar.cut < bar.end);
+}
 /** 在播条散尾 mask（齐头散尾）：不透明到 p1%（红线处）→ 40% 半透平台到 p2%（开播满 2h 处）
  *  → 尾端线性渐变到全透（约 30 分钟宽度）。p1 == p2 时（已播超 2h）从红线直接散尾。
  *  将来的直播预告条（只有开播时间、无下播时间）复用同款散尾样式。 */
@@ -144,6 +164,16 @@ function schedFadeMask(bar, e, now) {
   var r2 = (Math.round(Math.min(100, ((Math.max(now, e.startTs + 7200) - bar.start) / spanDs) * 100) * 10) / 10) + '%';
   return 'linear-gradient(90deg, #000 ' + r1 + ', rgba(0,0,0,0.4) ' + r1 +
     ', rgba(0,0,0,0.4) ' + r2 + ', rgba(0,0,0,0) 100%)';
+}
+/** 未知下播的散尾 mask：不透明到最后一次在播观测（bar.cut），随后直接线性淡出，
+ *  不套「至少播 2 小时」的平台——那是对仍在播的假设，停机后不该再假定还在播。 */
+function schedCutFadeMask(bar) {
+  var spanDs = bar.end - bar.start;
+  var r = spanDs > 0 ? (bar.cut - bar.start) / spanDs : 1;
+  r = Math.max(0, Math.min(1, r));
+  r = Math.round(r * 1000) / 10 + '%';
+  return 'linear-gradient(90deg, #000 ' + r + ', rgba(0,0,0,0.4) ' + r +
+    ', rgba(0,0,0,0) 100%)';
 }
 function schedPrepareColor(uid, face) {
   if (!uid || schedColors[uid] !== undefined || schedColorPending[uid]) return;
@@ -350,9 +380,9 @@ function schedStep(n) {
   schedLoad(next);
 }
 
-/** 周期数据保鲜：重取当前窗口数据（在播场下播后拿到真实 endTs，纠正无限延伸的横条），
- *  再重算轴 + 重渲。颜色按 uid 缓存复用，不重复拉头像。与 schedLoad 共用 schedSeq
- *  作废机制：用户滚动导航时更新 seq，本刷新结果自然丢弃。 */
+/** 周期数据保鲜：重取当前窗口数据（在播场下播后拿到真实 endTs；停机后已结束的场次
+ *  从在播变成未知下播，横条改画散尾），再重算轴 + 重渲。颜色按 uid 缓存复用，不重复拉头像。
+ *  与 schedLoad 共用 schedSeq 作废机制：用户滚动导航时更新 seq，本刷新结果自然丢弃。 */
 function schedRefreshData() {
   if (!schedCenter) return;
   var seq = ++schedSeq;
@@ -367,7 +397,8 @@ function schedRefreshData() {
 }
 
 // ---- 共享轴：按当前可见全部 5 天的实际内容算定（缩略行也在视野内，同样参与）；
-// 在播场终点用真实 now（2h/散尾假设只属于绘制层）；返回轴是否变化 ----
+// 在播场终点用真实 now，未观测下播用 lastLiveTs + 30min 散尾区（2h 假设只属于绘制层）；
+// 返回轴是否变化 ----
 function recomputeSchedAxis() {
   var now = Math.floor(Date.now() / 1000);
   var minOff = -1, maxOff = 0;
@@ -376,8 +407,12 @@ function recomputeSchedAxis() {
     var base = schedDayStartTs(schedDays[i].date);
     var es = schedDays[i].entries;
     for (var j = 0; j < es.length; j++) {
-      var offS = es[j].startTs - base;
-      var offE = (es[j].endTs !== null && es[j].endTs !== undefined ? es[j].endTs : now) - base;
+      var e = es[j];
+      var offS = e.startTs - base;
+      var offE;
+      if (e.endTs !== null && e.endTs !== undefined) offE = e.endTs - base;
+      else if (schedIsLive(e)) offE = now - base;
+      else offE = schedCutTs(e) + 1800 - base; // 未知下播：给散尾区留出行内空间
       if (minOff < 0 || offS < minOff) minOff = offS;
       if (offE > maxOff) maxOff = offE;
     }
@@ -427,9 +462,8 @@ function schedHasLive() {
       var es = schedDays[k].entries;
       for (var j = 0; j < es.length; j++) {
         var e = es[j];
-        // 在播 = [startTs, 绘制终点 schedEffEnd)，与行窗口有交集才算
-        if ((e.endTs === null || e.endTs === undefined) &&
-          e.startTs < winEnd && schedEffEnd(e, now) > winStart) return true;
+        // 在播 = [startTs, 绘制终点 schedEffEnd)，与行窗口有交集才算（未知下播不推进右端）
+        if (schedIsLive(e) && e.startTs < winEnd && schedEffEnd(e, now) > winStart) return true;
       }
     }
   }
@@ -472,8 +506,8 @@ function renderSchedAxis() {
  * 一天的条装箱：候选 = 当天 entries + 前一天 entries（通宵场溢出段接续绘制：
  * 归属日行画到该行窗口右端，次日行从其窗口左起接续，相邻窗口首尾相接故无缝）。
  * 装箱窗口 == 绘制窗口 = 当天 06:00 + [offStart, offEnd]（可延伸到次日白天）。
- * 末段在播的绘制终点带「假定 2h + 30min 散尾」假设（schedEffEnd，纯绘制层）；
- * 非末段缺 endTs 不至于发生，兜底 e.endTs ?? now。
+ * 末段在播的绘制终点带「假定 2h + 30min 散尾」假设；未知下播带「lastLiveTs + 30min
+ * 散尾」假设（schedEffEnd，纯绘制层）；非末段缺 endTs 不至于发生，兜底 e.endTs ?? now。
  * 先按段生成 bar，再把**同场相邻分段（同 rid+lt 且首尾相接）合并为一个视觉组**
  * （schedMergeSegments：整场画成单个圆角矩形，组内 parts 只负责文字，段间竖分割线
  *  并入条 ::before 背景层〔schedDividerLayers，随圆角裁切不伸出颜色区域〕，
@@ -500,11 +534,14 @@ function packSchedLanes(dayIdx) {
   for (var c = 0; c < cand.length; c++) {
     var item = cand[c];
     var e = item.e;
-    var effEnd = schedEffEnd(e, now); // 末段在播的绘制终点（含散尾假设）
+    var effEnd = schedEffEnd(e, now); // 末段在播/未知下播的绘制终点（含散尾假设）
+    var lastSci = e.segments.length - 1;
     for (var s = 0; s < e.segments.length; s++) {
       var seg = e.segments[s];
-      var live = s === e.segments.length - 1 && (e.endTs === null || e.endTs === undefined);
-      var segEnd = seg.endTs || (live ? effEnd : (e.endTs || now));
+      var lastSeg = s === lastSci;
+      var live = lastSeg && schedIsLive(e);
+      var unknown = lastSeg && schedUnknownEnd(e);
+      var segEnd = seg.endTs || (live || unknown ? effEnd : (e.endTs || now));
       var a = Math.max(seg.startTs, winStart);
       var b = Math.min(segEnd, winEnd);
       if (b <= a) continue; // 与行窗口无交集
@@ -512,7 +549,7 @@ function packSchedLanes(dayIdx) {
         start: a, end: b,
         di: item.di, ei: item.ei, si: s, uid: e.uid,
         rid: e.roomId, lt: e.liveTime,
-        live: live,
+        live: live, unknown: unknown, cut: unknown ? schedCutTs(e) : null,
       });
     }
   }
@@ -542,6 +579,8 @@ function packSchedLanes(dayIdx) {
             start: pt.start, end: pt.end,
             di: groups[q].di, ei: groups[q].ei, uid: groups[q].uid,
             rid: groups[q].rid, lt: groups[q].lt, live: pt.live,
+            unknown: groups[q].unknown && p2 === groups[q].parts.length - 1,
+            cut: groups[q].cut,
             parts: [pt],
           }]);
         }
@@ -585,11 +624,12 @@ function schedMergeSegments(bars) {
       prev.parts.push({ si: b.si, start: b.start, end: b.end, live: b.live });
       prev.end = b.end;
       if (b.live) prev.live = true;
+      if (b.unknown) { prev.unknown = true; prev.cut = b.cut; }
     } else {
       groups.push({
         start: b.start, end: b.end,
         di: b.di, ei: b.ei, uid: b.uid, rid: b.rid, lt: b.lt,
-        live: b.live,
+        live: b.live, unknown: b.unknown, cut: b.cut,
         parts: [{ si: b.si, start: b.start, end: b.end, live: b.live }],
       });
       lastBySession[skey] = groups.length - 1;
@@ -862,13 +902,14 @@ function schedGroupHtml(bar, now, winStart, span) {
   var e = schedDays[bar.di].entries[bar.ei];
   var left = ((bar.start - winStart) / span) * 100;
   var width = ((bar.end - bar.start) / span) * 100;
-  // --bar-bg：条背景（::before 承载）；is-live + --fade：在播散尾条由 ::before 的 mask 整体淡出
+  // --bar-bg：条背景（::before 承载）；is-fade + --fade：在播/未知下播散尾条由 mask 整体淡出
   var fading = schedBarFading(bar, now);
+  var fadeMask = fading ? (bar.unknown ? schedCutFadeMask(bar) : schedFadeMask(bar, e, now)) : '';
   var segStyle = 'left:' + left + '%;width:' + width + '%;--bar-bg:' +
     schedDividerLayers(bar) + schedColorOf(bar.uid) +
-    (fading ? ';--fade:' + schedFadeMask(bar, e, now) : '');
+    (fading ? ';--fade:' + fadeMask : '');
   if (schedIsDark()) segStyle += ';color:' + schedTextColorOf(bar.uid); // 暗色文字同色系提亮
-  var cls = 'sched-seg' + (fading ? ' is-live' : '');
+  var cls = 'sched-seg' + (fading ? ' is-fade' : '');
   var partsHtml = '';
   for (var i = 0; i < bar.parts.length; i++) partsHtml += schedPartHtml(bar, bar.parts[i], e, i === 0);
   return '<div class="' + cls + '"' +
@@ -949,9 +990,12 @@ function schedApplyGroup(segEl, bar, now, winStart, span) {
   segEl.style.width = width + '%';
   segEl.style.setProperty('--bar-bg', schedDividerLayers(bar) + schedColorOf(bar.uid));
   var fading = schedBarFading(bar, now);
-  if (fading) segEl.style.setProperty('--fade', schedFadeMask(bar, e, now));
-  else segEl.style.removeProperty('--fade');
-  segEl.classList.toggle('is-live', fading); // 在播散尾条：::before 套 --fade mask
+  if (fading) {
+    segEl.style.setProperty('--fade', bar.unknown ? schedCutFadeMask(bar) : schedFadeMask(bar, e, now));
+  } else {
+    segEl.style.removeProperty('--fade');
+  }
+  segEl.classList.toggle('is-fade', fading); // 散尾条：::before 套 --fade mask
   segEl.style.color = schedIsDark() ? schedTextColorOf(bar.uid) : ''; // 暗色文字同色系提亮，亮色回落白字
   var existing = {};
   var oldParts = segEl.querySelectorAll('.sched-part');
@@ -1188,8 +1232,13 @@ function schedShowPop(el, evt) {
   if (!e || !seg) return;
   var p = document.getElementById('sched-pop');
   var area = [seg.parentAreaName, seg.areaName].filter(Boolean).join(' / ');
-  var onAir = !seg.endTs;
-  var time = schedFmtHm(seg.startTs) + ' – ' + (seg.endTs ? schedFmtHm(seg.endTs) : '进行中');
+  var onAir = schedIsLive(e) && !seg.endTs;
+  // 未观测下播的末段没有 endTs：写「… 之后」，不把最后一次在播观测冒充下播时间
+  var unknownEnd = !onAir && schedUnknownEnd(e) && !seg.endTs;
+  var endText = onAir ? '进行中'
+    : unknownEnd ? schedFmtHm(schedCutTs(e)) + ' 之后'
+      : schedFmtHm(seg.endTs || e.endTs || seg.startTs);
+  var time = schedFmtHm(seg.startTs) + ' – ' + endText;
   var t = schedTimeAt(el, evt.clientX);
   schedPopClassKey = schedRunKey(e, t);
   p.innerHTML =
@@ -1317,8 +1366,9 @@ function schedMovePop(evt) {
   }, 60000);
 
   // 数据保鲜：schedDays 只在 schedLoad 时取一次，若某场开播时 endTs=null，之后下播了
-  // 缓存里仍是 null，在播条会一直延伸到「现在」像是没下播，必须刷新才能纠正。故周期
-  // 重取当前窗口数据（在播场结束即拿到真实 endTs），并重算轴 + 重渲。
+  // 缓存里仍是 null，在播条会一直延伸到「现在」像是没下播，必须刷新才能纠正。停机后
+  // 重启也靠这次刷新把在播条换成「最后一次在播观测 + 散尾」。故周期重取当前窗口数据，
+  // 并重算轴 + 重渲。
   setInterval(function () {
     if (!schedCenter || schedDays.length === 0) return;
     schedRefreshData();

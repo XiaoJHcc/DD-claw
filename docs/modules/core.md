@@ -40,7 +40,7 @@
 
 **直播场次与时间轴。** `live_sessions` 的主键是 `(room_id, live_time)`，这就是「一场直播」的身份。时间轴起点取 `live_time`（平台给的真实开播；异常时钟回退 `first_seen`），所以服务停机期间开播、重启后才观测到的场次不会从启动时刻才开始。`title_change` 在 `live_segments` 里切一段，段索引同样是 `(room_id, live_time)`。
 
-终点分三种：在线轮询中观测到下播 → `end_seen`（`closed_at` 同时写入）；停机/崩溃期间结束 → 只写 `closed_at`，**不写 `end_seen`、也不推后 `last_seen`**，时间轴画到最后一次在线观测；仍在播 → `endTs=null`。`last_seen` 是在播期间每轮刷新的「最后一次确认在播」，只用于在播鲜度判断与未观测结束的收口，不再被 `endSession` 推成重启时刻。重启首轮发现的 `live_end` 带 `endObserved=false`，pipeline 据此走未观测分支。
+终点只认观测事实：在线轮询中观测到下播 → `end_seen`（`closed_at` 同时写入），时间轴 `endTs` 只取它；停机/崩溃/断轮询期间结束 → 只写 `closed_at`，**不写 `end_seen`、也不推后 `last_seen`**，API 返回 `endTs=null` + `live=false` + `lastLiveTs`（最后一次确认在播），前端从 `lastLiveTs` 起画散尾，不把停机时刻或发现时刻写成下播时间；仍在播 → `endTs=null` + `live=true`。旧版 `endSession` 没有 `end_seen` 列、但会收尾开口段，所以「`end_seen` 为空 + 末段已闭合」的场次仍按最后一次观测当终点，不整段退回未知。`last_seen` 是在播期间每轮刷新的「最后一次确认在播」，只用于在播鲜度判断与未知下播的收口，不再被 `endSession` 推成重启时刻。重启首轮发现的 `live_end` 带 `endObserved=false`，pipeline 据此走未观测分支。
 
 **服务在线区间。** `service_runs` 每次进程启动开一条 run，周期心跳 + 每轮拉取成功刷新 `last_heartbeat_at`；正常停机写 `stopped_at`，崩溃/强杀由下次启动按最后心跳补封。时间轴 API 返回查询范围内的 `online` 区间与最早记录起点 `trackedFrom`；前端在行窗口内减去在线区间，把服务未运行时段铺成灰底。`trackedFrom` 之前没有记录，不铺灰，避免把功能部署前的历史误标成离线。`live_time` 相同的场次跨停机自动续上（仍是同一场），不重复建档；不同 `live_time` 才先封旧场再记新场。
 

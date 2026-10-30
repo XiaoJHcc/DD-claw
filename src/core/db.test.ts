@@ -666,6 +666,8 @@ test('listTimeline：场次 + 段 + verdicts + 主播信息归并；旧场次无
     `INSERT INTO live_sessions (room_id, live_time, uid, uname, title, area_name, first_seen, notified_at, last_seen)
      VALUES ('r2', 2000, '2', '主播2', '旧场', '网游', 2000, NULL, 8000)`,
   ).run();
+  // r1 在线观测到下播：end_seen 落库、开口段收尾（时间轴终点只认这个事实）
+  db.endSession('r1', 9000);
 
   const entries = db.listTimeline(0, 2_000_000_000);
   assert.equal(entries.length, 2);
@@ -673,11 +675,12 @@ test('listTimeline：场次 + 段 + verdicts + 主播信息归并；旧场次无
   assert.equal(e1.name, '阿梓', 'alias 优先于 uname');
   assert.equal(e1.face, 'f.jpg');
   assert.deepEqual([e1.startTs, e1.endTs], [900, 9000], '起点用真实开播 900，不是观测 1000');
+  assert.deepEqual([e1.live, e1.lastLiveTs], [false, 9000], '观测下播：live=false，终点只认 end_seen');
   assert.deepEqual([e1.keyframe, e1.cover], ['k1.jpg', 'c1.jpg']);
   assert.deepEqual(
     e1.segments.map((s) => [s.startTs, s.endTs, s.title, s.areaName]),
     [[900, 5000, '打游戏', '网游'], [5000, 9000, '唱歌', '虚拟Singer']],
-    '首段回推到真实开播；两段按 startTs 归并，last_seen 过鲜度窗口 = 已下播',
+    '首段回推到真实开播；两段按 startTs 归并，开口段收在观测到的下播',
   );
   assert.deepEqual(
     e1.verdicts.map((v) => [v.categoryName, v.source, v.confidence]),
@@ -688,6 +691,7 @@ test('listTimeline：场次 + 段 + verdicts + 主播信息归并；旧场次无
   const e2 = entries.find((e) => e.roomId === 'r2')!;
   assert.equal(e2.name, '主播2', '不在监听名单用 uname');
   assert.equal(e2.primary, null, '没有主分类行 = null');
+  assert.deepEqual([e2.live, e2.lastLiveTs], [false, 8000], '旧场次保留原始终点，不算未知下播');
   assert.deepEqual(
     e2.segments,
     [{ startTs: 2000, endTs: 8000, title: '旧场', areaName: '网游', parentAreaName: '' }],
@@ -722,17 +726,22 @@ test('listTimeline 在播判定：last_seen 新鲜 = endTs null（在播）；�
 
   const entries = db.listTimeline(0, nowS + 100);
   const live = entries.find((e) => e.roomId === 'rl')!;
-  assert.equal(live.endTs, null, 'last_seen 新鲜 = 在播');
+  assert.equal(live.live, true, 'last_seen 新鲜 = 在播');
+  assert.equal(live.endTs, null, '在播没有下播时间');
+  assert.equal(live.lastLiveTs, nowS - 10, '在播把 last_seen 作为最后一次在播观测');
   assert.equal(live.segments[0]!.endTs, null, '在播场开口段保持开口');
   const legacy = entries.find((e) => e.roomId === 'ro')!;
+  assert.equal(legacy.live, false, '无打点 legacy 场不算在播');
   assert.equal(legacy.endTs, legacy.startTs, '无打点 legacy 场终点 = first_seen（零长）');
+  assert.equal(legacy.lastLiveTs, null);
 });
 
-test('listTimeline：观测下播用 end_seen，停机未观测画到最后一次在线观测', (t) => {
+test('listTimeline：观测下播用 end_seen；停机未观测只收到最后一次在播观测，不写下播时间', (t) => {
   const db = new Db(':memory:');
   t.after(() => db.close());
   const raw = db.raw;
-  // 停机期间结束：closed_at（发现时刻）9999 不能进时间轴，终点 = last_seen 5000
+  // 停机期间结束：closed_at（发现时刻）9999 不能进时间轴，也没有下播时间可写；
+  // 只把「最后一次确认在播」last_seen 5000 暴露给前端画散尾
   raw.prepare(
     `INSERT INTO live_sessions
        (room_id, live_time, uid, uname, title, area_name, first_seen, notified_at, last_seen, end_seen, closed_at)
@@ -752,6 +761,16 @@ test('listTimeline：观测下播用 end_seen，停机未观测画到最后一�
     `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, created_at)
      VALUES ('r2', 2100, 2100, NULL, '观测结束', 1)`,
   ).run();
+  // 旧版观测下播（没有 end_seen 列，但 endSession 收尾了开口段）：不能整段变成未知
+  raw.prepare(
+    `INSERT INTO live_sessions
+       (room_id, live_time, uid, uname, title, area_name, first_seen, notified_at, last_seen, end_seen, closed_at)
+     VALUES ('r3', 3100, '3', '主播3', '旧版结束', '网游', 3100, NULL, 6200, NULL, 6200)`,
+  ).run();
+  raw.prepare(
+    `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, created_at)
+     VALUES ('r3', 3100, 3100, 6200, '旧版结束', 1)`,
+  ).run();
   // room_state.last_live_at：旧版重启写坏 last_seen 之前的最后在播观测，可往早收口
   raw.prepare(
     `INSERT INTO room_state (uid, room_id, is_live, live_time, last_live_at, updated_at)
@@ -760,15 +779,22 @@ test('listTimeline：观测下播用 end_seen，停机未观测画到最后一�
 
   const entries = db.listTimeline(1000, 10000);
   const r1 = entries.find((e) => e.roomId === 'r1')!;
-  assert.equal(r1.endTs, 4500, '未观测下播优先用 last_live_at 收口，不取发现时刻');
-  assert.equal(r1.segments[0]!.endTs, 4500, '显示层把开口段收在同一终点');
+  assert.deepEqual([r1.live, r1.endTs, r1.lastLiveTs], [false, null, 4500],
+    '未观测下播：没有 endTs，lastLiveTs 收到 last_live_at，不取发现时刻');
+  assert.equal(r1.segments[0]!.endTs, null, '未知下播的开口段保持开口（没有终点可收）');
   const r2 = entries.find((e) => e.roomId === 'r2')!;
-  assert.equal(r2.endTs, 6000, '观测下播 = end_seen，优先于 last_live_at');
+  assert.deepEqual([r2.live, r2.endTs, r2.lastLiveTs], [false, 6000, 7000],
+    '观测下播 = end_seen，优先于 last_live_at');
   assert.equal(r2.segments[0]!.endTs, 6000);
+  const r3 = entries.find((e) => e.roomId === 'r3')!;
+  assert.deepEqual([r3.live, r3.endTs, r3.lastLiveTs], [false, 6200, 6200],
+    '旧版已收尾的开口段仍是观测下播，不能因缺 end_seen 退回未知');
+  assert.equal(r3.segments[0]!.endTs, 6200);
 
-  // 只许往早收口：last_live_at 晚于 last_seen 时不得把终点向后延伸
+  // 只许往早收口：last_live_at 晚于 last_seen 时不得把收口点向后延伸
   raw.prepare("UPDATE room_state SET last_live_at = 5500 WHERE uid = '1'").run();
-  assert.equal(db.listTimeline(1000, 10000).find((e) => e.roomId === 'r1')!.endTs, 5000);
+  const r1b = db.listTimeline(1000, 10000).find((e) => e.roomId === 'r1')!;
+  assert.deepEqual([r1b.endTs, r1b.lastLiveTs], [null, 5000]);
 });
 
 test('service_runs：启动/心跳/正常停机/崩溃补封与查询裁剪', (t) => {

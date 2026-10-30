@@ -112,7 +112,13 @@ const store = {
         }
         : null,
     }];
-    return { ...entry, primary, classificationRuns: runs };
+    // 夹具导出时还没有 live/lastLiveTs：endTs=null 的场次在导出瞬间是在播。未知下播需要
+    // lastLiveTs 才能画散尾，旧夹具没有这种场次，字段补 null 保持与真实 API 同形状。
+    const live = entry.live !== undefined ? entry.live : entry.endTs == null;
+    return {
+      ...entry, live, lastLiveTs: entry.lastLiveTs ?? null,
+      primary, classificationRuns: runs,
+    };
   }),
   channels: clone(M.mockChannels),
   categories: demoCategories,

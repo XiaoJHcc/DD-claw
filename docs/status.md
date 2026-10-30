@@ -29,7 +29,7 @@
 | 视觉输入规范化 | 直播关键帧 / 封面与图文配图先落本地，再经 `sharp` 统一转合规 JPEG；被拦图片逐张记原因 |
 | 推送规则与执行 | 一张 `push_rules` 覆盖直播与图文两形态，确定性匹配出渠道与文案，dispatcher 按渠道发送（模型见 [统一计划](plan/unify-classify-push.md)、机制见 [modules/analysis.md](modules/analysis.md)） |
 | 面板与前端 | 五视图（时间表 / 主播 / 图文 / 设置 / Agent）+ 分类与推送记录回看 + 分类时机 sheet + 设置页底部变更历史；demo mock 与后端同构 |
-| 时间轴统计 | `live_segments` 内容变更切段 + `/api/schedule`（北京 06:00 日界）+ 五天滑动窗口泳道 + 按时间点的分类判定历史；起点用真实开播 `live_time`，停机未观测下播不伪造终点，`service_runs` 在线区间画离线灰底 |
+| 时间轴统计 | `live_segments` 内容变更切段 + `/api/schedule`（北京 06:00 日界）+ 五天滑动窗口泳道 + 按时间点的分类判定历史；起点用真实开播 `live_time`，停机未观测下播不写下播时间（`lastLiveTs` 起散尾），`service_runs` 在线区间画离线灰底 |
 | NapCat 托管与健康告警 | 专属端口条目自管 + 三态探测看门狗 + 双平台自动拉起；健康告警收敛到本机 toast |
 | 能力面（轴 B） | 注册表为唯一能力信源，写路径全部经 `runToolTracked`（校验 / 审计 / 快照）；`/api/*` 已收敛；MCP admin/gateway 双角色 + 渠道作用域隔离；撤销栈每调用域一条 |
 | 接入途径 | `/mcp`（进程外 Host）· WebUI Agent（`src/agent/`）· NapCat 直连（`src/qqbot/`）· MaiBot 插件（独立仓库，自带 loop）；WebUI Agent 与 QQ 直连共用同一个 agent loop 与能力面 |

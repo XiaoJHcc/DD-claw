@@ -2283,13 +2283,17 @@ test('/api/schedule：日界归属 + 空日期占位 + segments/verdicts 组装'
   assert.equal(a['kind'], 'live');
   assert.equal(a['name'], '阿梓', 'alias 优先');
   assert.equal(a['face'], 'f.jpg');
-  assert.deepEqual([a['startTs'], a['endTs']], [startA, startA + 7300], '跨 06:00 整体按开播日归属');
+  assert.deepEqual(
+    [a['startTs'], a['live'], a['endTs'], a['lastLiveTs']],
+    [startA, false, null, startA + 7300],
+    '跨 06:00 整体按开播日归属；没观测到下播 → 不写下播时间，只给 lastLiveTs',
+  );
   assert.deepEqual([a['keyframe'], a['cover']], ['k.jpg', 'c.jpg']);
   const aSegs = a['segments'] as Array<Record<string, unknown>>;
   assert.deepEqual(
     aSegs.map((s) => [s['startTs'], s['endTs'], s['title']]),
-    [[startA, startA + 3600, '上半场'], [startA + 3600, startA + 7300, '下半场']],
-    'last_seen 过鲜度窗口 = 已下播，开口段兜底关闭到场次终点',
+    [[startA, startA + 3600, '上半场'], [startA + 3600, null, '下半场']],
+    '未知下播的开口段保持开口，交给前端从 lastLiveTs 画散尾',
   );
   assert.deepEqual(a['verdicts'], [
     { categoryName: '歌回', source: 'llm', confidence: 0.9, evidence: '在唱歌' },
@@ -2300,6 +2304,7 @@ test('/api/schedule：日界归属 + 空日期占位 + segments/verdicts 组装'
   assert.equal(dayB.length, 1);
   assert.equal(dayB[0]!['roomId'], 'rB', '06:01 开播归当天');
   assert.equal(dayB[0]!['endTs'], dayB[0]!['startTs'], '无 last_seen 的 legacy 场终点 = first_seen（零长，前端不画）');
+  assert.deepEqual([dayB[0]!['live'], dayB[0]!['lastLiveTs']], [false, null]);
 });
 
 const DAY_S = 86400;
@@ -2315,6 +2320,10 @@ test('/api/schedule：归属日用真实开播 live_time，首段回推到开播
     `INSERT INTO live_segments (room_id, live_time, start_ts, end_ts, title, created_at)
      VALUES ('rT', ?, ?, NULL, '凌晨续播', 1)`,
   ).run(liveStart, firstSeen);
+  // 本场在线观测到了下播：让开口段有真实终点可收（未知下播的收口语义另有用例）
+  raw.prepare(
+    "UPDATE live_sessions SET end_seen = ?, closed_at = ? WHERE room_id = 'rT'",
+  ).run(firstSeen + 7200, firstSeen + 7200);
 
   const r = await api(base, '/api/schedule?from=2026-08-08&to=2026-08-09');
   assert.equal(r.status, 200);

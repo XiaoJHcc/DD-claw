@@ -919,8 +919,8 @@ input:disabled{opacity:.5;background:var(--fill)}
    字层绝对定位居中，文字允许向右溢出条范围（z-index:1 画在后续条背景之上）；
    红线上层（z-index:2）仍盖住文字。
    条纯实色（2026-09-03 决策：光泽与阴影全部去掉）。
-   背景画在 ::before 上（--bar-bg 由 JS 内联注入 = 分割线层 + 实色）；在播条的齐头散尾
-   用 ::before 的 mask（--fade 由 JS 注入）整体淡出——尾端不漏矩形硬边，
+   背景画在 ::before 上（--bar-bg 由 JS 内联注入 = 分割线层 + 实色）；在播条与未知下播条
+   的齐头散尾用 ::before 的 mask（--fade 由 JS 注入）整体淡出——尾端不漏矩形硬边，
    文字层（::before 的兄弟节点）不受 mask 影响保持实色 */
 .sched-seg{position:absolute;top:2px;bottom:0;border-radius:var(--r-md);overflow:visible;
   color:#fff;font-size:var(--fs-xs);line-height:1.2;white-space:nowrap;opacity:1;
@@ -929,8 +929,8 @@ input:disabled{opacity:.5;background:var(--fill)}
    border 1px 之下条顶内缩 2px——线两侧各 2px 对称。mini 日无分割线（gap 1px），条上下各 1px */
 .sched-day.mini .sched-seg{top:1px;bottom:0}
 .sched-seg:before{content:"";position:absolute;inset:0;border-radius:inherit;background:var(--bar-bg)}
-/* 在播散尾条：mask 整体淡出（--fade 由 JS 注入）；右端直角（散尾收边不收圆角） */
-.sched-seg.is-live:before{border-radius:var(--r-md) 0 0 var(--r-md);
+/* 散尾条（在播 / 未知下播）：mask 整体淡出（--fade 由 JS 注入）；右端直角（散尾收边不收圆角） */
+.sched-seg.is-fade:before{border-radius:var(--r-md) 0 0 var(--r-md);
   -webkit-mask-image:var(--fade);mask-image:var(--fade)}
 .sched-part{position:absolute;top:0;bottom:0}
 .sched-part-one{position:absolute;left:6px;top:0;bottom:0;display:flex;align-items:center;
