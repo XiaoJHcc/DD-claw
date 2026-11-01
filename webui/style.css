@@ -472,6 +472,13 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .sheet-foot{display:flex;justify-content:flex-end;align-items:center;gap:var(--sp-2);
   padding:0 var(--sheet-pad) var(--sheet-pad)}
 .sheet-foot .sp{flex:1}
+/* 带副卡的弹窗（分类测试区）：卡片按内容撑开、允许高出屏幕，纵向滚动由遮罩承担，
+   卡片内部不再压缩主卡、也不再出现自己的滚动条 */
+.sheet-mask.sheet-flow{overflow-y:auto;padding:4vh 0;
+  scrollbar-width:thin;scrollbar-color:var(--separator) transparent;scrollbar-gutter:stable}
+.sheet-mask.sheet-flow .sheet-stack{max-height:none;margin:auto}
+.sheet-mask.sheet-flow .sheet{max-height:none}
+.sheet-mask.sheet-flow .sheet-body{overflow:visible}
 
 /* 二维码舱：固定高度，生成前后容器不变（底色 = 极浅灰背景标准） */
 .qr-box{display:flex;align-items:center;justify-content:center;height:200px;margin:var(--sp-3) 0;
@@ -480,6 +487,8 @@ textarea.inp{height:auto;min-height:calc(var(--ctl-h)*2 + var(--sp-2));padding:v
 .qr-status{text-align:center;min-height:20px;font-size:var(--fs-sm);color:var(--text-2)}
 
 /* ---- 分类弹窗 · 真实数据测试：浅灰外卡包裹白色主卡，外卡承担整体投影 ---- */
+/* 折叠态也比通用弹窗宽一档，给分类表单更多横向空间；展开测试区后走 960 */
+.sheet-stack:has(.cat-test){width:720px}
 .sheet-stack.cat-test-open{width:960px}
 .cat-test{position:relative;display:flex;flex-direction:column;flex:1 1 auto;min-height:0;width:100%;
   overflow:hidden;border-radius:var(--r-lg);background:var(--bg-soft);box-shadow:var(--shadow-lg)}

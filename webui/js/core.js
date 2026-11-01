@@ -146,7 +146,10 @@ export function openSheet(title, bodyHtml, level, footHtml, attachmentHtml) {
     (footHtml != null ? `<div class="sheet-foot">${footHtml}</div>` : '') + '</div>';
   mask.innerHTML = '<div class="sheet-stack">' +
     (attachmentHtml ? attachmentHtml(sheetHtml) : sheetHtml) + '</div>';
+  // 带副卡的弹窗（分类测试区）整卡始终包住内容，滚动交给遮罩，允许高出屏幕（见 style.css .sheet-flow）
+  mask.classList.toggle('sheet-flow', !!attachmentHtml);
   mask.classList.remove('hidden');
+  mask.scrollTop = 0;
 }
 export function closeSheet(level) {
   var l = level || 1;
