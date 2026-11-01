@@ -2343,9 +2343,9 @@ test('/api/schedule：返回服务在线区间与记录起点，供前端画离�
   const { db, base } = await schedSetup(t);
   const nowS = Math.floor(Date.now() / 1000);
   db.beginServiceRun(nowS - 7200);
-  db.heartbeatServiceRun(nowS - 3600);
-  db.endServiceRun(nowS - 3600);
-  db.beginServiceRun(nowS - 600);
+  db.heartbeatServiceRun(nowS - 7140);
+  db.endServiceRun(nowS - 7100);
+  db.beginServiceRun(nowS - 30);
   db.heartbeatServiceRun(nowS);
 
   const today = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
@@ -2356,8 +2356,8 @@ test('/api/schedule：返回服务在线区间与记录起点，供前端画离�
     trackedFrom: number | null; online: Array<{ startTs: number; endTs: number }>;
   };
   assert.equal(service.trackedFrom, nowS - 7200);
-  assert.deepEqual(service.online[0], { startTs: nowS - 7200, endTs: nowS - 3600 });
-  assert.equal(service.online[1]!.startTs, nowS - 600, '新 run 从启动时刻起算');
+  assert.deepEqual(service.online[0], { startTs: nowS - 7200, endTs: nowS - 7100 });
+  assert.equal(service.online[1]!.startTs, nowS - 30, '新 run 从启动时刻起算');
   assert.ok(service.online[1]!.endTs >= nowS, '当前 run 延伸到请求时刻');
 });
 

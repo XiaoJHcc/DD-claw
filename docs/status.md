@@ -18,7 +18,7 @@
 |---|---|
 | 名单与凭据 | `streamers` / `follows` + CRUD + config 种子导入；B站 cookies + nav 心跳 + passport 扫码；微博扫码换票落盘；source 名单读 `listWatchedUids()`（过滤非纯数字 uid） |
 | 关注列表同步 | `FollowsSource` 分页拉取，正轮成功才落库，不自动入监听 |
-| 直播状态与采样 | 批量 `get_status_info_by_uids`（50/片）+ `diffRoom`；轮播按未开播；`KeyframeCache` 在播定时本地缓存；进程心跳记 `service_runs` 在线区间 |
+| 直播状态与采样 | 批量 `get_status_info_by_uids`（50/片）+ `diffRoom`；轮播按未开播；`KeyframeCache` 在播定时本地缓存；进程心跳记 `service_runs` 在线区间，心跳断档（休眠/卡死/无响应）超过宽限自动切段记离线 |
 | 三类图文来源 | X（免登录路线，`x_accounts`）· 微博（`weibo_accounts`）· B站动态（`bili_accounts`，监听主播 ∪ 名单账号）；各自独立名单、运行状态与账号级故障标记，`feed_post` 只对名单账号发 |
 | 补推语义 | 三平台统一的恢复/补推判定（静默轮、未运行期间按开关与时间窗/条数封顶补推），权威定义在 `src/core/backlog.ts` |
 | LLM 接线 | text/vision 路由、熔断、多 key 池、结构化输出多档、chat-completions / responses 双协议；`completeChat` 透传 tools |

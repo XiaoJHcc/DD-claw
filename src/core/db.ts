@@ -334,7 +334,12 @@ const TIMELINE_LIVE_STALE_S = 600;
  *  B站单场直播不可能持续一周；真实长播/停机续播都远低于这个上限。 */
 const LIVE_START_MAX_AGE_S = 7 * 86400;
 
-/** 服务心跳的宽限：最后一次心跳超过该秒数仍未更新，在线区间就收在最后一次心跳上。 */
+/**
+ * 服务心跳的宽限：心跳间隔超过该秒数 = 这段时间服务不可用（休眠 / 卡死 / 被杀都不会有心跳）。
+ * 写侧（heartbeatServiceRun）据此把断档切成两段 run，读侧（listServiceRuns）把未封口 run
+ * 收在最后一次心跳上——两侧同口径，任何没有心跳覆盖的时间段都不算在线。
+ * 定时心跳 30s，宽限 = 连丢两次；短于宽限的抖动仍算在线。
+ */
 const SERVICE_HEARTBEAT_GRACE_S = 90;
 
 /** 时间轴查询返回的服务在线区间（秒级闭开区间语义，前端只用来画离线灰底） */
@@ -1308,32 +1313,57 @@ export class Db {
     });
   }
 
-  /** 进程存活心跳（周期定时器 + 每轮轮询成功都可调）：只推进当前开口 run。 */
+  /**
+   * 进程存活心跳（周期定时器 + 每轮轮询成功都可调）：推进当前开口 run。
+   * 心跳断档超过宽限 = 这段时间服务不可用（电脑休眠、进程卡死、命令行无响应都不会有心跳）：
+   * 把当前 run 收在最后一次心跳上（`stop_kind='stalled'`），再从本次心跳另开一条 run。
+   * 断档区间因此没有任何 run 覆盖，时间轴会把它画成停机——而不是把同一进程的生命周期算成全程在线。
+   */
   heartbeatServiceRun(at: number = now()): void {
-    this.db
+    const open = this.db
       .prepare(
-        `UPDATE service_runs SET last_heartbeat_at = MAX(last_heartbeat_at, ?)
-         WHERE id = (SELECT id FROM service_runs WHERE stopped_at IS NULL ORDER BY id DESC LIMIT 1)`,
+        'SELECT id, last_heartbeat_at FROM service_runs WHERE stopped_at IS NULL ORDER BY id DESC LIMIT 1',
       )
-      .run(at);
+      .get() as { id: number; last_heartbeat_at: number } | undefined;
+    if (!open) return;
+    if (at - open.last_heartbeat_at > SERVICE_HEARTBEAT_GRACE_S) {
+      this.transaction(() => {
+        this.db
+          .prepare(`UPDATE service_runs SET stopped_at = last_heartbeat_at, stop_kind = 'stalled' WHERE id = ?`)
+          .run(open.id);
+        this.db
+          .prepare('INSERT INTO service_runs (started_at, last_heartbeat_at) VALUES (?, ?)')
+          .run(at, at);
+      });
+      return;
+    }
+    this.db
+      .prepare('UPDATE service_runs SET last_heartbeat_at = MAX(last_heartbeat_at, ?) WHERE id = ?')
+      .run(at, open.id);
   }
 
-  /** 正常停机：把当前开口 run 收在 at；stopKind 只用于诊断（unclean = 下次启动补封）。 */
+  /**
+   * 正常停机：把当前开口 run 收在 at（stopKind 只用于诊断）。停机前若已经超过宽限没有心跳
+   * （卡死/休眠后才收到停止信号），封口点退到最后一次心跳——没有心跳的时间段不算在线。
+   */
   endServiceRun(at: number = now(), stopKind = 'shutdown'): void {
     this.db
       .prepare(
         `UPDATE service_runs SET
-           stopped_at = MAX(COALESCE(stopped_at, 0), ?), stop_kind = ?
+           stopped_at = CASE WHEN ? - last_heartbeat_at > ? THEN last_heartbeat_at
+                             ELSE MAX(last_heartbeat_at, ?) END,
+           stop_kind = ?
          WHERE stopped_at IS NULL`,
       )
-      .run(at, stopKind);
+      .run(at, SERVICE_HEARTBEAT_GRACE_S, at, stopKind);
   }
 
   /**
    * 时间轴用的服务在线区间：查询范围内的 run（秒级半开区间），与最早一条在线记录的起点。
-   * 未封口的 run 若心跳还新鲜，按「在线到现在」返回；心跳停了就以最后心跳封口——
-   * 进程卡死或崩溃后，前端不会把未知时段画成在线。`trackedFrom` 之前的年代没有记录，
-   * 前端不对那段画灰底，避免把部署前的历史误标成离线。
+   * run 只在心跳连续时保持开口：未封口的 run 若心跳还新鲜，按「在线到现在」返回；心跳停了
+   * 就以最后心跳封口（写侧切段前的第一道兜底）——进程卡死或休眠后，前端不会把没有心跳的
+   * 时段画成在线。`trackedFrom` 之前的年代没有记录，前端不对那段画灰底，避免把部署前的
+   * 历史误标成离线。
    */
   listServiceRuns(fromTs: number, toTs: number, nowTs: number = now()): ServiceRuns {
     const tracked = this.db

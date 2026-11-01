@@ -797,27 +797,28 @@ test('listTimeline：观测下播用 end_seen；停机未观测只收到最后�
   assert.deepEqual([r1b.endTs, r1b.lastLiveTs], [null, 5000]);
 });
 
-test('service_runs：启动/心跳/正常停机/崩溃补封与查询裁剪', (t) => {
+test('service_runs：启动/心跳/正常停机/崩溃补封/心跳断档与查询裁剪', (t) => {
   const db = new Db(':memory:');
   t.after(() => db.close());
 
   db.beginServiceRun(1000);
-  db.heartbeatServiceRun(1100);
-  assert.deepEqual(db.listServiceRuns(0, 5000, 1150),
-    { online: [{ startTs: 1000, endTs: 1150 }], trackedFrom: 1000 },
+  db.heartbeatServiceRun(1030);
+  db.heartbeatServiceRun(1060);
+  assert.deepEqual(db.listServiceRuns(0, 5000, 1090),
+    { online: [{ startTs: 1000, endTs: 1090 }], trackedFrom: 1000 },
     '心跳新鲜：在线到现在');
   assert.deepEqual(db.listServiceRuns(0, 5000, 1200),
-    { online: [{ startTs: 1000, endTs: 1100 }], trackedFrom: 1000 },
+    { online: [{ startTs: 1000, endTs: 1060 }], trackedFrom: 1000 },
     '心跳超过宽限：在线区间收在最后心跳');
 
-  db.endServiceRun(1200);
+  db.endServiceRun(1100);
   db.beginServiceRun(2000);
-  db.heartbeatServiceRun(2100);
+  db.heartbeatServiceRun(2030);
   assert.deepEqual(db.listServiceRuns(0, 5000, 2100).online,
-    [{ startTs: 1000, endTs: 1200 }, { startTs: 2000, endTs: 2100 }],
+    [{ startTs: 1000, endTs: 1100 }, { startTs: 2000, endTs: 2100 }],
     '正常停机封口 + 新 run');
-  assert.deepEqual(db.listServiceRuns(1150, 2050, 2100).online,
-    [{ startTs: 1150, endTs: 1200 }, { startTs: 2000, endTs: 2050 }],
+  assert.deepEqual(db.listServiceRuns(1050, 2050, 2100).online,
+    [{ startTs: 1050, endTs: 1100 }, { startTs: 2000, endTs: 2050 }],
     '按查询范围裁剪');
 
   // 崩溃：没有 endServiceRun，下次启动按最后心跳补封
@@ -826,11 +827,37 @@ test('service_runs：启动/心跳/正常停机/崩溃补封与查询裁剪', (t
     .prepare('SELECT started_at, last_heartbeat_at, stopped_at, stop_kind FROM service_runs ORDER BY id')
     .all() as Array<{ started_at: number; last_heartbeat_at: number; stopped_at: number | null; stop_kind: string | null }>;
   assert.deepEqual(rows[1], {
-    started_at: 2000, last_heartbeat_at: 2100, stopped_at: 2100, stop_kind: 'unclean',
+    started_at: 2000, last_heartbeat_at: 2030, stopped_at: 2030, stop_kind: 'unclean',
   }, '遗留开口 run 以最后心跳封口');
   assert.deepEqual(rows[2], {
     started_at: 3000, last_heartbeat_at: 3000, stopped_at: null, stop_kind: null,
   });
+
+  // 休眠 / 卡死：心跳断档超过宽限 = 这段服务不可用。下一次心跳把旧 run 收在最后心跳上，
+  // 自己另开一条 run；断档区间没有任何 run 覆盖，时间轴据此画停机。
+  db.heartbeatServiceRun(3030);
+  db.heartbeatServiceRun(3060);
+  db.heartbeatServiceRun(6000);
+  assert.deepEqual(db.listServiceRuns(0, 7000, 6030).online,
+    [
+      { startTs: 1000, endTs: 1100 }, { startTs: 2000, endTs: 2030 },
+      { startTs: 3000, endTs: 3060 }, { startTs: 6000, endTs: 6030 },
+    ],
+    '断档不在线：按最后心跳截断，恢复后的心跳另起一段');
+  const stalled = db.raw
+    .prepare("SELECT started_at, last_heartbeat_at, stopped_at, stop_kind FROM service_runs WHERE stop_kind = 'stalled'")
+    .all();
+  assert.deepEqual(stalled, [{
+    started_at: 3000, last_heartbeat_at: 3060, stopped_at: 3060, stop_kind: 'stalled',
+  }], '断档 run 以最后心跳封口并标 stalled');
+  assert.deepEqual(db.listServiceRuns(0, 7000, 6060).online.at(-1),
+    { startTs: 6000, endTs: 6060 }, '恢复后的心跳是新的开口 run');
+
+  // 卡死很久后才收到停止信号：停机封口也不越过最后一次心跳
+  db.endServiceRun(7000);
+  assert.deepEqual(db.raw
+    .prepare('SELECT stopped_at, stop_kind FROM service_runs ORDER BY id DESC LIMIT 1')
+    .get(), { stopped_at: 6000, stop_kind: 'shutdown' }, '停机时刻不能把无心跳时段补成在线');
 });
 
 test('nearestSnapshot：取距 ts 最近一帧；无缓存 null', (t) => {
