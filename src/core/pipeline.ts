@@ -350,8 +350,9 @@ export class Pipeline {
    * - `start`（开播初判）：走机械去重 → 每场推一次；**不**因为之后的分类变化重推
    * - `startDelay` / `periodic` / `titleChange` / `titleDelay`（重分时机）：不经
    *   `OncePerSession` / `hasNotified` 阻断，只有「生效且属于」的 categoryId 集合相对
-   *   上一轮真正改变时才重新匹配并发送；命中规则仍是全部命中的规则（含任意内容规则）
-   * - 三档全关的时机等于关闭：不判定、不写历史、不动已有判定
+   *   上一轮真正改变时才重新匹配并发送；**只重推引用了分类的规则**（任意内容规则在开播
+   *   初判时已经决定过，不因分类变化重发）。三档全关的时机等于关闭：不判定、不写历史、
+   *   不动已有判定
    * - 冷启动抑制与推送总开关都只抑制**推送**：判定与历史照做，结论照样入库
    */
   private async handleLiveClassify(
@@ -399,6 +400,7 @@ export class Pipeline {
    * 重分时机的推送：分类集合变了才重新走 matchRules / buildMessage / dispatcher。
    * - 分类失败返回**不**当成「变成空」（不会因此重推）
    * - 集合从有变空也算变化，但那时通常没有规则命中，自然不推
+   * - **只重推引用了分类的规则**：任意内容规则在开播初判时已经决定过，不因分类变化重发
    * - 不走 OncePerSession / hasNotified，但仍用 sendingSessions 防同场发送竞态
    */
   private async repushLive(
@@ -428,9 +430,16 @@ export class Pipeline {
       log.debug(`不重推 [${trigger}] ${event.uname || event.alias}: 推送总开关已关（判定与历史照常）`);
       return;
     }
-    const rules = db.listPushRules();
+    const rules = db.listPushRules().filter((entry) => entry.enabled && entry.categoryId !== null);
+    if (rules.length === 0) {
+      this.auditPush(signal, {
+        status: 'skipped', reason: '没有引用分类的启用规则，分类变更不触发重推', rules: [], channels: [],
+      });
+      log.debug(`不重推 [${trigger}] ${event.uname || event.alias}: 没有引用分类的启用规则`);
+      return;
+    }
     const audit = this.auditRules(signal, 'live', event.uid, next, rules);
-    const msg = this.buildMessage({ ...event, classifications: res.items }, rules.filter((entry) => entry.enabled));
+    const msg = this.buildMessage({ ...event, classifications: res.items }, rules);
     if (!msg) return; // buildMessage 已记日志（无命中规则 / 命中规则未选渠道）
     log.info(`分类变更重推 [${trigger}] ${event.uname || event.alias} — ${[...next].join('/') || '无分类'}`);
     await this.deliverLive(signal, event, audit, msg, false);

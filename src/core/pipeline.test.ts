@@ -80,6 +80,8 @@ class FakeDb {
   }
   hasNotified(r: string, t: number) { return this.notified.has(`${r}:${t}`); }
   markNotified(r: string, t: number) { this.notified.add(`${r}:${t}`); }
+  /** 本文件不测平台重发 liveTime 的续播判定（真实链路用 Db） */
+  recentSessionsBefore() { return []; }
   getStreamer(uid: string) { return this.streamers.get(uid); }
   listEnabledPushRules() {
     return this.rules.filter((r) => r.enabled).sort((a, b) => a.id - b.id);

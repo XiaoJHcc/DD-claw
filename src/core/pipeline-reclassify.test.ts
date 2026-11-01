@@ -444,3 +444,72 @@ test('只有 LLM 档且冷却中：开播延迟时机的跳过同样不动结论
   assert.equal(db.getContentAudit('live', SUBJECT)!.analysis!.status, 'skipped');
   assert.equal(dispatcher.sent.length, 1, '两条都不重推（分类集合没变）');
 });
+
+// ---- 重推只发引用分类的规则 / 平台重发 liveTime 的同场判定 ----
+
+test('分类变更重推只发引用分类的规则：任意内容规则不随分类变化重发', async (t) => {
+  const { db, bus, dispatcher, pipeline } = harness(t);
+  seedRules(db);
+  const anyChannel = db.upsertPushChannel({
+    name: '任意群', notifier: 'onebot', targetType: 'group', targetId: '3', enabled: true,
+  });
+  db.upsertPushRule({ name: '全部', channels: [anyChannel] });
+
+  bus.emit(sig()); // 开播：歌回 + 任意内容 → 歌回群 + 任意群
+  await pipeline.whenIdle();
+  assert.equal(dispatcher.sent.length, 1);
+  assert.deepEqual([...dispatcher.sent[0]!.channels].sort(), ['1', '3']);
+
+  bus.emit(sig({ kind: 'title_change', statusOver: { title: '来打游戏' } }));
+  await pipeline.whenIdle();
+  assert.equal(dispatcher.sent.length, 2, '分类变化仍然重推');
+  assert.deepEqual(dispatcher.sent[1]!.channels, ['2'], '只推游戏规则，任意内容规则不重发');
+  const audit = db.getContentAudit('live', SUBJECT)!.push!;
+  assert.deepEqual(audit.rules.map((rule) => rule.name), ['歌回规则', '游戏规则'],
+    '重推审计只列引用分类的规则');
+});
+
+test('没有引用分类的启用规则：分类变化不重推，审计写明原因', async (t) => {
+  const { db, bus, dispatcher, pipeline } = harness(t);
+  db.upsertStreamer({ uid: '1', uname: '主播1' });
+  db.upsertCategory({ name: '歌回', keywords: ['歌'] });
+  db.upsertCategory({ name: '游戏', keywords: ['游戏'] });
+  const channel = db.upsertPushChannel({
+    name: '全部群', notifier: 'onebot', targetType: 'group', targetId: '1', enabled: true,
+  });
+  db.upsertPushRule({ name: '全部', channels: [channel] });
+
+  bus.emit(sig());
+  await pipeline.whenIdle();
+  assert.equal(dispatcher.sent.length, 1, '开播由任意内容规则推一次');
+
+  bus.emit(sig({ kind: 'title_change', statusOver: { title: '来打游戏' } }));
+  await pipeline.whenIdle();
+  assert.equal(dispatcher.sent.length, 1, '分类变了，但没有引用分类的规则 → 不重推');
+  const audit = db.getContentAudit('live', SUBJECT)!.push!;
+  assert.equal(audit.status, 'skipped');
+  assert.match(audit.reason, /没有引用分类的启用规则/);
+});
+
+test('平台重发 liveTime 但同轮替换、标题未变：连续重连也只推一次', async (t) => {
+  const { db, bus, dispatcher, pipeline } = harness(t);
+  seedRules(db);
+  const ts = Math.floor(Date.now() / 1000);
+
+  bus.emit(sig({ ts }));
+  await pipeline.whenIdle();
+  assert.equal(dispatcher.sent.length, 1);
+
+  const second = LIVE_TIME + 600;
+  bus.emit(sig({ kind: 'live_end', ts }));
+  bus.emit(sig({ kind: 'live_start', ts, statusOver: { liveTime: second } }));
+  await pipeline.whenIdle();
+  assert.equal(dispatcher.sent.length, 1, '同场重连不重复推');
+  assert.equal(db.hasNotified('r1', second), false, '被抑制的场次不写通知水位');
+
+  const third = LIVE_TIME + 1200;
+  bus.emit(sig({ kind: 'live_end', ts }));
+  bus.emit(sig({ kind: 'live_start', ts, statusOver: { liveTime: third } }));
+  await pipeline.whenIdle();
+  assert.equal(dispatcher.sent.length, 1, '连续重连回溯到最初已推送的场次，仍只算同一条直播');
+});

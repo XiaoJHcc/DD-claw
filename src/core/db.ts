@@ -1623,6 +1623,32 @@ export class Db {
       .run(Math.floor(Date.now() / 1000), roomId, liveTime);
   }
 
+  /**
+   * 同一房间在本场之前最近的若干场（按 live_time 倒序）。开播去重用它们判断
+   * 「平台重发 live_time 但其实是同一条直播」：只有一条连续的链（每场 end_seen
+   * 与下一场的起点在同一轮观测里衔接、标题始终相同）才算同场续播。
+   */
+  recentSessionsBefore(roomId: string, liveTime: number, limit: number): Array<{
+    liveTime: number; title: string; firstSeen: number;
+    endSeen: number | null; notifiedAt: number | null;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT live_time AS liveTime, title, first_seen AS firstSeen,
+                end_seen AS endSeen, notified_at AS notifiedAt
+         FROM live_sessions WHERE room_id = ? AND live_time < ?
+         ORDER BY live_time DESC LIMIT ?`,
+      )
+      .all(roomId, liveTime, limit) as Array<{
+        liveTime: number; title: string | null; firstSeen: number;
+        endSeen: number | null; notifiedAt: number | null;
+      }>;
+    return rows.map((row) => ({
+      liveTime: row.liveTime, title: row.title ?? '', firstSeen: row.firstSeen,
+      endSeen: row.endSeen, notifiedAt: row.notifiedAt,
+    }));
+  }
+
   logNotify(p: {
     roomId: string; liveTime: number; channel: string;
     target?: string; ok: boolean; error?: string;

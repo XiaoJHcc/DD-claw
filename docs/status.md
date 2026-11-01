@@ -25,7 +25,7 @@
 | 决策模型判定档 | System One 供应商名单 + 独立 key + 启停 / 排序 + `vision` 标记 + `systemone` 探活；判决链第一档（每分类 `noul` 得概率、主分类一道 `choice`，灰区不定案），独立路由 / 熔断 / key 轮换 / 超时门槛参数，与 LLM 通道隔离 |
 | 内容判定与归档 | 统一分类 + 判决链（确定性先跑、模型档按序、逐来源落库并标生效）→ `verdicts`；主分类组单选 → `primary_verdicts`（时间表展示）；判定与推送过程入 `content_audit`，面板可回看（契约见 [plan/decision-model.md](plan/decision-model.md)「二」与 [content-audit.md](content-audit.md)） |
 | 直播分类时机 | 五个时机（开播 / 开播延迟后 / 直播中定时 / 标题分区变更 / 变更延迟后）各自选规则 / 决策 / LLM 三档；`analysis/triggers.ts` 排延迟与周期，LLM 冷却按房间独立；多次判定替换当前结论并留 `live_classification_runs` 历史，时间表按鼠标时间点回看（机制见 [modules/core.md](modules/core.md)、[modules/analysis.md](modules/analysis.md)） |
-| 分类变更重推 | 重分时机只有「生效且属于」的分类集合相对上一轮改变时才重新匹配与发送，不经每场一次去重；任意内容规则同样响应，无命中 = 不推；冷启动抑制与推送总开关只抑制发送，不阻止判定与历史 |
+| 分类变更重推 | 重分时机只有「生效且属于」的分类集合相对上一轮改变时才重新匹配与发送，不经每场一次去重；只重推引用了分类的启用规则（任意内容规则在开播初判时已决定过，不因分类变化重发），无命中 = 不推；平台重发 `live_time` 时沿连续场次回溯判定同场续播，不重复通知；冷启动抑制与推送总开关只抑制发送，不阻止判定与历史 |
 | 视觉输入规范化 | 直播关键帧 / 封面与图文配图先落本地，再经 `sharp` 统一转合规 JPEG；被拦图片逐张记原因 |
 | 推送规则与执行 | 一张 `push_rules` 覆盖直播与图文两形态，确定性匹配出渠道与文案，dispatcher 按渠道发送（模型见 [统一计划](plan/unify-classify-push.md)、机制见 [modules/analysis.md](modules/analysis.md)） |
 | 面板与前端 | 五视图（时间表 / 主播 / 图文 / 设置 / Agent）+ 分类与推送记录回看 + 分类时机 sheet + 设置页底部变更历史；demo mock 与后端同构 |
