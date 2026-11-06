@@ -612,43 +612,40 @@ CHANGES['toggle-bili-account'] = function (el) {
 let acctDraft = null;
 
 function captureAcctDraft() {
-  if (!acctDraft) return;
-  const val = function (id) { const el = document.getElementById(id); return el ? el.value : null; };
-  let v;
+  if (!acctDraft || !sheetPlatform) return;
+  const val = function (id) { const el = document.getElementById(id); return el ? el.value : ''; };
+  const d = {
+    display: val(sheetPlatform === 'weibo' ? 'wa-display' : sheetPlatform === 'bili' ? 'ba-display' : 'xa-display'),
+  };
   if (sheetPlatform === 'weibo') {
-    if ((v = val('wa-nick')) !== null) acctDraft.nick = v;
-    if ((v = val('wa-uid')) !== null) acctDraft.uid = v;
+    d.nick = val('wa-nick');
+    d.uid = val('wa-uid');
+    d.bili = val('wa-bili');
   } else if (sheetPlatform === 'bili') {
-    if ((v = val('ba-uid')) !== null) acctDraft.uid = v;
+    d.name = val('ba-name');
+    d.uid = val('ba-uid');
   } else {
-    if ((v = val('xa-name')) !== null) acctDraft.name = v;
+    d.name = val('xa-name');
+    d.bili = val('xa-bili');
   }
-  const dispId = sheetPlatform === 'weibo' ? 'wa-display' : sheetPlatform === 'bili' ? 'ba-display' : 'xa-display';
-  if ((v = val(dispId)) !== null) acctDraft.display = v;
-  const biliId = sheetPlatform === 'weibo' ? 'wa-bili' : 'xa-bili';
-  if (sheetPlatform !== 'bili' && (v = val(biliId)) !== null) acctDraft.bili = v;
+  acctDraft[sheetPlatform] = d;
 }
 
-/**
- * 账号表单（X = ID / 显示名 / 关联主播；微博 = 昵称 + uid / 显示名 / 关联主播；
- *  B站 = uid / 显示名）。
- *  **ID 与平台昵称/用户名是平台事实**：编辑态一律只读回显（改它等于换账号，历史帖子会
- *  串到别人名下——要换就删了重加）；X 的昵称不收手填（添加时校验种入、抓取回写），
- *  B站的名称同理（抓到自动回写）。微博的「昵称」在**新建时**是解析键（填昵称 → 解析出
- *  uid），编辑态同样只读。自定义显示名 / 关联主播是用户自己的标注，随时可改。
- */
+function acctSearchHtml(id, platform, attrs) {
+  return `<div class="acct-search"><input class="inp" id="${id}" data-input="acct-search" data-platform="${platform}" autocomplete="off" ${attrs}>` +
+    `<div class="acct-suggest" id="${id}-suggest" hidden></div></div>`;
+}
+
+/** ID 与平台昵称只在新建时作为查询条件；保存的身份锚点始终由候选或既有解析结果回填。 */
 function acctFormHtml(a) {
-  const d = acctDraft || {};
+  const d = (acctDraft && acctDraft[sheetPlatform]) || {};
   if (sheetPlatform === 'weibo') {
     const uidInput = a
       ? `<input class="inp" id="wa-uid" value="${esc(a.uid)}" disabled>`
-      : `<input class="inp" id="wa-uid" data-change="wa-uid-change" value="${esc(d.uid || '')}">`;
-    // 昵称与 uid 并排（uid 在右）：两个独立 field，label 各在输入框上方（同抓取设置的 field 结构）；
-    // 昵称框 placeholder 只放一个 @——@昵称 是微博 ID 的常规词头（后端 normalizeWeiboNick 会剥掉开头的 @）；
-    // uid 框接受直接粘贴主页链接（失焦提取纯数字，见 wa-uid-change）
+      : `<input class="inp" id="wa-uid" data-input="acct-manual-id" value="${esc(d.uid || '')}">`;
     const nickInput = a
       ? `<input class="inp" id="wa-nick" value="${esc(a.nickname || '')}" disabled title="平台昵称（抓取回写），不可手改">`
-      : `<input class="inp" id="wa-nick" placeholder="@" data-change="wa-resolve-nick" value="${esc(d.nick || '')}">`;
+      : acctSearchHtml('wa-nick', 'weibo', `placeholder="@" value="${esc(d.nick || '')}"`);
     return '<div class="field-row">' +
         `<div class="field"><label class="field-label">昵称</label>${nickInput}</div>` +
         `<div class="field field-uid"><label class="field-label">UID（主页链接）</label>${uidInput}</div>` +
@@ -658,28 +655,24 @@ function acctFormHtml(a) {
       rulesSectionHtml(a);
   }
   if (sheetPlatform === 'bili') {
-    // uid 框接受直接粘贴主页链接（失焦提取纯数字，见 ba-uid-change）；
-    // 名称（uname）是平台事实：抓到自动回写，不收手填——想立刻有可读名字就填「显示名」
     const uidInput = a
       ? `<input class="inp" id="ba-uid" value="${esc(a.uid)}" disabled>`
-      : `<input class="inp" id="ba-uid" data-change="ba-uid-change" value="${esc(d.uid || '')}">`;
+      : `<input class="inp" id="ba-uid" value="${esc(d.uid || '')}">`;
     const nameRow = a
       ? field('名称（抓取回写）', `<input class="inp" value="${esc(a.uname || '（还没抓到）')}" disabled title="B站用户名（抓取回写），不可手改">`)
-      : '';
+      : field('用户名', acctSearchHtml('ba-name', 'bili', `value="${esc(d.name || '')}"`));
     return nameRow +
       field('UID（主页链接）', uidInput) +
       field('显示名', `<input class="inp" id="ba-display" value="${esc(a ? (a.displayName || '') : (d.display || ''))}">`) +
       rulesSectionHtml(a);
   }
-  // X：ID（@handle，唯一标识）/ 显示名（自定义，卡片优先）/ 关联主播；
-  // 昵称是平台事实（添加时校验种入 og:title 显示名、抓取回写），不收手填——编辑态只读回显
   const idInput = a
     ? `<input class="inp" id="xa-name" value="${esc(a.screenName)}" disabled title="X 的 ID 是身份锚点，不可改；要换账号就删除重加">`
-    : `<input class="inp" id="xa-name" placeholder="@" value="${esc(d.name || '')}">`;
+    : acctSearchHtml('xa-name', 'twitter', `placeholder="@ / 名称" value="${esc(d.name || '')}"`);
   const nickRow = a
     ? field('昵称（平台显示名）', `<input class="inp" value="${esc(a.nickname || '（还没抓到）')}" disabled title="X 的显示名（校验种入 / 抓取回写），不可手改">`)
     : '';
-  return field('ID', idInput) +
+  return field('ID / 名称', idInput) +
     nickRow +
     field('显示名', `<input class="inp" id="xa-display" value="${esc(a ? (a.displayName || '') : (d.display || ''))}">`) +
     field('关联主播', dropdownHtml('xa-bili', biliOptions(), a && a.biliUid ? String(a.biliUid) : (d.bili || ''))) +
@@ -690,6 +683,7 @@ function acctFormHtml(a) {
  * 账号浮窗（整卡点击/圆形添加钮打开）：添加 = 顶部小 segnav 切 X/微博/B站、表单随之切换；
  */
 function openAccountSheet(a, platform) {
+  removeAccountSuggest();
   sheetAccountId = a ? a.id : null;
   sheetPlatform = platform;
   acctDraft = {};
@@ -713,6 +707,8 @@ function openAccountSheet(a, platform) {
   sheetCleanups[1] = function () {
     sheetAccountId = null; sheetPlatform = null; acctDraft = null;
     invalidateResolve();
+    invalidateAccountSuggest();
+    removeAccountSuggest();
   };
   if (a) renderSheetRules();
 }
@@ -722,14 +718,180 @@ ACTIONS['acct-plat'] = function (el) {
   if (v === sheetPlatform) return;
   captureAcctDraft();
   invalidateResolve();
+  invalidateAccountSuggest();
+  removeAccountSuggest();
   sheetPlatform = v;
   segnavSelect(el.closest('.segnav'), v);
   const box = document.getElementById('acct-form');
   if (box) box.innerHTML = acctFormHtml(null);
 };
 
-// 微博「昵称 / uid」互解析：失焦（change）时查 /api/weibo/resolve 回填另一框。
-// 失败静默（保存时后端还会兜底校验并报错）；新输入作废旧结果（seq 防晚到的响应覆盖新输入）。
+const acctSuggestState = {
+  seq: 0,
+  timer: null,
+  candidates: { twitter: [], weibo: [], bili: [] },
+  cache: new Map(),
+};
+
+function acctSuggestInput(platform) {
+  const id = platform === 'weibo' ? 'wa-nick' : platform === 'bili' ? 'ba-name' : 'xa-name';
+  return document.getElementById(id);
+}
+
+function acctSuggestBox(platform) {
+  const input = acctSuggestInput(platform);
+  return input ? document.getElementById(input.id + '-suggest') : null;
+}
+
+function removeAccountSuggest() {
+  document.querySelectorAll('body > .acct-suggest').forEach(function (box) { box.remove(); });
+}
+
+function positionAccountSuggest(platform) {
+  const input = acctSuggestInput(platform);
+  const box = acctSuggestBox(platform);
+  if (!input || !box || box.hidden) return;
+  const rect = input.getBoundingClientRect();
+  const width = Math.min(Math.max(rect.width, 420), window.innerWidth - 16);
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+  const below = window.innerHeight - rect.bottom - 12;
+  const above = rect.top - 12;
+  const down = below >= 160 || below >= above;
+  const maxHeight = Math.max(48, Math.min(280, down ? below : above));
+  box.style.left = left + 'px';
+  box.style.top = (down ? rect.bottom + 4 : rect.top - maxHeight - 4) + 'px';
+  box.style.width = width + 'px';
+  box.style.maxHeight = maxHeight + 'px';
+}
+
+function showAccountSuggest(platform) {
+  const box = acctSuggestBox(platform);
+  if (!box || sheetPlatform !== platform) return null;
+  if (box.parentElement !== document.body) document.body.appendChild(box);
+  box.hidden = false;
+  positionAccountSuggest(platform);
+  return box;
+}
+
+function invalidateAccountSuggest() {
+  acctSuggestState.seq++;
+  if (acctSuggestState.timer) clearTimeout(acctSuggestState.timer);
+  acctSuggestState.timer = null;
+  const box = acctSuggestBox(sheetPlatform);
+  if (box) box.hidden = true;
+}
+
+function acctCandidateText(platform, c) {
+  if (platform === 'weibo') return {
+    name: c.nickname || c.uid,
+    id: 'UID ' + c.uid,
+    meta: c.verified ? '已认证' : (c.followers ? '粉丝 ' + Number(c.followers).toLocaleString() : ''),
+    detail: c.description || '',
+  };
+  if (platform === 'bili') return {
+    name: c.uname || c.uid,
+    id: 'UID ' + c.uid,
+    meta: c.official || (c.fans ? '粉丝 ' + Number(c.fans).toLocaleString() : ''),
+    detail: c.sign || '',
+  };
+  return {
+    name: c.name || c.screenName,
+    id: '@' + c.screenName,
+    meta: c.followers ? '粉丝 ' + Number(c.followers).toLocaleString() : (c.exists === true ? '已校验' : ''),
+    detail: c.description || (c.sources && c.sources[0] ? c.sources[0].title : ''),
+  };
+}
+
+function renderAccountSuggest(platform, rows) {
+  const box = acctSuggestBox(platform);
+  if (!box || sheetPlatform !== platform) return;
+  acctSuggestState.candidates[platform] = rows;
+  box.innerHTML = rows.length ? rows.map(function (c, i) {
+    const t = acctCandidateText(platform, c);
+    return `<button type="button" class="acct-suggest-item" data-action="acct-suggest-pick" data-platform="${platform}" data-index="${i}">` +
+      `<span class="acct-suggest-main"><b>${esc(t.name)}</b><small>${esc(t.id)}</small></span>` +
+      `<span class="acct-suggest-side">${t.meta ? `<small>${esc(t.meta)}</small>` : ''}${t.detail ? `<span>${esc(t.detail)}</span>` : ''}</span></button>`;
+  }).join('') : '<div class="acct-suggest-status">无匹配账号</div>';
+  showAccountSuggest(platform);
+}
+
+function runAccountSuggest(platform, query) {
+  const cached = acctSuggestState.cache.get(platform + ':' + query);
+  if (cached) {
+    renderAccountSuggest(platform, cached);
+    return;
+  }
+  const seq = ++acctSuggestState.seq;
+  const box = acctSuggestBox(platform);
+  if (box) {
+    box.innerHTML = '<div class="acct-suggest-status">搜索中…</div>';
+    showAccountSuggest(platform);
+  }
+  api('/api/search/accounts?platform=' + platform + '&q=' + encodeURIComponent(query)).then(function (rows) {
+    acctSuggestState.cache.set(platform + ':' + query, rows);
+    if (seq !== acctSuggestState.seq || sheetPlatform !== platform) return;
+    renderAccountSuggest(platform, rows);
+  }).catch(function (e) {
+    if (seq !== acctSuggestState.seq || sheetPlatform !== platform || !box) return;
+    const missingApify = platform === 'twitter' && /Apify (?:API )?token/.test(e.message) && /未配置|需要/.test(e.message);
+    box.innerHTML = '<div class="acct-suggest-status' + (missingApify ? '' : ' err') + '">' +
+      esc(missingApify ? '配置 Apify token 后可搜索 X 账号' : e.message) + '</div>';
+    showAccountSuggest(platform);
+  });
+}
+
+INPUTS['acct-search'] = function (el) {
+  const platform = el.getAttribute('data-platform');
+  const query = el.value.trim();
+  invalidateResolve();
+  invalidateAccountSuggest();
+  if (!query) return;
+  acctSuggestState.timer = setTimeout(function () {
+    runAccountSuggest(platform, query);
+  }, platform === 'twitter' ? 650 : 350);
+};
+INPUTS['acct-manual-id'] = function () { invalidateResolve(); };
+
+ACTIONS['acct-suggest-pick'] = function (el) {
+  const platform = el.getAttribute('data-platform');
+  const c = acctSuggestState.candidates[platform][Number(el.getAttribute('data-index'))];
+  if (!c) return;
+  if (platform === 'weibo') {
+    document.getElementById('wa-nick').value = c.nickname || '';
+    document.getElementById('wa-uid').value = c.uid || '';
+  } else if (platform === 'bili') {
+    document.getElementById('ba-name').value = c.uname || '';
+    document.getElementById('ba-uid').value = c.uid || '';
+  } else {
+    document.getElementById('xa-name').value = c.screenName || '';
+  }
+  invalidateResolve();
+  invalidateAccountSuggest();
+};
+
+document.addEventListener('click', function (e) {
+  if (!(e.target instanceof Element) || e.target.closest('.acct-search, .acct-suggest')) return;
+  const box = acctSuggestBox(sheetPlatform);
+  if (box) box.hidden = true;
+});
+document.addEventListener('keydown', function (e) {
+  if (!(e.target instanceof Element) || !e.target.matches('.acct-search .inp')) return;
+  const box = acctSuggestBox(sheetPlatform);
+  if (e.key === 'Escape') {
+    if (box) box.hidden = true;
+  } else if (e.key === 'ArrowDown' && box && !box.hidden) {
+    const first = box.querySelector('button');
+    if (first) { e.preventDefault(); first.focus(); }
+  }
+});
+window.addEventListener('resize', function () { positionAccountSuggest(sheetPlatform); });
+document.addEventListener('scroll', function (e) {
+  const box = acctSuggestBox(sheetPlatform);
+  if (!box || box.hidden || (e.target instanceof Node && box.contains(e.target))) return;
+  positionAccountSuggest(sheetPlatform);
+}, true);
+
+// 微博「昵称 / uid」互解析只在失焦后发起；新输入作废旧结果，防止晚到响应覆盖正在编辑的字段。
 let resolveSeq = 0;
 function invalidateResolve() { resolveSeq++; }
 function runWeiboResolve(kind) {
@@ -752,9 +914,13 @@ function extractUid(el) {
   const m = el.value.match(/(?:weibo\.com\/(?:u\/)?|space\.bilibili\.com\/)(\d+)/);
   if (m) el.value = m[1];
 }
-CHANGES['wa-uid-change'] = function (el) { extractUid(el); runWeiboResolve('uid'); };
-CHANGES['ba-uid-change'] = function (el) { extractUid(el); };
-CHANGES['wa-resolve-nick'] = function () { runWeiboResolve('nick'); };
+document.addEventListener('focusout', function (e) {
+  if (!(e.target instanceof HTMLInputElement)) return;
+  if (e.relatedTarget instanceof Element && e.relatedTarget.closest('.acct-suggest')) return;
+  if (e.target.id === 'wa-nick') runWeiboResolve('nick');
+  else if (e.target.id === 'wa-uid') { extractUid(e.target); runWeiboResolve('uid'); }
+  else if (e.target.id === 'ba-uid') extractUid(e.target);
+});
 
 function pickRuleRowHtml(r) {
   const dead = deadReason(r);

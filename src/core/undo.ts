@@ -13,8 +13,8 @@
  *    （better-sqlite3 的 `transaction()` 支持嵌套：写路径内部再开事务会退化成 savepoint，故可直接套在
  *    现有的 `Db.upsertXxx` 外面）；写抛错则事务回滚，写入与记录一起不落库。
  * ② 快照粒度 = 受影响行的前像 → 见上。
- * ③ 唯一隐私例外 = 模型 key（`settings` 的 `llm_key:<provider>` 与 `decision_key:<provider>`）：
- *    **不落明文**，撤销 = 清空并要求重填。
+ * ③ 唯一隐私例外 = 凭据类 key（`settings` 的 `llm_key:<provider>`、`decision_key:<provider>`、
+ *    `search_key` 与 `apify_key`）：**不落明文**，撤销 = 清空并要求重填。
  *
  * 撤销语义：栈式逆序（只撤最近一次、可连续撤、不跳序）、**每来源渠道一条独立栈**（面板 admin 另有全局栈）、
  * 逐行比对「后像 == 当前值」不等则**中止且一行都不动**（宁中止不丢写）、历史全量保留（只标记 undone，不删记录）。
@@ -145,9 +145,10 @@ export const DEFAULT_IGNORE_COLUMNS: Record<string, readonly string[]> = {
 };
 
 /**
- * 该 settings 键是否属于隐私例外（LLM key / 决策模型 key）。**键即判据**：
- * `redactSecretSettings` 与入口层的「撤销后需重填」提示都从这三个函数出发，
- * 两处口径不会漂移（`llm_key:<provider>` / `decision_key:<provider>` 一行一个键）。
+ * 该 settings 键是否属于隐私例外（LLM key / 决策模型 key / 网页搜索 key / Apify key）。
+ * **键即判据**：`redactSecretSettings` 与入口层的「撤销后需重填」提示都从这几个函数出发，
+ * 两处口径不会漂移（`llm_key:<provider>` / `decision_key:<provider>` 一行一个键，
+ * `search_key` / `apify_key` 各是全局唯一的一个键）。
  */
 export function isLlmKeySetting(key: unknown): boolean {
   return typeof key === 'string' && key.startsWith('llm_key:');
@@ -157,11 +158,22 @@ export function isDecisionKeySetting(key: unknown): boolean {
   return typeof key === 'string' && key.startsWith('decision_key:');
 }
 
-export function isSecretKeySetting(key: unknown): boolean {
-  return isLlmKeySetting(key) || isDecisionKeySetting(key);
+/** 网页搜索 key（`settings.search_key`；键名信源是 `search/config.ts` 的 SEARCH_KEY_SETTING） */
+export function isSearchKeySetting(key: unknown): boolean {
+  return key === 'search_key';
 }
 
-/** 隐私例外（两条独立通道的 key 都不落明文） */
+/** Apify key（`settings.apify_key`；键名信源是搜索侧的 APIFY_KEY_SETTING） */
+export function isApifyKeySetting(key: unknown): boolean {
+  return key === 'apify_key';
+}
+
+export function isSecretKeySetting(key: unknown): boolean {
+  return isLlmKeySetting(key) || isDecisionKeySetting(key)
+    || isSearchKeySetting(key) || isApifyKeySetting(key);
+}
+
+/** 隐私例外（凭据类 key 都不落明文） */
 export const redactSecretSettings: RedactPredicate = (table, column, row) =>
   table === 'settings' && column === 'value' && isSecretKeySetting(row.key);
 

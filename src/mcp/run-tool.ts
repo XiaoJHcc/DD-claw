@@ -105,7 +105,12 @@ function validateArgs(
 function auditLine(entry: ToolEntry, call: ToolCall): void {
   const sanitized = { ...call.args };
   // 写凭据的工具：值是 key 本身，日志只留「改过」
-  if ((call.def.name === 'set_llm_key' || call.def.name === 'set_search_key') && 'value' in sanitized) {
+  if (
+    (call.def.name === 'set_llm_key'
+      || call.def.name === 'set_search_key'
+      || call.def.name === 'set_apify_key')
+    && 'value' in sanitized
+  ) {
     sanitized.value = '***';
   }
   if ('key' in sanitized) sanitized.key = '***';

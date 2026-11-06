@@ -28,7 +28,7 @@ export function splitCsv(v) {
 const CONFIG_WRITE_PREFIXES = [
   '/api/llm', '/api/decision', '/api/advanced', '/api/categories', '/api/rules', '/api/channels',
   '/api/streamers', '/api/follows', '/api/listen', '/api/push',
-  '/api/x', '/api/weibo', '/api/bili', '/api/napcat', '/api/chat/mode', '/api/chat/provider',
+  '/api/x', '/api/weibo', '/api/bili', '/api/napcat', '/api/search', '/api/chat/mode', '/api/chat/provider',
 ];
 function isConfigWrite(path, method) {
   if (!method || String(method).toUpperCase() === 'GET') return false;

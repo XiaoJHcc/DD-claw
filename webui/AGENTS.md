@@ -27,7 +27,7 @@
 - `js/icons.js` + `js/lucide-icons.js` — 本地节选的 lucide 节点数据出图标（离线可用）。
 - `js/qr-lib.js` — B站扫码弹窗用的 qrcode-generator。
 - `js/rules.js` — 直播 / 图文共用的统一规则组件：行渲染、规则弹窗、生效范围圆柱卡 + 二级搜索多选、跨页刷新广播、摘要与可达性文案。
-- `js/x.js` — 图文分页：三张来源卡 + 图文规则卡 + 单墙混排账号卡墙（平台角标、添加浮窗按平台切草稿、微博昵称↔UID 失焦互查）。
+- `js/x.js` — 图文分页：三张来源卡 + 图文规则卡 + 单墙混排账号卡墙（平台角标、添加浮窗按平台切草稿、三平台远程账号候选回填 ID、微博昵称↔UID 失焦互查）。
 - `js/categories.js` — 两页的分类卡与分类弹窗（按 `appliesTo` 渲染；简单描述 / 精确原子条件双模式，两套数据保留、启用模式互斥；确定性条件组按内容形态切换）。
 - `js/category-test.js` — 包裹分类主卡的浅灰测试副卡（外卡承担整体投影）：常驻筛选 + 1–20 拉条 + 带图样本无边框表格；刷新抽样后对同一批 `subjectId` 复测，图标判定与单行关键证据，悬停 / 聚焦打开自定义证据浮窗，异步代际清理。
 - `js/push.js` — 推送渠道卡 + 直播规则卡（规则部分委托 rules.js）+ 推送设置 sheet。
@@ -36,7 +36,7 @@
 - `js/schedule.js` — 时间表（5 天滑动窗口、行高解算、预取、hover 关键帧）。
 - `js/listen.js` — B站登录行与抓取设置 sheet；导出扫码登录弹窗供图文页复用。
 - `js/llm.js` / `js/napcat.js` — LLM provider 与 key 卡 / NapCat 通道与自动拉起卡。
-- `js/search.js` — 设置页「网页搜索」卡：DeepSeek 搜索 key（`search_key`，缺省复用 DeepSeek 供应商的 key）。
+- `js/search.js` — 设置页「网页搜索」卡：DeepSeek 搜索 key（`search_key`，缺省复用 DeepSeek 供应商的 key）与 Apify X 账号搜索 token（`apify_key`）。
 - `js/decision.js` — 决策模型供应商卡（总开关 + System One 名单管理的管理面：启停、协议表单、`vision` 标记、探活与排序 + 「高级」sheet；与 LLM 完全隔离）。
 - `js/undo.js` — 设置页底部的变更历史卡（栈顶撤销 + 冲突标注）。
 - `js/content-audit.js` — 单份内容的判定与推送回看弹窗。

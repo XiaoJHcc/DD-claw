@@ -360,6 +360,11 @@ interface CallToolOpts {
   rejectUnknown?: boolean;
   /** 响应形状映射（缺省透传工具结果；缺结果时回 {ok:true}） */
   map?: (data: Record<string, unknown>) => unknown;
+  /**
+   * 工具失败且没带 HttpError 状态时的兜底状态码（缺省走老 500 口径）。
+   * 只给「失败原因是外部依赖/配置」的只读路由用：把真实中文原因回给调用方，不吞成「服务器内部错误」。
+   */
+  failureStatus?: number;
 }
 
 /** 调注册表工具（经 runToolTracked：zod 校验 + 审计 + 写快照），不做响应映射 */
@@ -383,8 +388,9 @@ async function runPanelTool(
 }
 
 /** 失败侧转 HTTP：HttpError 状态透传；无状态码的内部错误走老 500 口径（细节进日志不进响应） */
-function throwToolFailure(r: ToolFailure): never {
+function throwToolFailure(r: ToolFailure, fallbackStatus?: number): never {
   if (r.status !== undefined) throw new HttpError(r.status, r.error);
+  if (fallbackStatus !== undefined) throw new HttpError(fallbackStatus, r.error);
   throw new Error(r.error);
 }
 
@@ -397,7 +403,7 @@ async function callTool(
   opts: CallToolOpts = {},
 ): Promise<unknown> {
   const r = await runPanelTool(deps, name, body, opts);
-  if (!r.ok) throwToolFailure(r);
+  if (!r.ok) throwToolFailure(r, opts.failureStatus);
   const payload = opts.map ? opts.map(r.data as Record<string, unknown>) : (r.data ?? { ok: true });
   sendJson(res, opts.status ?? 200, payload);
   return payload;
@@ -863,7 +869,7 @@ async function handle(
       return;
     }
   }
-  // ---- 远程检索（search dep 存在才挂）：GET 只读凭据状态，PUT 写唯一一把搜索 key ----
+  // ---- 远程检索（search dep 存在才挂）：GET 只读凭据状态，PUT 写搜索 / Apify key ----
   // key 与 LLM key 同口径：本机面板明文回显/编辑（只绑 127.0.0.1）；缺省回退到 DeepSeek 供应商。
   if (deps.search && method === 'GET' && path === '/api/search') {
     sendJson(res, 200, deps.search.status());
@@ -872,6 +878,29 @@ async function handle(
   if (deps.search && method === 'PUT' && path === '/api/search/key') {
     const body = asBodyObject(await readJsonBody(req));
     await callTool(deps, res, 'set_search_key', { value: body.value }, { map: () => deps.search!.status() });
+    return;
+  }
+  if (deps.search && method === 'PUT' && path === '/api/search/apify-key') {
+    const body = asBodyObject(await readJsonBody(req));
+    await callTool(deps, res, 'set_apify_key', { value: body.value }, { map: () => deps.search!.status() });
+    return;
+  }
+  // 账号候选（给输入框联想/快速确认用）：只做适配，抓取逻辑全在注册表工具与装配层
+  if (deps.search && method === 'GET' && path === '/api/search/accounts') {
+    const platform = url.searchParams.get('platform') ?? '';
+    const q = (url.searchParams.get('q') ?? '').trim();
+    if (q === '') throw new HttpError(400, 'q 不能为空');
+    const targets: Record<string, { tool: string; key: string }> = {
+      twitter: { tool: 'search_x_accounts', key: 'query' },
+      weibo: { tool: 'search_weibo_accounts', key: 'keyword' },
+      bili: { tool: 'search_bili_accounts', key: 'keyword' },
+    };
+    const target = targets[platform];
+    if (!target) throw new HttpError(400, 'platform 必须是 twitter / weibo / bili');
+    await callTool(deps, res, target.tool, { [target.key]: q, limit: 5, mode: 'suggest' }, {
+      map: (data) => data,
+      failureStatus: 502,
+    });
     return;
   }
   // ---- 决策模型 provider 与 key 管理（decision dep 存在才挂；与 LLM 通道完全隔离）----

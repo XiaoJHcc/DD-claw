@@ -17,7 +17,7 @@ import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { UndoStore, adminScope, undoEffects, type UndoEffect, type UndoResult } from '../core/undo.js';
 import { ChatStore } from '../core/chat-store.js';
 import { DEFAULT_DECISION_THRESHOLDS } from '../analysis/tasks/decide.js';
-import { searchKeySource } from '../search/config.js';
+import { searchKeySource, apifyKeySource } from '../search/config.js';
 
 interface Fixture {
   db: Db;
@@ -31,6 +31,8 @@ interface Fixture {
   chat?: ChatStore;
   /** 注入 decision dep 时：名单 / key 写完后重建决策 router 的回调被调用了几次 */
   decisionChanges?: () => number;
+  /** 注入 search dep 时：工具 → 装配层的调用参数（验证平台映射与 limit/mode 固定值） */
+  searchCalls?: Array<{ method: string; args: unknown[] }>;
 }
 
 test('内容审计 REST 验证身份键并返回真实过程记录，旧内容明确无记录', async (t) => {
@@ -105,8 +107,8 @@ async function setup(
     undo?: boolean;
     /** 注入 ChatStore（P1 /api/chat* 对话端点）；缺省不注入（404） */
     chat?: boolean;
-    /** 注入远程检索 dep（/api/search*）；缺省不注入（404） */
-    search?: boolean;
+    /** 注入远程检索 dep（/api/search*）；缺省不注入（404）。对象形态可让 X 候选路径抛错（验证错误透传） */
+    search?: boolean | { failX?: string };
     /** 注入已有库（时间轴测试需要预置历史数据）；缺省新建内存库 */
     db?: Db;
   } = {},
@@ -163,14 +165,41 @@ async function setup(
   undoStore?.migrate();
   const chatStore = opts.chat ? new ChatStore(db.raw) : undefined;
   chatStore?.migrate();
-  // 远程检索 dep（生产装配形状：key 现解析；测试里只关心 key 的读写与来源展示）
+  // 远程检索 dep（生产装配形状：key 现解析；测试里只关心 key 的读写、来源展示与候选路由的参数映射）
+  const searchCalls: Array<{ method: string; args: unknown[] }> = [];
   const search: PanelDeps['search'] = opts.search
     ? {
-        web: async (q) => [{ title: q, url: 'https://example.com/x', snippet: '', summary: '', site: null, date: null }],
-        biliAccounts: async () => [],
-        weiboAccounts: async () => [],
-        xAccounts: async () => [],
-        status: () => ({ key: searchKeySource(db), providerName: null }),
+        web: async (q) => {
+          searchCalls.push({ method: 'web', args: [q] });
+          return [{ title: q, url: 'https://example.com/x', snippet: '', summary: '', site: null, date: null }];
+        },
+        biliAccounts: async (keyword, limit, mode) => {
+          searchCalls.push({ method: 'bili', args: [keyword, limit, mode] });
+          return [{
+            uid: '1459104794', uname: `bili:${keyword}`, sign: '', fans: 0, level: 1,
+            official: null, live: false, roomId: null, avatar: null,
+          }];
+        },
+        weiboAccounts: async (keyword, limit, mode) => {
+          searchCalls.push({ method: 'weibo', args: [keyword, limit, mode] });
+          return [{
+            uid: '2203177060', nickname: `weibo:${keyword}`, description: '',
+            followers: 0, verified: false, location: null,
+          }];
+        },
+        xAccounts: async (query, limit, mode) => {
+          searchCalls.push({ method: 'x', args: [query, limit, mode] });
+          if (typeof opts.search === 'object' && opts.search.failX) throw new Error(opts.search.failX);
+          return [{
+            screenName: `x_${query}`, url: `https://x.com/x_${query}`, name: query,
+            exists: true, sources: [],
+          }];
+        },
+        status: () => ({
+          key: searchKeySource(db),
+          providerName: null,
+          apifyKey: apifyKeySource(db),
+        }),
       }
     : undefined;
   // 撤销执行器（生产装配形状：撤栈顶 + 按 core/undo.ts 的 undoEffects 触发热生效回调）。
@@ -237,6 +266,7 @@ async function setup(
     ...(undoStore ? { undo: undoStore, undoFired } : {}),
     ...(chatStore ? { chat: chatStore } : {}),
     ...(opts.decision ? { decisionChanges: () => decisionChanges } : {}),
+    ...(opts.search ? { searchCalls } : {}),
   };
 }
 
@@ -3720,12 +3750,13 @@ test('无 chat dep 时 /api/chat* 一律 404（五个端点各自按 dep 挂载�
   assert.equal((await api(base, '/api/chat/provider', 'PUT', { provider: 'ds' })).status, 404);
 });
 
-test('/api/search：key 落 settings 并可撤销回退；无 dep 时 404', async (t) => {
-  const { base, db } = await setup(t, { search: true, undo: true });
+test('/api/search：key / apifyKey 落 settings 并可撤销回退；无 dep 时 404', async (t) => {
+  const { base, db, undo } = await setup(t, { search: true, undo: true });
   let r = await api(base, '/api/search');
   assert.equal(r.status, 200);
   assert.deepEqual(r.json.key, { source: 'unset', count: 0, value: null }, '未配 = 空，走供应商回退');
   assert.equal(r.json.providerName, null);
+  assert.deepEqual(r.json.apifyKey, { source: 'unset', count: 0, value: null }, 'Apify token 与搜索 key 同形状');
 
   r = await api(base, '/api/search/key', 'PUT', { value: 'sk-search-1' });
   assert.equal(r.status, 200);
@@ -3738,7 +3769,52 @@ test('/api/search：key 落 settings 并可撤销回退；无 dep 时 404', asyn
   assert.equal(r.status, 200);
   assert.deepEqual(r.json.key, { source: 'unset', count: 0, value: null });
 
+  // Apify token：经注册表写、落 settings、可回显与清除
+  r = await api(base, '/api/search/apify-key', 'PUT', { value: 'apify_api_secret_1' });
+  assert.equal(r.status, 200);
+  assert.equal((r.json.apifyKey as { value: string }).value, 'apify_api_secret_1');
+  assert.equal(db.getSetting('apify_key'), 'apify_api_secret_1');
+  assert.equal(undo!.history({ scope: adminScope() })[0]!.tool, 'set_apify_key', '配置写进撤销栈');
+  r = await api(base, '/api/search/apify-key', 'PUT', { value: '' });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.apifyKey, { source: 'unset', count: 0, value: null });
+
   const noDep = await setup(t);
   assert.equal((await api(noDep.base, '/api/search')).status, 404);
   assert.equal((await api(noDep.base, '/api/search/key', 'PUT', { value: 'x' })).status, 404);
+  assert.equal((await api(noDep.base, '/api/search/apify-key', 'PUT', { value: 'x' })).status, 404);
+  assert.equal((await api(noDep.base, '/api/search/accounts?platform=weibo&q=x')).status, 404);
+});
+
+test('GET /api/search/accounts：平台映射到注册表工具，固定 limit=5 / mode=suggest，直接返回候选数组', async (t) => {
+  const f = await setup(t, { search: true });
+  const cases = [
+    { platform: 'weibo', q: '渡瀬結月', method: 'weibo', key: 'nickname', expect: 'weibo:渡瀬結月' },
+    { platform: 'twitter', q: '羊宮妃那', method: 'x', key: 'screenName', expect: 'x_羊宮妃那' },
+    { platform: 'bili', q: 'mygo', method: 'bili', key: 'uname', expect: 'bili:mygo' },
+  ] as const;
+  for (const c of cases) {
+    const r = await api(f.base, `/api/search/accounts?platform=${c.platform}&q=${encodeURIComponent(c.q)}`);
+    assert.equal(r.status, 200, c.platform);
+    assert.ok(Array.isArray(r.json), '候选直接是数组（不是 {results} 包装）');
+    assert.equal((r.json as unknown as Array<Record<string, unknown>>)[0]![c.key], c.expect);
+    assert.deepEqual(f.searchCalls!.at(-1), { method: c.method, args: [c.q, 5, 'suggest'] });
+  }
+
+  assert.equal((await api(f.base, '/api/search/accounts?platform=weibo&q=%20%20')).status, 400, '空 q');
+  assert.equal((await api(f.base, '/api/search/accounts?platform=youtube&q=x')).status, 400, '不支持的平台');
+  assert.equal((await api(f.base, '/api/search/accounts?q=x')).status, 400, '缺平台');
+  assert.equal(f.searchCalls!.length, cases.length, '参数错误不得触达装配层');
+});
+
+test('GET /api/search/accounts：外部依赖失败回真实中文原因（502，不吞成服务器内部错误）', async (t) => {
+  const f = await setup(t, {
+    search: { failX: 'X 候选建议需要 Apify token：请先在设置页「网页搜索」填入 Apify API token' },
+  });
+  const r = await api(
+    f.base,
+    `/api/search/accounts?platform=twitter&q=${encodeURIComponent('羊宮妃那')}`,
+  );
+  assert.equal(r.status, 502);
+  assert.match(r.json.error!, /Apify token/);
 });

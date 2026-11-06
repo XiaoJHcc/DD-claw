@@ -9,11 +9,11 @@
  *   `detail`   逐行说明（`label` + `action` + `changes`），行来自 `RowImage` 的差分，不是另算一遍；
  *              `changes` 带**格式化后的旧值/新值**（布尔 → 开/关、JSON 数组 → 顿号连接、数值
  *              settings 键 → 带单位、长文本截断），回答「从什么改成了什么」，而非「改了哪些列」
- *   `undoNote` 撤销后的注意事项（`refill` = 该行是 LLM key 隐私例外，撤销 = 清空、需重填）
+ *   `undoNote` 撤销后的注意事项（`refill` = 该行是凭据类 key 隐私例外，撤销 = 清空、需重填）
  *
  * 三条口径纪律：
  * - `undoNote` 的 refill 判定与 `core/undo.ts` 的隐私例外**同源**（`isSecretKeySetting`），
- *   别处不再写第二份 `llm_key:` / `decision_key:` 前缀判断。
+ *   别处不再写第二份 `llm_key:` / `decision_key:` / `search_key` / `apify_key` 判断。
  * - `changes` 的列集合与快照差分**同源**（`DEFAULT_IGNORE_COLUMNS`）：轮询回写列（游标/心跳/头像/
  *   平台昵称/updated_at）既不算差分也不列进说明，否则「保存主播别名」会顺带说“改了更新时间”。
  *   纯配置表（categories / push_rules / …）的 `updated_at` 不在忽略表、确实每次写都变，
@@ -25,11 +25,11 @@
  *    changes: [{ field: '关键词', from: '唱、歌', to: '唱、歌、演唱会' }] }`；
  * `changes` 只在 `action='updated'` 时非空（其余恒为 `[]`，键始终存在，前端不必判 undefined）；
  * 布尔开关变化带 `bool: true`（from/to 恒为 开/关，供前端省略冗余字段名）；
- * 值不可示人的变化（LLM / 决策模型 key、MCP 令牌）给 `{ field, redacted: true }`，无 from/to。
+ * 值不可示人的变化（LLM / 决策模型 / 网页搜索 / Apify key、MCP 令牌）给 `{ field, redacted: true }`，无 from/to。
  */
 import {
-  DEFAULT_IGNORE_COLUMNS, changeTables, isDecisionKeySetting, isLlmKeySetting, isSecretKeySetting,
-  type ChangeRecord, type RowImage, type Row,
+  DEFAULT_IGNORE_COLUMNS, changeTables, isApifyKeySetting, isDecisionKeySetting, isLlmKeySetting,
+  isSearchKeySetting, isSecretKeySetting, type ChangeRecord, type RowImage, type Row,
 } from '../core/undo.js';
 
 /** 工具名没有（或认不出）时的标题：宁可说不知道，也不留空 */
@@ -65,6 +65,8 @@ const TOOL_TITLES: Record<string, string> = {
   set_listen: '监听开关',
   update_runtime_config: '修改运行时参数',
   set_llm_key: '设置 LLM 密钥',
+  set_search_key: '设置网页搜索密钥',
+  set_apify_key: '设置 Apify 密钥',
   // 主播与三张图文账号名单
   watch_streamer: '加入监听',
   unwatch_streamer: '取消监听',
@@ -180,11 +182,13 @@ const SETTING_NAMES: Record<string, string> = {
   qqbot_trigger_prefix: 'QQ 唤起前缀',
 };
 
-/** settings 行 → 中文设置项名（键名 + 前缀兜底 + 原名回退；两类 key 用同一份隐私判据） */
+/** settings 行 → 中文设置项名（键名 + 前缀兜底 + 原名回退；凭据类 key 用同一份隐私判据） */
 function settingLabel(key: unknown): string {
   const k = typeof key === 'string' ? key : String(key ?? '');
   if (isLlmKeySetting(k)) return `LLM 密钥（${k.slice('llm_key:'.length)}）`;
   if (isDecisionKeySetting(k)) return `决策模型密钥（${k.slice('decision_key:'.length)}）`;
+  if (isSearchKeySetting(k)) return '网页搜索密钥';
+  if (isApifyKeySetting(k)) return 'Apify 密钥';
   const exact = SETTING_NAMES[k];
   if (exact !== undefined) return exact;
   if (k.startsWith('napcat_')) return `NapCat 设置（${k}）`;
@@ -379,8 +383,11 @@ const SETTING_UNITS: Record<string, string> = {
   health_alert_after_failures: '次', llm_circuit_threshold: '次', backlog_max_age_hours: '小时',
 };
 
-/** 值不可示人的 settings 键（LLM key 在 undo.ts 层已 redact；这里兜住其余敏感配置） */
-const SECRET_SETTING_KEYS: readonly string[] = ['mcp_tokens'];
+/**
+ * 值不可示人的 settings 键（凭据 key 在 undo.ts 层已 redact；这里兜住其余敏感配置，
+ * 并让启动迁移清理前后的 search_key / apify_key 老记录在展示层同样不回显值）
+ */
+const SECRET_SETTING_KEYS: readonly string[] = ['mcp_tokens', 'search_key', 'apify_key'];
 
 /** 小枚举列 → 中文（`表.列` 为键） */
 const ENUM_VALUES: Record<string, Record<string, string>> = {
@@ -546,6 +553,12 @@ export function undoChangeHeadline(c: ChangeRecord): string {
   if (primary.table === 'settings' && isDecisionKeySetting(primary.pk.key)) {
     return `设置了 ${String(primary.pk.key).slice('decision_key:'.length)} 的决策模型密钥`;
   }
+  if (primary.table === 'settings' && isSearchKeySetting(primary.pk.key)) {
+    return '设置了网页搜索密钥';
+  }
+  if (primary.table === 'settings' && isApifyKeySetting(primary.pk.key)) {
+    return '设置了 Apify 密钥';
+  }
   if (primary.table === 'settings') {
     const boolHeadline = boolVerbHeadline(primary);
     if (boolHeadline !== null) return boolHeadline;
@@ -558,7 +571,7 @@ export function undoChangeHeadline(c: ChangeRecord): string {
 }
 
 /**
- * 撤销这条记录时要在界面上说的注意事项：`refill` = 该记录涉及模型 key 隐私例外
+ * 撤销这条记录时要在界面上说的注意事项：`refill` = 该记录涉及凭据类 key 隐私例外
  * （值本来就没落库），撤销动作 = 清空该行、需要主人重新填写。
  * 判定与 `core/undo.ts` 同源（工具名 + `isSecretKeySetting`），不另造口径。
  */

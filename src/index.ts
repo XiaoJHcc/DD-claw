@@ -40,8 +40,9 @@ import { createPanelServer, type PlatformStatus, type PanelDeps } from './panel/
 import { createWeiboResolver } from './sources/weibo/resolve.js';
 import { searchWeiboUsers } from './sources/weibo/search.js';
 import { searchXAccounts } from './sources/twitter/search.js';
+import { searchXAccountsViaApify } from './sources/twitter/apify-search.js';
 import { searchWeb } from './search/web.js';
-import { resolveSearchCredentials, searchKeySource } from './search/config.js';
+import { apifyKeySource, resolveApifyKey, resolveSearchCredentials, searchKeySource } from './search/config.js';
 import { loadWeiboCookies, weiboCookieHeader, type WeiboSelfInfo } from './sources/weibo/auth.js';
 import { WeiboFeedSource } from './sources/weibo/feed.js';
 import {
@@ -753,29 +754,74 @@ async function main(): Promise<void> {
       return searchWeb(creds.key, query, opts);
     };
     // 面板依赖面先建出来（QQ 自助入口要复用同一份：同源的 chat / llm router / undo）
+    // X 账号发现两条路线：Apify People 搜索（有 token 时优先，真实 profile）与免凭据网页发现
+    // （检索挖 x.com 线索 + x.com 校验，走既有代理链路，链路不通只标未校验）。
+    const webXDiscovery = (query: string, limit?: number) => searchXAccounts(query, {
+      search: (q) => runWebSearch(q, { count: 8 }),
+      verify: (screenName) => verifyAccount(screenName, getXConfig(db).proxyUrl),
+      limit,
+    });
+    const apifyToken = () => resolveApifyKey(db);
+    // 微博昵称解析器只建一份：面板「昵称→UID」与账号搜索的精确解析补位共用访客 cookie 缓存
+    const weiboResolver = createWeiboResolver();
     const panelDeps: PanelDeps = {
       db,
       undo: undoStore,
       undoLast,
       chat: chatStore,
-      weiboResolver: createWeiboResolver(),
+      weiboResolver,
       llm: llmDep,
       decision: decisionDep,
       search: {
         web: runWebSearch,
         biliAccounts: (keyword, limit) => searchBiliUsers(keyword, { limit }),
-        weiboAccounts: (keyword, limit) => searchWeiboUsers(keyword, { limit }),
-        // X 没有站内搜索：检索挖线索 + x.com 校验（走既有代理链路，链路不通只标未校验）
-        xAccounts: (query, limit) => searchXAccounts(query, {
-          search: (q) => runWebSearch(q, { count: 8 }),
-          verify: (screenName) => verifyAccount(screenName, getXConfig(db).proxyUrl),
+        // 登录态下两者都先走全站用户搜索（覆盖未认证长尾账号），失败/空结果回落匿名侧栏建议；
+        // 只有 discover 才在两条搜索都为空时补精确昵称解析
+        weiboAccounts: (keyword, limit, mode) => searchWeiboUsers(keyword, {
           limit,
+          mode,
+          cookie: weiboCookieHdr ?? undefined,
+          resolveUid: (nick) => weiboResolver.resolveUid(nick),
         }),
+        xAccounts: async (query, limit, mode = 'discover') => {
+          const token = apifyToken();
+          // suggest 只做快速候选：没有 token 就明确说怎么办，不拿网页发现逐键兜（太慢且贵）
+          if (mode === 'suggest') {
+            if (!token) {
+              throw new Error(
+                'X 候选建议需要 Apify token：请先在设置页「网页搜索」填入 Apify API token'
+                + '（在 apify.com 注册后获取），或用 discover 模式走免凭据网页发现',
+              );
+            }
+            return searchXAccountsViaApify(query, { token, limit });
+          }
+          if (!token) return webXDiscovery(query, limit);
+          // discover：Apify 优先；出错或空结果都回退网页发现（空数组只代表这条链路没线索）
+          let apifyError: Error | null = null;
+          try {
+            const hits = await searchXAccountsViaApify(query, { token, limit });
+            if (hits.length > 0) return hits;
+          } catch (e) {
+            apifyError = e instanceof Error ? e : new Error(String(e));
+          }
+          try {
+            return await webXDiscovery(query, limit);
+          } catch (e) {
+            const webError = e instanceof Error ? e.message : String(e);
+            if (apifyError) {
+              throw new Error(
+                `X 账号发现失败：Apify 搜索不可用（${apifyError.message}），网页发现失败（${webError}）`,
+              );
+            }
+            throw e;
+          }
+        },
         status: () => {
           const creds = resolveSearchKey();
           return {
             key: searchKeySource(db),
             providerName: creds?.source === 'provider' ? (creds.providerName ?? null) : null,
+            apifyKey: apifyKeySource(db),
           };
         },
       },

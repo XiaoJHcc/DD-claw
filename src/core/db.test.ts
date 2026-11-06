@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Db } from './db.js';
+import { UndoStore } from './undo.js';
 
 test('内容审计跨重启保留，两段独立更新不覆盖彼此', (t) => {
   let db: Db;
@@ -1300,4 +1301,169 @@ test('供应商 ID 迁移：保留 key 与 Agent 选择，不改写 baseURL，�
   assert.equal(again[0]!.id, llm[0]!.id, '重跑不重新生成 ID');
   assert.equal(db.getSetting(`llm_key:${llm[0]!.id}`), 'sk-llm');
   db.close();
+});
+
+// ---- 撤销记录里的凭据明文清理（search_key / apify_key）----
+
+/** 旧版本 UndoStore 落库的 settings 行：before/after 是整行（含明文值），没有 redacted 标记 */
+function legacySettingsImage(
+  key: string, before: string | null, after: string | null,
+): Record<string, unknown> {
+  return {
+    table: 'settings',
+    pk: { key },
+    before: before === null ? null : { key, value: before },
+    after: after === null ? null : { key, value: after },
+    beforeExists: before !== null,
+    afterExists: after !== null,
+  };
+}
+
+test('撤销记录凭据迁移：undo_changes 尚未建表时不落闸，建表后下次启动再清', (t) => {
+  let db: Db | undefined;
+  const dir = tmpdir_(t, () => db?.close());
+  const path = join(dir, 'undo-late.db');
+
+  // 首次启动：Db 构造早于装配根的 UndoStore.migrate()，表还不存在
+  db = new Db(path);
+  assert.equal(db.getSetting('migrated_undo_secret_rows_v1'), null, '表不存在 → 不落闸（留给下次启动）');
+  db.close();
+
+  {
+    const raw = new Database(path);
+    new UndoStore(raw).migrate();
+    raw.prepare(
+      `INSERT INTO undo_changes (scope, actor, entry, tool, at, rows, has_redacted)
+       VALUES ('admin', 'panel', 'panel', 'set_search_key', 1, ?, 0)`,
+    ).run(JSON.stringify([legacySettingsImage('search_key', 'sk-late-SECRET', null)]));
+    raw.close();
+  }
+
+  db = new Db(path);
+  assert.equal(db.getSetting('migrated_undo_secret_rows_v1'), '1', '表已建出 → 本次启动清除并落闸');
+  const rec = JSON.parse(
+    (db.raw.prepare('SELECT rows FROM undo_changes').get() as { rows: string }).rows,
+  ) as Array<Record<string, unknown>>;
+  assert.deepEqual(rec[0], {
+    table: 'settings',
+    pk: { key: 'search_key' },
+    before: null,
+    after: null,
+    beforeExists: true,
+    afterExists: false,
+    redacted: true,
+  });
+});
+
+test('撤销记录凭据迁移：search_key / apify_key 改为 redacted，其他 key 与记录列不动，明文从库里清除', (t) => {
+  let db: Db | undefined;
+  const dir = tmpdir_(t, () => db?.close());
+  const path = join(dir, 'undo-secret.db');
+  const SEARCH_SECRET = 'sk-legacy-search-SECRET-0001';
+  const APIFY_SECRET = 'apify_api_legacy_SECRET_0002';
+  const BACKUP_SECRET = 'sk-legacy-backup-SECRET-0003';
+
+  const untouchedRule = {
+    table: 'push_rules',
+    pk: { id: 3 },
+    before: { id: 3, name: '旧名', sort: 1 },
+    after: { id: 3, name: '新名', sort: 2 },
+    beforeExists: true,
+    afterExists: true,
+  };
+  const untouchedOtherKeys = [
+    legacySettingsImage('push_enabled', '1', '0'),
+    // 相似前缀但不是凭据键：只按精确键名清理
+    legacySettingsImage('search_key_backup', BACKUP_SECRET, null),
+  ];
+
+  {
+    const raw = new Database(path);
+    new UndoStore(raw).migrate();
+    const ins = raw.prepare(
+      `INSERT INTO undo_changes (scope, actor, entry, tool, note, at, rows, has_redacted, undone_at, undone_note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    // ① 更新形状：前后像都带 search_key 明文
+    ins.run('admin', 'panel', 'panel', 'set_search_key', null, 111,
+      JSON.stringify([legacySettingsImage('search_key', 'sk-legacy-search-OLD', SEARCH_SECRET), untouchedRule]),
+      0, null, null);
+    // ② 新增形状：只有后像带 apify_key 明文
+    ins.run('admin', 'panel', 'panel', 'set_apify_key', '一次写', 222,
+      JSON.stringify([legacySettingsImage('apify_key', null, APIFY_SECRET)]), 0, null, null);
+    // ③ 非凭据 key：原样保留（含相似前缀）
+    ins.run('ch:7', 'gw1', 'mcp', null, null, 333, JSON.stringify(untouchedOtherKeys), 0, 444, '需重填: x');
+    raw.close();
+  }
+
+  // 前置：旧版本的明文确实已经写进库文件（否则后面的「文件里找不到」就是空证明）
+  const beforeMigration = readFileSync(path);
+  assert.ok(beforeMigration.includes(SEARCH_SECRET) && beforeMigration.includes(APIFY_SECRET));
+
+  db = new Db(path);
+  const records = db.raw.prepare('SELECT * FROM undo_changes ORDER BY id').all() as Array<Record<string, unknown>>;
+  assert.equal(records.length, 3);
+
+  // ① search_key：前后像清空、只加 redacted；同一记录里的非 settings 行逐字不变
+  const searchRows = JSON.parse(String(records[0]!.rows)) as Array<Record<string, unknown>>;
+  assert.deepEqual(searchRows[0], {
+    table: 'settings',
+    pk: { key: 'search_key' },
+    before: null,
+    after: null,
+    beforeExists: true,
+    afterExists: true,
+    redacted: true,
+  });
+  assert.deepEqual(searchRows[1], untouchedRule);
+  // 记录自身的其它列不动（含 has_redacted：它只是写入端标记，消费端从不读）
+  assert.deepEqual(
+    {
+      scope: records[0]!.scope, actor: records[0]!.actor, entry: records[0]!.entry,
+      tool: records[0]!.tool, note: records[0]!.note, at: records[0]!.at,
+      has_redacted: records[0]!.has_redacted, undone_at: records[0]!.undone_at, undone_note: records[0]!.undone_note,
+    },
+    { scope: 'admin', actor: 'panel', entry: 'panel', tool: 'set_search_key', note: null, at: 111, has_redacted: 0, undone_at: null, undone_note: null },
+  );
+
+  // ② apify_key：新增形状的存在性照旧（撤销语义靠它）
+  const apifyRows = JSON.parse(String(records[1]!.rows)) as Array<Record<string, unknown>>;
+  assert.deepEqual(apifyRows[0], {
+    table: 'settings',
+    pk: { key: 'apify_key' },
+    before: null,
+    after: null,
+    beforeExists: false,
+    afterExists: true,
+    redacted: true,
+  });
+  assert.equal(records[1]!.tool, 'set_apify_key');
+  assert.equal(records[1]!.note, '一次写');
+
+  // ③ 非凭据键（普通设置 / 相似前缀）与已撤销标记原样保留
+  assert.deepEqual(JSON.parse(String(records[2]!.rows)), untouchedOtherKeys);
+  assert.equal(records[2]!.undone_at, 444);
+  assert.equal(records[2]!.undone_note, '需重填: x');
+  assert.equal(db.getSetting('migrated_undo_secret_rows_v1'), '1');
+
+  // 明文真正从库文件里消失（secure_delete 清零 + WAL TRUNCATE），不是只靠展示层遮住
+  const snapshot = JSON.stringify(records);
+  db.close();
+  db = undefined;
+  const bytes = readFileSync(path);
+  for (const secret of [SEARCH_SECRET, APIFY_SECRET]) {
+    assert.ok(!bytes.includes(secret), `SQLite 文件里不得残留明文 ${secret}`);
+  }
+  assert.ok(!snapshot.includes('sk-legacy-search-OLD') && !snapshot.includes(SEARCH_SECRET));
+
+  // 幂等：删掉闸门后重跑，已 redacted 的行不再改写，其他行逐字不变
+  {
+    const raw = new Database(path);
+    raw.prepare(`DELETE FROM settings WHERE key = 'migrated_undo_secret_rows_v1'`).run();
+    raw.close();
+  }
+  db = new Db(path);
+  const again = db.raw.prepare('SELECT * FROM undo_changes ORDER BY id').all() as Array<Record<string, unknown>>;
+  assert.deepEqual(again, records, '重跑不产生任何差量');
+  assert.equal(db.getSetting('migrated_undo_secret_rows_v1'), '1');
 });

@@ -42,8 +42,8 @@ import type { StreamerInput } from '../core/streamers.js';
 import { mcpWriteLimiter, writeLimitBucket } from './rate-limit.js';
 import { runToolTracked, scopeChannelId, undoScopeOf } from './run-tool.js';
 import type { McpAuth } from './auth.js';
-import { SEARCH_KEY_SETTING } from '../search/config.js';
-import type { SearchDeps } from '../search/deps.js';
+import { SEARCH_KEY_SETTING, APIFY_KEY_SETTING } from '../search/config.js';
+import type { AccountSearchMode, SearchDeps } from '../search/deps.js';
 
 /** gateway 渠道自助：单渠道 MCP 规则上限 */
 const MAX_MCP_RULES_PER_CHANNEL = 20;
@@ -69,6 +69,15 @@ export interface McpToolDef {
 
 const uidSchema = z.string().regex(/^\d+$/, 'uid 必须是纯数字字符串');
 const idSchema = z.number().int().positive();
+
+/** 三家账号搜索共用的模式参数（能力层只透传，各平台实现决定怎么跑） */
+const accountSearchModeSchema = z.enum(['discover', 'suggest']).optional()
+  .describe('discover=外部发现（默认；微博有登录态走全站搜索并补精确解析，X 有 Apify token 优先 People 搜索）；'
+    + 'suggest=快速候选建议（微博有登录态也走全站搜索，但只回落到匿名建议、不补精确解析，X 只能走 Apify）');
+
+/** 工具 description 的统一口径：空结果只是没线索，不是「账号不存在」 */
+const EMPTY_RESULT_NOTE = '返回空数组只表示这次没找到线索（检索覆盖有限，也可能被限流），'
+  + '不代表账号不存在；请如实说「没搜到」，可换关键词或用 web_search 再查，不要断言没有这个人。';
 
 /**
  * 精确条件（分类判定模式的原子条件）。`id` 只由调用方在**已有**条件上回传（试判 / 审计按它对齐）；
@@ -98,6 +107,30 @@ function checkXBiliUidForMcp(deps: PanelDeps, uid: string | null): void {
 /** 微博账号的关联主播校验（与 checkXBiliUidForMcp 同一条纪律） */
 function checkWeiboBiliUidForMcp(deps: PanelDeps, uid: string | null): void {
   if (uid && !deps.db.getStreamer(uid)) throw new HttpError(400, `关联主播不在监听名单: ${uid}`);
+}
+
+/**
+ * 单个 X 账号的写入内核（解析后）：重复检查 / 关联主播校验 / x.com 存在性校验 / 落库。
+ * 单个添加与批量添加共用这一份，避免两条路径的校验口径漂移；
+ * 热生效回调不在这里——批量写要攒到最后只调一次。
+ */
+async function insertXAccount(
+  deps: PanelDeps,
+  input: ReturnType<typeof parseNewXAccount>,
+): Promise<{ id: number; account: unknown; verify?: unknown }> {
+  if (deps.db.getXAccountByScreenName(input.screenName)) {
+    throw new HttpError(409, `@${input.screenName} 已在名单里`);
+  }
+  checkXBiliUidForMcp(deps, input.biliUid);
+  // 存在性校验（与面板 POST /api/x/accounts 同一条）：「账号不存在」是硬错误（多半敲错了）；
+  // 链路原因（代理不通 / 限流）照收——不能因为代理没开就让人加不了账号，把原因回报给调用方。
+  // verify 顺手抠到的 og:title 显示名直接种入 nickname（抠不到为 null，抓取再回写）
+  const verify = deps.x?.verify ? await deps.x.verify(input.screenName) : undefined;
+  if (verify?.checked && !verify.ok && verify.kind === 'not-found') {
+    throw new HttpError(400, `X 账号不存在：@${input.screenName}`);
+  }
+  const id = deps.db.upsertXAccount({ ...input, nickname: verify?.name ?? null });
+  return { id, account: deps.db.getXAccount(id), ...(verify ? { verify } : {}) };
 }
 
 /** 排序类工具的公共校验：ids 必须是现有行的全排列（与面板 put*Order 同一口径、同一句文案） */
@@ -348,7 +381,7 @@ const sharedTools: McpToolDef[] = [
         ok: true,
         change: { id: r.id, tool: r.tool ?? null },
         applied: r.applied,
-        // 隐私例外（LLM key）：值没落库，撤销 = 清空；这里点名要重填的字段
+        // 隐私例外（模型 / 远程检索 key）：值没落库，撤销 = 清空；这里点名要重填的字段
         ...(r.refill ? { refill: r.refill } : {}),
       };
     },
@@ -379,33 +412,40 @@ const adminTools: McpToolDef[] = [
     name: 'search_bili_accounts',
     description: '在 B站远程按用户名搜账号：返回 uid / 用户名 / 签名 / 粉丝数 / 认证 / 是否在播。'
       + 'watch_streamer 找 uid、upsert_bili_account 找账号、或确认某人在 B站的身份时用；'
-      + '只搜远程，不看本地名单（本地名单用 search_streamers / list_*）。',
+      + '只搜远程，不看本地名单（本地名单用 search_streamers / list_*）。' + EMPTY_RESULT_NOTE,
     schema: {
       keyword: z.string().min(1).max(64).describe('B站用户名关键词（也可以是部分名字）'),
       limit: z.number().int().min(1).max(20).optional().describe('返回条数，缺省 10'),
+      mode: accountSearchModeSchema,
     },
     role: 'admin',
     handler: (deps, args) => requireSearch(deps).biliAccounts(
-      args.keyword as string, args.limit as number | undefined,
+      args.keyword as string,
+      args.limit as number | undefined,
+      args.mode as AccountSearchMode | undefined,
     ),
   },
   {
     name: 'search_weibo_accounts',
     description: '在微博远程按昵称搜账号：返回 uid / 昵称 / 简介 / 粉丝数 / 认证。'
-      + 'upsert_weibo_account 找 uid 时用。微博的搜索建议只覆盖人气账号：没命中时会再按「完整昵称」'
-      + '做一次精确解析，仍为空才算没找到。',
+      + 'upsert_weibo_account 找 uid 时用。有登录态时两种模式都先走全站用户搜索（长尾未认证账号也在内）；'
+      + 'discover（默认）在两条搜索都没命中时再按「完整昵称」做一次精确解析，suggest 不补精确解析。'
+      + '无登录态时只有匿名侧栏建议，它覆盖不到长尾账号。' + EMPTY_RESULT_NOTE,
     schema: {
       keyword: z.string().min(1).max(64).describe('微博昵称（完整昵称最容易命中）'),
       limit: z.number().int().min(1).max(20).optional().describe('返回条数，缺省 10'),
+      mode: accountSearchModeSchema,
     },
     role: 'admin',
     handler: async (deps, args) => {
       const keyword = (args.keyword as string).trim();
       const limit = (args.limit as number | undefined) ?? 10;
-      const hits = await requireSearch(deps).weiboAccounts(keyword, limit);
+      const mode = (args.mode as AccountSearchMode | undefined) ?? 'discover';
+      const hits = await requireSearch(deps).weiboAccounts(keyword, limit, mode);
       // 模糊搜索空结果时补一次精确解析：搜索建议覆盖不到长尾账号，而 resolveUid 走的是匿名跳转链。
       // 解析失败（风控/网络）照实抛给模型——不能把「解析没做成」伪装成「没这个人」。
-      if (hits.length === 0 && deps.weiboResolver) {
+      // suggest 是快速候选语义：不跑精确解析（那是 discover 的补位手段）。
+      if (mode === 'discover' && hits.length === 0 && deps.weiboResolver) {
         const uid = await deps.weiboResolver.resolveUid(keyword);
         if (uid) {
           return [{
@@ -419,17 +459,22 @@ const adminTools: McpToolDef[] = [
   },
   {
     name: 'search_x_accounts',
-    description: '在 X/推特 上按名字找账号：网页检索挖出 x.com/<handle> 线索，再用 x.com 校验候选是否存在'
-      + '（需要代理；链路不通时只给未校验线索）。返回 handle / 显示名 / 是否确认存在 / 命中出处。'
-      + 'upsert_x_account 找 screenName 时用。候选来自第三方网页，可能混入同名号或旧号：'
-      + '拿不准就把候选与出处给主人确认，别挑一个直接加。',
+    description: '在 X/推特 上按名字找账号。discover（默认）：有 Apify token 时优先 X People 搜索'
+      + '（真实 profile：简介/粉丝/认证），失败或没结果时回退网页检索挖 x.com/<handle> 线索'
+      + '（需代理；链路不通时只给未校验线索）。suggest：只走 Apify People 搜索，需要 token。'
+      + '返回 handle / 显示名 / 是否确认存在 / 命中出处。upsert_x_account 找 screenName 时用。'
+      + '候选来自第三方网页或平台搜索，可能混入同名号或旧号：拿不准就把候选与出处给主人确认，'
+      + '别挑一个直接加。' + EMPTY_RESULT_NOTE,
     schema: {
       query: z.string().min(1).max(128).describe('人名或检索式，例如「羊宮妃那」或「MyGO 声優 推特」'),
       limit: z.number().int().min(1).max(10).optional().describe('返回候选数，缺省 5'),
+      mode: accountSearchModeSchema,
     },
     role: 'admin',
     handler: (deps, args) => requireSearch(deps).xAccounts(
-      args.query as string, args.limit as number | undefined,
+      args.query as string,
+      args.limit as number | undefined,
+      args.mode as AccountSearchMode | undefined,
     ),
   },
   {
@@ -654,20 +699,9 @@ const adminTools: McpToolDef[] = [
         if (args.nickname !== undefined) {
           throw new HttpError(400, '昵称是平台事实（添加校验种入 / 抓取回写），不接受手填');
         }
-        if (deps.db.getXAccountByScreenName(input.screenName)) {
-          throw new HttpError(409, `@${input.screenName} 已在名单里`);
-        }
-        checkXBiliUidForMcp(deps, input.biliUid);
-        // 存在性校验（与面板 POST /api/x/accounts 同一条）：「账号不存在」是硬错误（多半敲错了）；
-        // 链路原因（代理不通 / 限流）照收——不能因为代理没开就让人加不了账号，把原因回报给调用方。
-        // verify 顺手抠到的 og:title 显示名直接种入 nickname（抠不到为 null，抓取再回写）
-        const verify = deps.x?.verify ? await deps.x.verify(input.screenName) : undefined;
-        if (verify?.checked && !verify.ok && verify.kind === 'not-found') {
-          throw new HttpError(400, `X 账号不存在：@${input.screenName}`);
-        }
-        const id = deps.db.upsertXAccount({ ...input, nickname: verify?.name ?? null });
+        const added = await insertXAccount(deps, input);
         deps.x?.onChanged();
-        return { id, account: deps.db.getXAccount(id), ...(verify ? { verify } : {}) };
+        return added;
       }
       const id = Number(args.id);
       if (!deps.db.getXAccount(id)) throw new HttpError(404, 'X 账号不存在');
@@ -679,6 +713,41 @@ const adminTools: McpToolDef[] = [
       deps.db.upsertXAccount({ ...patch, id });
       deps.x?.onChanged();
       return { id, account: deps.db.getXAccount(id) };
+    },
+  },
+  {
+    name: 'upsert_x_accounts',
+    description: '批量添加 X 关注账号（1~50 个，只新建、不更新）。每项走与 upsert_x_account 完全相同的解析、'
+      + '重复检查、关联主播校验与 x.com 存在性校验；单项失败不阻断其他项，结果按输入顺序逐项回报。'
+      + '整批只落一条变更记录，可一次撤销（撤销会把本批新增的账号全部移除）',
+    schema: {
+      accounts: z.array(z.object({
+        screenName: z.string().min(1).describe('X 账号（@ 可省）'),
+        displayName: z.string().nullable().optional().describe('自定义显示名（卡片优先展示；留空 = 用昵称）'),
+        biliUid: uidSchema.nullable().optional().describe('可选关联主播 uid；null = 不关联'),
+        enabled: z.boolean().optional().describe('是否启用（缺省 true）'),
+      })).min(1).max(50).describe('要添加的账号列表，1~50 个'),
+    },
+    role: 'admin',
+    write: true,
+    handler: async (deps, args) => {
+      const items = args.accounts as Array<Record<string, unknown>>;
+      const results: Array<Record<string, unknown>> = [];
+      let added = 0;
+      for (const item of items) {
+        try {
+          const input = parseNewXAccount(pickBody(item, ['screenName', 'displayName', 'biliUid', 'enabled']));
+          const r = await insertXAccount(deps, input);
+          added++;
+          results.push({ screenName: input.screenName, ok: true, ...r });
+        } catch (e) {
+          const raw = typeof item.screenName === 'string' ? item.screenName : '';
+          results.push({ screenName: raw, ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      // 批量热生效：所有写完成后只调一次（有成功项时），避免 N 个账号触发 N 次源重启
+      if (added > 0) deps.x?.onChanged();
+      return { results, added, failed: results.length - added };
     },
   },
   {
@@ -1081,6 +1150,21 @@ const adminTools: McpToolDef[] = [
     write: true,
     handler: (deps, args) => {
       deps.db.setSetting(SEARCH_KEY_SETTING, (args.value as string).trim());
+      return { ok: true };
+    },
+  },
+  {
+    name: 'set_apify_key',
+    description: '设置 X 账号搜索用的 Apify API token（空串 = 清除）。有 token 时 X 账号发现优先走 '
+      + 'People 搜索（真实 profile）；没有 token 时 discover 回退免凭据网页发现，suggest 不可用。'
+      + '在 apify.com 注册后于账户设置里获取 token；保存后下一次检索即生效',
+    schema: {
+      value: z.string().describe('Apify API token；空串 = 清除'),
+    },
+    role: 'admin',
+    write: true,
+    handler: (deps, args) => {
+      deps.db.setSetting(APIFY_KEY_SETTING, (args.value as string).trim());
       return { ok: true };
     },
   },

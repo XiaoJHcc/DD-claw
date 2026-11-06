@@ -150,6 +150,33 @@ test('缺省审计：写操作落日志且 llm key 值打码', async (t) => {
   assert.match(joined, /"\*\*\*"/);
 });
 
+test('缺省审计：搜索 key / Apify token 同样打码', async (t) => {
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+  t.after(() => { console.log = orig; });
+
+  for (const [name, value] of [
+    ['set_search_key', 'sk-search-secret'],
+    ['set_apify_key', 'apify_api_secret'],
+  ] as const) {
+    const def = toolDef({
+      name, write: true,
+      schema: { value: z.string() },
+      handler: () => ({ ok: true }),
+    });
+    const r = await runTool(deps, def, { value }, admin);
+    assert.equal(r.ok, true);
+  }
+
+  const joined = lines.join('\n');
+  assert.match(joined, /set_search_key/);
+  assert.match(joined, /set_apify_key/);
+  assert.ok(!joined.includes('sk-search-secret'), '搜索 key 明文不得进日志');
+  assert.ok(!joined.includes('apify_api_secret'), 'Apify token 明文不得进日志');
+  assert.equal((joined.match(/"\*\*\*"/g) ?? []).length, 2, '两处值都被打码');
+});
+
 test('调用域解析：令牌绑定渠道 → scope；admin 与非法绑定不产生 scope', (t) => {
   const db = new Db(':memory:');
   t.after(() => db.close());

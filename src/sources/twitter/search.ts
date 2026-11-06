@@ -1,7 +1,7 @@
 /**
- * X 账号发现（没有「X 站内搜索」可用之后的替代路线）。
+ * X 账号发现（无凭据兜底：网页线索 + x.com 校验）。
  *
- * 事实（2026-10-29 实测）：X 不提供免登录的账号搜索——v1.1 `users/search` 已下线（404）、
+ * 事实（2026-10-29 实测）：X 不提供**免登录**的账号搜索——v1.1 `users/search` 已下线（404）、
  * `search/typeahead` 同样 404；Nitter 搜索在用户配置的实例上返回
  * 「Search has been disabled due to abuse」，nitter.net 已下线、官方仓库 2026-10-09 归档；
  * `site:x.com` / `site:twitter.com` 在 DeepSeek 搜索里恒为 0 条（X 页面不进索引）。
@@ -13,8 +13,14 @@
  *
  * 局限（要如实告诉模型/用户）：候选来自第三方页面，可能同名、可能是粉丝号；校验只能证明
  * 「这个 handle 存在」，证明不了「这是要找的人」。所以结果必须带出处片段让人/模型自己判断。
+ *
+ * 有 Apify token 时优先走 `apify-search.ts` 的 X People 搜索（真实 profile 字段更全）；
+ * 本文件保留为无凭据兜底，两者返回同一个 `XAccountCandidate` 形状。
  */
 import type { WebSearchResult } from '../../search/web.js';
+
+/** 候选来源：web = 网页检索 + x.com 校验（无凭据兜底）；apify = Apify People 搜索 */
+export type XAccountProvider = 'web' | 'apify';
 
 export interface XAccountCandidate {
   screenName: string;
@@ -23,8 +29,28 @@ export interface XAccountCandidate {
   name: string | null;
   /** true 存在 / false 不存在（会被丢弃）/ null 未校验或链路不通 */
   exists: boolean | null;
-  /** 命中出处（标题 + 链接 + 含 handle 的片段），供模型判断是不是同一个人 */
+  /** 命中出处（标题 + 链接 + 含 handle 的片段），供模型判断是不是同一个人；Apify 结果为空数组 */
   sources: Array<{ title: string; url: string; quote: string }>;
+  /** 候选来源；缺省按 web 兼容旧调用方 */
+  provider?: XAccountProvider;
+  /** 平台数字 id（仅 Apify） */
+  userId?: string;
+  /** 简介原文（仅 Apify） */
+  description?: string;
+  /** 粉丝数（仅 Apify；数据缺失为 null） */
+  followers?: number | null;
+  /** 认证或蓝标（仅 Apify） */
+  verified?: boolean;
+  /** 远程头像 URL，未本地化（仅 Apify） */
+  avatar?: string | null;
+  /** 自填位置（仅 Apify） */
+  location?: string | null;
+  /** 资料里的网站（仅 Apify） */
+  website?: string | null;
+  /** 累计发帖数（仅 Apify） */
+  tweets?: number | null;
+  /** Actor 回报的命中搜索词（仅 Apify） */
+  matchedQuery?: string;
 }
 
 export interface XVerifyResult {
@@ -193,6 +219,7 @@ export async function searchXAccounts(
       name: v?.name ?? null,
       exists: v?.exists ?? null,
       sources: b.sources,
+      provider: 'web',
     });
     if (out.length >= limit) break;
   }

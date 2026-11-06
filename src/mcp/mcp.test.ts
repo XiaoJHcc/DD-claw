@@ -21,7 +21,7 @@ import { listDecisionProviders, saveDecisionProviders } from '../analysis/decisi
 import { emptyXFeedSnapshot, getXConfig, saveXConfig } from '../core/x-config.js';
 import { emptyWeiboFeedSnapshot } from '../core/weibo-accounts.js';
 import { UndoStore, adminScope, channelScope, undoEffects, type UndoEffect } from '../core/undo.js';
-import { searchKeySource } from '../search/config.js';
+import { searchKeySource, apifyKeySource } from '../search/config.js';
 
 const ADMIN_TOKEN = 'ddc_test_admin';
 const GATEWAY_TOKEN = 'ddc_test_gateway';
@@ -37,6 +37,11 @@ interface Fixture {
   undoScopes: string[];
   /** 撤销后按 undoEffects 触发的热生效计数 */
   undoFired: Record<UndoEffect, number>;
+  /** X / 微博账号名单的热生效回调计数（批量写必须只调一次） */
+  xChanged: { count: number };
+  weiboChanged: { count: number };
+  /** 注入检索 dep 时记录工具→装配层的调用参数（验证 mode 透传） */
+  searchCalls: Array<{ method: string; args: unknown[] }>;
   /** 该测试开过的 MCP client（teardown 先关 client 再关 server，否则 keep-alive 连接拖住 server.close） */
   clients: Client[];
 }
@@ -81,6 +86,7 @@ async function setup(
   // X 分页 dep（生产装配形状）：配置落 settings，探测/校验走网络（测试里不触发）
   const xChanged = { count: 0 };
   const weiboChanged = { count: 0 };
+  const searchCalls: Array<{ method: string; args: unknown[] }> = [];
   const deps: PanelDeps = {
     db,
     undo,
@@ -136,20 +142,32 @@ async function setup(
     // 远程检索 dep（生产装配形状：只暴露四个函数）；缺省注入，withSearch:false 时验证未装配报错
     ...(opts.withSearch === false ? {} : {
       search: {
-        web: async (q: string) => [{
-          title: `结果:${q}`, url: 'https://example.com/a', snippet: '摘要', summary: '长摘要',
-          site: null, date: null,
-        }],
-        biliAccounts: async () => [{
-          uid: '1459104794', uname: 'MyGO_AveMujica', sign: '官方', fans: 1, level: 6,
-          official: null, live: false, roomId: null, avatar: null,
-        }],
-        weiboAccounts: async () => [],
-        xAccounts: async () => [{
-          screenName: 'hina_youmiya', url: 'https://x.com/hina_youmiya', name: '羊宮妃那',
-          exists: true, sources: [{ title: 't', url: 'https://a.example', quote: 'q' }],
-        }],
-        status: () => ({ key: searchKeySource(db), providerName: null }),
+        web: async (q: string) => {
+          searchCalls.push({ method: 'web', args: [q] });
+          return [{
+            title: `结果:${q}`, url: 'https://example.com/a', snippet: '摘要', summary: '长摘要',
+            site: null, date: null,
+          }];
+        },
+        biliAccounts: async (keyword: string, limit?: number, mode?: string) => {
+          searchCalls.push({ method: 'bili', args: [keyword, limit, mode] });
+          return [{
+            uid: '1459104794', uname: 'MyGO_AveMujica', sign: '官方', fans: 1, level: 6,
+            official: null, live: false, roomId: null, avatar: null,
+          }];
+        },
+        weiboAccounts: async (keyword: string, limit?: number, mode?: string) => {
+          searchCalls.push({ method: 'weibo', args: [keyword, limit, mode] });
+          return [];
+        },
+        xAccounts: async (query: string, limit?: number, mode?: string) => {
+          searchCalls.push({ method: 'x', args: [query, limit, mode] });
+          return [{
+            screenName: 'hina_youmiya', url: 'https://x.com/hina_youmiya', name: '羊宮妃那',
+            exists: true, sources: [{ title: 't', url: 'https://a.example', quote: 'q' }],
+          }];
+        },
+        status: () => ({ key: searchKeySource(db), providerName: null, apifyKey: apifyKeySource(db) }),
       },
     }),
     testPush: async () => ({ total: 2, succeeded: 2 }),
@@ -167,6 +185,7 @@ async function setup(
   const { port } = server.address() as AddressInfo;
   return {
     db, base: `http://127.0.0.1:${port}`, listenChanged, advancedChanged, undo, undoScopes, undoFired, clients,
+    xChanged, weiboChanged, searchCalls,
   };
 }
 
@@ -690,6 +709,80 @@ test('X 工具：list/upsert/delete 账号与配置读写走注册表，写路�
   await call(adm, 'delete_x_account', { id: created.id });
   assert.equal(f.db.listXAccounts().length, 1);
   await assert.rejects(() => call(adm, 'delete_x_account', { id: created.id }), /X 账号不存在/);
+});
+
+interface BatchUpsertResult {
+  results: Array<{
+    screenName: string; ok: boolean; id?: number; error?: string;
+    account?: { screenName: string; biliUid: string | null; enabled: boolean };
+    verify?: { kind: string };
+  }>;
+  added: number;
+  failed: number;
+}
+
+test('upsert_x_accounts：批量新建逐项回报，热生效只调一次', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+  f.db.upsertStreamer({ uid: '1001', uname: '阿梓', watch: true });
+
+  const r = (await call(adm, 'upsert_x_accounts', {
+    accounts: [
+      { screenName: '@Alpha_One', displayName: 'A' },
+      { screenName: 'Beta_Two', biliUid: '1001', enabled: false },
+    ],
+  })) as BatchUpsertResult;
+
+  assert.equal(r.added, 2);
+  assert.equal(r.failed, 0);
+  assert.deepEqual(r.results.map((x) => [x.screenName, x.ok]), [['alpha_one', true], ['beta_two', true]]);
+  assert.equal(r.results[1]!.account!.enabled, false, 'enabled 显式值生效');
+  assert.equal(r.results[1]!.account!.biliUid, '1001');
+  assert.equal(r.results[0]!.verify!.kind, 'ok');
+  assert.equal(f.db.listXAccounts().length, 2);
+  assert.equal(f.xChanged.count, 1, 'N 个账号只触发一次热生效，不是逐项 onChanged');
+});
+
+test('upsert_x_accounts：单项失败不阻断其他项，逐项给出原因', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  const r = (await call(adm, 'upsert_x_accounts', {
+    accounts: [
+      { screenName: 'good_one' },
+      { screenName: 'ghost_user' },
+      { screenName: 'good_one' },
+      { screenName: 'bili_bad', biliUid: '9999' },
+      { screenName: 'good_two' },
+    ],
+  })) as BatchUpsertResult;
+
+  assert.equal(r.added, 2, '两个合法项照常写入');
+  assert.equal(r.failed, 3);
+  assert.deepEqual(r.results.map((x) => x.ok), [true, false, false, false, true]);
+  assert.match(r.results[1]!.error!, /X 账号不存在：@ghost_user/);
+  assert.match(r.results[2]!.error!, /@good_one 已在名单里/, '同一批里的重复项也按名单重复处理');
+  assert.match(r.results[3]!.error!, /关联主播不在监听名单/);
+  assert.deepEqual(f.db.listXAccounts().map((a) => a.screenName).sort(), ['good_one', 'good_two']);
+  assert.equal(f.xChanged.count, 1, '部分成功也只热生效一次');
+});
+
+test('upsert_x_accounts：整批落一条变更记录，撤销移除本批新增账号', async (t) => {
+  const f = await setup(t);
+  const adm = await mcpClient(f, ADMIN_TOKEN);
+
+  await call(adm, 'upsert_x_accounts', {
+    accounts: [{ screenName: 'undo_one' }, { screenName: 'undo_two', enabled: false }],
+  });
+  const hist = f.undo.history({ scope: adminScope() });
+  assert.equal(hist.length, 1, '整批只一条变更记录');
+  assert.equal(hist[0]!.tool, 'upsert_x_accounts');
+  assert.equal(hist[0]!.rows.filter((row) => row.table === 'x_accounts').length, 2);
+
+  const undone = (await call(adm, 'undo_last_change')) as { change: { tool: string }; applied: number };
+  assert.equal(undone.change.tool, 'upsert_x_accounts');
+  assert.equal(undone.applied, 2);
+  assert.deepEqual(f.db.listXAccounts(), [], '批量新增的两行都被移除');
 });
 
 test('X 工具：gateway 角色看不到（配置含代理地址，属运维面）', async (t) => {
@@ -1345,6 +1438,27 @@ test('search_weibo_accounts：搜索空结果时用精确昵称解析补一条�
   assert.deepEqual(none, [], '搜不到 + 解析不到 = 空数组，不是错误');
 });
 
+test('账号搜索 mode 透传：suggest 不跑精确解析，缺省仍是 discover', async (t) => {
+  const f = await setup(t);
+  const admin = await mcpClient(f, ADMIN_TOKEN);
+
+  const suggested = await call(admin, 'search_weibo_accounts', { keyword: '渡瀬結月', mode: 'suggest' });
+  assert.deepEqual(suggested, [], 'suggest 只给搜索建议，不走 resolveUid 精确解析');
+  assert.deepEqual(f.searchCalls.at(-1), { method: 'weibo', args: ['渡瀬結月', 10, 'suggest'] });
+
+  await call(admin, 'search_bili_accounts', { keyword: 'mygo', mode: 'suggest' });
+  assert.deepEqual(f.searchCalls.at(-1), { method: 'bili', args: ['mygo', undefined, 'suggest'] }, 'B站也透传 mode');
+
+  await call(admin, 'search_x_accounts', { query: '羊宮妃那' });
+  assert.deepEqual(
+    f.searchCalls.at(-1),
+    { method: 'x', args: ['羊宮妃那', undefined, undefined] },
+    '缺省不传模式 = discover 由装配层默认',
+  );
+  await call(admin, 'search_x_accounts', { query: '羊宮妃那', mode: 'suggest' });
+  assert.deepEqual(f.searchCalls.at(-1), { method: 'x', args: ['羊宮妃那', undefined, 'suggest'] });
+});
+
 test('set_search_key：写 settings（可撤销），空串 = 清除', async (t) => {
   const f = await setup(t);
   const admin = await mcpClient(f, ADMIN_TOKEN);
@@ -1354,6 +1468,17 @@ test('set_search_key：写 settings（可撤销），空串 = 清除', async (t)
 
   await call(admin, 'set_search_key', { value: '   ' });
   assert.equal(f.db.getSetting('search_key'), '');
+});
+
+test('set_apify_key：写 settings（可撤销），空串 = 清除', async (t) => {
+  const f = await setup(t);
+  const admin = await mcpClient(f, ADMIN_TOKEN);
+  await call(admin, 'set_apify_key', { value: 'apify_api_secret_abc' });
+  assert.equal(f.db.getSetting('apify_key'), 'apify_api_secret_abc');
+  assert.equal(f.undo.history({ scope: adminScope() })[0]!.tool, 'set_apify_key', '进撤销栈（配置写）');
+
+  await call(admin, 'set_apify_key', { value: '  ' });
+  assert.equal(f.db.getSetting('apify_key'), '');
 });
 
 test('未注入检索 dep 时：四个工具都明确报「未装配」，不静默返回空', async (t) => {

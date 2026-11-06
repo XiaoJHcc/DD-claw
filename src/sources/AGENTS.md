@@ -45,14 +45,15 @@
 - `weibo/auth.ts` — weibo-cookies 读写 + `X-Log-Uid` 心跳。
 - `weibo/qrcode.ts` — passport sso/v2 扫码（generate 必须带 Referer）+ 302 链换 cookie。
 - `weibo/resolve.ts` — 昵称↔UID 匿名解析链（访客 cookie 缓存、失效重建重试一次）。
-- `weibo/search.ts` — 微博用户搜索（匿名侧栏建议；uid/昵称/简介/粉丝/认证）。
+- `weibo/search.ts` — 微博用户搜索：有登录态时 suggest 与 discover 都先走全站搜索（覆盖未认证长尾账号），失败/空结果回落匿名侧栏建议；仅 discover 再补精确昵称解析。
 - `weibo/avatar.ts` — 微博头像本地化（直连 sinaimg，md5 文件名入库）。
 
 **X / 推特（图文来源）**
 - `twitter/feed.ts` — `TwitterFeedSource`：Nitter RSS 主路线 + 免登录回退、逐账号拉时间线 → posts → `feed_post`；链路 canary 退避、账号级故障落库、头像与昵称回写。
 - `twitter/nitter.ts` — Nitter RSS 解析（唯一能区分原创/转发的免登录路线），多实例轮询。
 - `twitter/web.ts` — 免登录回退：`x.com` HTML 发现推文 id + 单推接口补详情；账号存在性校验。
-- `twitter/search.ts` — X 账号发现：网页检索挖 `x.com/<handle>` + 逐候选校验（X 无免登录账号搜索，成因见 research/web-search.md）。
+- `twitter/apify-search.ts` — Apify People 搜索（有 token 时优先）：异步 Actor run + Dataset 读取，直接返回真实用户资料；token 不进日志与错误。
+- `twitter/search.ts` — X 账号网页发现兜底：网页检索挖 `x.com/<handle>` + 逐候选校验（X 无免登录站内账号搜索，成因见 research/web-search.md）。
 - `twitter/probe.ts` — X 连通性探测（代理 → 实例 RSS → 免登录回退），面板测试按钮与 `npm run probe-x` 共用。
 - `twitter/avatar.ts` — X 头像本地化（隧道下载，md5 文件名入库）。
 

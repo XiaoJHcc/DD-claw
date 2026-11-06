@@ -123,6 +123,7 @@ const store = {
   llmEnabled: true,
   decisionEnabled: true,
   searchKey: '',   // 网页搜索 key（空 = 回退到 DeepSeek 供应商）
+  apifyKey: 'demo-apify-token',
   undoHistory: clone(M.mockUndoHistory),
   chat: { mode: M.mockChat.mode, provider: M.mockChat.provider, messages: clone(M.mockChat.messages) },
   chatPending: null,   // 挂起的「等你确认」写操作（写前询问模式：确认后才回报已执行）
@@ -135,11 +136,16 @@ const store = {
 
 /** /api/search 的响应形状（与 server.ts 同一份：key 来源 + 回退供应商名） */
 function searchStatus() {
-  if (store.searchKey) {
-    return { key: { source: 'panel', count: 1, value: store.searchKey }, providerName: null };
-  }
   const ds = store.llmProviders.find(function (p) { return /deepseek/i.test(p.baseURL || ''); });
-  return { key: { source: 'unset', count: 0, value: null }, providerName: ds ? ds.name : null };
+  return {
+    key: store.searchKey
+      ? { source: 'panel', count: 1, value: store.searchKey }
+      : { source: 'unset', count: 0, value: null },
+    providerName: store.searchKey ? null : (ds ? ds.name : null),
+    apifyKey: store.apifyKey
+      ? { source: 'panel', count: 1, value: store.apifyKey }
+      : { source: 'unset', count: 0, value: null },
+  };
 }
 
 // 内容记录（analysis 区）与后端同构：results 同一分类可有多行（确定性行 + 决策行 + 模型行），
@@ -1676,6 +1682,36 @@ for (const p of store.twitterPosts) {
   if (path === '/api/search/key' && method === 'PUT') {
     store.searchKey = String(body().value || '').trim();
     return ok(searchStatus());
+  }
+  if (path === '/api/search/apify-key' && method === 'PUT') {
+    store.apifyKey = String(body().value || '').trim();
+    return ok(searchStatus());
+  }
+  if (path === '/api/search/accounts' && method === 'GET') {
+    const platform = q.get('platform') || '';
+    const query = (q.get('q') || '').trim().toLowerCase();
+    if (!query) return ok([]);
+    const match = function () {
+      return Array.from(arguments).some(function (v) { return String(v || '').toLowerCase().includes(query); });
+    };
+    let rows;
+    if (platform === 'twitter') {
+      if (!store.apifyKey) return json(400, { error: 'X 候选建议需要 Apify token：请先在设置页「网页搜索」填入 Apify API token' });
+      rows = store.xAccounts.filter(function (a) { return match(a.screenName, a.nickname, a.displayName); }).map(function (a) {
+        return { screenName: a.screenName, name: a.nickname, description: '', followers: 0, verified: false, provider: 'apify', exists: true };
+      });
+    } else if (platform === 'weibo') {
+      rows = store.weiboAccounts.filter(function (a) { return match(a.uid, a.nickname, a.displayName); }).map(function (a) {
+        return { uid: a.uid, nickname: a.nickname, description: '', followers: 0, verified: false, via: 'search' };
+      });
+    } else if (platform === 'bili') {
+      rows = store.biliAccounts.filter(function (a) { return match(a.uid, a.uname, a.displayName); }).map(function (a) {
+        return { uid: a.uid, uname: a.uname, sign: '', fans: 0, official: null, avatar: a.avatar || null };
+      });
+    } else {
+      return json(400, { error: '不支持的平台' });
+    }
+    return ok(rows.slice(0, 5));
   }
   if (path === '/api/llm/providers/order' && method === 'PUT') {
     const ids = body().ids || [];

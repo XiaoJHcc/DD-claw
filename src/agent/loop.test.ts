@@ -15,6 +15,7 @@ import { getChatProvider, setChatProvider } from '../analysis/providers.js';
 import { UndoStore, adminScope, channelScope } from '../core/undo.js';
 import { HttpError } from '../panel/http-util.js';
 import type { PanelDeps, PanelStatus } from '../panel/server.js';
+import type { XAccountCandidate } from '../sources/twitter/search.js';
 import { AGENT_MAX_STEPS, chatBlockedReason, runAgentTurn } from './loop.js';
 import { getChatWriteMode, setChatWriteMode } from './system-prompt.js';
 
@@ -27,19 +28,53 @@ const PROVIDER: LlmProviderConfig = {
   keyEnvs: [], enabled: true, structuredOutput: 'schema', api: 'chat-completions',
 };
 
-/** 内存库 + 会话存储 + 撤销栈（生产装配形状；undoLast 用生产同款「撤该栈顶」语义） */
-function fixture(): { db: Db; chat: ChatStore; undo: UndoStore; deps: PanelDeps } {
+/**
+ * 内存库 + 会话存储 + 撤销栈（生产装配形状；undoLast 用生产同款「撤该栈顶」语义）。
+ * 检索与 X 分页 dep 也是生产装配形状的假实现，绝不打网络：`search_x_accounts` 原样回
+ * `xCandidates`，`x.verify` 用候选里的显示名当「存在性校验抠到的 og:title」（种入 nickname）。
+ */
+function fixture(opts: { xCandidates?: XAccountCandidate[] } = {}): {
+  db: Db; chat: ChatStore; undo: UndoStore; deps: PanelDeps; xChanged: { count: number };
+} {
   const db = new Db(':memory:');
   const chat = new ChatStore(db.raw);
   chat.migrate();
   const undo = new UndoStore(db.raw);
   undo.migrate();
+  const xChanged = { count: 0 };
   return {
-    db, chat, undo,
+    db, chat, undo, xChanged,
     deps: {
       db, chat, undo,
       undoLast: (scope) => undo.undo(scope ?? adminScope()),
       status: () => STATUS,
+      search: {
+        web: async (query) => [{
+          title: `检索结果：${query}`,
+          url: 'https://example.com/search',
+          snippet: '外部网页摘要。',
+          summary: '外部网页长摘要。',
+          site: 'example.com',
+          date: null,
+        }],
+        biliAccounts: async () => [],
+        weiboAccounts: async () => [],
+        xAccounts: async () => opts.xCandidates ?? [],
+        status: () => ({ key: { source: 'unset', count: 0, value: null }, providerName: null,
+          apifyKey: { source: 'unset', count: 0, value: null } }),
+      },
+      x: {
+        info: () => ({}),
+        save: () => ({}),
+        test: async () => ({}),
+        verify: async (screenName) => {
+          const hit = opts.xCandidates?.find((c) => c.screenName === screenName);
+          return hit?.name
+            ? { checked: true, ok: true, kind: 'ok' as const, message: '账号存在', name: hit.name }
+            : { checked: true, ok: true, kind: 'ok' as const, message: '账号存在' };
+        },
+        onChanged: () => { xChanged.count++; },
+      },
     },
   };
 }
@@ -136,6 +171,99 @@ test('两轮：请求写工具 → 执行落地 → 结果回填 → 终答；�
     { entry: hist[0]!.entry, actor: hist[0]!.actor, tool: hist[0]!.tool, scope: hist[0]!.scope },
     { entry: 'agent', actor: 'webui-agent', tool: 'set_push_enabled', scope: 'admin' },
   );
+});
+
+test('MyGO!!!!! / Ave Mujica 批量关注闭环：web_search → search_x_accounts → upsert_x_accounts 一次落库、一次撤销', async () => {
+  const MEMBERS: Array<[string, string]> = [
+    ['hina_youmiya', '羊宮妃那'],
+    ['tateishi_rin', '立石凛'],
+    ['aoki_hina', '青木陽菜'],
+    ['kohinata_mika', '小日向美香'],
+    ['hayashi_koko', '林鼓子'],
+    ['sasaki_riko', '佐々木李子'],
+    ['watase_yuzuki', '渡瀬結月'],
+    ['okada_yui', '岡田夢以'],
+    ['yonezawa_akane', '米澤茜'],
+    ['takao_kanon', '高尾奏音'],
+  ];
+  const candidates: XAccountCandidate[] = MEMBERS.map(([screenName, name]) => ({
+    screenName,
+    url: `https://x.com/${screenName}`,
+    name,
+    exists: true,
+    sources: [{
+      title: 'MyGO!!!!! / Ave Mujica 成员一览',
+      url: 'https://example.com/mygo-ave-mujica',
+      quote: `@${screenName}`,
+    }],
+  }));
+  const { db, chat, undo, deps, xChanged } = fixture({ xCandidates: candidates });
+
+  const llm = fakeChat([
+    () => ({
+      content: '先查清 MyGO!!!!! 和 Ave Mujica 的成员构成。',
+      toolCalls: [toolCall('c1', 'web_search', { query: 'MyGO Ave Mujica 成员 声优', count: 5 })],
+    }),
+    () => ({
+      content: '再找每位成员的 X 账号。',
+      toolCalls: [toolCall('c2', 'search_x_accounts', { query: 'MyGO Ave Mujica 声优', limit: 10 })],
+    }),
+    // 第三轮像真模型那样从上一轮结果里取候选，一次组成批量参数
+    (req) => {
+      const found = JSON.parse(toolTexts(req).at(-1)!) as XAccountCandidate[];
+      return {
+        content: `候选齐了，一次加入 ${found.length} 个。`,
+        toolCalls: [toolCall('c3', 'upsert_x_accounts', {
+          accounts: found.map((c) => ({ screenName: c.screenName })),
+        })],
+      };
+    },
+    () => reply('已把 MyGO!!!!! 与 Ave Mujica 的 10 位成员加入 X 关注名单，一次撤销即可全部移除。'),
+  ]);
+
+  const r = await runAgentTurn(deps, '把 MyGO!!!!! 和 Ave Mujica 十位成员的 X 关注都加上', { completeChat: llm.fn });
+
+  // 四轮跑完、没触发步数兜底；工具调用顺序与终答
+  assert.equal(r.truncated, false);
+  assert.deepEqual({ steps: r.steps, toolCalls: r.toolCalls }, { steps: 4, toolCalls: 3 });
+  assert.deepEqual(r.calls.map((c) => c.name), ['web_search', 'search_x_accounts', 'upsert_x_accounts']);
+  assert.ok(r.calls.every((c) => c.ok), '三步工具全部执行成功');
+  assert.equal(r.reply, '已把 MyGO!!!!! 与 Ave Mujica 的 10 位成员加入 X 关注名单，一次撤销即可全部移除。');
+  assert.equal(chat.messages(adminScope()).at(-1)!.content, r.reply, '终答落库');
+
+  // 搜索结果真回填给了下一轮：第二轮看到网页摘要，第三轮看到 10 个结构化候选
+  assert.match(toolTexts(llm.seen[1]!)[0]!, /检索结果：MyGO Ave Mujica 成员 声优/);
+  assert.equal((JSON.parse(toolTexts(llm.seen[2]!).at(-1)!) as XAccountCandidate[]).length, 10);
+
+  // 10 个账号真实落库（经 runToolTracked → handler → Db），verify 的显示名种入 nickname
+  const accounts = db.listXAccounts();
+  assert.equal(accounts.length, 10);
+  assert.deepEqual(accounts.map((a) => a.screenName).sort(), candidates.map((c) => c.screenName).sort());
+  assert.deepEqual(accounts.map((a) => a.nickname).sort(), MEMBERS.map(([, name]) => name).sort());
+  assert.match(toolTexts(llm.seen[3]!).at(-1)!, /"added": 10/);
+  assert.match(toolTexts(llm.seen[3]!).at(-1)!, /"failed": 0/);
+
+  // 批量热生效只调一次（不是每个账号一次）
+  assert.equal(xChanged.count, 1);
+
+  // admin 撤销栈：整批只有一条记录，10 行 x_accounts 都是本批新增
+  const hist = undo.history({ scope: adminScope() });
+  assert.equal(hist.length, 1);
+  const rec = hist[0]!;
+  assert.deepEqual(
+    { scope: rec.scope, entry: rec.entry, actor: rec.actor, tool: rec.tool },
+    { scope: 'admin', entry: 'agent', actor: 'webui-agent', tool: 'upsert_x_accounts' },
+  );
+  assert.deepEqual(rec.rows.map((row) => row.table), Array.from({ length: 10 }, () => 'x_accounts'));
+  assert.ok(rec.rows.every((row) => !row.beforeExists && row.afterExists), '10 行都是纯新增');
+
+  // 一次撤销 = 本批 10 个新增账号全部移除；撤销自身不落新记录
+  const undone = deps.undoLast!();
+  assert.equal(undone.ok, true);
+  assert.equal(undone.applied, 10);
+  assert.deepEqual(db.listXAccounts(), []);
+  assert.equal(undo.history().length, 1);
+  assert.ok(undo.history()[0]!.undoneAt !== null, '记录被标记为已撤销');
 });
 
 test('P1 冒烟回归：agent 用 set_streamer 改别名后能撤回（streamers 已纳入快照）', async (t) => {

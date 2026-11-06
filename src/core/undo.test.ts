@@ -1,12 +1,15 @@
 /**
- * 撤销引擎测试：差分快照、逆操作、冲突中止、按渠道分栈、隐私例外、同事务与回滚。
+ * 撤销引擎测试：差分快照、逆操作、冲突中止、按渠道分栈、隐私例外、同事务与回滚，
+ * 以及记录的「用户面视图」翻译（`panel/undo-view`，与本层记录形状的契约）。
  * 表结构照抄 src/core/db.ts 的真实 DDL 形状（settings 以 key 为主键、其余以 id 自增为主键）。
  */
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import Database from 'better-sqlite3';
+import { undoChangeInfo, type UndoFieldChange } from '../panel/undo-view.js';
 import {
   adminScope, channelScope, DEFAULT_CONFIG_TABLES, DEFAULT_IGNORE_COLUMNS, undoEffects, UndoStore,
+  type ChangeRecord,
 } from './undo.js';
 
 const DDL = `
@@ -306,7 +309,130 @@ test('隐私例外：决策模型 key 同样不落明文，撤销 = 清空并要
   assert.equal(db.prepare(`SELECT value FROM settings WHERE key = 'decision_key:jev'`).get(), undefined, '撤销 = 清空该 key');
 });
 
-test('非隐私 settings 正常还原（隐私判定只认模型 key 前缀）', (t) => {
+test('隐私例外：搜索 key 同样不落明文，撤销 = 清空并要求重填', (t) => {
+  const { db, store } = setup(t);
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('search_key', 'sk-search-old')`).run();
+
+  store.capture({ ...META, tool: 'set_search_key' }, () =>
+    db.prepare(`UPDATE settings SET value = 'sk-search-new' WHERE key = 'search_key'`).run());
+  const rec = store.peek(adminScope())!;
+  const dumped = JSON.stringify(rec.rows);
+  assert.ok(!dumped.includes('sk-search-old') && !dumped.includes('sk-search-new'), '快照不得落明文');
+  assert.equal(rec.rows[0]!.redacted, true);
+  assert.equal(rec.rows[0]!.before, null, '前像整行不落库');
+  assert.equal(rec.rows[0]!.after, null, '后像整行不落库');
+
+  const r = store.undo(adminScope());
+  assert.equal(r.ok, true);
+  assert.equal(r.tool, 'set_search_key');
+  assert.deepEqual(r.settingKeys, ['search_key']);
+  assert.deepEqual(r.refill, ['settings.(key=search_key)']);
+  assert.deepEqual(undoEffects(r), [], '搜索 key 每次调用现解析，不需要热生效回调');
+  assert.equal(db.prepare(`SELECT value FROM settings WHERE key = 'search_key'`).get(), undefined, '撤销 = 清空该 key');
+
+  // 历史全量保留，但明文始终不在（只标 undone）
+  const hist = store.history();
+  assert.equal(hist.length, 1);
+  assert.ok(hist[0]!.undoneAt !== null);
+  assert.ok(!JSON.stringify(hist).includes('sk-search-'), '历史里也不得出现明文');
+  assert.equal(hist[0]!.rows[0]!.redacted, true);
+});
+
+test('隐私例外：新增搜索 key 的撤销也只做清空（值没落库）', (t) => {
+  const { db, store } = setup(t);
+  store.capture({ ...META, tool: 'set_search_key' }, () =>
+    db.prepare(`INSERT INTO settings (key, value) VALUES ('search_key', 'sk-search-fresh')`).run());
+  const rec = store.peek(adminScope())!;
+  assert.equal(rec.rows[0]!.redacted, true);
+  assert.equal(rec.rows[0]!.before, null);
+  assert.equal(rec.rows[0]!.after, null);
+
+  const r = store.undo(adminScope());
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.refill, ['settings.(key=search_key)']);
+  assert.equal(db.prepare(`SELECT value FROM settings WHERE key = 'search_key'`).get(), undefined);
+});
+
+test('隐私例外：Apify key 同样不落明文，撤销 = 清空并要求重填', (t) => {
+  const { db, store } = setup(t);
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('apify_key', 'apify_api_old')`).run();
+
+  store.capture({ ...META, tool: 'set_apify_key' }, () =>
+    db.prepare(`UPDATE settings SET value = 'apify_api_new' WHERE key = 'apify_key'`).run());
+  const rec = store.peek(adminScope())!;
+  const dumped = JSON.stringify(rec.rows);
+  assert.ok(!dumped.includes('apify_api_old') && !dumped.includes('apify_api_new'), '快照不得落明文');
+  assert.equal(rec.rows[0]!.redacted, true);
+  assert.equal(rec.rows[0]!.before, null, '前像整行不落库');
+  assert.equal(rec.rows[0]!.after, null, '后像整行不落库');
+
+  const r = store.undo(adminScope());
+  assert.equal(r.ok, true);
+  assert.equal(r.tool, 'set_apify_key');
+  assert.deepEqual(r.settingKeys, ['apify_key']);
+  assert.deepEqual(r.refill, ['settings.(key=apify_key)']);
+  assert.deepEqual(undoEffects(r), [], 'Apify key 每次调用现解析，不需要热生效回调');
+  assert.equal(db.prepare(`SELECT value FROM settings WHERE key = 'apify_key'`).get(), undefined, '撤销 = 清空该 key');
+
+  const hist = store.history();
+  assert.equal(hist.length, 1);
+  assert.ok(hist[0]!.undoneAt !== null);
+  assert.ok(!JSON.stringify(hist).includes('apify_api_'), '历史里也不得出现明文');
+  assert.equal(hist[0]!.rows[0]!.redacted, true);
+});
+
+test('隐私例外：新增 Apify key 的撤销也只做清空（值没落库）', (t) => {
+  const { db, store } = setup(t);
+  store.capture({ ...META, tool: 'set_apify_key' }, () =>
+    db.prepare(`INSERT INTO settings (key, value) VALUES ('apify_key', 'apify_api_fresh')`).run());
+  const rec = store.peek(adminScope())!;
+  assert.equal(rec.rows[0]!.redacted, true);
+  assert.equal(rec.rows[0]!.before, null);
+  assert.equal(rec.rows[0]!.after, null);
+
+  const r = store.undo(adminScope());
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.refill, ['settings.(key=apify_key)']);
+  assert.equal(db.prepare(`SELECT value FROM settings WHERE key = 'apify_key'`).get(), undefined);
+});
+
+test('凭据 key 的撤销语义一致：清空 + refill；存在性冲突仍整体中止', (t) => {
+  // 同一套形状逐个跑：llm_key / decision_key / search_key / apify_key 的记录与撤销结果必须同构
+  for (const key of ['llm_key:p', 'decision_key:q', 'search_key', 'apify_key']) {
+    const { db, store } = setup(t);
+    const label = `settings.(key=${key})`;
+
+    // ① 更新形状：redacted 行 → 撤销清空并点名重填
+    db.prepare(`INSERT INTO settings (key, value) VALUES (?, 'old-value')`).run(key);
+    const upd = store.capture({ ...META, tool: 'set_key' }, () =>
+      db.prepare(`UPDATE settings SET value = 'new-value' WHERE key = ?`).run(key));
+    assert.ok(upd.changeId, `${key}: 值变化要落记录`);
+    const u1 = store.undo(adminScope());
+    assert.deepEqual(
+      { ok: u1.ok, settingKeys: u1.settingKeys, refill: u1.refill },
+      { ok: true, settingKeys: [key], refill: [label] },
+      `${key}: 撤销结果形状一致`,
+    );
+    assert.equal(db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key), undefined, `${key}: 撤销 = 清空`);
+
+    // ② 存在性冲突：记录后像存在、当前行已被别的入口删掉 → 整体中止且不标记已撤销
+    db.prepare(`INSERT INTO settings (key, value) VALUES (?, 'old-value')`).run(key);
+    store.capture({ ...META, tool: 'set_key' }, () =>
+      db.prepare(`UPDATE settings SET value = 'new-value' WHERE key = ?`).run(key));
+    db.prepare(`DELETE FROM settings WHERE key = ?`).run(key);
+    const rec = store.peek(adminScope())!;
+    const conflict = store.undo(adminScope());
+    assert.deepEqual(
+      { ok: conflict.ok, reason: conflict.reason },
+      { ok: false, reason: 'conflict' },
+      `${key}: 存在性冲突口径一致`,
+    );
+    assert.equal(store.peek(adminScope())!.id, rec.id, `${key}: 冲突不消费栈顶`);
+    assert.equal(store.peek(adminScope())!.undoneAt, null, `${key}: 冲突不打已撤销标记`);
+  }
+});
+
+test('非隐私 settings 正常还原（隐私判定只认凭据类 key）', (t) => {
   const { db, store } = setup(t);
   db.prepare(`INSERT INTO settings (key, value) VALUES ('push_enabled', '1')`).run();
   store.capture(META, () => db.prepare(`UPDATE settings SET value = '0' WHERE key = 'push_enabled'`).run());
@@ -696,4 +822,116 @@ test('undoEffects：受影响表 / settings 键 → 热生效标签（P0 判据 
     ['listen', 'llm'],
   );
   assert.deepEqual(undoEffects({}), []);
+});
+
+// ---- 记录的用户面视图（panel/undo-view）：凭据类 key 的展示口径 ----
+
+test('搜索 key 的历史视图：明文不进历史，detail 无 from/to，undoNote=refill', (t) => {
+  const { db, store } = setup(t);
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('search_key', 'sk-hist-old')`).run();
+  store.capture({ ...META, tool: 'set_search_key' }, () =>
+    db.prepare(`UPDATE settings SET value = 'sk-hist-new' WHERE key = 'search_key'`).run());
+
+  const info = undoChangeInfo(store.history()[0]!);
+  assert.equal(info.title, '设置网页搜索密钥');
+  assert.equal(info.headline, '设置了网页搜索密钥');
+  assert.equal(info.undoNote, 'refill', '涉及 search_key → 撤销 = 清空、需重填');
+
+  const detail = info.detail as Array<{ label: string; action: string; changes: UndoFieldChange[] }>;
+  assert.deepEqual(detail, [{
+    label: '网页搜索密钥',
+    action: 'updated',
+    changes: [{ field: '网页搜索密钥', redacted: true }],
+  }]);
+  const change = detail[0]!.changes[0]!;
+  assert.equal('from' in change, false, 'redacted 变化不带旧值');
+  assert.equal('to' in change, false, 'redacted 变化不带新值');
+
+  const dumped = JSON.stringify(info);
+  assert.ok(!dumped.includes('sk-hist-old') && !dumped.includes('sk-hist-new'), '明文 key 绝不进历史');
+});
+
+test('搜索 key 新增行的历史视图：无值可示，only 设置项标签', (t) => {
+  const { db, store } = setup(t);
+  store.capture({ ...META, tool: 'set_search_key' }, () =>
+    db.prepare(`INSERT INTO settings (key, value) VALUES ('search_key', 'sk-hist-fresh')`).run());
+
+  const info = undoChangeInfo(store.history()[0]!);
+  assert.equal(info.headline, '设置了网页搜索密钥');
+  assert.equal(info.undoNote, 'refill');
+  assert.deepEqual(info.detail, [{ label: '网页搜索密钥', action: 'created', changes: [] }]);
+  assert.ok(!JSON.stringify(info).includes('sk-hist-fresh'));
+});
+
+test('本修复前的 search_key 明文老记录：展示层同样不回显 from/to', () => {
+  // 旧版本落库的行含明文前像/后像（无 redacted 标记）；展示层必须按敏感键兜住，不再原样展示
+  const legacy: ChangeRecord = {
+    id: 1, scope: adminScope(), actor: 'panel', entry: 'panel', tool: 'set_search_key', at: 1_000,
+    rows: [{
+      table: 'settings',
+      pk: { key: 'search_key' },
+      before: { key: 'search_key', value: 'sk-legacy-old' },
+      after: { key: 'search_key', value: 'sk-legacy-new' },
+      beforeExists: true,
+      afterExists: true,
+    }],
+    undoneAt: null,
+    undoneNote: null,
+  };
+
+  const info = undoChangeInfo(legacy);
+  assert.equal(info.undoNote, 'refill');
+  assert.deepEqual(info.detail, [{
+    label: '网页搜索密钥',
+    action: 'updated',
+    changes: [{ field: '网页搜索密钥', redacted: true }],
+  }]);
+  const dumped = JSON.stringify(info);
+  assert.ok(!dumped.includes('sk-legacy-old') && !dumped.includes('sk-legacy-new'), '历史视图不得回显明文');
+});
+
+test('Apify key 的历史视图：标签 / headline / refill 与搜索 key 同口径，detail 无 from/to', (t) => {
+  const { db, store } = setup(t);
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('apify_key', 'apify_api_hist_old')`).run();
+  store.capture({ ...META, tool: 'set_apify_key' }, () =>
+    db.prepare(`UPDATE settings SET value = 'apify_api_hist_new' WHERE key = 'apify_key'`).run());
+
+  const info = undoChangeInfo(store.history()[0]!);
+  assert.equal(info.title, '设置 Apify 密钥');
+  assert.equal(info.headline, '设置了 Apify 密钥');
+  assert.equal(info.undoNote, 'refill', '涉及 apify_key → 撤销 = 清空、需重填');
+  assert.deepEqual(info.detail, [{
+    label: 'Apify 密钥',
+    action: 'updated',
+    changes: [{ field: 'Apify 密钥', redacted: true }],
+  }]);
+  const dumped = JSON.stringify(info);
+  assert.ok(!dumped.includes('apify_api_hist_old') && !dumped.includes('apify_api_hist_new'));
+});
+
+test('本修复前的 apify_key 明文老记录：展示层同样不回显 from/to', () => {
+  // 迁移之前的记录（无 redacted 标记）：即使库还没被启动迁移改写，展示层也不得回显明文
+  const legacy: ChangeRecord = {
+    id: 1, scope: adminScope(), actor: 'panel', entry: 'panel', tool: 'set_apify_key', at: 1_000,
+    rows: [{
+      table: 'settings',
+      pk: { key: 'apify_key' },
+      before: { key: 'apify_key', value: 'apify_api_legacy_old' },
+      after: { key: 'apify_key', value: 'apify_api_legacy_new' },
+      beforeExists: true,
+      afterExists: true,
+    }],
+    undoneAt: null,
+    undoneNote: null,
+  };
+
+  const info = undoChangeInfo(legacy);
+  assert.equal(info.undoNote, 'refill');
+  assert.deepEqual(info.detail, [{
+    label: 'Apify 密钥',
+    action: 'updated',
+    changes: [{ field: 'Apify 密钥', redacted: true }],
+  }]);
+  const dumped = JSON.stringify(info);
+  assert.ok(!dumped.includes('apify_api_legacy_old') && !dumped.includes('apify_api_legacy_new'));
 });

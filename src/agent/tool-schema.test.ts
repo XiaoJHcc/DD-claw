@@ -68,7 +68,7 @@ test('与真实注册表联调：全部工具都能转成 object schema（schema
 
 test('与真实注册表联调：admin 工具面里的写工具都在（暴露名单只挖排序/副作用类）', (t) => {
   const specNames = agentToolSpecs(toolDefsForRole('admin')).map((s) => s.name);
-  for (const name of ['set_listen', 'upsert_push_rule', 'delete_push_rule', 'upsert_channel', 'set_llm_key', 'update_runtime_config']) {
+  for (const name of ['set_listen', 'upsert_push_rule', 'delete_push_rule', 'upsert_channel', 'set_llm_key', 'update_runtime_config', 'set_apify_key', 'upsert_x_accounts']) {
     assert.ok(specNames.includes(name), `${name} 应在 admin 工具面`);
   }
   for (const name of AGENT_EXCLUDED_TOOLS) {

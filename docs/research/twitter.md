@@ -18,6 +18,8 @@
 | **D. 第三方 API（twitterapi.io）** | API key | ✅ | ✅ | ✅ | 起步 ≈$3/月，50 账号增量 ≈$65–80/月 | 无 SLA，厂商可能被停止函打死 |
 | E. 官方 X API | 开发者账号 | ✅ | ✅ | ✅ | 去重后 ≈$37/月；无去重 ≈$10,800/月 | 唯一授权渠道 |
 
+上表只覆盖**时间线**。把名字换成 handle 的**账号发现**是另一条线：官方 v2 有 `GET /2/users/search`，但需 OAuth 2.0 用户上下文、按 User read 计费，本项目不接入；当前有 `apify_key` 时优先 Apify People 搜索，无 token 或 Apify 失败/空结果回退网页发现，见 §4.5。
+
 架构上不用新发明：X 源 = 又一个 `Source`，落 `posts`（`platform='twitter'`）、发 `feed_post` 信号，与 `weibo/feed.ts` 同构。
 
 ## 1. 环境前提：必须走代理 [实测]
@@ -178,7 +180,7 @@ function connectTunnel(proxy, host, port = 443) {
 |---|---|---|---|---|
 | **twitterapi.io** | $0.00015/条（$0.15/1K），$10 起充，$1 试用 | **≈$65–80/月**（起步 ≈$3/月） | `api.twitterapi.io` **实测可达**（401 需 key），境内直连 | 字段含 `retweeted_tweet`/`quoted_tweet`/`isReply`；文档自警"只抓单用户最新推文会很贵" |
 | socialdata.tools | $0.0002/条，≤3 请求/分钟免费 | ≈$60/月（起步 ≈$0） | 域名**实测 ECONNRESET**（可能未被代理规则覆盖） | 字段最全（原生 retweeted_status/quoted_status/media），但无状态页无 ToS、余额归零静默暂停 |
-| Apify（apidojo / scrapesmith 等） | $0.15–0.40 /1K | ≈$1,296–3,456/月 | 未验证 | 社区维护，X 改版即可能失效 |
+| Apify（推文抓取：apidojo / scrapesmith 等） | $0.15–0.40 /1K | ≈$1,296–3,456/月 | 未验证 | 社区维护，X 改版即可能失效；与 §4.5 的 People 搜索（按资料计费）不是同一个 Actor |
 | Bright Data / ScraperAPI | $1.5/1K；起购 $250 | 远超预算 | 未验证 | 非实时 |
 | **官方 X API** | **$0.005/Post read**（User read $0.010） | 无去重 ≈**$10,800/月**（逼近 300 万 reads/月上限）；**做 `since_id` + 本地去重后 ≈$37/月** | api.x.com 被封，需代理 | 唯一授权渠道；免费档已取消 |
 
@@ -187,6 +189,21 @@ function connectTunnel(proxy, host, port = 443) {
 ### 4.4 已排除的选项 [实测/文档]
 
 `rsshub.app` 等公共实例 ECONNRESET；RSS-Bridge 的 Twitter bridge 已死（issue #4674）；`openrss.org` 2026-08-11 起全面失效；Feed43 DNS 解析失败；Playwright 常驻浏览器（支持 HTTP/SOCKS 代理）只作兜底，资源重且同样会被封。
+
+### 4.5 账号发现：名字 → handle（非时间线）
+
+**官方 v2 `GET /2/users/search`** [文档，2026-11 复核]：需要 OAuth 2.0 **用户上下文**（app-only Bearer 不够），单次最多 1,000 条，按 **User read $0.010 / 资料**计费。本项目**不接入**——没有 X 用户授权流程，为模糊名字候选维护用户 token 与逐资料计费不划算。免登录 v1.1 的 `users/search` / `search/typeahead` 已 404 [实测 2026-10-29]，两者不能混为一谈。
+
+**Apify People 搜索（有 `apify_key` 时首选）** [实现，未真机验收]：Actor
+[`arjun_code~x-twitter-people-search-scraper`](https://apify.com/arjun_code/x-twitter-people-search-scraper)，
+不需要 X 账号 / cookie / 代理；异步 run + Dataset，返回真实 profile（显示名 / 简介 / 粉丝 / 认证 /
+头像 / 位置 / 网站 / 累计发帖）。项目一次只查一个词、`maxUsersPerQuery` ≤10、整轮上限 120s；
+`no_results` 当空结果，`partial` / `request_failed` / 超时当失败并回退网页发现；token 只在请求 URL 里，
+错误文本统一脱敏。计费 $0.0005 / 成功资料（10 条 ≈$0.005）。**只跑过替身单测，没有真跑过 Actor**——
+`api.apify.com` 在本机的可达性、真实字段、延迟与计费都未验收。
+
+**网页发现（无 token，或 Apify 失败/空结果）** [实测 2026-10-29]：DeepSeek 检索挖 `x.com/<handle>`
++ `verifyAccount` 校验存在性，详见 [web-search.md](web-search.md)。只能证明 handle 存在，证明不了是本人。
 
 ## 5. 与 DD-claw 的落点
 
@@ -221,6 +238,8 @@ function connectTunnel(proxy, host, port = 443) {
 4. `tweet-result` 的 `token` 任意值是否长期有效。
 5. 免登录路线在**长期运行**下是否被 challenge / 逐步收紧（本次全部实测都经由同一个代理出口 IP）。
 6. 各第三方 API 的 media 字段逐字段确认、以及 RapidAPI 类服务在境内的可达性。
+7. Apify People 搜索的**真实 Actor 运行**：`api.apify.com` 本机可达性、run 延迟与超时、真实字段名、`partial` / `request_failed` 形态、实际计费；未验收前它只算「实现了」。
+8. 官方 `GET /2/users/search` 的 OAuth 2.0 用户授权流程与 User read 账单口径（接入前才需要）。
 
 ## 8. 风险定位
 
@@ -232,6 +251,8 @@ function connectTunnel(proxy, host, port = 443) {
 
 - 本页所有 [实测] 结论：2026-09-16 由本机经 `127.0.0.1:7890` 代理对 x.com / cdn.syndication.twimg.com / api.x.com / Nitter 实例发出的真实请求（CONNECT 隧道 + TLS，记录返回码、字节数、字段）。
 - 官方 API 文档源仓库：<https://github.com/xdevplatform/docs>（`x-api/getting-started/pricing.mdx`、`changelog.mdx`、`x-api/posts/timelines/integrate.mdx`）
+- 官方账号搜索：<https://docs.x.com/x-api/users/search-users>（OAuth 2.0 用户上下文、User read 计费；2026-11 由第三方文档与计费口径交叉核对，未亲测）
+- Apify People 搜索：<https://apify.com/arjun_code/x-twitter-people-search-scraper>（输入、输出字段与 pay-per-event 单价；2026-11 读取商店页，未真跑）
 - Nitter：<https://github.com/zedeus/nitter>（README、`src/routes/rss.nim`、`nitter.example.conf`）、实例 wiki <https://github.com/zedeus/nitter/wiki/Instances>、社区名单 <https://codeberg.org/mv12star/shitter/wiki/Instances>、健康页 <https://status.d420.de/>
 - 停止函报道：<https://itsfoss.com/news/nitter-returns-after-legal-troubles/>、<https://techcrunch.com/2026/08/25/x-sends-cease-and-desist-to-open-source-project-nitter-over-alleged-scraping/>
 - 抓取库：<https://github.com/vladkens/twscrape>、<https://github.com/the-convocation/twitter-scraper>

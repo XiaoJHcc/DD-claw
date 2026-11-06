@@ -277,7 +277,7 @@ ACTIONS['undo-change'] = function (el) {
     const title = (res && res.title) || (res && res.change && res.change.title) || titleOf(id);
     const refill = (res && res.refill) || [];
     if (refill.length) {
-      toast('已撤销：' + title + '；请重新填写模型密钥：' + refill.join('、'));
+      toast('已撤销：' + title + '；请重新填写密钥：' + refill.join('、'));
     } else {
       toast('已撤销：' + title);
     }

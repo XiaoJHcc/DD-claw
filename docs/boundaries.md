@@ -29,10 +29,16 @@
 |---|---|---|
 | B站空间动态 | [实测] ~~HTTP 412，即使 WBI 签名正确~~（2026-08-03 推翻：全量 cookie + dm 三参（高斯算法生成，非静态占位）+ space Referer 即通，**无需 WBI**） | 完整 cookie 集 |
 | 微博用户时间线 | [实测] **HTTP 432**，游客 cookie 流程已失效（2026-08-03 补充：扫码登录 + `weibo.com/ajax/statuses/mymblog` 路径已跑通，见 feeds.md 修订块） | 登录 cookie（面板扫码落 weibo-cookies.json） |
-| 微博全站模糊搜索 | [实测] 302 到登录页（`getIndex` 用户搜索 / `s.weibo.com/user` / `weibo.com/ajax/search/*`） | 微博登录 cookie |
+| 微博全站模糊搜索 | [实测] 匿名 302 到登录页（`getIndex` 用户搜索 / `s.weibo.com/user` / `weibo.com/ajax/search/*`） | 微博登录 cookie：`m.weibo.cn/api/container/getIndex?containerid=100103type=3&q=…&page_type=searchall`（移动 UA + m.weibo.cn Referer）。**登录态已本机实测 200 + cards**，实现细节见 [research/web-search.md](research/web-search.md) |
 | 我关注的直播列表 | [实测] `-101 账号未登录` | SESSDATA |
 | 直播原画画质 | [实测] `qn=10000` 静默降级到 250 | SESSDATA（本项目不需要） |
 | 动态评论区 | [文档] 需 `type=17` + 动态 id | 未跑通，见 feeds.md |
+
+### 需要第三方凭据（Apify）
+
+| 能力 | 接口 / 手段 | 验证 |
+|---|---|---|
+| **X 账号发现（名字 → handle）** | Apify Actor `arjun_code~x-twitter-people-search-scraper`：X 原生 People 搜索，无需 X 账号 / cookie / 代理 | [文档] 商店页记录输入输出与单价；项目只跑过替身单测，**未真机验收**。$0.0005 / 成功资料 + 极小 Actor start |
 
 ### 需要代理出网（境内直连不可达）
 
@@ -52,7 +58,9 @@
 - **CDP 直挂用户日常 Chrome** — [文档] Chrome ≥136 不再支持对默认 profile 用 remote debugging。
 - **免签调用 B站动态接口** — 旧接口 `dynamic_svr/space_history` [实测] 同样 412，无替代。（2026-08-03 修订：带登录 cookie + dm 参数的新接口 `web-dynamic/feed/space` 已跑通，见 §5.18；免签仍不可能。）
 - **绕过 412 靠静态占位设备指纹** — `dm_img_list` 等参数有生成算法，[实测] 填静态占位值无效；必须按 RSSHub 高斯算法现场生成（本项目 `src/sources/bili/dm.ts`）。
-- **X 免登录账号搜索** — [实测] v1.1 `users/search` 与 `search/typeahead` 均 404；Nitter 搜索大面积关闭（用户配置实例直接回「Search has been disabled due to abuse」，仓库 2026-10-09 归档）；`site:x.com` 检索恒 0 条。替代路线是网页检索挖 handle + x.com 校验存在性，见 [research/web-search.md](research/web-search.md)。
+- **X 免登录账号搜索** — [实测] v1.1 `users/search` 与 `search/typeahead` 均 404；Nitter 搜索大面积关闭（用户配置实例直接回「Search has been disabled due to abuse」，仓库 2026-10-09 归档）；`site:x.com` 检索恒 0 条。
+
+**注意：X 有官方账号搜索，只是本期不接入。** 官方 v2 `GET /2/users/search` 存在，但 [文档] 需要 **OAuth 2.0 用户上下文**（app-only Bearer 不够），并按 **User read（$0.010 / 资料）** 计费，单次最多 1,000 条。项目没有 X 用户授权流程，为模糊名字候选维护用户 token 与逐资料计费不划算，所以本期不用；「没有免登录账号搜索」不等于「没有官方账号搜索」。当前替代：有 `apify_key` 走 Apify People 搜索，无 token 或 Apify 失败/空结果时网页检索挖 handle + x.com 校验，见 [research/web-search.md](research/web-search.md)。
 
 ## 2. 功能边界
 
@@ -93,6 +101,8 @@
 | LLM 视觉判定 | 免费额度更紧，仅文本信号矛盾时动用 |
 | 本地常驻 | Node 单进程 + 按需几路 WS；OCR/音频模型按需加载 |
 | 推特第三方 API（增量轮询 50 账号） | ≈$65–80/月（twitterapi.io）；官方 X API 去重后 ≈$37/月，**无去重 ≈$10,800/月** |
+| X 账号发现（Apify People 搜索） | $0.0005 / 成功资料 + 极小 Actor start；一次 10 条候选 ≈$0.005 |
+| X 官方账号搜索（若接入） | User read $0.010 / 资料；模糊名字一次 10 条 ≈$0.10 |
 | 推特免登录路线（HTML + syndication / Nitter RSS） | 0 元，代价是实例与页面结构随时可变 |
 
 ## 4. 时效性风险
@@ -108,6 +118,9 @@
 | NapCat 可用性 | 同类项目 go-cqhttp / Lagrange V1 / Shamrock 已相继失效 |
 | SESSDATA 有效期 | [待验证] 网传半年到一年，无官方声明；用心跳检测代替硬编码天数 |
 | Nitter 实例存活与 X 页面结构 | 公共实例随时被限速/被停止函打死；免登录 HTML 的字段随 X 改版变化（2026-09-16 实测可用） |
+| 官方 X API 的账号搜索与单价 | `GET /2/users/search` 要求 OAuth 2.0 用户上下文，User read 单价随 X 计费政策调整 |
+| Apify People Actor 的可用性与计费 | 第三方维护的 Actor，X 改版或商店调价即可能失效/变贵（2026-11 读取商店页，未真跑） |
+| 微博登录态全站搜索 | 2026-09-20 已收紧过 uid→昵称方向；登录全站搜索可能同样被风控收紧，需按 302/`ok!==1` 识别 |
 | 本机代理的可用性 | X 全部能力都压在 `127.0.0.1:7890` 上，代理挂 = X 源全停（应做健康检查与告警） |
 
 ## 5. 已知踩坑清单
@@ -180,3 +193,10 @@
 43. **DeepSeek 检索的 `site:x.com` / `site:twitter.com` 恒为 0 条**（X 页面不进索引）：X 账号线索只能从第三方页面正文里的 `x.com/<handle>/status/...` 或 `@handle` 抠，且同一批结果会混入错号/旧号（实测同一人名同时命中正确与过期 handle）——**必须再用 x.com 存在性校验过滤**，不能把检索第一条当答案。[实测]
 44. **带过期登录 cookie 打 `m.weibo.cn/n/<昵称>` 会被踢到 `login.sina.com.cn`**，与「昵称不存在」（HTTP 200）表现不同；`resolveUid` 只把 `visitor.passport` 跳转判为访客 cookie 失效，遇到登录跳转会报「跳转目标无法识别」。清理本地过期 cookie 后同一条昵称解析仍可用（2026-10-29 实测 `羊宫妃那` → `/u/1889464875`）。[实测]
 45. **免登录 `x.com/<screen>` HTML 不再内嵌推文 id**（2026-10-29 复核）：页面仍 200（约 184KB），但 `rest_id` 出现次数为 0（`elonmusk`、`Hina_Youmiya` 均如此；2026-09-16 时同一账号有 13 个）。`og:title` 仍是「名字 (@handle)」——所以 `verifyAccount` 改成「200 + 抠到显示名 = 账号存在」，免登录回退抓推文一段实质停摆，只能依赖 Nitter RSS 或 syndication `timeline-profile`（抽样 + 限流）。[实测]
+
+以下来自账号发现链路（2026-11-03 代码核查；未发真实请求的部分只算实现，不算实测）：
+
+46. **X 官方账号搜索存在，但要求用户上下文**：`GET /2/users/search` 需要 OAuth 2.0 **用户授权 token**（app-only Bearer 不够），按 User read $0.010 / 资料计费，单次最多 1,000 条。它与已 404 的免登录 v1.1 `users/search` 是两回事——「X 没有免登录账号搜索」成立，「X 没有官方账号搜索」不成立。本项目未接用户 OAuth，本期不接入。[文档]
+47. **Apify People 搜索是异步 run + Dataset，不是一次 HTTP**：`POST /v2/acts/<actor>/runs?token=…&waitForFinish=0` → 轮询 `actor-runs/<id>` → 读 `defaultDatasetId/items`；`no_results` 是空结果，`partial` / `request_failed` / `TIMED-OUT` 是失败，不能当空。token 在 query 里，错误文本必须同时抹掉原文与 URL 编码形态。项目一次只放一个词、`maxUsersPerQuery` ≤10、整轮 120s。[实现 + 单测，**未真跑 Actor**]
+48. **微博登录态全站用户搜索**走 `m.weibo.cn/api/container/getIndex?containerid=100103type=3&q=…&page_type=searchall`（移动 UA + `Referer: https://m.weibo.cn/` + 登录 cookie）；用户对象嵌在 `cards` / `card_group` 里，要递归收集。`ok!==1`、302、403、非 JSON 都应判「登录失效 / 被风控」并降级，不能返回空数组冒充「没搜到」。suggest 与 discover 有登录 cookie 时都先走它，空结果或失败再回落匿名建议；suggest 不跑精确解析。`user.id` 是数字且常无 `idstr`，`followers_count` 是字符串或缺失。[实现 + 单测；本机真实登录 cookie 已实测 200 + cards，登录失效（302）降级只经桩测试]
+49. **搜索凭据的写面与脱敏**：`search_key` 与 `apify_key` 各只有一把，经注册表工具 `set_search_key` / `set_apify_key` 写入；审计日志把 `value` 打成 `***`，撤销快照不落明文、撤销语义是「清空并要求重填」，早期明文记录由启动迁移清理。Token 不进日志、不进错误文本，也不出现在快照的 from/to 里。[实现]

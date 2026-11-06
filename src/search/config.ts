@@ -11,6 +11,8 @@ import { llmKeySetting } from '../analysis/providers.js';
 import type { LlmProviderConfig } from '../config/schema.js';
 
 export const SEARCH_KEY_SETTING = 'search_key';
+/** X People 搜索（Apify）的 API token；缺失时 X 账号发现回退免凭据网页路线 */
+export const APIFY_KEY_SETTING = 'apify_key';
 /** DeepSeek Search API 端点（base URL 固定；供应商 baseURL 只用来判断 key 是否 DeepSeek 的） */
 export const SEARCH_ENDPOINT = 'https://api.deepseek.com/v1/tools/search';
 /** 回退判据：只有这把端点上的 key 能搜 */
@@ -25,13 +27,33 @@ export interface SearchCredentials {
 }
 
 /** 设置页展示口径（与 LLM key 一致：本机面板明文回显供编辑） */
-export function searchKeySource(db: Db): { source: 'panel' | 'unset'; count: number; value: string | null } {
-  const raw = db.getSetting(SEARCH_KEY_SETTING);
+export interface KeySourceStatus {
+  source: 'panel' | 'unset';
+  count: number;
+  value: string | null;
+}
+
+function settingSource(db: Db, key: string): KeySourceStatus {
+  const raw = db.getSetting(key);
   if (raw && raw.trim()) {
     const v = raw.trim();
     return { source: 'panel', count: splitCsvText(v).length, value: v };
   }
   return { source: 'unset', count: 0, value: null };
+}
+
+export function searchKeySource(db: Db): KeySourceStatus {
+  return settingSource(db, SEARCH_KEY_SETTING);
+}
+
+/** Apify token 的展示口径（与搜索 key 同形状） */
+export function apifyKeySource(db: Db): KeySourceStatus {
+  return settingSource(db, APIFY_KEY_SETTING);
+}
+
+/** 当前可用的 Apify token；没有返回 null（X 账号发现据此决定走 People 搜索还是网页兜底） */
+export function resolveApifyKey(db: Db): string | null {
+  return splitCsvText(db.getSetting(APIFY_KEY_SETTING) ?? '')[0] ?? null;
 }
 
 function isDeepSeekBase(baseURL: string): boolean {

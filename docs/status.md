@@ -32,7 +32,7 @@
 | 能力面（轴 B） | 注册表为唯一能力信源，写路径全部经 `runToolTracked`（校验 / 审计 / 快照）；`/api/*` 已收敛；MCP admin/gateway 双角色 + 渠道作用域隔离；撤销栈每调用域一条 |
 | 接入途径 | `/mcp`（进程外 Host）· WebUI Agent（`src/agent/`）· NapCat 直连（`src/qqbot/`）· MaiBot 插件（独立仓库，自带 loop）；WebUI Agent 与 QQ 直连共用同一个 agent loop 与能力面 |
 | 数据迁移 | 旧图文规则与范围列的一次性搬家已完成（旧表 DROP、账号选用列删除），机制与升级约束见 [modules/core.md](modules/core.md) |
-| 远程检索 | `web_search` + `search_{bili,weibo,x}_accounts`（admin 只读）：网页检索走 DeepSeek Search，B站走官方用户名搜索，微博走匿名侧栏建议 + 精确昵称解析，X 走网页线索 + x.com 校验；凭据 `search_key` 优先、DeepSeek 供应商回退（见 [research/web-search.md](research/web-search.md)） |
+| 远程检索 | `web_search` + `search_{bili,weibo,x}_accounts`（admin 只读，账号搜索带 discover / suggest）：网页检索走 DeepSeek Search；B站走官方用户名搜索（两种模式无差别）；微博有 cookie 时 discover 与 suggest 都先走登录全站搜索、失败/空结果回落匿名侧栏建议，仅 discover 再补精确昵称；X 有 `apify_key` 时优先 Apify People 搜索、失败或空结果回退网页挖线索 + x.com 校验，无 token 默认网页路线，suggest 只走 Apify（无 token 直接报错）。图文页添加浮窗经 `GET /api/search/accounts` 出三平台候选（固定 suggest），`upsert_x_accounts` 支持 1–50 个整批添加（逐项回报、整批一条变更记录可撤销）；凭据 `search_key` / `apify_key` 各走注册表工具，审计打码、撤销快照不落明文（见 [research/web-search.md](research/web-search.md)）。Apify 与真实批量链路仍待验收，见下 |
 
 ## 待验收
 
@@ -44,7 +44,9 @@
 - **QQ 通道复验**：统一规则升级后未实发 QQ（当次验收本机缺机器人配置，只走了本机 toast）；下次改动推送链路时一并复验群/私聊实发。
 - **MaiBot 插件适配统一规则模型**：插件（独立仓库）仍按旧 `uids` 读取规则范围，需改为读 `subjectKind` / `scope` 并覆盖图文规则显示与筛选；未适配前其「规则范围显示」「按主播查删」不可信，改动也不在本仓。
 - **X 源待验证项**：转发去重语义（要「每次转发都推」须另取 RT 自身 id）、免登录路线的长期稳定性等，见 [research/twitter.md](research/twitter.md) §7 与 [plan/twitter-source.md](plan/twitter-source.md)。
-- **Agent 远程检索真机验收**：四个检索客户端与 x.com 校验已实测，但「一句话加一批账号」的多步链路（`web_search` → `search_*_accounts` → `upsert_*`）还没在面板按 P1 口径跑过；X 候选依赖网页检索质量，需抽查误配率。
+- **Agent 远程检索真机验收**：DeepSeek 检索、B站搜索、微博匿名建议、x.com 校验已实测，但「一句话加一批账号」的真实链路（`web_search` → `search_*_accounts` → `upsert_x_accounts` 整批）还没在面板按 P1 口径跑过；需要覆盖有/无 `apify_key` 两条 X 路径、微博有/无登录态两条路径，并抽查 X 候选的误配率。真实批量链路验收前，这一项不删除。
+- **Apify People 搜索真机验收**：Actor 调用目前只有替身单测；`api.apify.com` 本机可达性、真实 run 延迟与超时、字段名、`partial` / `request_failed` 形态与实际计费均未确认。未验收前，X 的 suggest 候选（输入框）可能整体不可用，discover 也会实际退回网页路线。
+- **微博登录态全站搜索的失效降级**：真实登录 cookie 下的 200 响应与 `cards` 嵌套形态已本机实测（长尾未认证账号可命中）；被踢登录（302 / `ok!==1`）时的降级目前仍只有桩测试，没有真实失效 cookie 验证过实网表现。
 
 ## 未实现
 

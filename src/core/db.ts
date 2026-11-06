@@ -306,6 +306,26 @@ const POST_RULE_SCOPE_MIGRATION_KEY = 'migrated_post_rule_scopes_v1';
 /** 开播动态（LIVE_RCMD）彻底舍弃、清理旧库残留行的一次性闸门（见 Db.dropLiveRcmdPosts） */
 const LIVE_RCMD_DROP_KEY = 'migrated_drop_live_rcmd_posts_v1';
 
+/** 撤销记录里旧版落库的凭据明文清理（search_key / apify_key）的一次性闸门（见 Db.migrateUndoSecretRows） */
+const UNDO_SECRET_MIGRATION_KEY = 'migrated_undo_secret_rows_v1';
+
+/**
+ * 需要从历史撤销记录里清除明文的 settings 键。这正是 `core/undo.ts` 的隐私例外里
+ * **修复前缺的那两个**（旧版本只认 llm_key / decision_key）；迁移范围按「键名」精确匹配，
+ * 不碰其余 settings 键（含 prefix 相近的如 `search_key_backup`）。
+ */
+const UNDO_SECRET_SETTING_KEYS: ReadonlySet<string> = new Set(['search_key', 'apify_key']);
+
+/** 撤销记录行（RowImage）是否是待清理的凭据行：settings 表 + 主键命中凭据键 */
+function isUndoSecretImage(image: unknown): boolean {
+  if (image === null || typeof image !== 'object' || Array.isArray(image)) return false;
+  const img = image as Record<string, unknown>;
+  if (img.table !== 'settings') return false;
+  const pk = img.pk;
+  if (pk === null || typeof pk !== 'object' || Array.isArray(pk)) return false;
+  return UNDO_SECRET_SETTING_KEYS.has(String((pk as Record<string, unknown>).key));
+}
+
 /** listTimeline 在播判定：last_seen 超过该秒数未刷新 = 已下播（崩溃/停机错过 live_end 的兜底） */
 const TIMELINE_LIVE_STALE_S = 600;
 
@@ -540,6 +560,7 @@ export class Db {
     //   → verdicts 身份键（→ 老形状的中间态）→ verdicts 判据列（唯一键 + effective）
     //   → push_rules uids→scope 重建 → post_rules 搬家成分类+规则
     //   → 账号表 rule_ids 列删除（须在搬家之后——搬家要反查 rule_ids）
+    //   → provider id 统一 → 撤销记录里的凭据明文清理（表可能尚未由 UndoStore 建出）
     this.migrateWeiboAccounts();
     this.migratePostRuleScopes();
     this.dropLiveRcmdPosts();
@@ -549,6 +570,7 @@ export class Db {
     this.migratePostRulesToCategories();
     this.migrateAccountRuleIdsDrop();
     this.migrateProviderIds();
+    this.migrateUndoSecretRows();
     log.info(`数据库就绪: ${path}`);
   }
 
@@ -595,6 +617,79 @@ export class Db {
       if (selectedProvider) this.setSetting('chat_provider', selectedProvider.id as string);
       this.setSetting(gate, '1');
     });
+  }
+
+  /**
+   * 撤销记录里的凭据明文清理（settings 的 `search_key` / `apify_key`）。
+   *
+   * 旧版本 UndoStore 的隐私例外只认 llm_key / decision_key，搜索与 Apify 的 key 曾把整行
+   * （前后像 + 明文）写进 `undo_changes.rows`。新记录已不再落明文（undo.ts 的
+   * `isSecretKeySetting` 已覆盖这两个键），但库里的老记录必须真正改写：
+   * 命中的 RowImage 改成 `redacted: true`、before/after = null；表名 / 主键 / 存在性 /
+   * 记录自身的其它列一律不动（撤销与展示只依赖这些）。
+   *
+   * 幂等：settings 闸门 + 行级判定双保险（已 redacted 的行跳过），重跑是空操作。
+   * `undo_changes` 由装配根的 `UndoStore.migrate()` 建表、晚于本构造：首次启动还没有表时
+   * **不落闸**，等表建好后的下一次启动再清。
+   *
+   * 「真正清除」：SQLite 默认 secure_delete=OFF，UPDATE 覆盖后的明文仍留在空闲页里，
+   * 因此清理期间临时打开 secure_delete（旧内容清零），提交后 WAL checkpoint(TRUNCATE)
+   * 截掉本次与历史帧，最后恢复原 pragma。
+   */
+  private migrateUndoSecretRows(): void {
+    if (this.getSetting(UNDO_SECRET_MIGRATION_KEY)) return;
+    if (!this.tableExists('undo_changes') || !this.columnExists('undo_changes', 'rows')) return;
+
+    const records = this.db
+      .prepare('SELECT id, rows FROM undo_changes')
+      .all() as Array<{ id: number; rows: string }>;
+    const updates: Array<{ id: number; rows: string }> = [];
+    for (const rec of records) {
+      let images: unknown;
+      try {
+        images = JSON.parse(rec.rows);
+      } catch {
+        continue; // 坏 JSON 不猜结构（展示层另有兜底），保留原样
+      }
+      if (!Array.isArray(images)) continue;
+      let changed = false;
+      for (const image of images) {
+        if (!isUndoSecretImage(image)) continue;
+        const img = image as Record<string, unknown>;
+        if (img.before === null && img.after === null && img.redacted === true) continue;
+        img.before = null;
+        img.after = null;
+        img.redacted = true;
+        changed = true;
+      }
+      if (changed) updates.push({ id: rec.id, rows: JSON.stringify(images) });
+    }
+
+    const secureDelete = Number(this.db.pragma('secure_delete', { simple: true })) !== 0;
+    if (!secureDelete && updates.length > 0) this.db.pragma('secure_delete = ON');
+    try {
+      this.transaction(() => {
+        const update = this.db.prepare('UPDATE undo_changes SET rows = ? WHERE id = ?');
+        for (const u of updates) update.run(u.rows, u.id);
+        this.setSetting(UNDO_SECRET_MIGRATION_KEY, '1');
+      });
+    } finally {
+      if (!secureDelete && updates.length > 0) this.db.pragma('secure_delete = OFF');
+    }
+    if (updates.length > 0) {
+      log.info(`撤销记录凭据脱敏迁移：清除 ${updates.length} 条记录里的 search_key / apify_key 明文`);
+      try {
+        const checkpoint = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy?: number }> | undefined;
+        if (checkpoint?.[0]?.busy) {
+          // 有并发读者时 TRUNCATE 拿不到独占；主库页已被 secure_delete 清零，
+          // 残留的旧帧会在下一次成功的 checkpoint / 关闭时被覆盖
+          log.warn('撤销记录凭据脱敏迁移：WAL 繁忙，旧帧将在下次 checkpoint 时清除');
+        }
+      } catch (e) {
+        // 清理是尽力而为，不能因 checkpoint 失败挡住启动；数据本身已改写完成
+        log.warn(`撤销记录凭据脱敏迁移：WAL checkpoint 失败（${(e as Error).message}）`);
+      }
+    }
   }
 
   /** 缺列则 ALTER TABLE 补上（旧库在线迁移；新列一律可空或带默认值，不动旧数据） */
