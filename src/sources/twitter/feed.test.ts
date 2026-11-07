@@ -42,6 +42,7 @@ function tweet(o: Partial<ParsedTweet> & { id: string }): ParsedTweet {
 }
 
 interface HarnessOpts {
+  db?: Db;
   rssFetcher?: TwitterFeedSourceOpts['rssFetcher'];
   webFetcher?: TwitterFeedSourceOpts['webFetcher'];
   fallbackHtml?: boolean;
@@ -52,9 +53,11 @@ interface HarnessOpts {
 }
 
 function harness(opts: HarnessOpts = {}) {
-  const db = new Db(':memory:');
+  const db = opts.db ?? new Db(':memory:');
   for (const a of opts.accounts ?? [{ screenName: SCREEN }]) {
-    db.upsertXAccount({ screenName: a.screenName, displayName: null, biliUid: null, enabled: a.enabled ?? true });
+    if (!db.getXAccountByScreenName(a.screenName)) {
+      db.upsertXAccount({ screenName: a.screenName, displayName: null, biliUid: null, enabled: a.enabled ?? true });
+    }
   }
   const bus = new Bus();
   const signals: Signal[] = [];
@@ -78,7 +81,7 @@ function harness(opts: HarnessOpts = {}) {
     alerts: () => signals.filter((s) => s.kind === 'health_alert'),
     posts: () => db.listRecentPosts([SCREEN], 50).get(SCREEN) ?? [],
     account: () => db.getXAccountByScreenName(SCREEN)!,
-    cleanup: () => db.close(),
+    cleanup: () => { if (!opts.db) db.close(); },
   };
 }
 
@@ -235,6 +238,19 @@ test('Nitter 全挂 → 回退免登录路线；via 记为 web 且 host 为空',
   assert.equal(last.okAccounts, 1);
 });
 
+test('web 安全游标独立于入库推文：引用帖可前进，空的新帖列表也能形成有效抓取', async (t) => {
+  const h = harness({
+    rssFetcher: async () => { throw new FeedFetchError('instance', 'HTTP 429'); },
+    webFetcher: async () => ({ tweets: [], cursorId: '450', cursorAt: 1_700_000_050, bytes: 10, ms: 3 }),
+  });
+  t.after(h.cleanup);
+  await h.src.pollOnce();
+  assert.equal(h.account().lastTweetId, '450');
+  assert.equal(h.account().lastTweetAt, 1_700_000_050);
+  assert.ok(h.account().lastOkAt !== null);
+  assert.equal(h.posts().length, 0);
+});
+
 test('回退关着就不走 web；两条都失败 → 不写库、记 lastError、全灭持续满阈值聚合告警一条', async (t) => {
   t.mock.timers.enable({ apis: ['Date'] });
   let webCalls = 0;
@@ -382,6 +398,40 @@ test('链路持续中断满 10 分钟再发 durationAlert（QQ 路由依据）�
   t.mock.timers.setTime(Date.now() + 61_000);
   await h.src.pollOnce(); // 持续满 60s → 重新告警
   assert.equal(h.alerts().length, 3, '恢复后再次全灭可重新告警');
+});
+
+test('链路故障跨重启保留起点：满 600 秒必报一次，已报后不重复', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  t.mock.timers.setTime(1_000_000_000_000);
+  const db = new Db(':memory:');
+  t.after(() => db.close());
+  const opts: HarnessOpts = {
+    db,
+    fallbackHtml: false,
+    rssFetcher: async () => { throw new FeedFetchError('instance', 'nitter.a.example HTTP 429'); },
+  };
+  const isDur = (s: Signal) => (s.payload as { durationAlert?: boolean } | undefined)?.durationAlert === true;
+
+  const first = harness(opts);
+  await first.src.pollOnce();
+  t.mock.timers.setTime(Date.now() + 61_000);
+  await first.src.pollOnce();
+  assert.equal(first.alerts().length, 1, '重启前只有 toast');
+  assert.equal(first.alerts().filter(isDur).length, 0);
+  first.src.stop();
+
+  t.mock.timers.setTime(Date.now() + 539_000);
+  const restarted = harness(opts);
+  assert.equal(restarted.statuses[0]!.linkDown, true, '重启即恢复上次未结束的故障状态');
+  await restarted.src.pollOnce();
+  assert.equal(restarted.alerts().filter(isDur).length, 1, '从原始起点满 600 秒，重启后仍必须报 QQ');
+  restarted.src.stop();
+
+  t.mock.timers.setTime(Date.now() + 600_000);
+  const restartedAgain = harness(opts);
+  await restartedAgain.src.pollOnce();
+  assert.equal(restartedAgain.alerts().length, 0, '同一段故障已报过，后续重启和轮询都不重复');
+  restartedAgain.src.stop();
 });
 
 test('只轮询 enabled=1 的账号；名单为空时不发信号也不报错', async (t) => {

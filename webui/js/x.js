@@ -69,33 +69,30 @@ function loadX() {
 }
 
 // ---- X 状态卡：面板只两行（连接可达性 + 监听开关），其余全部收进源设置弹窗 ----
-// 口径：抓取本身是最强的连通性证据——最近一轮抓成功就是「可用」，比手动探测更真；
-// 进程重启后内存快照清零，回退到账号持久的 lastOkAt（上轮成功过的证据），
-// 都不行才看手动探测快照。于是监听开着时卡片永远是真实状态，不会每次打开全灰。
+// 口径：当前故障优先于历史成功；运行快照与账号持久成功时间都必须在两个轮询间隔内，
+// 才能证明「现在可用」。重启不会让几天前的 lastOkAt 继续冒充绿色现状。
 function connState() {
   const { cfg, st } = stateRows();
   const feed = st.feed || {};
-  // ⓪ 前提不存在：没配代理源根本不会跑，历史证据不算数
   if (!cfg.proxyUrl) return ['none', '未配置代理'];
   const nowSec = Date.now() / 1000;
   const freshSec = 2 * (cfg.intervalSec || 300) + 60;
-  // ① 本轮进程抓成功且新鲜（两个间隔内）→ 可用，路线直接拿 feed 的
+  if (feed.lastError || feed.linkDown) return ['bad', '不可用'];
   if (feed.lastOkAt && nowSec - feed.lastOkAt < freshSec) {
     return ['ok', '可用 · ' + (feed.via === 'web' ? '免登录回退' : 'Nitter')];
   }
-  // ② 最近一轮有报错 → 不可用（原因在下方的监听诊断行）
-  if (feed.lastError) return ['bad', '不可用'];
-  // ③ 重启后内存快照清零：账号的持久 lastOkAt 证明上轮成功过
-  const accOk = accountCache.some(function (a) { return a.enabled && a.lastOkAt; });
-  if (accOk) return ['ok', '可用'];
-  // ④ 手动探测快照（重启且从没抓成功过的场景）
+  const accOkAt = accountCache.reduce(function (latest, a) {
+    return a.enabled && a.lastOkAt ? Math.max(latest, a.lastOkAt) : latest;
+  }, 0);
+  if (accOkAt && nowSec - accOkAt < freshSec) return ['ok', '可用'];
+  // 源在跑而持久成功已过期：实际抓取证据优先于旧的手动探测快照。
+  if (feed.running && accOkAt) return ['bad', '不可用'];
   const inst = st.instances || [];
   if (inst.some(function (i) { return i.ok; })) return ['ok', '可用 · Nitter'];
   if (st.web && st.web.ok) return ['ok', '可用 · 免登录回退'];
   const msg = (st.proxy && st.proxy.message) || '';
-  if (msg && msg !== '尚未测试') return ['bad', msg]; // 失败原因或「配置已改，请重新测试」
+  if (msg && msg !== '尚未测试') return ['bad', msg];
   if (inst.length > 0) return ['bad', '不可用'];
-  // ⑤ 源在跑但首轮还没出结果：瞬时态，不是「未测试」
   if (feed.running) return ['none', '首轮抓取中…'];
   return ['none', '未测试'];
 }

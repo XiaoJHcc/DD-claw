@@ -764,6 +764,7 @@ export class Pipeline {
     // ——toast 阈值的告警通常是网络波动，只发本机 toast。告警 QQ 留空 = 全不发。
     const toQq = p?.alertKind === 'login_drop' || p?.durationAlert === true;
     const qqTarget = toQq ? getNapcatAlertQq(this.deps.db) : '';
+    if (toQq && !qqTarget) log.warn(`${signal.source} 的 QQ 故障告警未发送：未配置告警 QQ`);
     await this.deps.dispatcher.alertAll(
       'DD-claw 监听异常',
       p?.message ??

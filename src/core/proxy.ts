@@ -289,7 +289,7 @@ export function describeTunnelError(e: unknown): string {
       case 'timeout':
         return `超时：${e.message}`;
       case 'tls':
-        return `TLS 失败（多为被墙或代理未生效）：${e.message}`;
+        return `TLS 失败（目标站或代理链路）：${e.message}`;
       default:
         return e.message;
     }

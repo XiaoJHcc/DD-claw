@@ -155,7 +155,7 @@
 
 28. **Node 22 原生 fetch 不认代理**：`HTTPS_PROXY` 环境变量无效（`NODE_USE_ENV_PROXY` 是 Node 24+ 才有），项目也未装 `undici`；`curl.exe -x` 在同一环境下同样打不通（`000`）。可行解只有一个——**手写 CONNECT 隧道 + 在隧道上 `tls.connect({servername})`**。请求务必带 `Connection: close`：HTTP/1.1 默认 keep-alive 会让读取端永不 `end`，表现为**假的 20 秒超时**（本次调研踩过，浪费两轮探测）。[实测]
 29. `cdn.syndication.twimg.com/tweet-result` 的 `token` 参数**只需存在且非空，值任意**（`abc` 与推文 id 都返回完整 JSON，与网传"由 id 派生"不符）；**缺 token 时返回 `200` + `{}`**——空对象必须当失败处理，不能当"没内容"。[实测]
-30. **免登录的两条 X 路线都过滤转发**：`x.com/<screen>` HTML 与 `syndication timeline-profile` 实测 `retweeted_status_results` 全为 `null`（同期 Nitter RSS 显示同一账号 20 条里 10 条是转发）。要转发就必须走 Nitter RSS / 持号路线 / API。[实测]
+30. **免登录的两条 X 路线都过滤转发**：`x.com/<screen>` HTML 与 `syndication timeline-profile` 实测 `retweeted_status_results` 全为 `null`（同期 Nitter RSS 显示同一账号 20 条里 10 条是转发）。要转发就必须走 Nitter RSS / 持号路线 / API。HTML 的 `rest_id` 位于 Flight/RSC 载荷中，引号可能经过多层转义；解析不得只认未转义 JSON，也含用户与其他作者的引用对象，必须经单推详情确认作者后再归属。[实测]
 31. `syndication timeline-profile` **给的不是「最新 100 条」而是抽样**（实测最新条目停在 4 个月前，而该账号当天有推文），且限流 `x-rate-limit-limit: 30`（15 分钟窗口，打满返 429 + 20 字节空体）→ 只能当回填源，不能当实时源。[实测]
 32. Nitter RSS 的 `<link>` 指向**原作者**的 `/status/<id>`（`RT by @xxx` 的 link 是原作者推文），按 link 去重会把"同一条推文被多次转发"折叠成一条；需要"每次转发都推"就必须另取 RT 自身 id。[实测]
 33. Nitter 系公共实例对脚本客户端大多不可用：`xcancel.com` 返回 **451**（法律下架），`nitter.net`/`nitter.poast.org` TLS 重置，`nitter.space`/`lightbrd.com` Cloudflare 403，`tiekoetter`/`privacyredirect` 挂 **Anubis 工作量证明**。实测可用仅 `nitter.jaydenha.uk`、`x.n0g.xyz`（RSS 各 20 条）与限速的 `nitter.kareem.one` → 只能"多实例轮询 + 失败即弃"。[实测]

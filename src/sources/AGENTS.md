@@ -13,7 +13,7 @@
 - **图文轮次与补推只调 `core/backlog.ts`**：主动关闭恢复轮（`silent_next`）一律静默、缺口轮受开关与时间窗 + 条数双封顶、正常轮全推；归档永不缺席。源内不得自造一套判断。
 - **B站动态的轮询集合与信号面是两条不同的集合**：轮询对象 = `listWatchedUids()` ∪（图文开关开着时的）`bili_accounts` 启用账号；`feed_post` **只对名单账号发**，监听主播的动态只归档（是预告分析的数据源，不进图文推送）。
 - **`DYNAMIC_TYPE_LIVE_RCMD` 彻底舍弃**（不归档、不发信号）；`FORWARD` 在 source 内归一成三平台共用的 `retweet`——matcher 只认这个值。
-- **X 的一切出网经 `core/proxy.ts` 隧道**（Node 22 原生 fetch 不认代理），主路线 Nitter RSS、免登录 HTML 作回退；链路中断走 **canary 退避**（每轮只探第一个账号，通了当轮立刻恢复全量）。
+- **X 的一切出网经 `core/proxy.ts` 隧道**（Node 22 原生 fetch 不认代理），主路线 Nitter RSS、免登录 HTML 作回退；链路中断走 **canary 退避**（每轮只探第一个账号，通了当轮立刻恢复全量）。HTML 没有解析出任何 id 是失败，不得记成功或复位告警；故障起点与两级已告警位持久化，重启仍按原起点报一次、不重复。
 - **关键帧缓存不阻塞轮询**：按「尝试时间」节流（失败也记，不重试轰炸）、按**内容 md5** 去重（不按 URL 判）、路径相对且正斜杠。
 - **头像本地化按图床选路**：B站 `hdslb` / 微博 `sinaimg` 境内直连，X `pbs.twimg.com` 必须经隧道。
 
@@ -46,9 +46,9 @@
 - `weibo/avatar.ts` — 微博头像本地化（直连 sinaimg，md5 文件名入库）。
 
 **X / 推特（图文来源）**
-- `twitter/feed.ts` — `TwitterFeedSource`：Nitter RSS 主路线 + 免登录回退、逐账号拉时间线 → posts → `feed_post`；链路 canary 退避、账号级故障落库、头像与昵称回写。
+- `twitter/feed.ts` — `TwitterFeedSource`：Nitter RSS 主路线 + 免登录回退、逐账号拉时间线 → posts → `feed_post`；链路 canary 退避、故障起点与告警位持久化、账号级故障落库、头像与昵称回写。
 - `twitter/nitter.ts` — Nitter RSS 解析（唯一能区分原创/转发的免登录路线），多实例轮询。
-- `twitter/web.ts` — 免登录回退：`x.com` HTML 发现推文 id + 单推接口补详情；账号存在性校验。
+- `twitter/web.ts` — 免登录回退：`x.com` Flight/RSC 发现推文 id + 单推接口补详情；空 id 报错、作者过滤与安全游标；账号存在性校验。
 - `twitter/probe.ts` — X 连通性探测（代理 → 实例 RSS → 免登录回退），面板测试按钮与 `npm run probe-x` 共用。
 - `twitter/avatar.ts` — X 头像本地化（隧道下载，md5 文件名入库）。
 

@@ -12,6 +12,7 @@
 import { mapLimit } from '../../core/concurrency.js';
 import { parseInstanceList, parseProxyUrl, tunnelFetch, TunnelError, describeTunnelError } from '../../core/proxy.js';
 import { normalizeScreenName } from '../../core/x-accounts.js';
+import { parseWebTweetIds } from './web.js';
 
 /** 探测用的代理可达性目标：极小、稳定、无风控语义 */
 const PROXY_TARGET = 'https://x.com/robots.txt';
@@ -160,7 +161,7 @@ export async function probeInstance(
     if (res.status === 200) {
       const items = (res.text.match(/<item>/g) ?? []).length;
       if (items > 0) return mk(true, 'ok', `可用 · ${items} 条 · ${ms}ms`, items);
-      if (/<rss|<feed/i.test(body)) return mk(true, 'empty', `RSS 可用但暂无条目 · ${ms}ms`);
+      if (/<rss|<feed/i.test(body)) return mk(false, 'empty', `RSS 返回 0 条（与真实抓取同口径，记为不可用） · ${ms}ms`);
       return mk(false, 'error', `200 但不是 RSS（页面结构可能已变）`);
     }
     return mk(false, 'error', `HTTP ${res.status}`);
@@ -230,7 +231,7 @@ export async function probeWeb(
 
   try {
     const res = await tunnelFetch(`https://x.com/${encodeURIComponent(screen)}`, proxy, { timeoutMs });
-    const ids = [...new Set([...res.text.matchAll(/rest_id:"(\d{15,25})"/g)].map((m) => m[1]!))];
+    const ids = parseWebTweetIds(res.text);
     if (res.status !== 200 || ids.length === 0) {
       return {
         ...base,
@@ -308,14 +309,13 @@ export function probeVerdict(r: Pick<XProbeReport, 'proxy' | 'instances' | 'web'
   };
 }
 
-/** CLI 与面板共用的一次性总探测：代理 → 实例 → 免登录（依次，后面依赖前面通） */
+/** CLI 与面板共用的一次性总探测：代理、实例 RSS、免登录分别报告，不用 robots 结果阻断回退探测。 */
 export async function probeAll(
   cfg: { proxyUrl: string; instances: string[] },
   screenName = DEFAULT_PROBE_SCREEN,
 ): Promise<XProbeReport> {
   const proxy = await probeProxy(cfg.proxyUrl);
   const instances = await probeInstances(parseInstanceList(cfg.instances.join(',')), cfg.proxyUrl, screenName);
-  // x.com 不通就别白试免登录了（它整条路都压在 x.com 上）；实例结果不受影响
-  const web = proxy.ok ? await probeWeb(screenName, cfg.proxyUrl) : null;
+  const web = await probeWeb(screenName, cfg.proxyUrl);
   return { proxy, instances, web };
 }

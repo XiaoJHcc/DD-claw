@@ -8,9 +8,10 @@
  *
  * 失败纪律（与"拉取失败绝不能当成下播"同源）：
  * - 拉取失败**绝不当成「没有新推文」**：保留旧数据、什么都不写，只记账；
- * - 故障分两级（2026-11 重构，刷屏教训）：
+ * - 故障分两级：
  *   · 链路级 = 一轮内全部账号失败（代理挂 / Nitter 实例全挂 / 回退也挂）→ 源级计数，
- *     聚合告警一条（次数阈值 → toast；持续超阈值 → 告警 QQ），恢复复位；
+ *     聚合告警（持续阈值 → toast；持续满 600 秒 → 告警 QQ 一次），恢复复位；
+ *     故障起点与两级已告警位持久化，重启不丢失也不重复；
  *     全灭后下一轮进入 canary 退避：先只拉第一个账号，通了才继续全量，不通计一次全灭——
  *     链路故障期间不做 N×M 的必然失败请求（浪费且加剧实例限流）。
  *   · 账号级 = 一轮内有人成功、个别账号失败（改名/销号/被单点 ban，长期问题）→
@@ -42,6 +43,13 @@ import { fetchWebTimeline } from './web.js';
 import { cacheXAvatar } from './avatar.js';
 
 const log = makeLogger('twitter/feed');
+const LINK_HEALTH_SETTING = 'x_link_health_state';
+
+interface PersistedLinkHealth {
+  since: number;
+  toastAlerted: boolean;
+  durationAlerted: boolean;
+}
 
 export type TwitterRoute = 'nitter' | 'web';
 
@@ -50,6 +58,9 @@ export interface TimelineFetch {
   tweets: ParsedTweet[];
   via: TwitterRoute;
   host: string | null;
+  /** 安全推进到的游标；web 可能只返回部分详情或被引用帖，不能简单取 tweets 最大 id */
+  cursorId?: string | null;
+  cursorAt?: number | null;
   /** 顺手抠到的账号头像 URL（pbs.twimg.com 形态）；两条路线都可能给不了 → null */
   avatarUrl: string | null;
   /** 顺手抠到的账号显示名（RSS 频道头 title / 免登录路线 og:title）；都抠不到 → null */
@@ -71,7 +82,7 @@ export interface TwitterFeedSourceOpts {
   avatarSaver?: (url: string, dir: string, proxyUrl: string) => Promise<string | null>;
   /** 注入点（单测用；默认走真实网络） */
   rssFetcher?: (hosts: string[], screen: string) => Promise<NitterFetchResult>;
-  webFetcher?: (screen: string, sinceId: string | null) => Promise<{ tweets: ParsedTweet[]; avatarUrl?: string | null; authorName?: string | null; bytes: number; ms: number }>;
+  webFetcher?: (screen: string, sinceId: string | null) => Promise<{ tweets: ParsedTweet[]; avatarUrl?: string | null; authorName?: string | null; cursorId?: string | null; cursorAt?: number | null; bytes: number; ms: number }>;
   onStatus?: (s: XFeedSnapshot) => void;
 }
 
@@ -146,7 +157,12 @@ export class TwitterFeedSource implements Source {
   /** start 中除周期调度外的部分（测试可 bind 后直接驱动 pollOnce） */
   bind(ctx: SourceContext): void {
     this.ctx = ctx;
-    this.status = { ...this.status, running: true };
+    this.restoreLinkHealth();
+    this.status = {
+      ...this.status,
+      running: true,
+      ...(this.linkDown ? { linkDown: true, lastError: '上次运行结束时的抓取故障尚未确认恢复' } : {}),
+    };
     this.opts.onStatus?.(this.status);
     log.info(
       `启动：X 时间线轮询，间隔 ${this.opts.intervalSec}s，` +
@@ -260,10 +276,15 @@ export class TwitterFeedSource implements Source {
       (acc2, t) => (acc2 === null || BigInt(t.id) > BigInt(acc2.id) ? t : acc2),
       null,
     );
+    const cursorId = fetched.cursorId ?? newest?.id ?? null;
+    const cursorAt = fetched.cursorAt ?? newest?.pubTs ?? null;
+    const advanceCursor = cursorId !== null && (
+      acc.lastTweetId === null || !/^\d+$/.test(acc.lastTweetId) || BigInt(cursorId) > BigInt(acc.lastTweetId)
+    );
     const nowSec = Math.floor(Date.now() / 1000);
     ctx.db.touchXAccount(acc.id, {
       lastOkAt: nowSec,
-      ...(newest ? { lastTweetId: newest.id, lastTweetAt: newest.pubTs } : {}),
+      ...(advanceCursor ? { lastTweetId: cursorId, lastTweetAt: cursorAt } : {}),
       // 昵称（平台显示名）是平台事实：拿到非空才回写（RSS 频道头 title / 免登录路线
       // og:title 都能给；都没有就靠添加时 verify 种入的值保持）
       ...(fetched.authorName ? { nickname: fetched.authorName } : {}),
@@ -348,7 +369,15 @@ export class TwitterFeedSource implements Source {
       const web = this.opts.webFetcher
         ? await this.opts.webFetcher(screenName, sinceId)
         : await fetchWebTimeline(screenName, proxyUrl, { sinceId });
-      return { tweets: web.tweets, via: 'web', host: null, avatarUrl: web.avatarUrl ?? null, authorName: web.authorName ?? null };
+      return {
+        tweets: web.tweets,
+        via: 'web',
+        host: null,
+        cursorId: web.cursorId ?? null,
+        cursorAt: web.cursorAt ?? null,
+        avatarUrl: web.avatarUrl ?? null,
+        authorName: web.authorName ?? null,
+      };
     } catch (e) {
       const webMsg = e instanceof Error ? e.message : String(e);
       throw new FeedFetchError(
@@ -384,7 +413,39 @@ export class TwitterFeedSource implements Source {
 
   // ---- 链路级失败：一轮全灭才算；聚合告警一条 + canary 退避（见 pollOnce）----
 
+  private restoreLinkHealth(): void {
+    const raw = this.ctx!.db.getSetting(LINK_HEALTH_SETTING);
+    if (!raw) return;
+    try {
+      const state = JSON.parse(raw) as Partial<PersistedLinkHealth>;
+      if (!Number.isInteger(state.since) || (state.since ?? 0) <= 0) throw new Error('invalid since');
+      this.linkDown = true;
+      this.linkFailRounds = 1;
+      this.linkFirstFailTs = state.since!;
+      this.linkAlerted = state.toastAlerted === true;
+      this.linkDurationAlerted = state.durationAlerted === true;
+    } catch {
+      log.warn('X 链路故障状态快照无效，已重置');
+      this.ctx!.db.setSetting(LINK_HEALTH_SETTING, '');
+    }
+  }
+
+  private persistLinkHealth(): void {
+    const db = this.ctx!.db;
+    if (this.linkFirstFailTs === 0) {
+      db.setSetting(LINK_HEALTH_SETTING, '');
+      return;
+    }
+    const state: PersistedLinkHealth = {
+      since: this.linkFirstFailTs,
+      toastAlerted: this.linkAlerted,
+      durationAlerted: this.linkDurationAlerted,
+    };
+    db.setSetting(LINK_HEALTH_SETTING, JSON.stringify(state));
+  }
+
   private onLinkSuccess(): void {
+    const hadIncident = this.linkDown || this.linkFailRounds > 0;
     if (this.linkDown || this.linkFailRounds > 0) {
       log.info(`X 链路抓取恢复正常（此前连续全灭 ${this.linkFailRounds} 轮）`);
     }
@@ -393,11 +454,15 @@ export class TwitterFeedSource implements Source {
     this.linkFirstFailTs = 0;
     this.linkAlerted = false;
     this.linkDurationAlerted = false;
+    if (hadIncident) this.persistLinkHealth();
   }
 
   private onLinkFailure(accounts: number, err: string | null, scope: FetchScope | null): void {
     const nowSec = Math.floor(Date.now() / 1000);
-    if (this.linkFailRounds === 0) this.linkFirstFailTs = nowSec;
+    if (this.linkFailRounds === 0) {
+      this.linkFirstFailTs = nowSec;
+      this.persistLinkHealth();
+    }
     this.linkFailRounds++;
     this.linkDown = true;
     const durationSec = nowSec - this.linkFirstFailTs;
@@ -405,11 +470,13 @@ export class TwitterFeedSource implements Source {
     // 持续满 healthAlertToastAfterSec → 本机 toast；满 STREAK_QQ_ALERT_AFTER_SEC → 告警 QQ
     const toastSec = this.opts.healthAlertToastAfterSec ?? this.ctx!.config.healthAlertToastAfterSec;
     if (durationSec >= toastSec && !this.linkAlerted) {
-      this.linkAlerted = true; // 同一轮故障只告警一次，恢复后才复位
+      this.linkAlerted = true; // 同一段故障只告警一次，恢复后才复位
+      this.persistLinkHealth();
       this.emitLinkAlert(accounts, durationSec, err, scope, false);
     }
     if (durationSec >= STREAK_QQ_ALERT_AFTER_SEC && !this.linkDurationAlerted) {
       this.linkDurationAlerted = true;
+      this.persistLinkHealth();
       this.emitLinkAlert(accounts, durationSec, err, scope, true);
     }
   }

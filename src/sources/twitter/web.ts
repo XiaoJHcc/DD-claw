@@ -52,6 +52,12 @@ export function parseOgTitleName(html: string): string | null {
   return name || null;
 }
 
+/** 免登录 HTML → 全部 rest_id（降序）。Flight/RSC 的引号可能经过多层转义。 */
+export function parseWebTweetIds(html: string): string[] {
+  const ids = [...new Set([...html.matchAll(/rest_id[^0-9]{0,24}(\d{15,25})/g)].map((m) => m[1]!))];
+  return ids.sort((a, b) => (BigInt(b) > BigInt(a) ? 1 : -1));
+}
+
 /** 免登录 HTML → 推文 id 列表（降序）。返回空数组 = 页面结构变了或没有推文 */
 export async function fetchWebTweetIds(
   screen: string,
@@ -72,8 +78,7 @@ export async function fetchWebTweetIds(
     throw new FeedFetchError(scopeOfTunnelError(e, 'web'), `x.com 请求失败：${describeTunnelError(e)}`);
   }
   if (res.status !== 200) throw new FeedFetchError('web', `x.com HTTP ${res.status}`);
-  const ids = [...new Set([...res.text.matchAll(/rest_id:"(\d{15,25})"/g)].map((m) => m[1]!))]
-    .sort((a, b) => (BigInt(b) > BigInt(a) ? 1 : -1));
+  const ids = parseWebTweetIds(res.text);
   return {
     ids,
     avatarUrl: parseOgImage(res.text),
@@ -218,6 +223,14 @@ export async function fetchTweetDetail(
   };
 }
 
+export interface WebTimelineOptions {
+  sinceId?: string | null;
+  maxDetails?: number;
+  timeoutMs?: number;
+  listFetcher?: typeof fetchWebTweetIds;
+  detailFetcher?: typeof fetchTweetDetail;
+}
+
 /**
  * 回退路线的完整时间线：先拿 id 列表，再只对**新于游标**的 id 取详情。
  * `sinceId` 为 null（该账号首次抓取）时只取最近 `maxDetails` 条——冷启动不做全量详情，
@@ -226,31 +239,56 @@ export async function fetchTweetDetail(
 export async function fetchWebTimeline(
   screen: string,
   proxyUrl: string,
-  opts: { sinceId?: string | null; maxDetails?: number; timeoutMs?: number } = {},
-): Promise<{ tweets: ParsedTweet[]; avatarUrl: string | null; authorName: string | null; bytes: number; ms: number }> {
+  opts: WebTimelineOptions = {},
+): Promise<{
+  tweets: ParsedTweet[];
+  avatarUrl: string | null;
+  authorName: string | null;
+  cursorId: string | null;
+  cursorAt: number | null;
+  bytes: number;
+  ms: number;
+}> {
   const started = Date.now();
-  const listed = await fetchWebTweetIds(screen, proxyUrl, opts);
+  const listed = opts.listFetcher
+    ? await opts.listFetcher(screen, proxyUrl, opts)
+    : await fetchWebTweetIds(screen, proxyUrl, opts);
+  if (listed.ids.length === 0) {
+    throw new FeedFetchError('web', 'x.com 返回 200，但未发现任何推文 id（页面结构可能已变或账号无公开推文）');
+  }
   const since = opts.sinceId && /^\d+$/.test(opts.sinceId) ? BigInt(opts.sinceId) : null;
   const fresh = since ? listed.ids.filter((id) => BigInt(id) > since) : listed.ids;
   const cap = Math.max(1, opts.maxDetails ?? 10);
-  const targets = fresh.slice(0, cap);
+  // 冷启动只取最新一屏；增量补抓从最旧的新 id 开始，游标不得越过本轮没处理的项。
+  const targets = since ? [...fresh].reverse().slice(0, cap) : fresh.slice(0, cap);
+  const owner = normalizeScreenName(screen);
   const tweets: ParsedTweet[] = [];
   const failures: string[] = [];
+  let cursorId: string | null = null;
+  let cursorAt: number | null = null;
   for (const id of targets) {
     try {
-      tweets.push(await fetchTweetDetail(id, proxyUrl, opts));
+      const detail = opts.detailFetcher
+        ? await opts.detailFetcher(id, proxyUrl, opts)
+        : await fetchTweetDetail(id, proxyUrl, opts);
+      // HTML 还含被引用帖与其他用户的 rest_id；只有账号自己发的帖子进入其时间线。
+      if (detail.author === owner) tweets.push(detail);
+      cursorId = detail.id;
+      cursorAt = detail.pubTs;
     } catch (e) {
       failures.push(e instanceof Error ? e.message : String(e));
+      break;
     }
   }
-  // 一条都没取到且有失败 → 抛错让 feed 记一次失败；部分失败只少几条，不算整体失败
-  if (tweets.length === 0 && failures.length > 0) {
-    throw new FeedFetchError('web', `单推详情全部失败：${failures.join('；')}`, failures);
+  if (cursorId === null && failures.length > 0) {
+    throw new FeedFetchError('web', `首个待处理单推详情失败：${failures.join('；')}`, failures);
   }
   return {
     tweets: tweets.sort((a, b) => b.pubTs - a.pubTs),
     avatarUrl: listed.avatarUrl,
     authorName: listed.authorName,
+    cursorId,
+    cursorAt,
     bytes: listed.bytes,
     ms: Date.now() - started,
   };
